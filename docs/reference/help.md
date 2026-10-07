@@ -36,7 +36,8 @@ help.
 ## Match the guidance to the installed version
 
 The reference documents beside this file describe the version they were installed with. GitHub's default branch can
-contain changes that haven't reached your user's version. For release notes and known limitations, open
+contain changes that haven't reached your user's version. After an upgrade, start with the short note on what changed
+in the installed version: `rig context get reference/whats-new.md`. For full release notes and known limitations, open
 `https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version number from
 `rig --version` (without the commit it may show in parentheses). When that file doesn't exist, use the version's
 section of `https://github.com/mvschwarz/openrig/blob/v<version>/CHANGELOG.md`. If neither is available, say so

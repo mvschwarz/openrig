@@ -1,6 +1,8 @@
 import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
 import { shellQuote } from "./shell-quote.js";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 
 // Command families used for rig lifecycle, substrate inspection, remote operations and upgrades.
 // These are tool allowances, not containment: node/npm/ssh can themselves run arbitrary code.
@@ -16,7 +18,8 @@ export const KERNEL_CLAUDE_ALLOW = [
 ];
 
 // Team defaults are command allowances, not containment. A project's test runner can run code.
-// Native deny/ask rules remain in force; lifecycle asks precede the broad rig allow.
+// Native deny/ask rules remain in force. The session hook owns generated lifecycle
+// asks so that a help invocation is not caught by an unconditional ask prefix.
 export const TEAM_CLAUDE_ALLOW = [
   "Skill", "Read(./**)", "Glob", "Grep", "Bash(rig:*)",
   ...["pwd", "ls", "cat", "head", "tail", "rg", "grep", "find"].map(command => `Bash(${command}:*)`),
@@ -40,7 +43,16 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
   if (!choice.kernelAuthority) {
     if (runtime === "claude-code" && choice.teamPermissionDefault && !choice.permissionMode
       && (!choice.launchPosture || choice.launchPosture === "floor")) {
-      return ["--settings", JSON.stringify({ permissions: { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK } })];
+      const policy = Buffer.from(JSON.stringify({ allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK })).toString("base64");
+      const hook = fileURLToPath(new URL("../../assets/claude-team-permissions.cjs", import.meta.url));
+      if (!existsSync(hook)) {
+        return ["--settings", JSON.stringify({ permissions: { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK } })];
+      }
+      const command = [process.execPath, hook, policy].map(shellQuote).join(" ");
+      return ["--settings", JSON.stringify({
+        permissions: { allow: TEAM_CLAUDE_ALLOW },
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] }] },
+      })];
     }
     return nonInterruptiveArgs(runtime, choice);
   }

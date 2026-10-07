@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { resolve, isAbsolute } from "node:path";
+import { statSync } from "node:fs";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
@@ -117,6 +118,16 @@ export function printWorkflowAdvisories(advisories: string[] | undefined): void 
   }
 }
 
+/** Preserve discovered workflow IDs while resolving explicit paths and local files. */
+function resolveWorkflowSource(source: string): string {
+  if (isAbsolute(source) || source.includes("/") || source.includes("\\")) return resolve(source);
+  try {
+    return statSync(source).isFile() ? resolve(source) : source;
+  } catch {
+    return source;
+  }
+}
+
 export function workflowCommand(depsOverride?: WorkflowDeps): Command {
   const cmd = new Command("workflow").description(
     "Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection (PL-004 Phase D)",
@@ -139,7 +150,7 @@ Examples:
     .action(async (specPath: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.post<unknown>("/api/workflow/validate", { specPath });
+        const res = await client.post<unknown>("/api/workflow/validate", { specPath: resolve(specPath) });
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
@@ -283,7 +294,7 @@ Examples:
           instance?: { boundRig?: string | null };
           advisories?: string[];
         }>("/api/workflow/instantiate", {
-          specPath,
+          specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
@@ -671,7 +682,7 @@ Examples:
   // `rig workflow run … && next-thing` is honest in scripts.
   cmd
     .command("run <specPath>")
-    .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed)")
+    .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed or aborted)")
     .requiredOption("--root-objective <text>", "Root objective for the run")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
@@ -679,7 +690,7 @@ Examples:
     .option("--json", "Stream events as JSON lines for agents")
     .addHelpText("after", `
 Streams each step event as it happens; exits when the workflow reaches
-a terminal state. Exit codes: 0 = completed, 3 = workflow failed,
+a terminal state. Exit codes: 0 = completed, 3 = workflow failed or aborted,
 1/2 = transport errors (4xx/5xx). If the event stream drops, the
 command reconnects, then degrades to polling — announced, never a
 silent freeze.
@@ -703,7 +714,7 @@ Examples:
           instance?: { instanceId?: string };
           advisories?: string[];
         }>("/api/workflow/instantiate", {
-          specPath,
+          specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
@@ -736,8 +747,8 @@ Examples:
 Read-only: renders the instance's current state (snapshot), then
 streams live events until a terminal state. Attaching to an already
 fast-moving instance is safe — steps that closed before attach render
-from the snapshot exactly once. Exit codes: 0 = completed, 3 =
-workflow failed, 1/2 = transport errors.
+from the snapshot exactly once. Exit codes: 0 = completed, 3 = workflow failed or aborted,
+1/2 = transport errors.
 
 Examples:
   $ rig workflow watch WF01ABC

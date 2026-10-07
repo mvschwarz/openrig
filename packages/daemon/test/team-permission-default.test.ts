@@ -11,6 +11,7 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -37,24 +38,18 @@ function transport() {
 }
 function assertDefault(cmd: string, runtime: string) {
   if (runtime === "claude-code") {
-    const json = cmd.match(/'--settings' '([^']+)'/)?.[1];
-    expect(json, "team allowance must reach native command").toBeDefined();
-    const settings = JSON.parse(json!);
-    expect(Object.keys(settings)).toEqual(["permissions"]);
+    const args = operationalLaunchArgs("claude-code", { teamPermissionDefault: true, launchPosture: "floor" });
+    expect(cmd, "team settings must reach the native command").toContain(args.map(arg => ` ${shellQuote(arg)}`).join(""));
+    const settings = JSON.parse(args[1]);
+    expect(Object.keys(settings)).toEqual(["permissions", "hooks"]);
     expect(settings.permissions.allow).toContain("Bash(rig:*)");
     expect(settings.permissions.allow).toContain("Bash(npm test:*)");
     expect(settings.permissions.allow).not.toContain("Bash(tmux:*)");
     expect(settings.permissions.allow).not.toContain("Bash(node:*)");
-    expect(settings.permissions.ask).toEqual(expect.arrayContaining(["Bash(rig up:*)", "Bash(rig down:*)", "Bash(rig destroy:*)", "Bash(rig bundle install:*)", "Bash(rig seat stop:*)", ...["compact", "policy apply", "config set", "config reset", "setup", "import", "adopt", "attach", "bind", "handover", "unclaim", "release", "reconcile-session", "env down"].map(command => `Bash(rig ${command}:*)`)]));
-    // Bare prefix comparisons only; this is not a native permission-enforcement probe.
-    for (const command of ["rig queue claim qitem-example", "rig queue unclaim qitem-example",
-      "rig queue handoff qitem-example --to worker@team", "rig queue update qitem-example --state in-progress",
-      "rig queue show qitem-example", "rig whoami --json"]) {
-      expect(settings.permissions.ask.some((rule: string) => {
-        const prefix = /^Bash\((.*):\*\)$/.exec(rule)?.[1];
-        return prefix && (command === prefix || command.startsWith(`${prefix} `));
-      }), command).toBe(false);
-    }
+    expect(settings.permissions.ask).toBeUndefined();
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].matcher).toBe("Bash");
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain("claude-team-permissions.cjs");
     expect(settings.permissions.deny).toBeUndefined();
     expect(cmd).toContain("--permission-mode acceptEdits");
   } else {

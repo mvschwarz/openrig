@@ -277,7 +277,7 @@ and follow `docs/reference/getting-started.md`. `first-project` is starter's old
 works. **`workshop` is not built in**, so `rig up workshop` does not resolve. Install it from its
 pinned openrig-world link, `rig up https://github.com/mvschwarz/openrig-world/tree/<commit>/rigs/workshop
 --target ~/rigs/workshop`, taking the commit from
-`https://raw.githubusercontent.com/mvschwarz/openrig-world/main/registry/workshop.yaml`; fetch it
+`https://raw.githubusercontent.com/mvschwarz/openrig-registry/main/registry/workshop.yaml`; fetch it
 fresh, since a web tool's cached copy can be older. The built-in shelf also holds `code-review`,
 `research`, `pm`, `secrets-manager` and `kernel`. Older names are gone: `adversarial-review`,
 `research-team` and `pm-team` became `code-review`, `research` and `pm` with no alias, and

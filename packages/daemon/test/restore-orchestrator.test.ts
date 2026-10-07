@@ -33,7 +33,6 @@ import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
-import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 
 function setupDb(): Database.Database {
@@ -1101,7 +1100,8 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = buildCodexResumeCore(resumeToken, "resume", false, "--add-dir /tmp/openrig-state");
+    // The observer reads ps argv after the shell has removed launch quoting.
+    const codexCommand = ["codex", "-p", "resume", "resume", "--add-dir", "/tmp/openrig-state", resumeToken].join(" ");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
@@ -1132,7 +1132,7 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = `${buildCodexResumeCore("different-thread", "resume", false, "--add-dir /tmp/openrig-state")} resume ${resumeToken}`;
+    const codexCommand = ["codex", "-p", "resume", "resume", "--add-dir", "/tmp/openrig-state", "different-thread", "resume", resumeToken].join(" ");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),

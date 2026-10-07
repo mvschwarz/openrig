@@ -224,6 +224,41 @@ export class HumanMessageShapeError extends Error {
   readonly code = "human_message_unrenderable";
 }
 
+/** #897 — split text into pieces that each fit `budgetFor(index)` once escaped, so a brief
+ *  over one message's limit is posted as several messages instead of refused. Secrets are
+ *  redacted before any cut, so a cut can never separate a secret from the pattern that finds
+ *  it. A cut prefers a blank line, then a line end, then a space, in the second half of the
+ *  room; it never falls inside a surrogate pair. The pieces join back to the redacted text
+ *  without its trailing whitespace. */
+export function splitForSlack(text: string, budgetFor: (index: number) => number): string[] {
+  const pieces: string[] = [];
+  let rest = redactSecrets(text).trimEnd();
+  while (rest) {
+    const budget = budgetFor(pieces.length);
+    let end = 0;
+    let width = 0;
+    while (end < rest.length) {
+      const code = rest.charCodeAt(end);
+      const step = code >= 0xd800 && code <= 0xdbff && end + 1 < rest.length ? 2 : 1;
+      const add = escapeSlackText(rest.slice(end, end + step)).length;
+      if (width + add > budget) break;
+      width += add;
+      end += step;
+    }
+    if (end === rest.length) {
+      pieces.push(rest);
+      break;
+    }
+    if (end === 0) throw new HumanMessageShapeError(`Message part ${pieces.length + 1} has no room for brief text. Shorten the subject.`);
+    const room = rest.slice(0, end);
+    const boundaries = [room.lastIndexOf("\n\n") + 2, room.lastIndexOf("\n") + 1, room.lastIndexOf(" ") + 1];
+    const cut = boundaries.find((at) => at > end / 2) ?? end;
+    pieces.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  return pieces;
+}
+
 function bounded(text: string, max: number, field: string): string {
   // Count the escaped wire string in UTF-16 units, conservatively. Never slice
   // an entity or surrogate pair; reject the whole request before any post.

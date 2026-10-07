@@ -66,6 +66,19 @@ describe("rig terminal CLI", () => {
     expect(cmd!.commands.map((c) => c.name()).sort()).toEqual(["open", "status", "views"]);
   });
 
+  it("--window uses local desktop handling and reports a headless refusal without a provider POST", async () => {
+    const { deps, calls } = makeDeps();
+    const factory = deps.clientFactory;
+    deps.clientFactory = url => Object.assign(factory(url), { baseUrl: "http://localhost:7433" });
+    deps.windowDeps = { platform: "linux", env: {}, exists: () => false, exec: vi.fn(), launch: vi.fn(), sleep: vi.fn(), id: () => "unused" };
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "saved:kernel", "--window", "--json"]);
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, opened: [], code: "terminal_window_failed" });
+    expect(calls).toHaveLength(0);
+  });
+
   it("open POSTs /api/terminal/open with view + provider", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/terminal/open": { status: 200, data: opened(["a-seat"]) } },

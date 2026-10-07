@@ -11,6 +11,12 @@ metadata:
 
 # Refocusing
 
+Invoke the skill as `refocusing`, its frontmatter name. OpenRig seeds it in the
+Claude and Codex global skill roots and includes selected plugin skills in managed
+loadouts. Existing externally managed copies remain authoritative. If the harness
+has not discovered it yet, read this installed skill file and run its script directly;
+hook registration alone does not prove native skill discovery.
+
 Refocus preserves a long session's earned expertise while re-grounding it in current intent and
 lived context. It is not a restart, wake, or phase checkpoint.
 
@@ -19,6 +25,9 @@ Run the bundled trace from this skill directory instead of reconstructing the hi
 ```bash
 python3 scripts/trace-to-root.py --trees both --depth light
 ```
+
+For managed compaction, do this during the restore request or its read-depth
+audit. The earlier acknowledgement-only boundary is not permission to restore.
 
 Use `--trees topology|work|both` to select context domains and `--depth light|full` to control how
 much each node contributes. Light work traces compose `intent:` and name notes; full traces include

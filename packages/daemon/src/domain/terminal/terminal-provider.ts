@@ -72,6 +72,8 @@ export interface ProviderStatus {
   /** Provider version when the probe could determine it; omitted when unknown. */
   version?: string;
   capabilities: Record<string, boolean>;
+  /** Herdr endpoint the local desktop client must attach to. */
+  launch?: { socketPath: string; session?: string };
 }
 
 /** Liveness of the provider surface itself (herdr: `herdr status`; NOT a daemon ping). */

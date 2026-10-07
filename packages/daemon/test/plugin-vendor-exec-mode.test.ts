@@ -189,8 +189,8 @@ describe("PluginVendorService release-version authority", () => {
     expect(sha256(fs.readFileSync(installedHook))).toBe(
       "09601be0c704da9bf49eb2c8b174f9caa2983fd11fc5df9333b49ab28d4d3bfc",
     );
-    expect(sha256(fs.readFileSync(bundledHook))).toBe(
-      "4d0a89e70cc44d6721333afc5c43751ca63acf875d7bbfd311c35b995c7aeded",
+    expect(sha256(fs.readFileSync(bundledHook))).not.toBe(
+      sha256(fs.readFileSync(installedHook)),
     );
 
     const svc = new PluginVendorService({

@@ -21,12 +21,12 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
-export interface TerminalDeps extends StatusDeps {}
+export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
 
 /** The one shared open-result shape (mirrors the daemon `OpenViewResult`). */
-interface OpenViewResult {
+export interface OpenViewResult {
   provider: string;
   ok: boolean;
   opened: string[];
@@ -36,6 +36,7 @@ interface OpenViewResult {
   error?: string;
   code?: string;
   notes?: string[];
+  window?: { app: string; surface: string };
 }
 
 // Opening applies pages through several bounded provider round trips; it is
@@ -67,6 +68,7 @@ function humanOpen(r: OpenViewResult): string {
       ? `Opened ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
       : `No tiles opened in ${r.provider}.`,
   );
+  if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
   if (r.error) lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
@@ -103,11 +105,17 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
     .description("Open every live agent in the view as an interactive terminal tile")
-    .option("--provider <name>", "terminal provider: herdr (default) or cmux (best-effort)")
+    .option("--provider <name>", "herdr (default), cmux, or tmux with --window")
+    .option("--window", "Open a new desktop terminal tab/window; herdr if installed, otherwise plain tmux")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; json?: boolean }) => {
+    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
+        if (opts.window) {
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps);
+          printOpen(opts.json ?? false, result, 200);
+          return;
+        }
         const body = { view, ...(opts.provider ? { provider: opts.provider } : {}) };
         const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
         if (!Array.isArray(res.data?.opened)) {

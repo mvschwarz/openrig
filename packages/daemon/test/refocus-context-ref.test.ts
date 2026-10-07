@@ -717,6 +717,14 @@ exit 1
 });
 
 describe("openrig-core refocus hook — delivery state", () => {
+  // These cases exercise delivery state; the real dual-tree trace is covered above.
+  function successfulTrace(home: string): string {
+    const script = join(home, "trace-success");
+    writeFileSync(script, '#!/bin/sh\nprintf "WORK TRACE: fixture intent\\n"\n');
+    chmodSync(script, 0o755);
+    return script;
+  }
+
   it("retains due state at Stop, then consumes one context-visible delivery", () => {
     root = mkdtempSync(join(tmpdir(), "refocus-delivery-state-"));
     const home = join(root, "home");
@@ -725,6 +733,7 @@ describe("openrig-core refocus hook — delivery state", () => {
     mkdirSync(join(home, "refocus"), { recursive: true });
     writeFileSync(state, JSON.stringify({ lastBytes: 0 }), "utf8");
     writeFileSync(transcript, "due transcript bytes", "utf8");
+    const python = successfulTrace(home);
 
     const invoke = (event: string) => spawnSync(process.execPath, [HOOK, "--runtime", "claude"], {
       input: JSON.stringify({ hook_event_name: event, transcript_path: transcript }),
@@ -739,6 +748,7 @@ describe("openrig-core refocus hook — delivery state", () => {
         OPENRIG_REFOCUS_TREES: "work",
         OPENRIG_WORKSPACE_ROOT: home,
         OPENRIG_REFOCUS_WORK_NODE: home,
+        PYTHON: python,
       },
     });
 
@@ -754,6 +764,7 @@ describe("openrig-core refocus hook — delivery state", () => {
     const delivered = invoke("UserPromptSubmit");
     expect(delivered.status).toBe(0);
     expect(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext).toContain("REFOCUS (");
+    expect(delivered.stdout).not.toContain("TRACE GAP");
     const deliveredState = JSON.parse(readFileSync(state, "utf8"));
     expect(deliveredState).toMatchObject({
       lastBytes: Buffer.byteLength("due transcript bytes"),
@@ -771,6 +782,7 @@ describe("openrig-core refocus hook — delivery state", () => {
     const home = join(root, "home");
     const state = join(home, "refocus", "seat@test__postcompact-occupant.json");
     mkdirSync(home, { recursive: true });
+    const python = successfulTrace(home);
     const invoke = (event: string) => spawnSync(process.execPath, [HOOK, "--runtime", "codex"], {
       input: JSON.stringify({ hook_event_name: event, session_id: "postcompact-occupant", transcript_path: "" }),
       encoding: "utf8",
@@ -782,6 +794,9 @@ describe("openrig-core refocus hook — delivery state", () => {
         OPENRIG_REFOCUS_TREES: "work",
         OPENRIG_WORKSPACE_ROOT: home,
         OPENRIG_REFOCUS_WORK_NODE: home,
+        OPENRIG_REFOCUS_CONTENT_REF: undefined,
+        OPENRIG_REFOCUS_CONTENT_FILE: undefined,
+        PYTHON: python,
       },
     });
 
@@ -793,6 +808,7 @@ describe("openrig-core refocus hook — delivery state", () => {
     const delivered = invoke("UserPromptSubmit");
     expect(delivered.status).toBe(0);
     expect(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext).toContain("just compacted");
+    expect(delivered.stdout).not.toContain("TRACE GAP");
     expect(JSON.parse(readFileSync(state, "utf8"))).not.toHaveProperty("pendingOn");
   });
 });

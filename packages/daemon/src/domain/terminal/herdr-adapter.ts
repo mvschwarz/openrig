@@ -305,6 +305,7 @@ export function extractWorkspaceId(result: HerdrResult): string | null {
 
 export interface HerdrAdapterDeps {
   transportFactory: HerdrTransportFactory;
+  launch?: ProviderStatus["launch"];
   /**
    * Mint a fresh launch token per `openView` so a relaunch creates a new tab
    * (BR-5). Injectable for deterministic tests. Default: a per-instance
@@ -360,6 +361,7 @@ export class HerdrAdapter implements TerminalProvider {
       const probe = await this.transport.probe();
       return {
         provider: this.name,
+        ...(this.deps.launch ? { launch: this.deps.launch } : {}),
         available: probe.alive,
         ...(probe.version ? { version: probe.version } : {}),
         // The socket answering ping IS the capability surface: layout.apply is
@@ -369,7 +371,7 @@ export class HerdrAdapter implements TerminalProvider {
       };
     } catch {
       // An unreachable socket (herdr not running) = honestly unavailable.
-      return { provider: this.name, available: false, capabilities: {} };
+      return { provider: this.name, available: false, capabilities: {}, ...(this.deps.launch ? { launch: this.deps.launch } : {}) };
     }
   }
 

@@ -46,6 +46,12 @@ Choose the working account you already have: **Claude Code, Codex, or both**. Re
 
 A team seat with no permission policy, per-seat choice or (for Codex) named profile launches with OpenRig's [team default](docs/reference/rig-spec.md#team-launch-defaults): Claude runs ordinary `rig` commands, project reads and common tests without prompting, while lifecycle commands such as `rig up` and `rig down` still ask; Codex also gets the OpenRig workspace and its pod's state directory as writable directories. Before launching, your agent recommends keeping that default, and offers to remember selected OpenRig commands in your native settings only if you want that, at personal project scope unless you explicitly choose user-wide sessions. It is not global YOLO or permission to invent work. On Yes, the agent [adds and verifies native rules](docs/reference/getting-started.md#have-your-agent-configure-permissions); No or no answer keeps the team default and leaves settings unchanged. An existing explicit choice is reused. Say “Undo the OpenRig command allowances added by this setup” to remove only its additions.
 
+If permission prompts are slowing you down, consider the
+[workshop bundle](https://openrig.dev/rigs/workshop). It ships with broad access
+and [non-interruptive mode](docs/reference/non-interruptive-mode.md): its agents
+bypass permission prompts and supported harness warning dialogs. The listing
+and before-install view explain that access before you choose it.
+
 Check `tmux -V` and only your selected CLI/login: `claude --version` plus
 `claude auth status`, or `codex --version` plus `codex login status`. If needed,
 sign in once with `claude auth login` or `codex login`; do not install or log in
@@ -388,9 +394,9 @@ Optional:
 
 ## Setup and Troubleshooting
 
-- `rig setup` attempts core machine preparation: it installs a missing Claude Code or Codex and writes tmux defaults. On macOS it also installs a missing tmux and cmux with an existing Homebrew; elsewhere install tmux yourself (setup only checks it). cmux is optional and macOS-only; elsewhere setup skips it and `rig doctor` only warns that it's missing. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
+- `rig setup` attempts core machine preparation: it installs a missing Claude Code or Codex and writes tmux defaults. It installs Herdr by default on macOS and Linux; use `--no-herdr` if you decline it. On macOS it also installs a missing tmux with an existing Homebrew; elsewhere install tmux yourself (setup only checks it). On a Mac, the installing agent offers Ghostty once; accepting uses `rig setup --ghostty`, and declining leaves Terminal.app available. Existing cmux settings are preserved. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
 - `rig setup --full` attempts a broader operator workstation setup (jq, gh, via Homebrew, so macOS only) on top of core.
-- `rig doctor` inspects current system health and helps diagnose problems after setup. Use it when something stops working or after machine changes. It does not check provider logins or whether agents can work: also run `claude auth status` or `codex login status`, and `rig ps --nodes --rig <rig>`.
+- `rig doctor` inspects current system health and helps diagnose problems after setup. Use it when something stops working or after machine changes. It shares setup's local provider login checks. These do not prove provider acceptance or a working agent; also inspect `rig ps --nodes --rig <rig>`.
 
 Both commands support `--json` for agent-driven workflows.
 
@@ -398,7 +404,7 @@ Before setup or managed launch, review [what OpenRig changes on your machine](#w
 
 Already-running adopted sessions may need restart before they pick up newly written runtime config.
 
-**For agents:** First ask which available provider(s) the user wants, reusing an explicit choice. Recommend the working account they already have and follow the selected-provider guide above. Offer core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) only when they want those additional tools. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues. Then start the daemon if it is stopped, ask “Open the OpenRig view now?”, and hand the person's goal and project folder to the kernel operator ([installing-agent handoff](docs/reference/getting-started.md#installing-agent-handoff)). Installation is finished when the person is talking to the operator; don't implement the project yourself. When OpenRig itself misbehaves, read [docs/reference/help.md](docs/reference/help.md) (installed agents can run `rig context get help`; the same text is at [openrig.dev/help/agents](https://www.openrig.dev/help/agents)): it covers the next step, known problems, and how to reach the team if you're still stuck.
+**For agents:** First ask which available provider(s) the user wants, reusing an explicit choice. Recommend the working account they already have and follow the selected-provider guide above. Offer core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) only when they want those additional tools. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues. Then start the daemon if it is stopped, ask “Open the OpenRig view now?”, run `rig terminal open saved:kernel --window --json` on yes (no commands for the person to copy), and hand the person's goal and project folder to the kernel operator ([installing-agent handoff](docs/reference/getting-started.md#installing-agent-handoff)). Installation is finished when the person is talking to the operator; don't implement the project yourself. When OpenRig itself misbehaves, read [docs/reference/help.md](docs/reference/help.md) (installed agents can run `rig context get help`; the same text is at [openrig.dev/help/agents](https://www.openrig.dev/help/agents)): it covers the next step, known problems, and how to reach the team if you're still stuck.
 
 ## Comparison with Claude Managed Agents
 

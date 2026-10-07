@@ -11,10 +11,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const { recordRefocusResult } = require("./refocus-health.cjs");
 
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
 const CONTENT_LOOKUP_TIMEOUT_MS = 2_000;
+// Normal managed restore advances on ~30 s polls with a 10 s idle wait.
+// A lost daemon stage must not suppress this occupant's refocus indefinitely.
+const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
 
 function runtime() {
   const index = process.argv.indexOf("--runtime");
@@ -188,6 +192,7 @@ function renderTrace() {
     script,
     "--trees", trees,
     "--depth", process.env.OPENRIG_REFOCUS_DEPTH || "light",
+    "--check",
   ];
   if (process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE) {
     args.push("--topology-start", process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE);
@@ -213,9 +218,15 @@ function renderTrace() {
     maxBuffer: 16 * 1024 * 1024,
   });
   const reason = result.error?.message || result.stderr?.trim() || `trace exited ${result.status ?? "without a status"}`;
-  const trace = !result.error && result.status === 0 && result.stdout.trim()
-    ? result.stdout.trim() : `TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`;
-  return [trace, role].filter(Boolean).join("\n\n");
+  const failed = Boolean(result.error) || result.status !== 0 || !result.stdout?.trim();
+  const trace = [
+    ...(failed ? [`TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`] : []),
+    result.stdout?.trim(),
+  ].filter(Boolean).join("\n");
+  return {
+    text: [trace, role].filter(Boolean).join("\n\n"),
+    failed,
+  };
 }
 
 (async () => {
@@ -225,6 +236,11 @@ function renderTrace() {
   try { input = JSON.parse((await readStdin()) || "{}") || {}; } catch {}
   const event = input.hook_event_name || "UserPromptSubmit";
   const harness = runtime();
+
+  // The acknowledgement is never an actionable restore turn. The managed
+  // marker below also holds earlier/later peer messages, not just this prompt.
+  const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  if (event === "UserPromptSubmit" && prompt.startsWith("OpenRig post-compaction turn boundary.")) process.exit(0);
 
   // Fresh-session orientation is the default onboarding pack's job. Even a manually invoked hook must
   // no-op here, so a stale registration cannot corrupt the world install.
@@ -311,16 +327,16 @@ function renderTrace() {
     state = { lastBytes: size, baselineAt: new Date().toISOString() };
     persist();
   } else if (size > 0 && size < Number(state.lastBytes || 0)) {
-    // Shrink clears pending and resets the baseline BEFORE due computation. The
-    // reset itself emits no refocus, and a stale pending can never ride through a
-    // reset into a delivery. Advisory once per reset episode: the reset moment is
-    // the dedupe (afterwards lastBytes === size), and the marker records in state.
-    delete state.pendingOn;
-    delete state.pendingAt;
+    // Shrink invalidates growth-based due state, not an exact PostCompact event
+    // awaiting its actionable restore turn.
+    if (state.pendingOn !== "PostCompact") {
+      delete state.pendingOn;
+      delete state.pendingAt;
+    }
     state.lastReset = { at: new Date().toISOString(), fromBytes: Number(state.lastBytes || 0), toBytes: size };
     state.lastBytes = size;
     persist();
-    process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset, pending cleared\n`);
+    process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset; PostCompact pending retained if present\n`);
   }
 
   const lastBytes = Number(state.lastBytes || 0);
@@ -334,17 +350,46 @@ function renderTrace() {
   if (!due) process.exit(0);
 
   if (event !== "UserPromptSubmit") {
+    if (event === "PostCompact" && harness === "claude") {
+      // PreCompact records whether THIS compact was initiated by the enforcer.
+      // A manual /compact overwrites the marker with false; other occupants
+      // cannot hold this session. Read the early sentinel first if it survives.
+      state.managedRestorePending = false;
+      for (const suffix of [".expected.json", ".json"]) {
+        try {
+          const marker = JSON.parse(fs.readFileSync(path.join(home, "compaction", "restore-pending", seatKey + suffix), "utf8"));
+          if (marker.sessionName !== seat || (marker.sessionId ? marker.sessionId !== identity : !transcriptPath || marker.transcriptPath !== transcriptPath)) continue;
+          state.managedRestorePending = marker.managedRefocusPending === true;
+          break;
+        } catch {}
+      }
+      if (state.managedRestorePending) state.managedRestorePendingAt = new Date().toISOString();
+      else delete state.managedRestorePendingAt;
+    }
     if (event === "PostCompact" || !state.pendingOn) state.pendingOn = event;
     state.pendingAt ||= new Date().toISOString();
     persist();
     process.exit(0);
   }
 
+  if (harness === "claude" && state.managedRestorePending) {
+    const heldFor = Date.now() - Date.parse(state.managedRestorePendingAt);
+    // Missing/invalid timestamps from older state, or a clock moving backwards,
+    // cannot establish a live hold. No timer or extra turn is created here.
+    if (heldFor >= 0 && heldFor < MANAGED_RESTORE_HOLD_MS
+      && !prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) process.exit(0);
+    delete state.managedRestorePending;
+    delete state.managedRestorePendingAt;
+    persist();
+  }
+
   // Run the public trace before resolving a context ref. Besides keeping the
   // content ladder untouched, this makes `rig context get` the last resolver
   // call and preserves the existing observable ref contract.
-  const trace = renderTrace();
+  const rendered = renderTrace();
+  const trace = rendered.text;
   const configured = readConfiguredContent(home);
+  const failed = rendered.failed || Boolean(configured.failure);
   const why = onDemand
     ? "on demand"
     : state.pendingOn === "PostCompact"
@@ -391,7 +436,14 @@ function renderTrace() {
       additionalContext: payload,
     },
   });
-  process.stdout.write(output, () => {
+  process.stdout.write(output, (error) => {
+    recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error) });
+    if (failed || error) {
+      state.pendingOn ||= event;
+      state.pendingAt ||= new Date().toISOString();
+      persist();
+      return;
+    }
     if (size > 0) state.lastBytes = size;
     state.firedAt = new Date().toISOString();
     state.firedOn = event;

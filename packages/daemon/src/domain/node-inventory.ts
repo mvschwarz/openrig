@@ -1126,8 +1126,8 @@ export function attachTerminalActivityAndWork(
  *
  * The logicalId is the pod-aware `pod.member` form (dot-separated).
  * The canonical session form replaces the dot with a dash to match the
- * convention from deriveCanonicalSessionName (so `redo.driver-2` in
- * rig `openrig-velocity` becomes `redo-driver-2@openrig-velocity`).
+ * convention from deriveCanonicalSessionName (so `dev.driver-2` in
+ * rig `my-rig` becomes `dev-driver-2@my-rig`).
  *
  * Sums distinct destination_session keys to avoid double-counting
  * when both forms are identical (managed seats whose

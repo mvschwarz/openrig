@@ -261,8 +261,38 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // OPR.0.5.6.14 — a failed post writes the transport-failed ledger transition so the
   // undelivered surface (and --verify) can name the gateway's error instead of guessing
   // from nudge telemetry. One receipt per episode.
-  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string): void => {
+  // #897 — an ask that can't be rendered fails the same way on every retry, so the person never
+  // sees it. Tell the seat that asked, once: the notice's id derives from the ask's, so a replay
+  // returns the same row instead of a second one.
+  // A retry that can't post the rest of an ask some of which may already be in Slack says so.
+  const notifySourceUndeliverable = (p: OutboundPostPayload, detail: string, partlyPosted = false): void => {
+    const seat = p.sourceSession;
+    if (!p.qitemId || !seat) return;
+    const human = p.destinationSession ?? "the person";
+    opts.queueRepo.create({
+      qitemId: `${p.qitemId}-undeliverable`,
+      sourceSession: seat,
+      destinationSession: seat,
+      summary: `Not delivered to ${human}: ${p.summary ?? p.qitemId}`,
+      body: [
+        partlyPosted
+          ? `Part of your ask ${p.qitemId} may already be in Slack, but OpenRig could not post the rest, so ${human} has not seen all of it.`
+          : `OpenRig could not post your ask ${p.qitemId} to Slack, so ${human} has not seen it.`,
+        "",
+        `Reason: ${detail}`,
+        "",
+        partlyPosted
+          ? "Check the thread in Slack and send what's missing as a new ask. The original row stays open until you close it."
+          : "Shorten it and send it as a new ask. The original row stays open until you close it.",
+      ].join("\n"),
+      evidenceRef: `rig queue show ${p.qitemId}`,
+      tags: ["slack-undeliverable"],
+    }).catch((e) => log(`undeliverable notice FAILED for ${p.qitemId}: ${(e as Error).message}`));
+  };
+
+  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string, partlyPosted?: boolean): void => {
     if (!p.qitemId) return;
+    if (failureClass === "human-message-unrenderable") notifySourceUndeliverable(p, detail, partlyPosted);
     const key = p.notificationKey ?? p.qitemId;
     const alreadyRecorded = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((transition) =>
       transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
@@ -395,6 +425,24 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           } catch (e) {
             // Stamp failure degrades REBUILDABILITY, not routing — loud, never fatal to delivery.
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
+          }
+        },
+        // #899 — a message posted into a thread for an ask maps to that ask and its seat (the thread's root
+        // may be another ask's), so a reaction on it reaches the seat that asked. A digest speaks for many
+        // rows and has no single asking seat, so it isn't mapped.
+        onPostedPart: (p, messageTs, threadTs) => {
+          const seat = p.sourceSession ?? "";
+          if (!p.qitemId || !seat || (p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return;
+          const human = p.destinationSession ?? "";
+          threadMap.recordPart({ messageTs, channel: cfg.channel!, threadTs, seat, conversationId: p.qitemId });
+          try {
+            opts.queueRepo.update({
+              qitemId: p.qitemId,
+              actorSession: "daemon@kernel",
+              transitionNote: formatPostedStamp({ threadTs, messageTs, channel: cfg.channel!, human, seat, conversationId: p.qitemId }),
+            });
+          } catch (e) {
+            log(`reply stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
         onTransportFailed: recordTransportFailed,

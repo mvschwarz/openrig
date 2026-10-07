@@ -83,7 +83,7 @@ describe("kernel operational launch default", () => {
     const adapter = runtime === "codex" ? new CodexRuntimeAdapter(t) : new ClaudeCodeAdapter(t);
     await adapter.launchHarness(b, { name: "seat" }); const cmd = t.send.mock.calls[0]![1];
     if (runtime === "claude-code") {
-      expect(cmd).toContain("Bash(rig up:*)");
+      expect(cmd).toContain("claude-team-permissions.cjs");
       expect(cmd).not.toContain("Bash(tmux:*)");
     }
     expect(cmd).not.toContain("notice.");

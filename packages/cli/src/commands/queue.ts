@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
@@ -198,13 +198,16 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
+// renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
+const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
 function wakeDurationSeconds(value: string): number {
   const match = /^(\d+)(s|m|h)?$/i.exec(value.trim());
-  if (!match) throw new Error("wake duration must be a positive integer with optional s, m, or h suffix");
+  if (!match) throw new InvalidArgumentError(`${WAKE_DURATION_FORMAT}; got '${value}'`);
   const amount = Number.parseInt(match[1]!, 10);
   const factor = match[2]?.toLowerCase() === "h" ? 3600 : match[2]?.toLowerCase() === "m" ? 60 : 1;
   const seconds = amount * factor;
-  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new Error("wake duration must be positive");
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new InvalidArgumentError(`${WAKE_DURATION_FORMAT}; got '${value}'`);
   return seconds;
 }
 

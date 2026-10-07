@@ -874,10 +874,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logger: (...args) => console.log("[openrig]", ...args),
     });
     await vendorService.ensureLatest("openrig-core");
-    vendorService.ensureSkillGlobally("openrig-core", "openrig-skills", [
-      nodePath.join(os.homedir(), ".claude", "skills"),
-      nodePath.join(os.homedir(), ".agents", "skills"),
-    ]);
+    for (const skill of ["openrig-skills", "refocusing"]) {
+      try {
+        vendorService.ensureSkillGlobally("openrig-core", skill, [
+          nodePath.join(os.homedir(), ".claude", "skills"),
+          nodePath.join(os.homedir(), ".agents", "skills"),
+        ]);
+      } catch (err) {
+        console.error(`[openrig] global ${skill} skill setup warning: ${(err as Error).message}`);
+      }
+    }
   } catch (err) {
     console.error(`[openrig] plugin vendor setup warning: ${(err as Error).message}`);
   }
@@ -1766,7 +1772,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   {
     const { TerminalService } = await import("./domain/terminal/terminal-service.js");
     const { HerdrAdapter } = await import("./domain/terminal/herdr-adapter.js");
-    const { createHerdrSocketRpc, createHerdrSocketTransport } = await import(
+    const { createHerdrSocketRpc, createHerdrSocketTransport, resolveHerdrSocketPath } = await import(
       "./domain/terminal/herdr-transport.js"
     );
     const { CmuxProviderAdapter } = await import("./domain/terminal/cmux-provider-adapter.js");
@@ -1794,9 +1800,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logicalId: e.logicalId,
     });
 
+    const herdrSocketPath = resolveHerdrSocketPath();
     const herdrProvider = new HerdrAdapter({
       // FB4: herdr speaks its unix control socket (there is no `layout` CLI).
-      transportFactory: createHerdrSocketTransport(createHerdrSocketRpc()),
+      transportFactory: createHerdrSocketTransport(createHerdrSocketRpc(herdrSocketPath)),
+      launch: { socketPath: herdrSocketPath, ...(process.env["HERDR_SESSION"] ? { session: process.env["HERDR_SESSION"] } : {}) },
     });
     const cmuxProvider = new CmuxProviderAdapter({
       cmuxAdapter,
