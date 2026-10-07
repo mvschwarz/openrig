@@ -200,6 +200,12 @@ function validateDenylist(value, sourcePath) {
       invalid(sourcePath, `${field} must be an array`);
     }
   }
+  if (Object.hasOwn(value, "allowed_context_lines") && (
+    !isStringArray(value.allowed_context_lines) ||
+    value.allowed_context_lines.some((line) => line === "" || /[\r\n]/.test(line))
+  )) {
+    invalid(sourcePath, "allowed_context_lines must be an array of nonempty single-line strings");
+  }
   if (
     !isObject(value.section_fence) ||
     typeof value.section_fence.begin !== "string" ||

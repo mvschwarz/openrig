@@ -80,6 +80,7 @@ describe("control-plane JSON generator", () => {
         "  begin: '<!-- internal:begin -->'",
         "  end: '<!-- internal:end -->'",
         "allowed_context_substrings: [do not ship]",
+        "allowed_context_lines: ['  Generic <path> placeholder']",
         "",
       ].join("\n"),
     );
@@ -112,6 +113,7 @@ describe("control-plane JSON generator", () => {
     expect(first.membership.product_public.clean).toEqual(["alpha"]);
     expect(first.membership.not_public.reclass_host_only).toEqual(["private"]);
     expect(first.denylist.section_fence.begin).toBe("<!-- internal:begin -->");
+    expect(first.denylist.allowed_context_lines).toEqual(["  Generic <path> placeholder"]);
     expect(first.layout.skills.alpha).toEqual({
       edges: ["canonical", "plugin", "spec"],
       category: "core",
@@ -303,6 +305,18 @@ describe("control-plane JSON generator", () => {
     expect(
       existsSync(join(input.outputDir, "skill-edge-digests.generated.json")),
     ).toBe(false);
+  });
+
+  it("rejects malformed optional exact-line allowances", async () => {
+    const generator = await loadGenerator();
+    const root = tempRoot();
+    const input = seedGeneratorInput(root);
+    seedEdges(root);
+    const original = readFileSync(input.denylistPath, "utf8");
+    for (const value of [null, "text", [42], [""], ["two\nlines"], ["two\rlines"]]) {
+      write(input.denylistPath, `${original}\nallowed_context_lines: ${JSON.stringify(value)}\n`);
+      await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/allowed_context_lines/);
+    }
   });
 
   it("rejects edge directory symlinks before traversal or digesting outside-root bytes", async () => {
