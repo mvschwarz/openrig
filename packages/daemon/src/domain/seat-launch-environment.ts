@@ -1,8 +1,9 @@
-import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync } from "node:fs";
+import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { powershellQuote, renderWindowsLaunch } from "../adapters/windows-launch.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -49,8 +50,8 @@ function pairedCli(): string {
  * Child tools still inherit the pane PATH. Unrecognised env shebang syntax
  * falls back to the old literal-PATH command instead of guessing its meaning.
  */
-function codexEntry(searchPath: string, cwd: string): string {
-  const executable = launchExecutable("codex", searchPath, cwd);
+function codexEntry(searchPath: string, cwd: string, windows = false): string {
+  const executable = launchExecutable("codex", searchPath, cwd, windows);
   const fd = openSync(executable, "r");
   let firstLine: string;
   try {
@@ -65,10 +66,12 @@ function codexEntry(searchPath: string, cwd: string): string {
 }
 
 /** Resolve exactly on the daemon launch PATH, without consulting the pane rc. */
-export function launchExecutable(name: string, searchPath: string, cwd: string): string {
+export function launchExecutable(name: string, searchPath: string, cwd: string, windows = false): string {
   for (const entry of searchPath.split(path.delimiter)) {
-    const file = path.resolve(cwd, entry, name);
-    try { accessSync(file, constants.X_OK); if (statSync(file).isFile()) return file; } catch { /* next entry */ }
+    for (const suffix of windows ? [".exe", ".cmd", ".bat", ""] : [""]) {
+      const file = path.resolve(cwd, entry, name + suffix);
+      try { accessSync(file, constants.X_OK); if (statSync(file).isFile()) return file; } catch { /* next entry */ }
+    }
   }
   throw new Error(`Seat launch requires ${name} on the daemon launch PATH.`);
 }
@@ -83,7 +86,8 @@ export class SeatLaunchEnvironment {
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly daemonCwd: string,
     private readonly cliPath?: string,
-    private readonly codexHome?: string) {}
+    private readonly codexHome?: string,
+    private readonly launchPlatform: "posix" | "win32" = "posix") {}
 
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
@@ -93,6 +97,15 @@ export class SeatLaunchEnvironment {
     // daemon's link. Only rig is exposed, not the other tools in a shared bin.
     const bin = path.resolve(this.daemonCwd, this.sessionEnv.OPENRIG_HOME, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
     mkdirSync(bin, { recursive: true });
+    if (this.launchPlatform === "win32") {
+      const shim = path.join(bin, "rig.ps1");
+      const content = `& ${powershellQuote(process.execPath)} ${powershellQuote(cli)} @args\nexit $LASTEXITCODE\n`;
+      try { writeFileSync(shim, content, { flag: "wx" }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      if (readFileSync(shim, "utf8") !== content || readdirSync(bin).some(name => name !== "rig.ps1"))
+        throw new Error("Seat bin is not rig-only");
+      return bin;
+    }
     const link = path.join(bin, "rig");
     try { symlinkSync(cli, link); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -111,7 +124,7 @@ export class SeatLaunchEnvironment {
       const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
       if (shell === "nu" || shell === "nu.exe") throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
-      if (target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
+      if (this.launchPlatform !== "win32" && target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
         throw new Error("Unsupported Pi pane shell");
       }
       const identity: Record<string, string | undefined> = {};
@@ -132,11 +145,16 @@ export class SeatLaunchEnvironment {
       // interpreter selection while child tools retain the user's PATH.
       if (target.codexCwd !== undefined) {
         if (!searchPath || !command.startsWith("codex ")) throw new Error("Expected a Codex launch command and PATH.");
-        command = codexEntry(searchPath, target.codexCwd) + command.slice(5);
+        command = codexEntry(searchPath, target.codexCwd, this.launchPlatform === "win32") + command.slice(5);
       }
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
       if (target.codexCwd !== undefined && this.codexHome) env.CODEX_HOME = this.codexHome;
+      if (this.launchPlatform === "win32") {
+        if (!searchPath) throw new Error("Launch PATH unavailable");
+        env.PATH = `${binDir}${path.delimiter}${searchPath}`;
+        return renderWindowsLaunch(command, env);
+      }
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading
       // assignments preserve shell lookup; /usr/bin/env would bypass it.
@@ -147,6 +165,7 @@ export class SeatLaunchEnvironment {
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
       return `/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
     } catch {
+      if (this.launchPlatform === "win32") throw new Error("Experimental Windows launch environment could not be prepared; no POSIX fallback was typed.");
       // This best-effort correction is not a new launch admission gate. Do not
       // include error details: transport errors may contain environment values.
       console.warn("[seat launch] Environment correction unavailable; using the previous launch command.");
