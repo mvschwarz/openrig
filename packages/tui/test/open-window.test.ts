@@ -3,6 +3,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openTerminalInWindow, terminalWindowNotice } from "../src/terminals/open-window.js";
+import { createViewState } from "../src/state.js";
+import { demoSnapshot } from "../src/demo-data.js";
+import { parseCommand } from "../src/grammar.js";
+import { renderScreen } from "../src/render.js";
+import { hydrateSnapshot } from "../src/hydrate.js";
+import { terminalLines } from "../src/terminals/terminal-model.js";
+import type { DaemonClient } from "../src/daemon-client.js";
+
+// Keep the prior implementation callable: it ignores the optional recovery hook.
+const openWithRecovery: (view: string, endpoint: string, entry?: string, plan?: string, onUnavailable?: () => void) => ReturnType<typeof openTerminalInWindow> = openTerminalInWindow;
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -17,6 +27,50 @@ console.log(${JSON.stringify(JSON.stringify(result))});process.exitCode=${exit};
 const opened = { provider: "tmux", ok: true, opened: ["advisor", "operator"], absent: [], degraded: [], pages: 1 };
 
 describe("TUI desktop terminal action", () => {
+  it.each(["rig", "pod"])("direct %s action reaches exact attach guidance after definite window refusal, without relaunch", async kind => {
+    let snap = demoSnapshot();
+    const view = createViewState({ instanceId: "fixture", getSnapshot: () => snap });
+    view.dispatch(parseCommand("rig openrig-build"));
+    const action = renderScreen(view.get(), snap, { cols: 140, rows: 42 }).hitMap
+      .map(hit => hit.action).find(a => a?.type === "act" && a.act === "open-terminal" && a.view.startsWith(`${kind}:`));
+    if (action?.type !== "act" || action.act !== "open-terminal") throw new Error("direct terminal action missing");
+    expect(view.get().section).not.toBe("terminals");
+    const f = child({ ...opened, ok: false, opened: [], code: "terminal_window_failed", windowAttempted: false,
+      error: "No terminal window was opened. No local desktop display is available." }, 1);
+    await expect(openWithRecovery(action.view, "http://selected.example:7654", f.entry, action.expectedPlan,
+      () => view.dispatch({ type: "terminal-preview", view: action.view }))).rejects.toThrow("No terminal window was opened");
+    expect(view.get()).toMatchObject({ section: "terminals", terminalView: action.view });
+    const paneCommand = "ssh viewer@other.example \"tmux attach -r -t '=seat with spaces'\"";
+    const reads: string[] = [];
+    const client = { baseUrl: "http://selected.example:7654",
+      terminalViews: async () => { reads.push("catalog"); return { saved: [], rigs: [] }; },
+      previewTerminal: async (selected: string) => { reads.push(selected); return {
+        view: selected, provider: "herdr", planId: "recovery-plan", status: { available: false },
+        composed: { id: "recovery", opened: [{ seat: "remote" }], absent: [], degraded: [],
+          pages: [[{ seat: "remote", label: "Remote seat", readOnly: true, paneCommand }]] },
+        grids: [{ columns: 1, rows: 1, blanks: 0 }],
+      }; },
+    } as unknown as DaemonClient;
+    snap = await hydrateSnapshot(client, undefined, null, null, null, view.get());
+    const text = terminalLines(view.get(), snap, 1000).map(line => line.text).join("\n");
+    expect(text).toContain(action.view);
+    expect(text).toContain("Headless or remote: open a NEW terminal/tab");
+    expect(text).toContain("http://selected.example:7654");
+    expect(text).toContain("env -u TMUX ssh -t viewer@other.example \"tmux attach -r -t '=seat with spaces'\"");
+    expect(reads).toEqual(["catalog", action.view]);
+    expect(f.calls()).toHaveLength(1);
+  });
+
+  it.each([true, undefined])("keeps an unknown outcome on the current view without recovery/replay (attempted: %s)", async windowAttempted => {
+    const f = child({ ...opened, ok: false, opened: [], code: "terminal_window_failed", windowAttempted,
+      error: "Terminal window status is unknown. Inspect the desktop before retrying." }, 1);
+    let recoveries = 0;
+    await expect(openWithRecovery("rig:team", "http://localhost:7433", f.entry, undefined, () => { recoveries++; }))
+      .rejects.toThrow("Inspect the desktop before retrying");
+    expect(recoveries).toBe(0);
+    expect(f.calls()).toHaveLength(1);
+  });
+
   it("runs the installed CLI once with the selected daemon, unchanged view and preview", async () => {
     const f = child(opened);
     expect(await openTerminalInWindow("saved:team with spaces", "http://selected.example:7439", f.entry, "preview-42")).toEqual(opened);

@@ -116,6 +116,7 @@ describe("desktop terminal view", () => {
     if (reason === "headless") Object.assign(f.deps, { platform: "linux", env: {} });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ code: "terminal_window_failed", windowAttempted: false });
     expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/fixture/bin/tmux")).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
   });
@@ -127,7 +128,7 @@ describe("desktop terminal view", () => {
       if (file === "/usr/bin/osascript") throw new Error("Automation denied");
       return original(file, args);
     });
-    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: expect.stringContaining("Terminal window status is unknown. Automation denied"), opened: [] });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, windowAttempted: true, error: expect.stringContaining("Terminal window status is unknown. Automation denied"), opened: [] });
     expect(vi.mocked(f.deps.exec).mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
     expect(f.post).not.toHaveBeenCalled();
   });
