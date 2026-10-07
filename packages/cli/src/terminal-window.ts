@@ -73,6 +73,8 @@ async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<(comma
         ghostty = major! > 1 || (major === 1 && minor! >= 3);
       } catch { /* Older/non-scriptable Ghostty uses the system terminal. */ }
     }
+    // Native macOS tab groups appear as separate one-tab Terminal windows.
+    // That is not evidence that resizing one would leave existing windows alone.
     const script = ghostty ? `on run argv
 tell application "Ghostty"
   set cfg to new surface configuration
@@ -91,32 +93,17 @@ tell application "Ghostty"
 end tell
 end run` : `on run argv
 tell application "Terminal"
-  set newTab to do script (item 1 of argv)
-  set sized to false
-  try
-    repeat with targetWindow in windows
-      if (count of tabs of targetWindow) is 1 then
-        if (tab 1 of targetWindow) = newTab then
-          set number of columns of newTab to 140
-          set number of rows of newTab to 40
-          set sized to (number of columns of newTab is 140 and number of rows of newTab is 40)
-        end if
-      end if
-    end repeat
-  end try
+  do script (item 1 of argv)
   activate
-  if sized then return "window-sized"
 end tell
-return "window-manual"
+return "window"
 end run`;
     // A denied/uncertain Automation request is returned once, never replayed in another app.
     return async command => {
       const surface = (await deps.exec("/usr/bin/osascript", ["-e", script, command], 120_000)).trim();
       notes.push(ghostty
         ? "Ghostty's macOS scripting interface does not expose window size. Enlarge the new view manually if its columns are cramped; existing window settings were kept."
-        : surface === "window-sized"
-          ? "The new Terminal tab reports 140 columns by 40 rows."
-          : "Terminal opened, but could not confirm 140 columns by 40 rows. Enlarge the new window manually if needed; do not reopen it just to resize.");
+        : "Terminal opened with its own window sizing. Resize or move the new view manually if needed; OpenRig did not request a size or position change.");
       return { app: ghostty ? "Ghostty" : "Terminal", surface: ghostty ? surface : "window" };
     };
   }
