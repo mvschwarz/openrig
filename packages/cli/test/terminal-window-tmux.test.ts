@@ -49,7 +49,7 @@ it.each([
   const beforeSplits: string[] = [];
   const deps: WindowDeps = {
     herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
-    platform: "darwin", env: { HOME: dir }, exists: () => false,
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: dir }, exists: () => false,
     exec: async (file, args) => {
       if (file === "/bin/sh") return "tmux";
       if (file === "/usr/bin/osascript") return desktop();
@@ -88,7 +88,7 @@ it("opens three real viewer panes while original sessions keep the same pane and
   const desktop = vi.fn(async () => "window");
   const deps: WindowDeps = {
     herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
-    platform: "darwin", env: { HOME: "/fixture" }, exists: () => false,
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" }, exists: () => false,
     exec: async (file, args) => {
       if (file === "/bin/sh") return "tmux";
       if (file === "/usr/bin/osascript") return desktop();

@@ -20,11 +20,20 @@ hook registration alone does not prove native skill discovery.
 Refocus preserves a long session's earned expertise while re-grounding it in current intent and
 lived context. It is not a restart, wake, or phase checkpoint.
 
-Run the bundled trace from this skill directory instead of reconstructing the hierarchy from memory:
+Resolve the bundled script's absolute path from the directory of this loaded skill.
+Stay in your current working directory; do not `cd` into the skill directory, which
+can change the inferred work node. Run the trace as **one plain command**, replacing
+the example path with the actual absolute path written out in the tool call:
 
 ```bash
-python3 scripts/trace-to-root.py --trees both --depth light
+python3 "/absolute/path/to/refocusing/scripts/trace-to-root.py" --trees both --depth light
 ```
+
+Do not combine this command with shell variables, environment assignments, command
+substitution, exit-status printing or file-reading loops. Read the named source
+files separately with the native read tool. Combined shell loops or variables can
+require native approval even when the intended operations are read-only; a plain
+command is not a guarantee that approval will never be needed.
 
 For managed compaction, do this during the restore request or its read-depth
 audit. The earlier acknowledgement-only boundary is not permission to restore.
@@ -32,8 +41,9 @@ audit. The earlier acknowledgement-only boundary is not permission to restore.
 Use `--trees topology|work|both` to select context domains and `--depth light|full` to control how
 much each node contributes. Light work traces compose `intent:` and name notes; full traces include
 the complete node and notes bodies. The script resolves `topology.root` and `workspace.root` with
-`rig config get`. When a current node cannot be derived, set `OPENRIG_REFOCUS_TOPOLOGY_NODE` or
-`OPENRIG_REFOCUS_WORK_NODE`, or pass the matching `--*-start` option.
+`rig config get`. When a known current node must be supplied, pass `--work-start` or
+`--topology-start` with its literal absolute path in the same plain command. Do not
+substitute the project root for a mission or slice node and claim that mission was traced.
 
 The trace walks the topology and work trees. For the project's own declared context (intent, context files,
 skills), `rig context work-install` lists it; read what the next action needs.
