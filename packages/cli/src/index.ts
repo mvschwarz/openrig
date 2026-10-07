@@ -171,7 +171,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program
     .name("rig")
     .description("CLI for the OpenRig local control plane")
-    .version(CLI_VERSION);
+    .version(CLI_VERSION)
+    .addHelpText("after", "\nWelcome screen / OpenRig view / see my agents:\n  rig terminal open saved:kernel --window\n  Opens a new desktop terminal itself: TUI | advisor | operator.\n  An installing agent can run this from its shell on the daemon's desktop.\n  Start a stopped daemon with rig daemon start; rig tui is the team dashboard.\n");
 
   program.addCommand(startCommand(depsOverride?.startDeps));
   program.addCommand(daemonCommand(depsOverride?.daemonDeps));

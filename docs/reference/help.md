@@ -63,17 +63,44 @@ in a report; otherwise follow the accompanying diagnostic. If the only remaining
 
 Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
 (`rig context get reference/getting-started.md#open-the-kernel-conversations`). The default
-`rig terminal open saved:kernel --provider herdr` needs no saved-view YAML or starter team. After the selected login
+`rig terminal open saved:kernel --window` needs no saved-view YAML or starter team. After the selected login
 works, start the daemon if stopped, then read `rig status` and `rig ps --nodes --rig kernel`. Started is not ready;
 the view can open while the agents finish starting, with that state reported honestly.
-Ask **“Open the OpenRig view now?”** Yes opens a new space using installed herdr, else cmux, else the guide's exact
-new-terminal command. No gives the command to open it later. Over SSH or without a display, give the exact
-connection/attach command. Keep your own terminal and existing user spaces intact; no new view provider is needed.
+The person's words **“welcome screen”**, **“OpenRig view”** or **“see my agents”** lead to that command.
+It opens the desktop window itself. An agent can run it from its shell on the daemon's desktop, including when
+it did not run setup; “my shell isn't your terminal” is not a reason to stop. Use the person's request to open it,
+or ask **“Open the OpenRig view now?”** if they have not chosen. The command uses installed Herdr, otherwise plain
+tmux, in a new terminal tab/window. Keep your terminal and existing conversations intact. `rig tui` is the team
+dashboard, not the operator's conversation. An existing cmux workspace remains available with `--provider cmux`
+without `--window`.
+
+If the person chooses a manual attachment after a failure, read `rig ps --nodes --rig kernel --json`, find
+`operator.agent`, and fill its returned `canonicalSessionName` into
+`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`. Give the completed command for a new terminal on
+that host and account; not every failure prints one. Over SSH, use the known connection details, as in the guide.
 No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check the
 visible view; a created workspace or a CLI running in a new OS window is not visual proof.
 Show TUI | advisor | operator for Claude-only, Codex-only and mixed kernels; the queue worker stays accessible through
 the TUI. Talk to the operator about your goal before choosing and launching a first project team.
 Use the existing recovery routes for unavailable seats; opening a view does not create another kernel or new accounts.
+
+### A step interrupted setup or the welcome screen
+
+Name the exact command and result, the reason it stopped and the next useful step. A harness's permission rules,
+sandbox or automatic permission decision can refuse an installing agent's tool call before OpenRig runs.
+Claude Code's [auto mode can deny calls](https://code.claude.com/docs/en/auto-mode-config); explain the reported
+refusal and let the person review that step in their harness controls or run it themselves, within their chosen
+permissions. Do not silently claim installation failed or completed from a refused call.
+
+For missing tools, downloads or selected logins, use the specific setup hint. A Herdr install warning leaves plain
+tmux available. A requested Ghostty install can fail setup; resolve it or decline with `--no-ghostty` and keep the
+earlier choices. Terminal.app remains available; required tools and logins still matter. macOS may ask for
+Automation permission; a missing display or remote daemon needs the documented headless/manual route.
+Herdr may show an intro (Return to continue) and an agent-integration panel (Esc to close); the view does not
+require installing those integrations. Enlarge a cramped 80×24 window. Use authorized desktop tools to inspect the
+window contents, or state that visibility is unconfirmed and ask the person to check. A successful command or
+window listing alone is not visual proof. The [full friction table](getting-started.md#what-can-interrupt-installation-and-the-welcome-screen)
+connects each observation to its next step. Preserve existing conversations while resolving it.
 
 ### The team did not start, or a terminal is missing
 

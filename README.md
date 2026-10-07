@@ -14,7 +14,7 @@ It's the open-source system behind my AI civilization experiments.
 
 ![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
 
-**Start here:** [the guided first-use path](docs/reference/getting-started.md): install, launch a two-agent team in your repository, and get one reviewed change.
+**Start here:** [the guided first-use path](docs/reference/getting-started.md): install, talk to the kernel operator, then choose a team for your first useful change.
 
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
 
@@ -42,7 +42,7 @@ To install with Bun instead, run `bun add -g @openrig/cli`. OpenRig still runs o
 
 npm 11 and later can skip that postinstall script and print `npm warn install-scripts` naming `@openrig/cli`. That's expected: the CLI still works, and only the Node.js and SQLite check was skipped. To run it yourself, use `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"`; `rig doctor` checks the Node.js version only.
 
-Choose the working account you already have: **Claude Code, Codex, or both**. Reuse an explicit choice; no second subscription is required. `rig setup --dry-run` previews the broader setup, but applying `rig setup` checks both harnesses and installs a missing one, and on macOS cmux too. It is optional for the [selected-provider path](docs/reference/getting-started.md#choose-your-providers).
+Choose the working account you already have: **Claude Code, Codex, or both**. Reuse an explicit choice; no second subscription is required. `rig setup --dry-run` previews the broader setup; applying `rig setup` checks both harnesses and installs a missing one, plus Herdr unless declined with `--no-herdr`. On macOS, the installing agent offers Ghostty once. Setup leaves an existing cmux installation alone. It is optional for the [selected-provider path](docs/reference/getting-started.md#choose-your-providers).
 
 A team seat with no permission policy, per-seat choice or (for Codex) named profile launches with OpenRig's [team default](docs/reference/rig-spec.md#team-launch-defaults): Claude runs ordinary `rig` commands, project reads and common tests without prompting, while lifecycle commands such as `rig up` and `rig down` still ask; Codex also gets the OpenRig workspace and its pod's state directory as writable directories. Before launching, your agent recommends keeping that default, and offers to remember selected OpenRig commands in your native settings only if you want that, at personal project scope unless you explicitly choose user-wide sessions. It is not global YOLO or permission to invent work. On Yes, the agent [adds and verifies native rules](docs/reference/getting-started.md#have-your-agent-configure-permissions); No or no answer keeps the team default and leaves settings unchanged. An existing explicit choice is reused. Say “Undo the OpenRig command allowances added by this setup” to remove only its additions.
 
@@ -57,16 +57,46 @@ Check `tmux -V` and only your selected CLI/login: `claude --version` plus
 sign in once with `claude auth login` or `codex login`; do not install or log in
 to an unused provider.
 
-After installation, your agent should [open a **new kernel conversation space**](docs/reference/getting-started.md#open-the-kernel-conversations): `rig terminal open saved:kernel --provider herdr`, then cmux or a plain terminal if unavailable. The default view needs no YAML edit. The agent tells you before opening it and keeps its own terminal and your existing spaces intact. The guide also gives the manual and SSH commands.
+### Open the welcome screen
+
+Ask your agent to **“open the welcome screen”**, **“open the OpenRig view”** or
+**“let me see my agents.”** After checking the selected login, it runs:
+
+```sh
+rig daemon start  # if stopped
+rig terminal open saved:kernel --window
+```
+
+`--window` opens a new terminal tab or window itself, with **TUI | advisor |
+operator**. An installing agent can run it from its shell on the daemon's
+desktop; the person copies nothing. It uses Herdr when installed, otherwise
+the same layout in plain tmux, and preserves existing conversations. `rig tui`
+is the team dashboard. Installation is finished when you are talking to the
+operator; if you choose to talk later, that handoff remains pending.
+
+If setup stops, read the named step: missing tools and selected-provider logins
+need their specific setup action. A harness permission rule, sandbox or automatic
+permission decision can also block the installing agent's command. The agent
+should name the command and reported reason, then help you resolve that specific
+step within your chosen permissions. A permission refusal is not an OpenRig
+installation result.
+
+The desktop may need an Automation approval; SSH/headless sessions may have no
+display. Herdr can show first-run panels, and an 80×24 window can cramp the view.
+Follow [the welcome-view checks and next steps](docs/reference/getting-started.md#what-can-interrupt-installation-and-the-welcome-screen).
+The agent checks the visible window when it has desktop access and says what it
+could not verify otherwise. If you choose a manual attachment after a failure,
+ask the installing agent for the exact command using your current operator
+session; run that in a new terminal window.
 
 The kernel's operator helps you pick a first team. It asks what you want to build,
 recommends one of three, and fits it to the providers you have.
 
-| Team | Agents | For |
+| Team | Talk to | Agents and purpose |
 | --- | --- | --- |
-| `starter` | A builder (`dev-build`, Claude Code) and a reviewer (`dev-review`, Codex) | One bounded change |
-| `workshop` | A lead, a builder, QA and a reviewer | Ongoing work in one repository; a rig bundle the operator installs from its pinned listing |
-| `factory` | Seven: a lead, an advisor, build, QA, design and two independent reviewers | Sustained product work |
+| `starter` | `dev-build@starter` | A Claude Code builder and Codex reviewer for one bounded change |
+| `workshop` | `orch-lead@workshop` | A lead, builder, QA and reviewer for ongoing work in one repository; a rig bundle the operator installs from its pinned listing |
+| `factory` | `orch-lead@factory` | Seven: a lead, advisor, build, QA, design and two independent reviewers for sustained product work |
 
 As shipped, `starter` uses both Claude Code and Codex. With only one of them, ask
 the kernel operator to adapt it: it writes a copy of the team for your providers
