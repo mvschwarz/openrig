@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 
-function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean } = {}) {
+function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean; terminalSize?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
   const composed = { opened: options.empty ? [] : panes, pages: options.empty ? [] : [panes], columns: 3, absent: [], degraded: [] };
   const preview = { planId: "bound-plan", composed, status: { launch: { socketPath: "/daemon home/herdr.sock", session: "daemon-session" } } };
@@ -16,7 +16,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
       return "herdr 0.9.3";
     }
     if (file === "/usr/libexec/PlistBuddy") return options.ghostty ?? "1.2.0";
-    if (file === "/usr/bin/osascript") return options.ghostty === "1.3.0" ? "tab" : "window";
+    if (file === "/usr/bin/osascript") return options.ghostty === "1.3.0" ? "tab" : options.terminalSize === false ? "window-manual" : "window-sized";
     if (file === "/bin/sh") return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/tmux";
     if (args.at(-1) === "default-size") return "120x40";
     if (args[0] === "show-options" && args.at(-1) === "window-size") return "latest";
@@ -35,6 +35,8 @@ describe("desktop terminal view", () => {
     const launch = f.exec.mock.calls.find(([file]) => file === "/usr/bin/osascript")!;
     expect(launch[1][1]).toContain("new tab in front window");
     expect(launch[1][1]).toContain("new window with configuration");
+    expect(launch[1][1]).not.toMatch(/set (bounds|number of columns|number of rows)/);
+    expect(result.notes).toContain("Ghostty's macOS scripting interface does not expose window size. Enlarge the new view manually if its columns are cramped; existing window settings were kept.");
     expect(launch[1][2]).toContain("HERDR_SOCKET_PATH='/daemon home/herdr.sock'");
     expect(launch[1][2]).not.toContain("--session");
     expect(launch[1][2]).toContain("-u HERDR_SESSION");
@@ -50,6 +52,22 @@ describe("desktop terminal view", () => {
     expect(script).toContain('tell application "Terminal"');
     expect(script).toContain("do script (item 1 of argv)");
     expect(script).not.toContain("in front window");
+    expect(script).toContain("set newTab to do script");
+    expect(script).toContain("set number of columns of newTab to 140");
+    expect(script).toContain("set number of rows of newTab to 40");
+    expect(script).not.toMatch(/settings set|default settings|System Events/);
+    expect(result.notes).toContain("The new Terminal tab reports 140 columns by 40 rows.");
+  });
+
+  it("keeps the opened Terminal view when sizing cannot be confirmed, without retrying", async () => {
+    const f = fixture({ terminalSize: false });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: true, window: { app: "Terminal", surface: "window" } });
+    expect(result.notes?.join(" ")).toContain("Enlarge the new window manually");
+    expect(result.notes?.join(" ")).not.toContain("tab reports 140");
+    expect(f.exec.mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.deps.launch).not.toHaveBeenCalled();
   });
 
   it("creates only a new tmux viewer with the composed three-column ordering", async () => {
@@ -122,5 +140,32 @@ describe("desktop terminal view", () => {
     expect(result).toMatchObject({ ok: true, provider: "tmux", window: { app: "ghostty", surface: "window-requested" } });
     expect(f.exec.mock.calls.some(([,args]) => args.includes("--version"))).toBe(false);
     expect(f.deps.launch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, string[]]>([
+    ["ghostty", ["--window-width=140", "--window-height=40", "-e"]],
+    ["gnome-terminal", ["--window", "--geometry=140x40", "--"]],
+    ["konsole", ["-p", "TerminalColumns=140", "-p", "TerminalRows=40", "-e"]],
+    ["xterm", ["-geometry", "140x40", "-e"]],
+    ["x-terminal-emulator", ["-e"]],
+  ])("uses %s per-launch sizing without changing the command or selection order", async (app, prefix) => {
+    const f = fixture();
+    Object.assign(f.deps, { platform: "linux", env: { DISPLAY: ":fixture" } });
+    const original = f.deps.exec;
+    f.deps.exec = vi.fn(async (file, args) => {
+      if (file === "/bin/sh" && args[1]?.startsWith("command -v ") && args[1] !== "command -v herdr") {
+        if (args[1] === `command -v ${app}` || (app === "x-terminal-emulator" && args[1] === "command -v xterm")) return `/bin/${app}`;
+        throw new Error("absent");
+      }
+      return original(file, args);
+    });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    const calls = vi.mocked(f.deps.launch).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toBe(app);
+    expect(calls[0]![1].slice(0, -1)).toEqual([...prefix, "/bin/sh", "-c"]);
+    expect(calls[0]![1].at(-1)).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(result).toMatchObject({ ok: true, window: { app, surface: "window-requested" } });
+    expect(result.notes?.join(" ")).toContain(app === "x-terminal-emulator" ? "no portable size option" : "Requested 140 columns by 40 rows");
   });
 });
