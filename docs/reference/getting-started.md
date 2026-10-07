@@ -84,9 +84,12 @@ user.
     inherits;
   - Pi credentials the managed seat can reach, because a global Pi login isn't
     shared with managed seats. This user put them in the seat's agent
-    directory. A provider key in the daemon environment also works: name it in
+    directory. For `openrouter`, `zai`, `kimi-coding` or `minimax`, a key in the
+    daemon environment also works (`OPENROUTER_API_KEY`, `ZAI_API_KEY`,
+    `KIMI_API_KEY` or `MINIMAX_API_KEY`): name it in
     `recovery.provider_auth_env_allowlist`, give the seat a `<provider>/<id>`
-    model, then restart the daemon and relaunch the seat;
+    model, then restart the daemon and relaunch the seat. Any other provider
+    goes in the seat's agent directory;
   - the current `@earendil-works/pi-coding-agent` package in its own npm prefix,
     not the deprecated `@mariozechner` one.
 - **Not tested:** the kernel and operator, herdr, reboot, suspend and resume,
