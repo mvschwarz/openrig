@@ -1,8 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch } from "../src/adapters/windows-launch.js";
+import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch, hasOnlyWindowsTerminalResponseDraft } from "../src/adapters/windows-launch.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("literal Windows launch rendering", () => {
+  it("recognises only an entirely terminal-response current draft", () => {
+    const reply = "]10;rgb:cccc/cccc/cccc\\]11;rgb:0c0c/0c0c/0c0c\\";
+    expect(hasOnlyWindowsTerminalResponseDraft(`header\n› ${reply}\n\n footer`)).toBe(true);
+    expect(hasOnlyWindowsTerminalResponseDraft(`› ${reply}my draft\n\n`)).toBe(false);
+    expect(hasOnlyWindowsTerminalResponseDraft(`› ${reply}\n  my second line\n\n`)).toBe(false);
+    expect(hasOnlyWindowsTerminalResponseDraft(`› ${reply}\n\nold answer\n› current draft\n\n`)).toBe(false);
+    expect(hasOnlyWindowsTerminalResponseDraft("› normal draft\n\n")).toBe(false);
+  });
   it("preserves generated POSIX words, including empty, Unicode and apostrophe arguments", () => {
     expect(parseLiteralLaunchWords(`node 'C:\\project space\\runner.js' '' 'a'"'"'b' '中文;$HOME'`))
       .toEqual(["node", "C:\\project space\\runner.js", "", "a'b", "中文;$HOME"]);

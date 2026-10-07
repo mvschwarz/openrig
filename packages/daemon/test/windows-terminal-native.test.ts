@@ -6,11 +6,43 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
+import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
+  it("delivers a multiline block as one runner submission", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-input-"));
+    const session = `openrig-input-${process.pid}-${Date.now()}`;
+    const output = path.join(dir, "result.json"), ready = path.join(dir, "ready");
+    const script = path.join(dir, "receiver.mjs");
+    const runner = pathToFileURL(path.resolve(import.meta.dirname, "../dist/adapters/pi-runner.js")).href;
+    writeFileSync(script, `import fs from 'node:fs'; import {createRunnerInput} from ${JSON.stringify(runner)};
+      createRunnerInput(process.stdin, process.stdout, block => { fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify(block)); process.exit(0); });
+      fs.writeFileSync(${JSON.stringify(ready)}, 'ready');`);
+    const invoke = async (argv: string[]) => (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { windowsHide: true })).stdout;
+    const adapter = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
+    try {
+      expect(await adapter.createSession(session, dir)).toEqual({ ok: true });
+      const q = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
+      expect(await adapter.sendShellCommand(session, renderWindowsLaunch([process.execPath, script].map(q).join(" "), {}))).toEqual({ ok: true });
+      const waitForFile = async (file: string) => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) { try { return readFileSync(file, "utf8"); } catch { await new Promise(resolve => setTimeout(resolve, 50)); } }
+        throw new Error("receiver did not produce its fixture file");
+      };
+      await waitForFile(ready);
+      const pane = (await adapter.listPanes(session))[0]!;
+      const message = "first line\nsecond line; 中文";
+      expect(await adapter.sendText(pane.id, message)).toEqual({ ok: true });
+      expect(await adapter.sendKeys(pane.id, ["Enter"])).toEqual({ ok: true });
+      expect(JSON.parse(await waitForFile(output))).toBe(message);
+    } finally {
+      await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
   it("delivers exact native argv and environment through a real pane", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-"));
     const session = `openrig-test-${process.pid}-${Date.now()}`;
@@ -38,6 +70,9 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
         try { result = JSON.parse(readFileSync(output, "utf8")); break; } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
       }
       expect(result).toEqual({ args, marker: "native-ok" });
+      expect(await adapter.killSession(session)).toEqual({ ok: true });
+      expect((await adapter.probeSession(session)).state).toBe("absent");
+      expect((await adapter.probeSession(decoy)).state).toBe("present");
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
       await invoke(["tmux", "kill-session", "-t", `=${decoy}`]).catch(() => {});

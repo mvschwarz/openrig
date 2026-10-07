@@ -98,12 +98,21 @@ export class SeatLaunchEnvironment {
     const bin = path.resolve(this.daemonCwd, this.sessionEnv.OPENRIG_HOME, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
     mkdirSync(bin, { recursive: true });
     if (this.launchPlatform === "win32") {
-      const shim = path.join(bin, "rig.ps1");
-      const content = `& ${powershellQuote(process.execPath)} ${powershellQuote(cli)} @args\nexit $LASTEXITCODE\n`;
-      try { writeFileSync(shim, content, { flag: "wx" }); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-      if (readFileSync(shim, "utf8") !== content || readdirSync(bin).some(name => name !== "rig.ps1"))
-        throw new Error("Seat bin is not rig-only");
+      // PowerShell, native cmd and Git Bash each need their own argument-preserving entry.
+      // Reject batch metacharacters in fixed executable paths rather than interpreting them.
+      if (/[\r\n"%]/.test(process.execPath + cli)) throw new Error("Unsupported Windows executable path");
+      const shims: Record<string, string> = {
+        "rig.ps1": `& ${powershellQuote(process.execPath)} ${powershellQuote(cli)} @args\nexit $LASTEXITCODE\n`,
+        "rig.cmd": `@echo off\r\n"${process.execPath}" "${cli}" %*\r\n`,
+        rig: `#!/bin/sh\nexec ${shellQuote(process.execPath.replace(/\\/g, "/"))} ${shellQuote(cli.replace(/\\/g, "/"))} "$@"\n`,
+      };
+      for (const [name, content] of Object.entries(shims)) {
+        const shim = path.join(bin, name);
+        try { writeFileSync(shim, content, { flag: "wx", mode: 0o700 }); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+        if (readFileSync(shim, "utf8") !== content) throw new Error("Seat bin content differs from the paired CLI");
+      }
+      if (readdirSync(bin).some(name => !(name in shims))) throw new Error("Seat bin is not rig-only");
       return bin;
     }
     const link = path.join(bin, "rig");
