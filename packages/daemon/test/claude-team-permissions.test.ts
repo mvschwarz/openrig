@@ -38,7 +38,6 @@ describe("Claude team command permissions", () => {
     "npm test", "/opt/tools/npm test", "'/project/node_modules/.bin/vitest' run test/unit.test.ts",
     "/private/tmp/project/node_modules/.bin/jest test/unit.test.ts", "python3 -m pytest",
     "rig send worker 'literal rig down text'", "rig send worker 'multiline\nrig down example'",
-    "rig -- down --help example", "rig seat -- stop --help example@demo",
   ])("allows existing allowance spelling: %s", command => expect(decide(command, policy)).toBe("allow"));
 
   it.each([
@@ -53,6 +52,7 @@ describe("Claude team command permissions", () => {
     "xargs rig down", "if true; then rig down example; fi",
     "for s in example; do rig down $s; done", "{ rig down example; }", "! rig down example",
     "rig -- down example", "rig seat -- stop example@demo --reason maintenance",
+    "rig -- down --help", "rig -- down -h", "rig -- down --help example", "rig seat -- stop --help example@demo",
     "ls # <<pwd\nrig down example\npwd", "ls # ' <<pwd\nrig down example\npwd",
     "echo $((1 <<value))\nrig down example\nvalue", "((1 <<value))\nrig down example\nvalue",
     "echo $((\n1 <<value))\nrig down example\nvalue",

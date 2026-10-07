@@ -44,7 +44,7 @@ async function parse(command: string) {
 describe("team hook agrees with real CLI dispatch", () => {
   it.each([
     "rig down example", "rig -- down example",
-    "rig seat -- stop example@demo --reason maintenance",
+    "rig -- down --help", "rig -- down -h",
     "command rig down example", "nice -n 5 rig down example",
     "if true; then rig down example; fi", "for s in example; do rig down $s; done",
     "{ rig down example; }", "rig down -- --help",
@@ -55,8 +55,16 @@ describe("team hook agrees with real CLI dispatch", () => {
     expect(observed.decision).toBe("ask");
   });
   it.each([
+    ["rig seat -- stop example@demo --reason maintenance", "commander.missingMandatoryOptionValue"],
+    ["rig -- down --help example", "commander.excessArguments"],
+  ])("keeps invalid separator forms conservative: %s", async (command, error) => {
+    const observed = await parse(command);
+    expect(observed.error).toBe(error); expect(observed.calls).toEqual([]);
+    expect(observed.decision).toBe("ask");
+  });
+  it.each([
     "rig down example --help", "rig down --help example", "rig down -h example",
-    "rig seat stop --help example@demo", "rig -- down --help example",
+    "rig seat stop --help example@demo",
   ])("allows help with no action: %s", async command => {
     const observed = await parse(command);
     expect(observed.error).toBe("commander.helpDisplayed"); expect(observed.calls).toEqual([]);

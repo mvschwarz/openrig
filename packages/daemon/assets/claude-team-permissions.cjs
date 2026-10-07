@@ -193,6 +193,9 @@ function prefixes(rules) {
 }
 
 function helpOnly(tokens, prefixLength) {
+  // A separator before a subcommand also makes its remaining words operands.
+  // For example, the CLI dispatches `rig -- down --help` on a rig named --help.
+  if (tokens.slice(1, prefixLength).some(t => t.value === "--")) return false;
   const args = tokens.slice(prefixLength);
   // A help-looking option value or text after -- is not a help invocation.
   // Commander also accepts help before positional arguments.
