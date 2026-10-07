@@ -92,10 +92,12 @@ question through the human channel instead.
    product lead, a researcher and a builder for prototypes).
 4. **Show the real spec, before anything starts.** Find the shared TUI's
    `canonicalSessionName` on the kernel's `operator.human` member with
-   `rig ps --nodes --rig kernel --json`, then capture that pane. When it shows
+   `rig ps --nodes --rig kernel --json`, then capture that pane with
+   `tmux capture-pane -p -t '=<session>:'`, substituting that canonical name
+   for `<session>` and keeping the trailing colon. When it shows
    the TUI's normal view and an empty command line, type the TUI command
-   `spec starter` and Enter with tmux send-keys to that pane. A rig spec opens
-   on its graph tab; capture again and confirm the named spec and its graph
+   `spec starter` and Enter with `tmux send-keys -t '=<session>:'`. A rig spec
+   opens on its graph tab; capture again and confirm the named spec and its graph
    are visible while you explain its roles. Do the same with `spec workshop`
    and `spec factory` as you present those choices. These are TUI commands,
    not shell commands. Previewing does not launch a team; leave the Launch
@@ -104,16 +106,19 @@ question through the human channel instead.
      If exactly one workshop entry is listed, show it and add nothing; say if
      its source differs from the pinned install you are offering. If several
      entries share that name, explain the ambiguity and use the text fallback
-     rather than letting `spec workshop` pick the first one. Otherwise, obtain
-     a clean checkout of the exact commit in the fresh registry listing from
-     step 3. Verify `git -C <checkout> rev-parse HEAD` equals that commit and
+     rather than letting `spec workshop` pick the first one. Otherwise, create
+     a temporary directory with `mktemp -d` and put a clean checkout of the
+     exact commit in the fresh registry listing from step 3 inside it.
+     Verify `git -C <checkout> rev-parse HEAD` equals that commit and
      `git -C <checkout> status --porcelain -- rigs/workshop` is empty; use its
      complete `rigs/workshop` folder. Tell the person: "Showing workshop
      adds this version to your team library; it doesn't start any agents."
-     Run `rig specs add <pinned-workshop-folder> --json`, then refresh the TUI
-     and open `spec workshop`. Keep that same commit in the later install
-     link: the preview is a library copy, while installation still uses the
-     pinned link and `--target ~/rigs/workshop`, not the bare library name.
+     Run `rig specs add <pinned-workshop-folder> --json`; once it succeeds,
+     the temporary checkout can be removed because the library has its own
+     copy. Refresh the TUI and open `spec workshop`. Keep that same commit in
+     the later install link: the preview is a library copy, while installation
+     still uses the pinned link and `--target ~/rigs/workshop`, not the bare
+     library name.
      Do not overwrite an existing workshop entry. If you cannot bind the
      copy to that commit or the preview copy prevents the pinned install,
      explain why workshop needs the text fallback below.
@@ -182,10 +187,12 @@ question through the human channel instead.
      team.
 8. **Show them the team.** Capture the shared TUI: its session is the
    `operator.human` member's `canonicalSessionName` in
-   `rig ps --nodes --rig kernel --json`. Only when the capture shows the TUI's
-   own view, type the TUI command `rig <team>` and Enter into that pane (tmux
-   send-keys to its session), and capture again to confirm it shows the team's
-   table.
+   `rig ps --nodes --rig kernel --json`. Use
+   `tmux capture-pane -p -t '=<session>:'`, substituting that canonical name
+   for `<session>` and keeping the trailing colon. Only when the capture shows
+   the TUI's own view, type the TUI command `rig <team>` and Enter into that pane
+   with `tmux send-keys -t '=<session>:'`, and capture again to confirm it shows
+   the team's table.
    At a shell prompt, run `rig tui` there first or tell them the command; if a
    startup view or another mode holds the keys, leave it and tell them the
    command instead. Then open the team's terminals as a new space with
