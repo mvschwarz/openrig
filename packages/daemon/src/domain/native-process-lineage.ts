@@ -30,7 +30,9 @@ function tokens(command: string): string[] {
   const append = (end: number) => {
     if (start === end) return;
     const token = command.slice(start, end);
-    result.push(token[0] === '"' && token.at(-1) === '"'
+    // Retain paired outer quotes from command-builder observations, without
+    // treating an apostrophe inside a path as the start of a quoted span.
+    result.push(token.length > 1 && (token[0] === '"' || token[0] === "'") && token.at(-1) === token[0]
       ? token.slice(1, -1) : token);
   };
   for (let index = 0; index < command.length; index += 1) {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
+import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 
 const token = "00000000-0000-7000-8000-000000000001";
 const startedAt = "Sat Jan  1 12:00:00 2000";
@@ -24,6 +25,12 @@ describe("joined native Codex identity", () => {
   });
   it("proves direct-native resume", async () => {
     expect((await check(() => [{ ...rows()[3]!, pid: 10, ppid: 1 }]))?.process.pid).toBe(10);
+  });
+  it("retains paired quotes in generated resume commands with a profile named resume", async () => {
+    const command = buildCodexResumeCore(token, "resume", false, "--add-dir /tmp/state");
+    const list = () => rows().map(r => r.pid === 13 ? { ...r, command } : r);
+    expect((await check(list))?.process.pid).toBe(13);
+    expect(await check(list, { expectedToken: "different" })).toBeNull();
   });
   it.each([
     `resume ${token} --add-dir /Users/me/code/Bob's app`,
