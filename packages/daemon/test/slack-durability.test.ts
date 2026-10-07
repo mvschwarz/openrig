@@ -179,10 +179,9 @@ describe("R2 round-3 — reconciliation identity is STRUCTURAL: guaranteed in th
       ],
     });
     const { deliver } = harness(slack.fetchImpl);
-    // Near the limit, but still one message beside the worst-case mention the shape is chosen with (#897).
     const scoped: OutboundDecision = {
       kind: "outbound_decision", decisionId: "d-scope-check", op: OUTBOUND_OP, entityBindingRef: "mike#slack",
-      payload: { ...payload, qitemId: "qitem-routine-scope", summary: "x".repeat(900), body: "y".repeat(2840) },
+      payload: { ...payload, qitemId: "qitem-routine-scope", summary: "x".repeat(900), body: "y".repeat(2900) },
     };
     await deliver(scoped);
     const retry = await deliver(scoped);

@@ -140,22 +140,27 @@ describe("long human asks (#897)", () => {
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(longBody);
   });
 
+  // A long subject makes the complete-fallback budget decide whether a brief fits in one message.
+  const nearLimitSummary = "Approve the plan? ".repeat(62);
+  /** The shortest brief that fits in one message without a mention but not beside one. Probes use
+   *  the delivery's own decision id: its reconcile marker is part of the message text. */
+  const briefPastMention = async (id: string) => {
+    const fitsBesideMention = async (length: number) => {
+      const posts: Post[] = [];
+      await subsystemSlackDeliver({ ...stores(`probe-${length}`), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), resolveMentionUserId: () => "U0123456789" })(decision(id, { body: "a".repeat(length), summary: nearLimitSummary }));
+      return posts.length === 1;
+    };
+    let fits = 0, splits = 6000;
+    while (splits - fits > 1) { const mid = (fits + splits) >> 1; if (await fitsBesideMention(mid)) fits = mid; else splits = mid; }
+    return "a".repeat(splits);
+  };
+
   it.each([
     ["none, then one", undefined, "U0123456789"],
     ["one, then none", "U0123456789", undefined],
   ])("keeps one message or a split when the mention changes between an interrupted attempt and its retry (mention %s)", async (_label, before, after) => {
-    // A long subject makes the complete-fallback budget decide whether a brief fits in one message.
-    const summary = "Approve the plan? ".repeat(62);
-    // Probes use the test's own decision id: its reconcile marker is part of the message text.
-    const fitsBesideMention = async (length: number) => {
-      const posts: Post[] = [];
-      await subsystemSlackDeliver({ ...stores(`probe-${length}`), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), resolveMentionUserId: () => "U0123456789" })(decision("shape", { body: "a".repeat(length), summary }));
-      return posts.length === 1;
-    };
-    // The shortest brief that doesn't fit in one message beside the mention.
-    let fits = 0, splits = 6000;
-    while (splits - fits > 1) { const mid = (fits + splits) >> 1; if (await fitsBesideMention(mid)) fits = mid; else splits = mid; }
-    const body = "a".repeat(splits);
+    const summary = nearLimitSummary;
+    const body = await briefPastMention("shape");
 
     const posted: Post[] = [];
     const fetchImpl: FetchImpl = async (url, init) => {
@@ -173,10 +178,34 @@ describe("long human asks (#897)", () => {
     expect((await subsystemSlackDeliver(opts)(ask)).ok).toBe(false);
     mention = after;
     expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
-    // Joined back in posting order, the parts are the whole brief: nothing lost, nothing repeated.
+    // Joined back in posting order, what posted is the whole brief once, as one message or as a split.
     const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
-    expect(bodies[0]!.endsWith(NOTE)).toBe(true);
-    expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
+    const first = bodies[0]!.endsWith(NOTE) ? bodies[0]!.slice(0, -NOTE.length) : bodies[0]!;
+    expect([first, ...bodies.slice(1)].join("")).toBe(body);
+  });
+
+  it("posts a retry in the shape, and with the mention, its first attempt planned", async () => {
+    const body = await briefPastMention("planned");
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      if (++calls === 1) throw new Error("synthetic timeout before the post landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    let mention: string | undefined;
+    const opts = { ...stores("planned"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl, resolveMentionUserId: () => mention };
+    const ask = decision("planned", { body, summary: nearLimitSummary });
+    // Without a mention the brief fits in one message, and the first attempt never lands.
+    expect((await subsystemSlackDeliver(opts)(ask)).ok).toBe(false);
+    // A mention that would push it past one message is resolved before the retry.
+    mention = "U0123456789";
+    expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.text).not.toContain("<@U0123456789>");
+    expect(unescape(posted[0]!.blocks[1]!.text!.text)).toBe(body);
   });
 
   it("redacts secrets before cutting, so no part carries a piece of one", async () => {

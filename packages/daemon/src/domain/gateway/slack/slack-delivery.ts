@@ -401,12 +401,27 @@ type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[] };
 /** #897 — the most Slack messages one ask may post: the primary plus its thread replies. */
 export const MAX_HUMAN_MESSAGE_PARTS = 20;
 const CONTINUES_NOTE = "The rest of this brief follows in this thread.";
-/** Longer than any Slack user id, so a split sized with it fits whichever mention is rendered. */
-const WORST_CASE_MENTION_ID = "U".padEnd(32, "X");
 const DETAIL_NOTE = "Supplemental detail follows in this thread.";
 
-function worstCaseSizing(opts: SubsystemSlackDeliveryOpts): SubsystemSlackDeliveryOpts {
-  return { ...opts, resolveMentionUserId: () => WORST_CASE_MENTION_ID };
+/** #897 — what an ask's first attempt chose: the mention it rendered and, for a split, the length of
+ *  each piece. It is kept with the attempt, so a retry posts the same parts under the same ids even
+ *  if the mention has changed since. */
+interface DeliveryPlan { mention?: string; body?: number[]; detail?: number[] }
+
+const DELIVERY_PLAN = "::delivery-plan::";
+
+function recordedPlan(attempted: Set<string>, decisionId: string): DeliveryPlan | undefined {
+  const prefix = `${decisionId}${DELIVERY_PLAN}`;
+  const key = [...attempted.keys()].find((candidate) => candidate.startsWith(prefix));
+  return key ? JSON.parse(Buffer.from(key.slice(prefix.length), "base64url").toString("utf8")) as DeliveryPlan : undefined;
+}
+
+/** The pieces splitForSlack cut, replayed from their recorded lengths; undefined if they no longer add up. */
+function replayPieces(text: string, lengths: number[] | undefined): string[] | undefined {
+  const rest = redactSecrets(text).trimEnd();
+  if (!lengths || lengths.reduce((sum, n) => sum + n, 0) !== rest.length) return undefined;
+  let at = 0;
+  return lengths.map((n) => rest.slice(at, (at += n)));
 }
 
 function partIdFor(decisionId: string, count: number, index: number): string {
@@ -431,25 +446,22 @@ function renderPart(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, part: Del
 /** #897 — a brief or supplemental detail too long for one message: the primary keeps the
  *  subject, the start of the brief, any options and the evidence; the rest follows as
  *  numbered replies in its thread, each sized to its own message limits. */
-function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decisionId: string): DeliveryPart[] {
+function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decisionId: string, recorded?: DeliveryPlan): { parts: DeliveryPart[]; plan: DeliveryPlan } {
   const reply = (summary: string): DeliveryPart => ({ ...q, humanDetail: undefined, humanQuestions: undefined, summary, media: [], evidenceRef: null });
   const widest = `${MAX_HUMAN_MESSAGE_PARTS} of ${MAX_HUMAN_MESSAGE_PARTS}`;
   // A part's room is what its subject, options, evidence, sender and marker leave of both limits.
-  // The primary is sized with a worst-case mention, not the current one: the mention follows
-  // the registry and availability, so sizing with it would move the cuts between an interrupted
-  // attempt and its retry, losing or repeating text. The real render is still preflighted.
-  const sizing = worstCaseSizing(opts);
   const roomFor = (part: DeliveryPart, index: number, reserve = 0): number => {
-    const frame = renderPart(sizing, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
+    const frame = renderPart(opts, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
     return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve;
   };
   const primary: DeliveryPart = { ...q, humanDetail: undefined };
-  const body = splitForSlack(q.body ?? "", (i) => i === 0
+  // A retry replays its first attempt's cuts, so no piece moves between the parts already posted and the rest.
+  const body = replayPieces(q.body ?? "", recorded?.body) ?? splitForSlack(q.body ?? "", (i) => i === 0
     ? roomFor(primary, 0, Math.max(CONTINUES_NOTE.length, DETAIL_NOTE.length) + 2)
     : roomFor(reply(`Continued (${widest})`), i));
   const first = Math.max(body.length, 1);
   const detail = q.humanDetail
-    ? splitForSlack(q.humanDetail, (j) => roomFor(reply(`Supplemental detail (${widest})`), first + j))
+    ? replayPieces(q.humanDetail, recorded?.detail) ?? splitForSlack(q.humanDetail, (j) => roomFor(reply(`Supplemental detail (${widest})`), first + j))
     : [];
   // A brief that fits keeps the usual note; only a brief that continues says so.
   const note = body.length > 1 ? CONTINUES_NOTE : DETAIL_NOTE;
@@ -459,7 +471,7 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   if (parts.length > MAX_HUMAN_MESSAGE_PARTS) {
     throw new HumanMessageShapeError(`This brief needs ${parts.length} Slack messages (maximum ${MAX_HUMAN_MESSAGE_PARTS}). Shorten it, or put the long part in a file and link it.`);
   }
-  return parts;
+  return { parts, plan: { body: body.map((piece) => piece.length), detail: detail.map((piece) => piece.length) } };
 }
 
 /** One authored primary and, optionally, one coherent supplemental reply; a brief or
@@ -477,36 +489,46 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
           { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
         ]
       : [q];
-    const preflight = (candidate: DeliveryPart[], render = opts) => {
-      for (const [index, part] of candidate.entries()) renderPart(render, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
+    // #897 — the first attempt decides the shape from the real render and records it; a retry renders
+    // with the recorded mention and cuts, so it can't switch between one message and a split or move a cut.
+    let recorded: DeliveryPlan | undefined;
+    try { recorded = recordedPlan(opts.attempted.load(), decision.decisionId); }
+    catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan is unreadable: ${(error as Error).message}` }; }
+    const mention = recorded ? recorded.mention : opts.resolveMentionUserId?.(q);
+    const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
+    let plan: DeliveryPlan = { mention };
+    const preflight = (candidate: DeliveryPart[]) => {
+      for (const [index, part] of candidate.entries()) renderPart(planned, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
     };
     try {
-      let splitError: unknown;
-      try {
-        // The shape is chosen with the worst-case mention too, so a retry whose mention changed
-        // posts the same parts under the same ids instead of switching between one message and a split.
-        preflight(parts, worstCaseSizing(opts));
-      } catch (error) {
-        if (!(error instanceof HumanMessageShapeError)) throw error;
-        // #897 — too long for the authored parts: split, and refuse only if that can't fit.
+      if (recorded?.body) {
+        parts = splitIntoParts(planned, q, decision.decisionId, recorded).parts;
+        preflight(parts);
+      } else {
         try {
-          const split = splitIntoParts(opts, q, decision.decisionId);
-          if (split.length > 1) parts = split;
-        } catch (e) {
-          if (!(e instanceof HumanMessageShapeError)) throw e;
-          splitError = e;
+          preflight(parts);
+        } catch (error) {
+          if (recorded || !(error instanceof HumanMessageShapeError)) throw error;
+          // #897 — too long for the authored parts: split, and refuse only if that can't fit.
+          const split = splitIntoParts(planned, q, decision.decisionId);
+          if (split.parts.length < 2) throw error;
+          preflight(split.parts);
+          parts = split.parts;
+          plan = { mention, ...split.plan };
         }
       }
-      // The real render, with the real mention or none.
-      try { preflight(parts); } catch (error) { throw splitError ?? error; }
     } catch (error) {
       const detail = (error as Error).message;
       try { opts.onTransportFailed?.(q, "human-message-unrenderable", detail); }
       catch (receiptError) { return { ok: false, class: "receipt-failed", detail: (receiptError as Error).message }; }
       return { ok: false, class: "human-message-unrenderable", detail };
     }
+    if (!recorded) {
+      try { opts.attempted.mark(`${decision.decisionId}${DELIVERY_PLAN}${Buffer.from(JSON.stringify(plan)).toString("base64url")}`, "delivery-plan"); }
+      catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` }; }
+    }
     const partId = (index: number) => partIdFor(decision.decisionId, parts.length, index);
-    if (parts.length === 1) return deliverSinglePart(opts)(decision);
+    if (parts.length === 1) return deliverSinglePart(planned)(decision);
 
     const rootPrefix = `${decision.decisionId}::primary-receipt::`;
     const retained = [...opts.attempted.load()].find((key) => key.startsWith(rootPrefix));
@@ -518,8 +540,8 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         return { ok: false, class: "receipt-failed", detail: "Supplemental delivery requires the actual primary Slack timestamp; retain for reconciliation." };
       }
       const outcome = await deliverSinglePart({
-        ...opts,
-        resolveMentionUserId: index === 0 ? opts.resolveMentionUserId : undefined,
+        ...planned,
+        resolveMentionUserId: index === 0 ? planned.resolveMentionUserId : undefined,
         resolveThreadTs: index === 0 ? opts.resolveThreadTs : () => primary!.threadTs ?? primary!.messageTs,
         onPostedRoot: index === 0 ? opts.onPostedRoot : undefined,
         onPosted: (_part, messageTs, threadTs) => {
