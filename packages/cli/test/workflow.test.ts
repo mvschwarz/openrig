@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { writeFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync, mkdirSync, rmdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { WorkflowDeps } from "../src/commands/workflow.js";
@@ -182,6 +182,19 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
       expect(requests[2]?.body).toMatchObject({ specPath: resolve(file) });
     } finally {
       unlinkSync(file);
+    }
+  });
+
+  it.each(["instantiate", "run"])("%s preserves a discovered name when a same-name directory exists", async (verb) => {
+    const { deps, calls } = makeDeps();
+    mkdirSync("conveyor");
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", verb, "conveyor", "--json", "--root-objective", "ship", "--created-by", "orch@rig"]);
+      expect(calls.find(call => call.path === "/api/workflow/instantiate")?.body).toMatchObject({ specPath: "conveyor" });
+    } finally {
+      rmdirSync("conveyor");
     }
   });
 

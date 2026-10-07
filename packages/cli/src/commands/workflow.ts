@@ -1,5 +1,5 @@
 import { resolve, isAbsolute } from "node:path";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
@@ -118,12 +118,14 @@ export function printWorkflowAdvisories(advisories: string[] | undefined): void 
   }
 }
 
-// Preserve discovered workflow IDs, but bind explicit or existing local files
-// to the CLI working directory before the daemon reads them.
+/** Preserve discovered workflow IDs while resolving explicit paths and local files. */
 function resolveWorkflowSource(source: string): string {
-  return isAbsolute(source) || source.includes("/") || source.includes("\\") || existsSync(source)
-    ? resolve(source)
-    : source;
+  if (isAbsolute(source) || source.includes("/") || source.includes("\\")) return resolve(source);
+  try {
+    return statSync(source).isFile() ? resolve(source) : source;
+  } catch {
+    return source;
+  }
 }
 
 export function workflowCommand(depsOverride?: WorkflowDeps): Command {
