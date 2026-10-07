@@ -67,7 +67,8 @@ question through the human channel instead.
    own working directory is OpenRig's workspace, not their project, so never launch with
    `--cwd .` from here.
 3. **Three teams, one recommendation.** Present starter, workshop and factory,
-   recommend one with a short reason tied to their goal, and draw each:
+   recommend one with a short reason tied to their goal, and show each graph
+   in the shared TUI as you explain it (step 4):
    - `starter`: a builder and a reviewer (`dev-build`, `dev-review`) for one
      bounded change. Built in; `first-project` is its old name.
    - `workshop`: a lead, a builder, a QA seat and a reviewer for ongoing work
@@ -89,12 +90,38 @@ question through the human channel instead.
    Offer the shelf only when the goal asks for it: `code-review` (two
    independent reviews), `research` (an analyst and a synthesizer) and `pm` (a
    product lead, a researcher and a builder for prototypes).
-4. **Draw from the real spec, before anything starts.** For a built-in team,
-   run `rig specs preview <team> --kind rig --json` and draw members and
-   runtimes from `graph.nodes` and edges from `graph.edges`, for example
-   `[dev.build, Claude] --delegates_to--> [dev.review, Codex]`, with one line
-   on what each role does. For workshop, draw from its `rig.yaml` at the pinned
-   commit.
+4. **Show the real spec, before anything starts.** Find the shared TUI's
+   `canonicalSessionName` on the kernel's `operator.human` member with
+   `rig ps --nodes --rig kernel --json`, then capture that pane. When it shows
+   the TUI's normal view and an empty command line, type the TUI command
+   `spec starter` and Enter with tmux send-keys to that pane. A rig spec opens
+   on its graph tab; capture again and confirm the named spec and its graph
+   are visible while you explain its roles. Do the same with `spec workshop`
+   and `spec factory` as you present those choices. These are TUI commands,
+   not shell commands. Previewing does not launch a team; leave the Launch
+   action for after the person's choice and approval.
+   - **Workshop's preview:** first inspect `rig specs ls --kind rig --json`.
+     If workshop is already listed, show that entry and add nothing; say if
+     its source differs from the pinned install you are offering. Otherwise,
+     obtain the complete `rigs/workshop` folder from the exact commit in the
+     fresh registry listing from step 3. Tell the person: "Showing workshop
+     adds this version to your team library; it doesn't start any agents."
+     Run `rig specs add <pinned-workshop-folder> --json`, then refresh the TUI
+     and open `spec workshop`. Keep that same commit in the later install
+     link: the preview is a library copy, while installation still uses the
+     pinned link and `--target ~/rigs/workshop`, not the bare library name.
+     Do not overwrite an existing workshop entry. If you cannot bind the
+     copy to that commit or the preview copy prevents the pinned install,
+     explain why workshop needs the text fallback below.
+   - **If the graph cannot be shown:** at the shared pane's shell prompt,
+     start `rig tui` there once, then capture before navigating. If it has a
+     startup screen, a dialog, unfinished input or another program, preserve
+     it. Name the unavailable preview and draw that team in the conversation
+     instead; use this fallback only when the TUI or that exact graph cannot
+     be driven. For a built-in team, read
+     `rig specs preview <team> --kind rig --json`: draw members and runtimes
+     from `graph.nodes` and edges from `graph.edges`, with one line on each
+     role. For workshop, draw from its `rig.yaml` at the pinned commit.
 5. **Fit it to their providers.** Infer which tools they have from the
    kernel's own runtimes (`rig ps --nodes --rig kernel --json`), or ask. Check
    only the providers the team needs (`claude auth status` or
