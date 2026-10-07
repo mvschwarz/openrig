@@ -63,7 +63,7 @@ before-install view explain that access before you choose it.
 > "kernel ready" does not mean every kernel agent is healthy; a workspace root
 > being *live* does not mean it is the *right* one for your project.
 
-### WSL2: a reported working setup
+## WSL2: a reported working setup
 
 This is one user's report, not a supported platform.
 [dajiaohuang](https://github.com/dajiaohuang)
