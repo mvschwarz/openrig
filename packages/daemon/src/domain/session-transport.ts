@@ -1781,7 +1781,9 @@ export class SessionTransport {
     if (
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
-      hookActivity.stale !== true
+      hookActivity.stale !== true &&
+      hookActivity.reason !== "permission_request_pending" &&
+      hookActivity.reason !== "permission_prompt_cleared"
     ) {
       // Fresh hook (within the 15s send window): authoritative for any state.
       if (this.hookFreshForSend(hookActivity, now)) {

@@ -168,7 +168,7 @@ describe("AgentActivityStore", () => {
     });
   });
 
-  it("normalizes a Codex PermissionRequest hook to needs_input (OPR.0.4.1.10 hook-primary producer)", () => {
+  it("records a Codex PermissionRequest as pending", () => {
     const { node, sessionName } = seedSession("codex");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
 
@@ -184,8 +184,8 @@ describe("AgentActivityStore", () => {
 
     const latest = store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW });
     expect(latest).toMatchObject({
-      state: "needs_input",
-      reason: "permission_request",
+      state: "unknown",
+      reason: "permission_request_pending",
       evidenceSource: "runtime_hook",
       rawEvent: "PermissionRequest",
       evidence: "Bash", // names the tool being approved
