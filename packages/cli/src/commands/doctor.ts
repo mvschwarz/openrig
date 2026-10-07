@@ -17,6 +17,7 @@ import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
+import { checkProviderReadiness } from "../provider-auth.js";
 
 interface DoctorCheck {
   name: string;
@@ -34,6 +35,8 @@ export interface DoctorDeps {
   checkPort: (port: number, host: string) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
   platform?: NodeJS.Platform;
+  /** Same CODEX_HOME and credential environment used by setup. */
+  env?: NodeJS.ProcessEnv;
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
   fetch?: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
@@ -63,8 +66,8 @@ function defaultCheckPort(port: number, host: string): Promise<boolean> {
   });
 }
 
-export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; portCheck: Promise<DoctorCheck>; asyncChecks: Promise<DoctorCheck>[] } {
-  const checks: DoctorCheck[] = [];
+export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] = checkProviderReadiness(deps)): { checks: DoctorCheck[]; portCheck: Promise<DoctorCheck>; asyncChecks: Promise<DoctorCheck>[] } {
+  const checks: DoctorCheck[] = [...providerChecks];
   const platform = deps.platform ?? process.platform;
 
   // 1. Daemon dist
@@ -387,8 +390,8 @@ function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
 
 export function doctorCommand(depsOverride?: DoctorDeps): Command {
   const cmd = new Command("doctor")
-    .description("Check installation, dependencies, writable paths, port/daemon and conditional cmux control")
-    .addHelpText("after", "\nWith --spec, compares declared and live topology. This is not an end-to-end readiness check.\nProvider login and agent task-readiness are not established. Check only your selected providers: claude auth status or codex login status.\nInspect your team with rig ps --nodes --rig <rig> and rig capture <seat> --lines 30.");
+    .description("Check installation, provider authentication, writable paths, port/daemon and conditional cmux control")
+    .addHelpText("after", "\nWith --spec, compares declared and live topology. This is not an end-to-end readiness check.\nReports Claude and Codex authentication using setup's checks, including configured Codex credential variables. No agent task or provider request is tested.\nInspect your team with rig ps --nodes --rig <rig> and rig capture <seat> --lines 30.");
 
   cmd
     .option("--json", "JSON output for agents")
@@ -398,7 +401,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         exists: existsSync,
         baseDir: import.meta.dirname,
         readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
-        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }),
+        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 30_000 }),
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),
@@ -445,8 +448,8 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
 
       console.log("");
       console.log(healthy ? "No failures in the checks above. Review any WARN or SKIP rows." : "Some checks failed. Review the FAIL rows and their fixes above.");
-      console.log("This is not an end-to-end readiness verdict: provider login and agent task-readiness are not established.");
-      console.log("Check only your selected providers: `claude auth status` or `codex login status`.");
+      console.log("Authentication checks report local provider facts; no agent task or provider request was tested.");
+      console.log("A credential variable being set does not prove the provider accepts it or that managed seats receive it.");
       console.log("Inspect your team with `rig ps --nodes --rig <rig>` and `rig capture <seat> --lines 30`.");
       if (!healthy) process.exitCode = 1;
     });

@@ -24,8 +24,9 @@ rig doctor --json
 ```
 
 Use the installed command's `--help` if an option is unavailable. Read the diagnostic findings; don't treat them as
-instructions to reset the machine. `rig doctor` does not check provider logins or whether agents can work: also run
-`claude auth status` or `codex login status` for the selected providers, and `rig ps --nodes --rig <rig>`. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
+instructions to reset the machine. `rig doctor` checks Claude and Codex authentication using the same local checks
+as setup, including a configured Codex provider credential variable. A set variable does not prove that the provider accepts it or that managed
+seats receive it. Doctor does not run an agent task: also inspect `rig ps --nodes --rig <rig>`. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
 and recent output.
 
 **If OpenRig won't install or `rig` won't run, start here anyway.** Record the attempted package version, install
