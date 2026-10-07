@@ -215,10 +215,14 @@ function renderTrace() {
     maxBuffer: 16 * 1024 * 1024,
   });
   const reason = result.error?.message || result.stderr?.trim() || `trace exited ${result.status ?? "without a status"}`;
-  const trace = result.stdout?.trim() || `TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`;
+  const failed = Boolean(result.error) || result.status !== 0 || !result.stdout?.trim();
+  const trace = [
+    ...(failed ? [`TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`] : []),
+    result.stdout?.trim(),
+  ].filter(Boolean).join("\n");
   return {
     text: [trace, role].filter(Boolean).join("\n\n"),
-    failed: Boolean(result.error) || result.status !== 0 || !result.stdout?.trim(),
+    failed,
   };
 }
 
