@@ -6,7 +6,8 @@ This does not sign in to a provider or change any seat's permission policy.
 
 The option applies only to seats whose resolved launch posture is `full_bypass`.
 This must be declared through `builtin:yolo`, a `full_bypass` flag policy, or an explicit `full_bypass` selection;
-ambient `OPENRIG_YOLO` alone without an attached policy is not covered.
+ambient `OPENRIG_YOLO` alone without an attached policy is not covered. One exception: kernel Codex seats on the
+kernel's operational default always get the Codex notice overrides below, without this option.
 
 - Claude Code receives `--settings '{"skipDangerousModePermissionPrompt":true}'`, accepting its bypass-permissions warning.
   A seat with an explicitly selected native permission mode other than `bypassPermissions` doesn't get it.
@@ -24,7 +25,8 @@ Turning it on for an existing rig works the same way: `rig down <rig-name>`, the
 
 For an operator default on **new rigs**, use `rig config set launch.non_interruptive true`, or set
 `OPENRIG_LAUNCH_NON_INTERRUPTIVE` in the daemon's environment (it overrides the config file).
-The default is false; an explicit positive or negative command-line flag overrides it. Existing rigs
+The default is false; a rig spec's `non_interruptive` overrides it (see below), and an explicit positive or
+negative command-line flag overrides both. Existing rigs
 keep their saved choice when the operator default changes. On a remote install the receiving daemon's
 default applies.
 
@@ -34,8 +36,9 @@ and, for each affected seat, "Non-interruptive: OpenRig accepted Claude's bypass
 Codex's full-access and GPT-5.1 migration notices… no warning-acceptance settings were written."
 
 A bundle's before-install view (`rig bundle inspect`) says when this option is available for its full-bypass
-Claude and Codex seats, and that Claude Code asks once to accept its warning otherwise. See
-[bundle formats](bundle-formats.md).
+Claude and Codex seats, and that Claude Code asks once to accept its warning otherwise. When the bundle's `rig.yaml`
+declares `non_interruptive: true`, it says instead that the bundle's launches are non-interruptive by default, and
+leaves out the asks-once note. See [bundle formats](bundle-formats.md).
 
 This feature writes no warning-acceptance settings to Claude or Codex files. It uses the launch-flag
 surfaces checked in Claude Code 2.1.282 and Codex 0.153.4. Other notices introduced by later harness

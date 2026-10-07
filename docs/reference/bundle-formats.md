@@ -121,7 +121,9 @@ carries no tested status.
     `posture[].nonInterruptive: "available"` says a full-bypass Claude/Codex seat can use
     [non-interruptive launch flags](non-interruptive-mode.md). It does not select the option, read host acceptance
     state or prove a prompt-free launch. Both fields are omitted where inapplicable or unresolved; older v1 views
-    remain valid without them. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
+    remain valid without them. Optional `posture[].nonInterruptiveDefault` (boolean) carries the rig's authored
+    `non_interruptive` for those seats; an explicit launch choice overrides it. When it is `true`, `firstRunWarnings`
+    is omitted. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
   - An empty list means none are known. Something unknown goes in `unknownBeforeLaunch`.
   - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. It's required on
     `team` and `posture`. Elsewhere it's optional: bundle-wide facts (services, library and project writes, setup and

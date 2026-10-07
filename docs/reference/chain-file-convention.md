@@ -67,8 +67,8 @@ without a `SPEC.md`.
 **Project-tree context cannot ship.** It describes what *you* are building —
 mission intent, slice specifications, proof contracts. No vendor can author it
 in advance, and shipping a default would install someone else's project as
-your context. The demo project carries a worked example to copy from; real
-projects author their own. (Topology-tree context is the opposite: how a team
+your context. Real projects author their own; `rig scope mission create` and
+`rig scope slice create` start the tree. (Topology-tree context is the opposite: how a team
 of agents runs well is largely general, which is why included rigs ship
 defaults.)
 
