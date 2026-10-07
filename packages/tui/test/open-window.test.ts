@@ -77,6 +77,32 @@ describe("TUI desktop terminal action", () => {
     expect(f.calls()).toEqual([{ url: "http://selected.example:7439", args: ["terminal", "open", "--window", "--json", "--expected-plan", "preview-42", "--", "saved:team with spaces"] }]);
   });
 
+  it("accepts a confirmed reused workspace without new tiles, preserving partial-state notes", async () => {
+    const reused = { ...opened, provider: "herdr", opened: [], pages: 0,
+      reusedWorkspace: { id: "existing", tabId: "first", view: "kernel" },
+      absent: [{ seat: "operator", reason: "stopped" }],
+      notes: ["Check the new terminal shows the intended view."],
+    };
+    const f = child(reused);
+    let recoveries = 0;
+    expect(await openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, () => { recoveries++; })).toEqual(reused);
+    expect(f.calls()).toHaveLength(1);
+    expect(recoveries).toBe(0);
+    const notice = terminalWindowNotice("saved:kernel", reused);
+    expect(notice).toContain("Reused Herdr workspace existing");
+    expect(notice).toContain("0 tiles prepared; 1 absent");
+    expect(notice).toContain("Absent: operator — stopped");
+    expect(notice).toContain(reused.notes[0]);
+  });
+
+  it.each(["unconfirmed", "nonzero exit"])("does not accept reused-workspace metadata after %s", async kind => {
+    const f = child({ ...opened, ok: kind !== "unconfirmed", opened: [], pages: 0,
+      reusedWorkspace: { id: "existing", tabId: "first", view: "kernel" },
+    }, kind === "nonzero exit" ? 1 : 0);
+    await expect(openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry)).rejects.toThrow();
+    expect(f.calls()).toHaveLength(1);
+  });
+
   it("keeps partial results and named absences instead of claiming a full open", async () => {
     const partial = { ...opened, ok: false, absent: [{ seat: "review", reason: "stopped" }], notes: ["Existing conversations preserved."] };
     const f = child(partial);

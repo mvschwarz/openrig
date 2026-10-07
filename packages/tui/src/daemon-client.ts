@@ -42,6 +42,7 @@ export interface TerminalOpenResult {
   error?: string;
   code?: string;
   notes?: string[];
+  reusedWorkspace?: { id: string; tabId: string; view: string };
 }
 
 export interface LaunchNodeResult {

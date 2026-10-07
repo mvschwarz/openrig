@@ -5,6 +5,7 @@ import type { TerminalOpenResult } from "../daemon-client.js";
 export function terminalWindowNotice(view: string, result: TerminalOpenResult): string {
   return [
     `Terminal view requested: ${view}`,
+    ...(result.ok && result.reusedWorkspace ? [`Reused Herdr workspace ${result.reusedWorkspace.id}; existing contents were kept.`] : []),
     `${result.opened.length} tiles prepared; ${result.absent.length} absent; ${result.degraded.length} degraded.`,
     ...(result.error ? [result.error] : []),
     ...result.absent.map(member => `Absent: ${member.seat} — ${member.reason}`),
@@ -35,7 +36,7 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
   if (!Array.isArray(result.opened) || !Array.isArray(result.absent) || !Array.isArray(result.degraded)) {
     throw new Error(result.error ?? "The terminal command returned no view result. Inspect any new terminal before retrying.");
   }
-  if (executionError || !result.opened.length) {
+  if (executionError || (!result.opened.length && !(result.ok && result.reusedWorkspace))) {
     // Only a definite pre-launch failure can reveal passive recovery; unknown outcomes stay put.
     if (result.code === "terminal_window_failed" && result.windowAttempted === false && !result.window && !result.opened.length) onUnavailable?.();
     throw new Error([result.error ?? executionError ?? "No terminals were confirmed open.", ...(result.notes ?? []),
