@@ -206,3 +206,27 @@ describe("validateMarkdownAddressability — the compose gate", () => {
     expect(findings.filter((f) => f.kind === "unaddressable-header").length).toBe(2);
   });
 });
+
+
+describe("Markdown block boundaries in context addresses", () => {
+  it("keeps inline backtick spans from swallowing later sections", () => {
+    const text = "## Setup\n```literal ` backticks```\n## Deploy\ndeploy instructions\n";
+    expect(resolveAddress(text, ["deploy"]).text).toBe("## Deploy\ndeploy instructions\n");
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+    expect(resolveAddress(text, ["setup"]).text).toContain("```literal ` backticks```");
+  });
+
+  it.each(["##", "## ", "##\t"])("keeps the empty heading %j as a span and scope boundary", (heading) => {
+    const text = `## Setup\nsetup instructions\n${heading}\nother section\n### Child\nchild instructions\n`;
+    expect(resolveAddress(text, ["setup"]).text).toBe("## Setup\nsetup instructions");
+    expect(() => resolveAddress(text, ["setup", "child"])).toThrow(AddressResolutionError);
+    expect(parseMarkdownSections(text).find((section) => section.title === "Child")?.headerPath).toEqual(["", "child"]);
+    expect(validateMarkdownAddressability(text).filter((finding) => finding.kind === "unaddressable-header")).toHaveLength(2);
+  });
+
+  it("resets the parent scope at an empty H1 and terminates an H3 at an empty H4", () => {
+    const text = "## Setup\n### Child\nchild instructions\n####\nother subsection\n#\n### Independent\nindependent instructions";
+    expect(resolveAddress(text, ["setup", "child"]).ownText).toBe("### Child\nchild instructions");
+    expect(resolveAddress(text, ["independent"]).text).toContain("independent instructions");
+  });
+});

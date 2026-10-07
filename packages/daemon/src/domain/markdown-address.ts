@@ -115,6 +115,9 @@ function scanHeaders(lines: string[]): HeaderScan {
       const marker = fenceMatch[1]![0]!;
       const length = fenceMatch[1]!.length;
       if (!fence) {
+        // Backticks in an opener's info string prevent a fenced block.
+        // Do not let inline code spans hide the following real headings.
+        if (marker === "`" && line.slice(fenceMatch[0].length).includes("`")) continue;
         fence = { marker, length, line: i };
       } else if (fence.marker === marker && length >= fence.length
         && /^[ \t\r]*$/.test(line.slice(fenceMatch[0].length))) {
@@ -123,8 +126,10 @@ function scanHeaders(lines: string[]): HeaderScan {
       continue;
     }
     if (fence) continue;
-    const header = line.match(/^ {0,3}(#{1,6})\s+(.*\S)\s*$/);
-    if (header) hits.push({ level: header[1]!.length, title: header[2]!, line: i });
+    // Empty ATX headings still end spans and change the parent scope. Their
+    // empty slug is reported by the existing addressability validator.
+    const header = line.match(/^ {0,3}(#{1,6})(?:\s+(.*\S))?\s*$/);
+    if (header) hits.push({ level: header[1]!.length, title: header[2] ?? "", line: i });
   }
   return { hits, unterminatedFenceLine: fence?.line ?? null };
 }
