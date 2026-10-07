@@ -13,11 +13,12 @@ vi.mock("../src/daemon-lifecycle.js", async () => ({
 function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; unsupported?: boolean; denial?: boolean; remote?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
   const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("preview") ? {
-    planId: "one-plan", composed: { opened: panes, pages: [panes], columns: 3, absent: [], degraded: [] },
+    planId: "one-plan", composed: { id: "kernel", opened: panes, pages: [panes], columns: 3, absent: [], degraded: [] },
     status: { launch: { socketPath: "/fixture/herdr.sock" } },
   } : { providers: [{ liveness: { alive: true } }] } }));
   const post = vi.fn(async () => ({ status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } }));
   const exec = vi.fn(async (file: string, args: string[]) => {
+    if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { tabs: [] } });
     if (file === "/usr/bin/osascript") {
       if (options.denial) throw new Error("Automation denied");
       return "window";

@@ -93,6 +93,13 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, opened: ["tui", "advisor", "operator"] });
   });
 
+  it("does not treat a label without the layout delimiter as a view marker", async () => {
+    const f = fixture([{ workspace_id: "unrelated", tab_id: "plain", label: "openrig:kernelx" }]);
+    await f.run();
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.post).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the complete resolved view id even when it contains a delimiter", async () => {
     const f = fixture([{ workspace_id: "saved", tab_id: "exact", label: "openrig:kernel#other#l1" }], "kernel#other");
     await f.run();

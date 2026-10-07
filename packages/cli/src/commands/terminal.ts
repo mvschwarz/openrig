@@ -37,6 +37,7 @@ export interface OpenViewResult {
   code?: string;
   notes?: string[];
   window?: { app: string; surface: string };
+  reusedWorkspace?: { id: string; tabId: string; view: string };
 }
 
 // Opening applies pages through several bounded provider round trips; it is
@@ -66,9 +67,11 @@ function humanOpen(r: OpenViewResult): string {
   lines.push(
     r.code === "terminal_window_failed" && r.error
       ? r.error
-      : tiled > 0
-        ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
-        : `No tiles opened in ${r.provider}.`,
+      : r.ok && r.reusedWorkspace
+        ? `Terminal window requested. Reused herdr workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
+        : tiled > 0
+          ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
+          : `No tiles opened in ${r.provider}.`,
   );
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
   if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
@@ -79,15 +82,14 @@ function humanOpen(r: OpenViewResult): string {
   return lines.join("\n");
 }
 
-/** Open exit rule: exit 0 iff at least one pane was tiled (partial-with-names is success). */
+/** A successful existing-workspace selection also needs no new panes. */
 function printOpen(json: boolean, r: OpenViewResult, status: number): void {
   if (json) {
     console.log(JSON.stringify(r));
   } else {
     console.log(humanOpen(r));
   }
-  // A 4xx/5xx (bad input / unknown view / service down) OR a zero-pane open is a failure.
-  if (status >= 400 || r.opened.length === 0) {
+  if (status >= 400 || (r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }

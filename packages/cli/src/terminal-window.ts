@@ -12,7 +12,7 @@ interface Pane { seat: string; label: string; paneCommand: string }
 interface Preview {
   planId: string;
   status: { launch?: { socketPath: string; session?: string } };
-  composed: { opened: Pane[]; pages: Pane[][]; columns?: number; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
+  composed: { id: string; opened: Pane[]; pages: Pane[][]; columns?: number; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
 }
 
 export interface WindowDeps {
@@ -184,6 +184,30 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         await deps.sleep(250);
       }
       if (!alive) throw new Error("The terminal was requested, but herdr's control socket did not become ready. Inspect the new terminal before retrying.");
+      // Herdr's tab list spans all workspaces; focusing a tab selects its workspace too.
+      // Match the existing OpenRig view marker, not a possibly unrelated human workspace name.
+      const herdrArgs = ["-u", "TMUX", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH", `HERDR_SOCKET_PATH=${endpoint.socketPath}`, herdr, "tab"];
+      const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "list"])) as {
+        result?: { tabs?: Array<{ workspace_id: string; tab_id: string; label: string }> };
+      };
+      const tabs = listed?.result?.tabs;
+      if (!Array.isArray(tabs) || !tabs.every(tab => tab && typeof tab.label === "string" && typeof tab.tab_id === "string" && tab.tab_id && typeof tab.workspace_id === "string" && tab.workspace_id)) {
+        throw new Error("Herdr returned no usable tab inventory; no replacement space was created.");
+      }
+      const existing = tabs.find(tab => tab.label.includes("#") && tab.label.slice(0, tab.label.lastIndexOf("#")) === `openrig:${composed.id}`);
+      if (existing) {
+        const focused = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "focus", existing.tab_id])) as {
+          result?: { tab?: { tab_id?: string; workspace_id?: string } };
+        };
+        if (focused?.result?.tab?.tab_id !== existing.tab_id || focused.result.tab.workspace_id !== existing.workspace_id) {
+          throw new Error("Herdr did not confirm the existing view selection; no replacement space was created.");
+        }
+        return {
+          provider, ok: true, opened: [], absent: [], degraded: [], pages: 0, window,
+          reusedWorkspace: { id: existing.workspace_id, tabId: existing.tab_id, view: composed.id },
+          notes: [...windowNotes, "Existing workspace contents were kept; no layout refresh or new tiles were requested. Check the new terminal shows the intended view."],
+        };
+      }
       const result = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr", expectedPlan: planId }, { timeoutMs: 45_000 });
       if (result.status >= 400) return { ...failed(result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, notes: windowNotes, absent: composed.absent, degraded: composed.degraded };
       if (!Array.isArray(result.data?.opened)) throw new Error("The terminal opened, but the daemon returned no view result. Inspect it before retrying.");

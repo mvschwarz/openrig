@@ -4,13 +4,14 @@ import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 
 function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean; terminalSize?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
-  const composed = { opened: options.empty ? [] : panes, pages: options.empty ? [] : [panes], columns: 3, absent: [], degraded: [] };
+  const composed = { id: "kernel", opened: options.empty ? [] : panes, pages: options.empty ? [] : [panes], columns: 3, absent: [], degraded: [] };
   const preview = { planId: "bound-plan", composed, status: { launch: { socketPath: "/daemon home/herdr.sock", session: "daemon-session" } } };
   const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("preview") ? preview : { providers: [{ liveness: { alive: options.alive !== false } }] } }));
   const post = vi.fn(async () => options.refusal ? { status: options.refusal, data: { error: "view changed" } } : { status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } });
   const client = { baseUrl: "http://localhost:7433", get, post } as unknown as DaemonClient;
   let pane = 0;
   const exec = vi.fn(async (file: string, args: string[]) => {
+    if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { tabs: [] } });
     if (args.includes("--version")) {
       if (options.herdr === false) throw new Error("not installed");
       return "herdr 0.9.3";
