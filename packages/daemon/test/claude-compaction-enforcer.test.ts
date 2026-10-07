@@ -15,7 +15,7 @@ import { ClaudeCompactionEnforcer as ActualEnforcer } from "../src/domain/claude
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
-import { mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
@@ -29,10 +29,10 @@ class ClaudeCompactionEnforcer extends ActualEnforcer {
     transport.send = async (session, text, options) => {
       const result = options === undefined ? await send(session, text) : await send(session, text, options);
       const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
-      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
       if (result.ok && marker && target) {
         const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+        writeFileSync(file, "# Completed fixture map\n" + marker + "\n");
       }
       return result;
     };

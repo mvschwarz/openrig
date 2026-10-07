@@ -16,6 +16,7 @@
 //   3. ensureLatest(): orchestrates ensureVendored + attemptAutoFetch
 
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { PluginVendorService } from "../src/domain/plugin-vendor-service.js";
 
 // Injectable fs ops for test mock
@@ -156,6 +157,30 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
 
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md"]).toBe("# bundled 0.2.0");
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json"]).toContain('"0.2.0"');
+  });
+
+  it("the shipped core upgrades 0.1.5 installs to daemon-publication instructions", async () => {
+    const source = "/asset-root/openrig-core";
+    const target = "/home/test/.openrig/plugins/openrig-core";
+    const skill = "skills/claude-compaction-restore/SKILL.md";
+    const files = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", skill];
+    const bundled = Object.fromEntries(files.map(rel => [
+      `${source}/${rel}`,
+      readFileSync(new URL(`../assets/plugins/openrig-core/${rel}`, import.meta.url), "utf8"),
+    ]));
+    const fs = mockFs({
+      ...bundled,
+      [`${target}/.claude-plugin/plugin.json`]: '{"name":"openrig-core","version":"0.1.5"}',
+      [`${target}/.codex-plugin/plugin.json`]: '{"name":"openrig-core","version":"0.1.5"}',
+      [`${target}/${skill}`]: "Old instruction: atomically rename the map yourself.",
+    });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root", userPluginsDir: "/home/test/.openrig/plugins",
+      fs, httpClient: vi.fn(),
+    });
+    await svc.ensureVendored("openrig-core");
+    for (const rel of files) expect(fs._store[`${target}/${rel}`]).toBe(bundled[`${source}/${rel}`]);
+    expect(fs._store[`${target}/${skill}`]).toContain("The daemon publishes");
   });
 
   it("ensureVendored skips silently when vendored asset doesn't exist (no source to copy)", async () => {

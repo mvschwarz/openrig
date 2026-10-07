@@ -92,8 +92,10 @@ You are about to lose every connection you have built. Spend this turn making th
    What were the threads? What did you work out about how the pieces fit? What is unfinished? What did you
    decide, and why? What were you about to be wrong about?
 2. **Write the restore map at the exact path named in OpenRig's preparation request.** Follow that
-   request's completion marker and atomic publication instructions: the daemon waits for that specific
-   file. Do not substitute the seat folder or another map. Managed preparation normally uses
+   request's completion instructions: use your ordinary file-edit tool to write the named `.tmp` file,
+   with the exact completion marker as its last line, then finish and close it. The daemon publishes
+   the completed map atomically; do not run a shell rename or write the final file incrementally.
+   Do not substitute the seat folder or another map. Managed preparation normally publishes
    `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent
    compaction folder ignores itself in Git because maps hold private working context. Unknown or
    unwritable launch directories retain the instance-home fallback named in the request; it may need
