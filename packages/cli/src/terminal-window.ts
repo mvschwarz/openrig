@@ -145,7 +145,7 @@ function failure(provider: string, error: string): OpenViewResult {
 }
 
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
-export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps()): Promise<OpenViewResult> {
+export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string): Promise<OpenViewResult> {
   let provider = requestedProvider ?? "herdr";
   let window: { app: string; surface: string } | undefined;
   let viewer: string | undefined;
@@ -169,6 +169,9 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failed((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
     }
     const { composed, planId } = preview.data;
+    if (expectedPlan !== undefined && expectedPlan !== planId) {
+      return failure(provider, "The terminal view changed since preview. Refresh the preview before opening.");
+    }
     if (!composed.opened.length) return { ...failed("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
 
     if (herdr) {

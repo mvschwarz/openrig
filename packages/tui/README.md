@@ -35,6 +35,13 @@ Inside an existing herdr or cmux workspace, `rig terminal open <view> --provider
 is a rig name, `mission:<id>`, `slice:<id>` or a saved-view id. For the first desktop
 view, use `rig terminal open saved:kernel --window` as above.
 
+In the TUI, choose **Open terminals** above a rig's grid or in an agent's detail.
+The Terminals section also offers it after a passive view preview. It uses the
+same desktop opener: herdr if installed, otherwise the composed layout in plain
+tmux. Run the TUI on the selected daemon's desktop for this action. Headless or
+remote sessions retain per-seat attach commands in the preview. A launch result
+does not confirm visibility; check the new terminal shows the intended view.
+
 ## Driving it (human or agent — same grammar, same state)
 
 Command bar / keyboard / mouse / control socket all mutate ONE view-state

@@ -86,7 +86,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     return wrapDetailLines(lines, width);
   }
   if (!preview) {
-    lines.push({ text: "Browse and preview are passive. Only Open creates a Herdr space." });
+    lines.push({ text: "Browse and preview are passive. Choose a view, then Open terminals to request a desktop window." });
     for (const kind of ["saved", "derived"] as const) {
       const entries = read.catalog.filter(e => e.kind === kind && `${e.name} ${e.members.join(" ")}`.toLowerCase().includes(state.filter.toLowerCase()));
       const open = kind === "saved" || state.expanded.includes("terminals:derived") || !!state.filter;
@@ -109,20 +109,9 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   lines.push({ text: plan.id }, { text: `${plan.opened.length} attachable · ${plan.absent.length} absent · ${plan.degraded.length} degraded` });
   // Actions precede the diagram so explicit Open/Back remain accessible at 80×24.
   lines.push({ text: "Back to views", action: { type: "back" } });
-  if (preview.status.available && plan.opened.length) lines.push({ text: `Open in Herdr · all ${plan.pages.length} pages`, action: { type: "act", act: "open-terminal", view: preview.view, expectedPlan: preview.planId } });
-  else if (preview.status.available) lines.push({ text: "Nothing attachable; no space will be opened." });
-  else {
-    lines.push({ text: `Herdr unavailable on the selected daemon (${read.daemonTarget ?? "address unreported"}). Start/connect Herdr there and refresh, or use the plain-terminal commands below. Nothing opens automatically.` });
-    if (page.length) {
-      lines.push({ text: `Plain terminal · ${preview.view}: open a NEW terminal on the machine running that daemon, then run one of these commands. Use a separate terminal for each seat; do not run in an agent's terminal.` });
-      lines.push({ text: "If a command wraps, widen this terminal until it fits on one line before copying." });
-      for (const member of page) {
-        // A plain SSH terminal needs a remote PTY; keep the composer's quoted host and target.
-        const command = member.paneCommand.replace(/^ssh /, "ssh -t ");
-        lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
-      }
-    }
-  }
+  if (plan.opened.length) {
+    lines.push({ text: `Open terminals ▸ all ${plan.pages.length} pages`, action: { type: "act", act: "open-terminal", view: preview.view, expectedPlan: preview.planId } });
+  } else lines.push({ text: "Nothing attachable; no space will be opened." });
   lines.push({ text: "Refresh preview", action: { type: "terminal-preview", view: preview.view } });
   if (plan.pages.length > 1) {
     if (pageIndex > 0) lines.push({ text: "Previous page", action: { type: "terminal-page", page: pageIndex - 1 } });
@@ -146,5 +135,15 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   });
   lines.push({ text: "Auto-layout: equal cells, at most 9 members per page. Blank cells fill incomplete rectangles. Saved views store membership only; no custom geometry editor." });
   for (const member of [...plan.absent, ...plan.degraded]) lines.push({ text: `Unavailable · ${member.seat}: ${member.reason}` });
+  if (page.length) {
+    lines.push({ text: "On a desktop, opens a new terminal tab or window: Herdr if installed, otherwise the same layout in plain tmux." });
+    lines.push({ text: `Run this TUI on the selected daemon's desktop (${read.daemonTarget ?? "address unreported"}). Existing conversations stay in place.` });
+    lines.push({ text: `Headless or remote: open a NEW terminal/tab on the machine running the selected daemon (${read.daemonTarget ?? "address unreported"}), then attach with one command below per terminal. Existing conversations stay in place.` });
+    lines.push({ text: "If a command wraps, widen this terminal until it fits on one line before copying." });
+    for (const member of page) {
+      const command = member.paneCommand.replace(/^ssh /, "ssh -t ");
+      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
+    }
+  }
   return wrapDetailLines(lines, width);
 }

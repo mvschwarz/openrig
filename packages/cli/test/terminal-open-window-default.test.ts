@@ -52,6 +52,22 @@ describe("terminal open desktop default", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([{ flags: [] }, { flags: ["--window"] }])("keeps the TUI preview binding on the desktop route with $flags", async ({ flags }) => {
+    const f = fixture();
+    await f.run(["--expected-plan", "old-plan", ...flags, "--json", "--", "saved:kernel"]);
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(logs[0]!).error).toContain("changed since preview");
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript")).toBe(false);
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it("forwards a preview binding to the explicit existing-workspace route", async () => {
+    const f = fixture({ platform: "linux", env: {} });
+    await f.run(["saved:kernel", "--provider", "herdr", "--expected-plan", "one-plan", "--json"]);
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "one-plan" }, { timeoutMs: 45_000 });
+    expect(f.exec).not.toHaveBeenCalled();
+  });
+
   it.each([{ args: [] }, { args: ["--window"] }, { args: ["--provider", "herdr", "--window"] }])("opens the desktop with arguments $args, even when the provider socket already answers", async ({ args }) => {
     const f = fixture();
     await f.run(["saved:kernel", ...args, "--json"]);

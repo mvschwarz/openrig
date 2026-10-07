@@ -109,18 +109,19 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
     .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
+    .option("--expected-plan <id>", "Open only if the view still matches this preview")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean }) => {
+    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         // Herdr's control socket can answer with no desktop client attached.
         // The default requests a desktop; an explicit provider reuses its workspace.
         if (opts.window || !opts.provider) {
-          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps);
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan);
           printOpen(opts.json ?? false, result, 200);
           return;
         }
-        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}) };
+        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) };
         const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
         if (!Array.isArray(res.data?.opened)) {
           printResult(opts.json ?? false, res.data, res.status);

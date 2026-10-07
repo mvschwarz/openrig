@@ -28,6 +28,20 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
 }
 
 describe("desktop terminal view", () => {
+  it.each([true, false])("rejects a changed preview before opening a window (Herdr installed: %s)", async herdr => {
+    const f = fixture({ herdr });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps, "prior-plan");
+    expect(result).toMatchObject({ ok: false, opened: [], error: expect.stringContaining("changed since preview") });
+    expect(f.exec.mock.calls.some(([file, args]) => file === "/usr/bin/osascript" || args.includes("new-session"))).toBe(false);
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it("opens the previewed tmux layout when the expected plan still matches", async () => {
+    const f = fixture({ herdr: false });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps, "bound-plan");
+    expect(result).toMatchObject({ ok: true, provider: "tmux", opened: ["tui", "advisor", "operator"] });
+  });
+
   it("opens a new Ghostty tab and applies the same daemon plan and Herdr endpoint", async () => {
     const f = fixture({ ghostty: "1.3.0" });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);

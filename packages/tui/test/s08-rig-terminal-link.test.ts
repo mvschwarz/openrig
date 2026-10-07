@@ -20,7 +20,7 @@ function drilled() {
   return v;
 }
 
-describe("rig detail — term ▸ rig link", () => {
+describe("rig detail — Open terminals link", () => {
   for (const size of [{ cols: 140, rows: 32 }, { cols: 60, rows: 20 }]) {
     it(`${size.cols}x${size.rows}: shown on the default tab, reachable by keys, and Enter opens the rig view`, () => {
       const v = drilled();
@@ -30,7 +30,7 @@ describe("rig detail — term ▸ rig link", () => {
       const key = (k: keyof typeof KEYS) => { const a = resolve(k); if (a) v.dispatch(a); };
       const first = draw();
       // Narrow panes truncate the row with "…" rather than wrap it; the link itself stays a target.
-      expect(first.lines.some((l) => l.includes(size.cols >= 100 ? `term ▸ rig ${RIG}` : "term ▸ rig"))).toBe(true);
+      expect(first.lines.some((l) => l.includes(size.cols >= 100 ? `Open terminals ▸ rig ${RIG}` : "Open terminals"))).toBe(true);
       for (const row of first.lines) expect(row.length).toBeLessThanOrEqual(size.cols);
       key("right");
       let enter: Action | null = null;
@@ -51,7 +51,7 @@ describe("rig detail — term ▸ rig link", () => {
   it("clicking the link gives the same act; pod term ▸ links still open their pod", () => {
     const v = drilled();
     const sc = renderScreen(v.get(), snap, { cols: 140, rows: 32 });
-    const y = sc.lines.findIndex((l) => l.includes(`term ▸ rig ${RIG}`)) + 1;
+    const y = sc.lines.findIndex((l) => l.includes(`Open terminals ▸ rig ${RIG}`)) + 1;
     const rigHits = sc.hitMap.filter((h) => h.y === y && h.action?.type === "act");
     expect(rigHits.map((h) => h.action)).toContainEqual(RIG_ACT);
     const podActs = sc.hitMap.filter((h) => h.action?.type === "act" && (h.action as { view?: string }).view?.startsWith(`pod:${RIG}/`));
