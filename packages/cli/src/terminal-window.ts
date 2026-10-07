@@ -169,8 +169,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       let pane = (await deps.exec(tmux, [...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
       // Nested source clients on this server can make a new window too narrow to split.
       // Use the viewer's configured detached size, then restore normal client resizing.
-      const [width, height] = (await deps.exec(tmux, ["show-options", "-v", "-t", viewer, "default-size"])).trim().split("x");
-      const sizing = (await deps.exec(tmux, ["show-options", "-wv", "-t", pane, "window-size"])).trim();
+      const [width, height] = (await deps.exec(tmux, ["show-options", "-Av", "-t", viewer, "default-size"])).trim().split("x");
+      const sizing = (await deps.exec(tmux, ["show-options", "-Awv", "-t", pane, "window-size"])).trim();
       await deps.exec(tmux, ["resize-window", "-t", pane, "-x", width!, "-y", height!]);
       await deps.exec(tmux, ["select-pane", "-t", pane, "-T", first.label]);
       for (const item of page.slice(1)) {
