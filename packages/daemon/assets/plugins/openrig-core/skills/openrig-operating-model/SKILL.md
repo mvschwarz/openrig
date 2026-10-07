@@ -252,7 +252,7 @@ Use distinct names for the two directions:
 - **TRACE** — the pull ascent. `compose.py up` renders a node's chain to the root.
 - **`rig walk`** — the push verb for paced delivery into a seat's pane.
 
-Use `refocusing` for the current trace workflow. A delivery receipt and an
+Use `openrig-core:refocusing` for the current trace workflow. A delivery receipt and an
 agent's read-depth report answer different questions; pacing alone does not
 establish understanding.
 

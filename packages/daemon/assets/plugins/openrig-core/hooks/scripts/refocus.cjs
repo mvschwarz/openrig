@@ -11,6 +11,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const { recordRefocusResult } = require("./refocus-health.cjs");
 
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
@@ -226,6 +227,14 @@ function renderTrace() {
   const event = input.hook_event_name || "UserPromptSubmit";
   const harness = runtime();
 
+  // The managed restore first asks for an acknowledgement only. Leave due-state
+  // untouched until the subsequent restore request, when the seat may act.
+  if (event === "UserPromptSubmit" && input.prompt === [
+    "OpenRig post-compaction turn boundary.",
+    "Please acknowledge this message briefly.",
+    "Do not restore yet; the next normal user message will contain the restore instructions.",
+  ].join(" ")) process.exit(0);
+
   // Fresh-session orientation is the default onboarding pack's job. Even a manually invoked hook must
   // no-op here, so a stale registration cannot corrupt the world install.
   if (event === "SessionStart") process.exit(0);
@@ -345,6 +354,7 @@ function renderTrace() {
   // call and preserves the existing observable ref contract.
   const trace = renderTrace();
   const configured = readConfiguredContent(home);
+  const failed = /(?:TRACE GAP|NOTES RESOLUTION GAP)/.test(trace) || Boolean(configured.failure);
   const why = onDemand
     ? "on demand"
     : state.pendingOn === "PostCompact"
@@ -391,7 +401,14 @@ function renderTrace() {
       additionalContext: payload,
     },
   });
-  process.stdout.write(output, () => {
+  process.stdout.write(output, (error) => {
+    recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error) });
+    if (failed || error) {
+      state.pendingOn ||= event;
+      state.pendingAt ||= new Date().toISOString();
+      persist();
+      return;
+    }
     if (size > 0) state.lastBytes = size;
     state.firedAt = new Date().toISOString();
     state.firedOn = event;

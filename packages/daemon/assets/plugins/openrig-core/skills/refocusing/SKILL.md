@@ -11,6 +11,11 @@ metadata:
 
 # Refocusing
 
+When invoking through the plugin skill tool, use the registered name
+`openrig-core:refocusing`. If that plugin is not loaded by the current harness,
+read this file and run the bundled script directly; hook registration alone does
+not make a skill visible to the harness.
+
 Refocus preserves a long session's earned expertise while re-grounding it in current intent and
 lived context. It is not a restart, wake, or phase checkpoint.
 
@@ -19,6 +24,9 @@ Run the bundled trace from this skill directory instead of reconstructing the hi
 ```bash
 python3 scripts/trace-to-root.py --trees both --depth light
 ```
+
+For managed compaction, do this during the restore request or its read-depth
+audit. The earlier acknowledgement-only boundary is not permission to restore.
 
 Use `--trees topology|work|both` to select context domains and `--depth light|full` to control how
 much each node contributes. Light work traces compose `intent:` and name notes; full traces include
