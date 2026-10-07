@@ -437,7 +437,7 @@ exit 1
     expect(env.stdout).not.toContain("TRACE GAP");
   });
 
-  it("leaves a standalone run with no daemon answer on the old cwd inference and gap text", () => {
+  it("keeps standalone cwd inference and names literal-path recovery when unresolved", () => {
     const f = fixture();
     const inside = trace(["--trees", "work"], unpinned(f.env), f.workStart);
     expect(inside.status).toBe(0);
@@ -447,7 +447,7 @@ exit 1
     const outside = trace(["--trees", "work"], unpinned(f.env), dirname(f.workspace));
     expect(outside.status).toBe(0);
     expect(outside.stdout).toContain(
-      "TRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE",
+      "TRACE GAP — current work node is unresolved; pass --work-start with a literal absolute path (or configure OPENRIG_REFOCUS_WORK_NODE separately)",
     );
   });
 
