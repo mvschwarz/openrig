@@ -420,8 +420,9 @@ seat, plugin, and release lifecycle actions remain agent-owned.
   longer supported. Node 26 and other versions are untested. On a Mac with Apple
   silicon, use Node.js 22: see the [compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation).
 - tmux
-- macOS or Linux. Native Windows is not supported yet. WSL2 isn't supported either;
-  one user's working setup is in the [getting-started guide](docs/reference/getting-started.md#wsl2-a-reported-working-setup)
+- macOS or Linux. On Windows, use WSL2, the Windows route OpenRig supports; native
+  Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; one user's
+  working setup is in the [getting-started guide](docs/reference/getting-started.md#wsl2-a-reported-working-setup)
 
 Optional:
 - herdr or cmux for terminal workspaces showing the agents together

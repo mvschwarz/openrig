@@ -22,8 +22,9 @@ supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
 or NodeSource. On a Mac with Apple
 silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
-Windows is not supported yet. WSL2 isn't a supported platform either, though one
-user has [reported a working setup](#wsl2-a-reported-working-setup). Node 20 and
+Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
+supports, though OpenRig's automated tests don't run on it yet. One user's
+[working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
 odd-numbered releases (23, 25 and so on) are not supported; Node 26 and later
 even-numbered releases are untested.
 
@@ -65,7 +66,8 @@ before-install view explain that access before you choose it.
 
 ## WSL2: a reported working setup
 
-This is one user's report, not a supported platform.
+WSL2 is the Windows route OpenRig supports. OpenRig's automated tests don't run on
+it yet; this is one user's working setup.
 [dajiaohuang](https://github.com/dajiaohuang)
 [ran OpenRig 0.6.6 under WSL2](https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546)
 on Ubuntu 24.04, with Node.js 24.14.1, tmux 3.4, Codex CLI 0.161.0 and Pi

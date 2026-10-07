@@ -47,8 +47,9 @@ rather than treating a newer command as installed.
 
 ### Installation or platform problems
 
-Supported platforms are macOS and Linux. Native Windows is not supported yet. WSL2 isn't supported either; one user's
-[reported working setup](getting-started.md#wsl2-a-reported-working-setup) lists what mattered. OpenRig needs
+Supported platforms are macOS and Linux, and WSL2 on Windows; native Windows isn't supported. OpenRig's automated tests
+don't run on WSL2 yet; one user's [reported working setup](getting-started.md#wsl2-a-reported-working-setup) lists what
+mattered. OpenRig needs
 Node.js 22 or 24 and tmux. A Linux distribution's own Node.js can be older; check `node --version`. With npm 11 or
 later, an `npm warn install-scripts` line for `@openrig/cli` means only the postinstall Node.js and SQLite check was
 skipped; `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. A WSL error needs its actual versions,
