@@ -18,11 +18,11 @@ interface Selection {
   selectedAt: string;
 }
 
-function git(checkout: string, args: string[]): string {
+function git(checkout: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): string {
   try {
     return execFileSync("git", ["-C", checkout, ...args], {
       encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
-      env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no" },
+      env: { ...process.env, ...extraEnv, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no" },
       stdio: ["ignore", "pipe", "pipe"],
     }).trimEnd();
   } catch (err) {
@@ -198,7 +198,8 @@ export function addGitContext(source: string, opts: { pack?: string; name?: stri
     const branchRef = /^ref: (refs\/heads\/[^\t\r\n]+)\tHEAD$/m.exec(advertised)?.[1];
     if (!revision) throw new Error("Git source has no advertised HEAD commit. Check its default branch before retrying.");
     checkout = join(parent, randomUUID());
-    git(parent, ["init", `--object-format=${revision.length === 64 ? "sha256" : "sha1"}`, "--", checkout]);
+    // Old Git ignores this environment variable and retains its SHA-1 default.
+    git(parent, ["init", "--", checkout], { GIT_DEFAULT_HASH: revision.length === 64 ? "sha256" : "sha1" });
     git(checkout, ["remote", "add", "origin", remote]);
     try {
       // Pin the advertised commit even if the branch advances during the fetch.
