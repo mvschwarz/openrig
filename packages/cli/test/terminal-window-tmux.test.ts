@@ -48,6 +48,7 @@ it.each([
   const desktop = vi.fn(async () => "window");
   const beforeSplits: string[] = [];
   const deps: WindowDeps = {
+    herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
     platform: "darwin", env: { HOME: dir }, exists: () => false,
     exec: async (file, args) => {
       if (file === "/bin/sh") return "tmux";
@@ -86,6 +87,7 @@ it("opens three real viewer panes while original sessions keep the same pane and
   const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: [panes], columns: 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
   const desktop = vi.fn(async () => "window");
   const deps: WindowDeps = {
+    herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
     platform: "darwin", env: { HOME: "/fixture" }, exists: () => false,
     exec: async (file, args) => {
       if (file === "/bin/sh") return "tmux";

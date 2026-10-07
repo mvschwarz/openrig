@@ -24,7 +24,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
     if (args.includes("#{pane_id}")) return `%${++pane}`;
     return "";
   });
-  const deps: WindowDeps = { platform: "darwin", env: { HOME: "/fixture", HERDR_SESSION: "wrong-session", HERDR_SOCKET_PATH: "/wrong.sock" }, exists: () => !!options.ghostty, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "owned-test" };
+  const deps: WindowDeps = { platform: "darwin", env: { HOME: "/fixture", HERDR_SESSION: "wrong-session", HERDR_SOCKET_PATH: "/wrong.sock" }, exists: () => !!options.ghostty, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), herdrConfig: vi.fn(() => "/fixture/private herdr.toml"), id: () => "owned-test" };
   return { client, deps, get, post, exec, preview };
 }
 
@@ -53,6 +53,8 @@ describe("desktop terminal view", () => {
     expect(launch[1][1]).not.toMatch(/set (bounds|number of columns|number of rows)/);
     expect(result.notes).toContain("Ghostty's macOS scripting interface does not expose window size. Enlarge the new view manually if its columns are cramped; existing window settings were kept.");
     expect(launch[1][2]).toContain("HERDR_SOCKET_PATH='/daemon home/herdr.sock'");
+    expect(launch[1][2]).toContain("HERDR_CONFIG_PATH='/fixture/private herdr.toml'");
+    expect(f.deps.herdrConfig).toHaveBeenCalledExactlyOnceWith("/daemon home/herdr.sock");
     expect(launch[1][2]).not.toContain("--session");
     expect(launch[1][2]).toContain("-u HERDR_SESSION");
     expect(launch[1][2]).not.toContain("wrong-session");
@@ -119,6 +121,16 @@ describe("desktop terminal view", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
+  it("does not open a window or apply a view if preserving the person's config fails", async () => {
+    const f = fixture();
+    f.deps.herdrConfig = vi.fn(() => { throw new Error("Cannot read Herdr config"); });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({
+      ok: false, windowAttempted: false, error: expect.stringContaining("Cannot read Herdr config"),
+    });
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript")).toBe(false);
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
   it("returns Automation denial without replaying in another terminal or applying a layout", async () => {
     const f = fixture();
     const original = f.deps.exec;
@@ -154,6 +166,7 @@ describe("desktop terminal view", () => {
     expect(result).toMatchObject({ ok: true, provider: "tmux", window: { app: "ghostty", surface: "window-requested" } });
     expect(f.exec.mock.calls.some(([,args]) => args.includes("--version"))).toBe(false);
     expect(f.deps.launch).toHaveBeenCalledTimes(1);
+    expect(f.deps.herdrConfig).not.toHaveBeenCalled();
   });
 
   it.each<[string, string[]]>([

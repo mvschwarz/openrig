@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
+import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 
 interface Pane { seat: string; label: string; paneCommand: string }
@@ -23,6 +24,7 @@ export interface WindowDeps {
   launch(file: string, args: string[]): Promise<void>;
   sleep(ms: number): Promise<void>;
   id(): string;
+  herdrConfig(socketPath: string): string;
 }
 
 export function defaultWindowDeps(): WindowDeps {
@@ -39,6 +41,7 @@ export function defaultWindowDeps(): WindowDeps {
     }),
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     id: () => randomUUID().slice(0, 12),
+    herdrConfig: socketPath => prepareHerdrLaunchConfig(env, socketPath),
   };
 }
 
@@ -166,9 +169,11 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (herdr) {
       const endpoint = preview.data.status.launch;
       if (!endpoint?.socketPath) throw new Error("The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window.");
+      const configPath = deps.herdrConfig(endpoint.socketPath);
       // A CLI session would override the daemon's resolved socket in Herdr.
       windowAttempted = true;
-      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`);
+      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} HERDR_CONFIG_PATH=${shellQuote(configPath)} ${shellQuote(herdr)}`);
+      windowNotes.push("Herdr starts with the sidebar collapsed unless this endpoint has a saved choice; later toggles are kept.");
       let alive = false;
       for (let attempt = 0; attempt < 20; attempt++) {
         const status = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>("/api/terminal/status?provider=herdr");

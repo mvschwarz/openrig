@@ -220,6 +220,11 @@ not replayed in another app. On Linux a local graphical display and a supported
 terminal are required (Ghostty, the system terminal, GNOME Terminal, Konsole or
 xterm). Linux reports a window request; verify what actually appeared.
 
+OpenRig's Herdr launch starts with the sidebar collapsed unless that endpoint
+already has a saved choice; later sidebar toggles persist normally. It uses a
+private copy of your Herdr settings with only that initial preference changed,
+and leaves your global config untouched.
+
 The command runs Herdr when installed, using the daemon's configured session and
 socket. Otherwise it creates a plain tmux viewing session. Explicitly choose the
 latter with `--provider tmux --window`. Neither route types into or replaces the

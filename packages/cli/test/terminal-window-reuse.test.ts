@@ -37,7 +37,7 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
   });
   const windowDeps: WindowDeps = {
     platform: "darwin", env: { HERDR_SESSION: "wrong", HERDR_SOCKET_PATH: "/wrong.sock" },
-    exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "fixture",
+    exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), herdrConfig: vi.fn(() => "/fixture/private herdr.toml"), id: () => "fixture",
   };
   const deps: TerminalDeps = {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,

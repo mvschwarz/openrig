@@ -30,7 +30,7 @@ function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
     }
     return "";
   });
-  const windowDeps: WindowDeps = { platform: options.platform ?? "darwin", env: options.env ?? {}, exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "fixture" };
+  const windowDeps: WindowDeps = { platform: options.platform ?? "darwin", env: options.env ?? {}, exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), herdrConfig: vi.fn(() => "/fixture/private herdr.toml"), id: () => "fixture" };
   const deps: TerminalDeps = {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
     clientFactory: () => ({ baseUrl: options.remote ? "http://192.0.2.2:7433" : "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
