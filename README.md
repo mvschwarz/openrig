@@ -22,6 +22,15 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 
 Requires Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). Native Windows is not supported yet, and WSL2 has not been tested. Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
+**One command.** This runs OpenRig's install script from the `v0.6.6` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh
+```
+
+**Or step by step:**
+
 ```bash
 npm install -g @openrig/cli
 rig setup --dry-run

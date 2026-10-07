@@ -51,6 +51,10 @@ later, an `npm warn install-scripts` line for `@openrig/cli` means only the post
 skipped; `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. A WSL error needs its actual versions,
 commands and error text; don't assume a Windows-related pull request fixes it.
 
+The one-command install ([getting-started](getting-started.md#install-and-sign-in)) prints its plan with
+`--dry-run` and changes nothing. When a step fails it prints `FAILED [n/4] <command> (exit <code>)` and stops; run that
+command by hand to see its full error, and record it in a report.
+
 ### Installation finished, but there is nobody to talk to
 
 Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conversations)

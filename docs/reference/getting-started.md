@@ -47,6 +47,22 @@ team default and leaves settings unchanged. Broader access is separate.
 
 ## Install and sign in
 
+**One command, when the person wants the full setup.** It needs Node.js 22 or 24 with npm already installed. First
+run the preview, which prints what the script will do and changes nothing, and show the person that plan:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
+```
+
+With their yes, run the same command without `--dry-run`:
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`. It installs the
+latest published `@openrig/cli` with `npm install -g`,
+runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+Codex and may install a missing one, as described below. A failed step prints `FAILED [n/4] <command> (exit <code>)`.
+Then check the sign-in of each provider the person chose, as below, and continue at
+[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
+by step instead:
+
 ### Choose your providers
 
 Ask: **“Which working account do you want this team to use: Claude Code, Codex,
