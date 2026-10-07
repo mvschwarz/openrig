@@ -907,3 +907,64 @@ describe("selected bundle identity boundaries", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+
+describe("selected plugin skills", () => {
+  function writePlugin(root: string): string {
+    const plugin = join(root, "plugins", "core");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "core", version: "0.1.0" }));
+    for (const id of ["delegating-work", "queue-handoff"]) {
+      mkdirSync(join(plugin, "skills", id), { recursive: true });
+      writeFileSync(join(plugin, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: Use when testing ${id}.\n---\n\n# plugin ${id}\n`);
+    }
+    return plugin;
+  }
+
+  function resolveWithPlugin(root: string, plugin: string, skills: Array<{ id: string; path: string }>) {
+    const spec = makeSpec({
+      resources: { skills, guidance: [], subagents: [], plugins: [{ id: "core", source: { kind: "local", path: plugin } }], runtimeResources: [] },
+      profiles: {
+        default: { uses: { skills: skills.map((skill) => skill.id), guidance: [], subagents: [], plugins: ["core"], runtimeResources: [] } },
+      },
+    });
+    return resolveNodeConfig(makeCtx({
+      baseSpec: makeResolved(spec, root),
+      member: makeMember({ cwd: join(root, "work") }),
+      skillsRoot: join(root, "no-catalog"),
+      homedir: join(root, "home"),
+    }));
+  }
+
+  it("adds a selected plugin's skills to the managed loadout, not to the plan's skill entries", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-plugin-skills-"));
+    try {
+      const plugin = writePlugin(root);
+      const result = resolveWithPlugin(root, plugin, []);
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.config.selectedResources.skills).toEqual([]);
+      expect(result.config.skillLoadout?.entries.map((entry) => [entry.id, entry.sourceDir, entry.selectedBy])).toEqual([
+        ["delegating-work", join(plugin, "skills", "delegating-work"), ["topology"]],
+        ["queue-handoff", join(plugin, "skills", "queue-handoff"), ["topology"]],
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps a selected bundle skill's source when the plugin has a skill with the same name", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-plugin-precedence-"));
+    try {
+      const plugin = writePlugin(root);
+      const bundle = join(root, "bundle", "queue-handoff");
+      mkdirSync(bundle, { recursive: true });
+      writeFileSync(join(bundle, "SKILL.md"), "---\nname: queue-handoff\ndescription: Use when testing the bundle copy.\n---\n\n# bundle\n");
+      const result = resolveWithPlugin(root, plugin, [{ id: "queue-handoff", path: bundle }]);
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.config.selectedResources.skills.map((skill) => [skill.effectiveId, (skill.resource as { path: string }).path]))
+        .toEqual([["queue-handoff", bundle]]);
+      expect(result.config.skillLoadout?.entries.map((entry) => entry.id)).toEqual(["delegating-work"]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});

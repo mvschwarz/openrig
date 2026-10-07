@@ -226,8 +226,8 @@ checked once more, so a prompt that appears by then gives `attention_required`.
 
 **Startup proof.** A `startup_proof` action selects `authenticated` or `none` (the default is none; the last applicable
 one wins, and it needs `idempotent: true`). With `authenticated`, a fresh launch of an agent seat includes a challenge,
-and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes` shows
-the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
+and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes --full`
+shows the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
 
 **After a failure.** Delivery, launch and action failures, and readiness timeouts, give `failed`. Every 30 seconds the
 context monitor marks a `failed` or `attention_required` seat `ready` once its pane reads ready, unless fresh context
@@ -291,7 +291,7 @@ run after the harness is ready: `after_files` (the default) after the post-launc
 | `send_text` delivery after ready | **Supported** | Reliable. Requires harness to be ready. |
 | Hooks | **Through plugins** | Declare a plugin under `resources.plugins[]`; `resources.hooks` is refused. |
 | Runtime resource projection | **Supported for recognized fragments** | `claude_settings_fragment`, `claude_mcp_fragment`, and `codex_config_fragment` are applied to provider config. Unknown types are copied to runtime extension directories. |
-| Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them. It does not add a global Claude `Bash(rig:*)` allowance. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
+| Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them; the `kernel` rig's seats get a wider operational default ([rig spec, "At launch"](rig-spec.md)). It does not add a global Claude `Bash(rig:*)` allowance. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
 | MCP installation | **Supported for Claude fragments** | A selected `claude_mcp_fragment` is merged into the project's `.mcp.json`. Claude asks to approve new servers found there; that prompt stops startup as `mcp_gate` until someone answers it and runs `rig seat continue`. Otherwise use `/mcp` or `claude mcp add`, or describe the servers in startup files for the agent to configure. |
 | System dependency installation | **Not deterministic** | Describe in startup files; agent handles via shell commands. |
 | Recurring tasks / wake timers | **Runtime-dependent** | Claude Code supports recurring tasks via the `/loop` command. Codex does not have a confirmed equivalent. Orchestrators should include `/loop` instructions in startup for Claude Code agents. |

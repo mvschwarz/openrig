@@ -67,9 +67,9 @@ export function detectBundleConflicts(input: DetectConflictsInput): ConflictRepo
           collisionWith: { rigId: rig.rigId, rigName: rig.name },
           description: `bundle declares rig name '${input.bundleRigName}' but a running rig with this name already exists (rigId: ${rig.rigId})`,
           resolutions: [
-            "use --target <newname> on install to rename the rig on install (lands at Checkpoint 4.2)",
-            `stop the running rig first (e.g. rig down ${rig.name}) and re-attempt install`,
-            "use --force on install for an operator-explicit override (lands at Checkpoint 4.2; NOT recommended for routine use)",
+            `use the existing team (rig ps --rig '${rig.name}' --nodes)`,
+            `stop the running rig first (rig down '${rig.name}') and retry this install to replace the stopped team; the earlier generation is archived`,
+            "cancel the install and keep the existing team; --target chooses a directory, not a new rig name",
           ],
         });
         break;

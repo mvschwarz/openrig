@@ -86,7 +86,7 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
 
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
-    "Open OpenRig views (agent terminals) as tiles in a terminal provider (herdr / cmux)",
+    "Open agent conversations as tiles (herdr / cmux); kernel dashboard + chats: rig terminal open saved:kernel",
   );
 
   const getDeps = (): TerminalDeps =>

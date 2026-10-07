@@ -9,7 +9,7 @@ export interface StoredNativePermissionSelection extends NativePermissionSelecti
   updatedAt: string;
 }
 
-export type PermissionModeSource = "explicit" | "member_spec" | "rig_spec" | "system_default";
+export type PermissionModeSource = "explicit" | "member_spec" | "rig_spec" | "kernel_default" | "system_default";
 
 export interface ResolvedSeatPermission {
   effectiveMode: string;
@@ -22,6 +22,39 @@ export interface ResolvedSeatPermission {
 /** The stable node owns the desired setting. Native history and current processes are untouched. */
 export class NativePermissionStore {
   constructor(private readonly db: Database.Database) {}
+
+  /** Kernel is the persisted class-of-one rig, never a pane-name or cwd heuristic.
+   * Authored policies and named Codex profiles keep their existing meaning. */
+  private launchDefault(nodeId: string, runtime: string): "kernel" | "team" | undefined {
+    if (runtime !== "claude-code" && runtime !== "codex") return undefined;
+    try {
+      const row = this.db.prepare(`SELECT r.name, n.permission_policy AS member_policy,
+        r.permission_policy AS rig_policy, n.codex_config_profile AS profile
+        FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?`).get(nodeId) as {
+          name: string; member_policy: string | null; rig_policy: string | null; profile: string | null;
+        } | undefined;
+      if (!row || row.member_policy != null || row.rig_policy != null
+        || (runtime === "codex" && row.profile?.trim())) return undefined;
+      return row.name === "kernel" ? "kernel" : "team";
+    } catch {
+      // This optional default must not block otherwise supported launches when
+      // its metadata lookup is unavailable. Keep the existing permission path.
+      return undefined;
+    }
+  }
+
+  /** One decision shared by fresh/continue, legacy restore and same-seat handover. */
+  launchOverride(nodeId: string, runtime: string): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault"> {
+    const selection = this.read(nodeId);
+    if (selection && selection.runtime !== runtime) {
+      throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
+    }
+    const launchDefault = selection ? undefined : this.launchDefault(nodeId, runtime);
+    if (launchDefault === "kernel") {
+      return { kernelAuthority: true, teamPermissionDefault: false, launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
+    }
+    return { kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
+  }
 
   read(nodeId: string): StoredNativePermissionSelection | null {
     const row = this.db.prepare("SELECT * FROM node_permission_selections WHERE node_id = ?").get(nodeId) as {
@@ -144,6 +177,12 @@ export class NativePermissionStore {
       };
     }
 
+    // Kernel's operational default also replaces persisted no-policy floor provenance.
+    if (this.launchDefault(nodeId, runtime) === "kernel") {
+      return { effectiveMode: runtime === "codex" ? "full_bypass" : "acceptEdits", source: "kernel_default",
+        launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
+    }
+
     // Level 3: Rig-level declaration in rig.yaml
     // Applied when the member did not declare its own policy.
     const effectiveRigPosture = rigPosture ?? (
@@ -197,16 +236,13 @@ export class NativePermissionStore {
   }
 
   apply(binding: NodeBinding, runtime: string): NodeBinding {
-    const selection = this.read(binding.nodeId);
-    if (selection && selection.runtime !== runtime) {
-      throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
-    }
-    const override = permissionBindingOverride(selection);
+    const override = this.launchOverride(binding.nodeId, runtime);
     const effectivePosture = override.launchPosture ?? binding.launchPosture;
     const permissionMode = override.permissionMode ?? (effectivePosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     return {
       ...binding,
       ...override,
+      ...(override.kernelAuthority ? { permissionMode: undefined } : {}),
       ...(permissionMode ? { permissionMode } : {}),
     };
   }

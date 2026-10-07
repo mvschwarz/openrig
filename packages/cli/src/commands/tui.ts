@@ -42,9 +42,9 @@ export function tuiCommand(io: FrontDoorIo & {
   attachShared?: (target: string) => Promise<number>;
 } = {}): Command {
   const cmd = new Command("tui")
-    .description("open mission control (standalone by default; --shared joins the kernel terminal)")
-    .option("--shared", "join the kernel's existing shared terminal; detach with Ctrl-b d")
-    .addHelpText("after", "\nThe shared terminal keeps its view when you detach. On an older kernel, or after quitting the TUI, run rig tui in that terminal once. No agent or terminal is started by --shared.\nHerdr/cmux users can also open the kernel through rig terminal open kernel --provider herdr|cmux.");
+    .description("open the status dashboard, not agent chat (--shared joins the same dashboard)")
+    .option("--shared", "join the kernel's existing dashboard, not the operator conversation; detach with Ctrl-b d")
+    .addHelpText("after", "\nThe dashboard shows status and navigation; it is not the operator's or advisor's conversation.\nTo open the kernel dashboard and conversations together: rig terminal open saved:kernel (herdr by default; --provider cmux is also supported). If the view cannot open, use its printed operator attach command in a new terminal.\nThe shared dashboard keeps its view when you detach. On an older kernel, or after quitting the TUI, run rig tui in that terminal once. No agent or terminal is started by --shared.");
 
   cmd
     .command("commands")
@@ -88,7 +88,7 @@ export function tuiCommand(io: FrontDoorIo & {
         const exit = io.exit ?? ((code: number) => process.exit(code));
         try {
           const target = await (io.sharedTarget ?? sharedTuiTarget)();
-          err("Joining the kernel terminal. Ctrl-b d detaches and preserves the view; if a shell is shown, run rig tui once.");
+          err("Joining the shared dashboard, not the operator conversation. For conversations: rig terminal open saved:kernel. Ctrl-b d detaches and preserves the view; if a shell is shown, run rig tui once.");
           const code = await (io.attachShared ?? attachSharedTui)(target);
           if (code !== 0) err("Could not attach the kernel terminal. Inspect rig ps --nodes --rig kernel and rig status; standalone: rig tui.");
           exit(code);

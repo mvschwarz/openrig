@@ -86,7 +86,7 @@ start_daemon_or_explain_reset "populated" "$POPULATED_HOME" "$POPULATED_PORT"
 echo
 echo "==> Both daemons up. Seed the populated daemon with sample data:"
 echo "    OPENRIG_HOME=$POPULATED_HOME OPENRIG_PORT=$POPULATED_PORT \\"
-echo "      rig up product-team   # instantiate a sample rig"
+echo "      rig up factory   # instantiate a sample rig"
 echo
 echo "    Copy workflow fixtures to operator workspace specs dir:"
 echo "    cp $FIXTURE_DIR/workflows/*.yaml \\"

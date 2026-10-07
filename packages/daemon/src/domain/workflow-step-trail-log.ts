@@ -92,6 +92,18 @@ export class WorkflowStepTrailLog {
     return rows.map(rowToEntry);
   }
 
+  /**
+   * Oldest first, in the order the rows were recorded. rowid follows
+   * inserts in this append-only table, so the order holds even when
+   * closed_at does not move forward.
+   */
+  listForInstanceInAppendOrder(instanceId: string): WorkflowStepTrailEntry[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM workflow_step_trails WHERE instance_id = ? ORDER BY rowid`)
+      .all(instanceId) as TrailRow[];
+    return rows.map(rowToEntry);
+  }
+
   countForInstance(instanceId: string): number {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM workflow_step_trails WHERE instance_id = ?`)

@@ -98,10 +98,9 @@ export class StartupController {
       if (this.state.rig && this.state.rigs.some((r) => r.id === this.state.rig!.rigId)) await this.readRig(this.state.rig.rigId);
       else { this.state.page = "rigs"; this.state.selected = 0; }
       this.state.notice = "Daemon connected. Choose what to bring back.";
-      // The served fold is running only for a nonempty rig whose nodes are all
-      // observed running. Missing, stopped, degraded and unverified are not proof.
-      const running = rigs.find(r => r.lifecycleState === "running");
-      if (this.automaticEntry && this.state.open && running) {
+      // Connected users can inspect work regardless of the rigs' lifecycle states.
+      // Setup and recovery remain deliberate choices through Start and return.
+      if (this.automaticEntry && this.state.open) {
         this.automaticEntry = false;
         this.state.open = false;
         this.deps.onWork();

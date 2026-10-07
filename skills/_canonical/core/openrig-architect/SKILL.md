@@ -1,6 +1,6 @@
 ---
 name: openrig-architect
-description: Use when designing multi-agent topologies that run ON OpenRig — authoring RigSpec and AgentSpec files for new rigs, creating agent startup content (guidance / skills / culture), or diagnosing why a launched rig's agents aren't behaving as intended. NOT for changing OpenRig itself (use openrig-builder); NOT for ordinary CLI operation of an existing rig (use openrig-user). Covers the full authoring lifecycle from user intent to validated, launchable rig.
+description: Use when designing multi-agent topologies that run ON OpenRig — authoring RigSpec and AgentSpec files for new rigs, creating agent startup content (guidance / skills / culture), or diagnosing why a launched rig's agents aren't behaving as intended. NOT for changing OpenRig itself (use developing-openrig); NOT for ordinary CLI operation of an existing rig (use openrig-user). Covers the full authoring lifecycle from user intent to validated, launchable rig.
 metadata:
   cli_surfaces_referenced:
     - agent validate
@@ -17,7 +17,7 @@ metadata:
     sibling_skills:
       - openrig-user
       - openrig-operator
-      - openrig-builder
+      - developing-openrig
       - openrig-upgrade
       - forming-an-openrig-mental-model
       - ai-dev-workflows
@@ -92,7 +92,7 @@ Every rig is organized into pods — bounded context groups where members share 
 **Sizing principles:**
 
 - **Solo agent:** Only when the task is genuinely single-person (quick script, simple question). No rig needed.
-- **Pair (2 agents):** The minimum effective unit for quality work. One does, one verifies. The `implementation-pair` pattern.
+- **Pair (2 agents):** The minimum effective unit for quality work. One does, one verifies. The built-in `starter` team's shape.
 - **Small team (3-5 agents):** Orchestrator + one or two working pods. Good starting point for focused projects.
 - **Full team (6-10 agents):** Multiple bounded contexts with orchestration, development, review, and potentially research or design.
 - **Large team (10-40+ agents):** Complex projects with many concerns. Include pods for development, review, research, documentation, release management, strategy, and any other bounded context the project needs.
@@ -178,7 +178,7 @@ This is where most rigs succeed or fail. The topology is mechanical; the startup
 
 **For serious rigs, also include:**
 4. `startup/context.md` per agent — boot-time grounding (project info, environment details)
-5. Pod SOP skills — how each pod operates (implementation-pair SOP, review-pair SOP, etc.)
+5. Pod SOP skills — how each pod operates (build-pair SOP, review-pair SOP, etc.)
 6. Project-specific documentation in rig-level startup files
 
 **The key principle:** An agent that boots without knowing its role, its team's culture, and its project context will produce generic, unhelpful work. The startup content IS the product value. Invest in it.
@@ -356,7 +356,7 @@ pods:
 **Use when:** The work involves operating software, not just writing code.
 
 ### The Full Product Team
-**7 agents, 3 pods.** The kitchen-sink topology: orchestration pair, development pod (impl + qa + design), review pair. See the `product-team` starter spec for the complete worked example.
+**7 agents, 3 pods.** The kitchen-sink topology: orchestration pair, development pod (impl + qa + design), review pair. See the built-in `factory` spec for the complete worked example.
 
 **Use when:** Full product development with design, implementation, QA, and independent review. Requires strong culture and SOP content to keep all agents engaged.
 

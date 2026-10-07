@@ -6,428 +6,367 @@ topics: [observability, coordination]
 domains: [engineering-advisor, product-advisor, operating-advisor]
 applies-when: |
   Need to know how the operator-facing destination surfaces are built —
-  the For-You attention feed (5-card classifier + verb actions), the
-  Project workspace/mission/slice scope pages (tabbed rollups), and the
-  Dashboard landing surface on the vellum brand system. Author-mode
-  module — ui.md prose for these surfaces predates 0.3.x; every claim is
-  sourced to file:line at HEAD.
+  the For-You attention feed (5-card classifier, attention merge, verb
+  actions), the Project workspace/mission/slice scope pages (tabbed
+  rollups), and the Dashboard launcher. The web UI is in maintenance mode;
+  claims are sourced to file and symbol (and line where verified) at the
+  stamped commit.
 siblings: [shell-and-routing.md, ../architecture/mission-control.md]
 prerequisite-reads: [../README.md, shell-and-routing.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-07-06
+last-verified-against-source: 104b78ee
+last-updated: 2026-10-05
 ---
 
 # UI Project Observability, For You, Dashboard
 
 The three operator-facing destination surfaces: **For You** (`/for-you`,
 the attention feed), **Project** (`/project*`, the workspace/mission/slice
-scope pages), and the **Dashboard** (`/`, the landing surface on the
-vellum brand system). All read live daemon state; none adds UI-local
-persistence beyond per-event soft-dismiss.
+scope pages), and the **Dashboard** (`/`, the launcher). All read live
+daemon state. For You persists two dismissal sets in localStorage; shared
+shell preferences include the theme choice (see
+[`library-specs-and-design-system.md`](library-specs-and-design-system.md))
+and the maintenance-notice dismissal (see
+[`shell-and-routing.md`](shell-and-routing.md)).
 
-> **AUTHOR-HEAVY module.** `ui.md`'s Project Observability / For You /
-> Graphics-Layer sections are thin and predate the 0.3.1 dashboard/vellum
-> brand refresh. Every load-bearing claim carries `> Source: <file:line>
-> @HEAD`; ambiguity is declared as an OPEN item, never smoothed. Paths
-> are relative to `packages/ui/src/` unless prefixed `docs/`.
->
-> Verified at HEAD `7eaf524c` (`git describe` → `v0.3.1-6-g7eaf524c`).
-> Package version **0.3.1**; HEAD carries 6 unreleased release-0.3.2
-> commits; no `v0.3.2` tag (daemon-core.md; slice-00 §1.1).
+> Paths are relative to `packages/ui/src/` unless prefixed `docs/` or
+> `packages/`. Verified at `104b78ee` (package version 0.6.6). The web UI
+> is in maintenance mode (`docs/reference/developing.md`); this page
+> records what ships, not a roadmap.
 
-## 0. Release attribution (forensic seam — read first)
+## 0. Release attribution (forensic seam)
 
-Re-verified at HEAD via `git cat-file -e <tag>:<path>`:
+Checked via `git cat-file -e <tag>:<path>`:
 
-| Layer | Release | Forensic proof @HEAD |
+| Layer | Release | Forensic proof |
 |---|---|---|
-| Project-observability foundation (For-You feed, feed-classifier, project scope pages, the Mission Control 7-verb vocabulary) | **0.3.0** | `v0.3.0:components/for-you/Feed.tsx`, `v0.3.0:lib/feed-classifier.ts`, `v0.3.0:components/project/ScopePages.tsx`, `v0.3.0:components/mission-control/components/VerbActions.tsx` all resolve at `v0.3.0` (slice-00 0.3.0-GT §1.5/§1.6/§1.7) |
-| Vellum **brand-identity system** the Dashboard/For-You now render on (`dashboard/vellum/*`: CornerBracket, VellumDestinationCard, marks, graphics, single-source-of-truth barrel) | **0.3.1, NOT 0.3.0** | `git cat-file -e v0.3.0:components/dashboard/vellum/index.ts` → **ABSENT** ("exists on disk, but not in 'v0.3.0'"); `v0.3.1:` → present (slice-00 0.3.0-GT seam (b); §2 rows 1/2) |
+| Project-observability foundation (For-You feed, feed-classifier, project scope pages, the Mission Control 7-verb vocabulary) | **0.3.0** | `v0.3.0:components/for-you/Feed.tsx`, `v0.3.0:lib/feed-classifier.ts`, `v0.3.0:components/project/ScopePages.tsx`, `v0.3.0:components/mission-control/components/VerbActions.tsx` all resolve at `v0.3.0` |
+| Vellum **brand-identity system** (`dashboard/vellum/*`: CornerBracket, VellumDestinationCard, marks, graphics, barrel) | **0.3.1, NOT 0.3.0** | `git cat-file -e v0.3.0:packages/ui/src/components/dashboard/vellum/index.ts` fails; `v0.3.1:` resolves |
 
-> Source: re-run at HEAD `7eaf524c` —
-> `git cat-file -e v0.3.0:packages/ui/src/components/dashboard/vellum/index.ts`
-> fails; `v0.3.0:.../for-you/Feed.tsx`, `.../lib/feed-classifier.ts`,
-> `.../project/ScopePages.tsx`, `.../mission-control/components/VerbActions.tsx`
-> all resolve at `v0.3.0`. Vellum surface *primitives*
-> (`components/ui/vellum-*.tsx`) shipped 0.3.0; the coherent vellum
-> *brand system* under `dashboard/vellum/` is 0.3.1 — slice-00 0.3.0-GT
-> seam (b) is the exact split. **Do not back-attribute the vellum brand
-> system to 0.3.0.**
+Vellum surface *primitives* (`components/ui/vellum-*.tsx`) shipped 0.3.0;
+the brand system under `dashboard/vellum/` is 0.3.1. Do not back-attribute
+the brand system to 0.3.0.
 
-## 1. Route reality (source-verified at `routes.tsx`@HEAD — BINDING)
+## 1. Route reality
 
-Before narrating any surface, each route was verified at
-`packages/ui/src/routes.tsx`@HEAD (542 lines). The Phase-8.1 survey's
-"missing route" expectations are grep-derived and partially wrong; this
-table is authored from `routes.tsx` reality, not the survey:
+Verified at `routes.tsx` (605 lines):
 
-| Path | Reality @HEAD | Component | Source |
+| Path | Reality | Component | Source |
 |---|---|---|---|
-| `/for-you` | **REAL destination route** | `Feed` | `routes.tsx:122-126` |
-| `/project` | **REAL destination route** | `WorkspaceScopePage` | `routes.tsx:128-132` |
-| `/project/mission/$missionId` | **REAL destination route** | `MissionScopePage` | `routes.tsx:134-138` |
-| `/project/slice/$sliceId` | **REAL destination route** | `SliceScopePage` | `routes.tsx:140-144` |
-| `/` (index) | **REAL destination route** | `Dashboard` | `routes.tsx:88-92` |
-| `/mission-control` | **DELETED `<Navigate to="/for-you">` redirect-stub** | `() => <Navigate to="/for-you">` | `routes.tsx:440-444` |
-| `/progress` | **`<Navigate to="/project">` redirect-stub** (folds into Project tabs) | `() => <Navigate to="/project">` | `routes.tsx:463-467` |
-| `/slices` | **DELETED `<Navigate to="/project">` redirect-stub** | `() => <Navigate to="/project">` | `routes.tsx:447-451` |
-| `/slices/$name` | **`<Navigate to="/project/slice/$sliceId">` redirect-stub** | `useParams` → `<Navigate>` | `routes.tsx:453-460` |
-| `/steering` | **`<Navigate to="/project">` redirect-stub** | `() => <Navigate to="/project">` | `routes.tsx:470-474` |
-| `/markdown` | **NOT a route** — `MarkdownViewer` is a component used inside `MissionScopePage` | (no route) | grep `routes.tsx`@HEAD: zero `path: "/markdown"` |
+| `/` (index) | destination route | `Dashboard` | `routes.tsx:96-100` |
+| `/for-you` | destination route | `Feed` | `routes.tsx:130-134` |
+| `/project` | destination route | `WorkspaceScopePage` | `routes.tsx:136-140` |
+| `/project/mission/$missionId` | destination route | `MissionScopePage` | `routes.tsx:142-146` |
+| `/project/slice/$sliceId` | destination route | `SliceScopePage` | `routes.tsx:148-152` |
+| `/mission-control` | redirect stub to `/for-you` | `() => <Navigate to="/for-you">` | `routes.tsx:496-500` |
+| `/slices` | redirect stub to `/project` | `() => <Navigate to="/project">` | `routes.tsx:503-507` |
+| `/slices/$name` | redirect stub to `/project/slice/$sliceId` | `useParams` → `<Navigate>` | `routes.tsx:509-516` |
+| `/progress` | redirect stub to `/project` | `() => <Navigate to="/project">` | `routes.tsx:519-523` |
+| `/steering` | redirect stub to `/project` | `() => <Navigate to="/project">` | `routes.tsx:526-530` |
+| `/markdown` | **not a route** — `MarkdownViewer` is a component | (no route) | no `path: "/markdown"` in `routes.tsx` |
 
-> Source: `routes.tsx:88-92`,`:122-144`,`:440-474` @HEAD; component
-> imports `routes.tsx:40-41` (`Dashboard`, `Feed`), `:60-63`
-> (`WorkspaceScopePage`/`MissionScopePage`/`SliceScopePage` from
-> `components/project/ScopePages.js`) @HEAD.
+> Source: component imports `routes.tsx:42-43` (`Dashboard`, `Feed`),
+> `:61-65` (`WorkspaceScopePage`/`MissionScopePage`/`SliceScopePage` from
+> `components/project/ScopePages.js`).
 
-> **Route-reality contract (slice-08 §10.7):** the **Mission Control
-> *system*** lives at daemon/PL-005 (see `../architecture/mission-control.md`)
-> — `/mission-control` is **NOT a UI destination**; it is a deleted
-> redirect-stub (SC-18). The 7-verb *action vocabulary* surfaces in this
-> module via `VerbActions` embedded in For-You cards, but the system
-> itself is not this module's subject. `/progress`, `/slices`,
-> `/steering` all fold into `/project` tabs — they are redirect-stubs,
-> not surfaces to narrate.
+The review altitudes `/agents` (`RigAgentsPage`) and `/fleet` (`FleetPage`)
+are listed in [`shell-and-routing.md`](shell-and-routing.md).
+
+> **Route-reality contract:** the **Mission Control *system*** lives in the
+> daemon (see `../architecture/mission-control.md`); `/mission-control` is
+> a redirect stub, not a UI destination. The 7-verb *action vocabulary*
+> surfaces here via `VerbActions` in For-You cards. `/progress`, `/slices`
+> and `/steering` fold into `/project` tabs.
 
 ## 2. For You — the attention feed (`/for-you` → `Feed`)
 
-`Feed` is the operator's attention surface: a chronologically-sorted,
-subscription-filtered, soft-dismissable card stream over the live
-activity feed. Header reads `Attention` / `For You`; max width 720px.
+`Feed` is the operator's attention surface: decision cards first, then the
+rest newest-first, subscription- and lens-filtered and soft-dismissable.
+Header reads `Attention` / `For You`; max width 720px. A plain-language
+`LevelControl` (All activity / Highlights / Needs you) sits at the top of
+the feed over the same subscription toggles.
 
-> Source: `components/for-you/Feed.tsx:364-369` (`data-testid="for-you-feed"`,
-> max-w-720 + `For You` header), feed-centerpiece design note `:3-12`
-> (PRIMARY UX = the feed; subscriptions NOT dominating — LOAD-BEARING
-> SC-16) @HEAD.
+> Source: `components/for-you/Feed.tsx` (`data-testid="for-you-feed"`,
+> max-w-720 header; `LevelControl` in `feed-level-control`; design note
+> `:3-12`); `lib/feed-levels.ts` `FEED_LEVEL_LABELS`.
 
 ### 2.1 The 5-card classifier (0.3.0 spine)
 
-`classifyFeed(events)` maps every `ActivityEvent` to exactly one of five
+`classifyFeed(events)` maps every `ActivityEvent` to one of five
 `FeedCardKind` values — `action-required`, `approval`, `shipped`,
-`progress`, `observation` — then sorts by `receivedAt` descending.
-**Nothing is silently dropped**: any unmatched event type falls through
-to `observation`. Queue-visibility events are sub-classified by
-`queueKind(type, state)` (e.g. `*.closed` → shipped; `human-gate` /
-`pending-approval` → action-required; `closeout-pending-ratify` →
-approval); a human-seat destination forces `action-required`.
+`progress`, `observation` — sorted by `receivedAt` descending. **Nothing is
+silently dropped**: an unmatched event type falls through to
+`observation`. Queue events are sub-classified by
+`queueKind(type, state, tier)`: `*.closed` → shipped;
+`qitem.closure_overdue` / `inbox.denied` → action-required; tier
+`human-gate` → **approval**; state `pending-approval` → action-required;
+`closeout-pending-ratify` → approval; `done|closed|completed|shipped` →
+shipped; otherwise progress. A human-seat destination forces
+`action-required` unless the card is already an approval.
 
-> Source: `lib/feed-classifier.ts:9-14` (`FeedCardKind` union),
-> `classifyEvent` `:145-218` (default-observation fallthrough L216-217),
-> `queueKind` `:93-110`, `classifyFeed` `:220-223` (receivedAt-desc sort),
-> `isHumanSeat` `:141-144` @HEAD.
+> Source: `lib/feed-classifier.ts` — `FeedCardKind` `:10-15`, `queueKind`
+> `:105-129`, `isHumanSeat`, `classifyEvent` (approval-preserving
+> human-seat override; default-observation fallthrough), `classifyFeed`,
+> `sortFeedByDecisionBand`.
 
-The feed pipeline (`Feed.tsx`): `classifyFeed` → cap at
-`HISTORY_LIMIT = 50` → hydrate each card's kind from the live queue-item
-map + action-audit (`hydratedCardKind`: a recorded outcome on an
-action/approval card → `approval`; a `done|closed|completed` qitem →
-`shipped`) → **subscription filter** (`isCardKindSubscribed` against the
-5 `feed.subscriptions.*` config keys; `action-required` is always
-visible, `observation` only when the audit subscription is on) → the
-transient **lens-chip** filter (All / Action req / Approvals / Shipped /
-Progress / Audit; not persisted) → per-event-seq soft-dismiss filter.
+### 2.2 The feed pipeline
 
-> Source: `components/for-you/Feed.tsx:63` (`HISTORY_LIMIT = 50`),
-> `:238` (`classifyFeed(events).slice(0, HISTORY_LIMIT)`),
-> `hydratedCardKind` `:156-180`, subscription+lens+dismiss pipeline
-> `:269-285` (subscription FIRST L280-282; lens L283; dismiss L284),
-> `LENS_CHIPS` `:54-61` @HEAD;
-> subscription forced/default rules `Feed.tsx:3-12` (action_required
-> forced ON L9; observation gated on audit_log L10) @HEAD.
+1. **Event cards:** `classifyFeed(events)` capped at `HISTORY_LIMIT = 50`.
+2. **Attention merge:** daemon attention rows (`useAttentionItems(50, …)`:
+   `GET /api/queue/list?attention=1…`, or `GET /api/queue/attention-aggregate`
+   when a remote host subscription is on) and needs-input seats
+   (`useNeedsInputSeats`) become cards, and `mergeAttentionIntoFeed` lets a
+   queue-derived card supersede a matching event-derived **action-required
+   or approval** card; shipped, progress and observation event cards for the
+   same qitem remain.
+3. **Decision-band sort:** `sortFeedByDecisionBand` lifts every
+   action-required and approval card above the rest, newest-first within
+   each band.
+4. **Hydration:** `hydratedCardKind` re-reads each card against the live
+   queue item and the action audit: a recorded outcome on an
+   action/approval card → `approval`; tier `human-gate` → `approval`; a
+   `done|closed|completed` item → `shipped`; a human-seat destination →
+   `action-required`.
+5. **Filters, in order:** subscription (`isCardKindSubscribed`;
+   `action-required` always visible, `observation` only with the audit
+   subscription), the transient lens chips (All / Action req / Approvals /
+   Shipped / Progress / Audit), a per-host filter, then dismissal.
+   Event cards dismiss by event seq (`forYou.dismissedSeqs`); queue-derived
+   cards dismiss by card id (`forYou.dismissedCardIds`); both are
+   localStorage-backed.
 
-### 2.2 Queue-item hydration + proof previews
+> Source: `components/for-you/Feed.tsx` — `LENS_CHIPS` `:60-67`,
+> `HISTORY_LIMIT` `:69`, `hydratedCardKind` `:167-186`, attention merge and
+> sort `:244-276`, dismiss hooks `:285`/`:294`, filter pipeline `:334-356`;
+> `hooks/useAttentionItems.ts`, `hooks/useNeedsInputSeats.ts`,
+> `lib/attention-feed.ts` (`mergeAttentionIntoFeed`, `attentionKindFor`),
+> `hooks/useDismissedSeqs.ts`, `hooks/useDismissedCardIds.ts`.
 
-For cards carrying a `qitemId` payload, `useQueueItemMap` hydrates the
-full queue-item body; for `shipped` cards `sliceForCard` matches a slice
-by tag/text and `proofPreviewForSlice` pulls the first proof packet with
-screenshots so the card renders an inline `ProofThumbnailGrid` →
-`ProofImageViewer`. This is the slice-00 §1.5 "queue cards hydrate qitem
-bodies + proof previews" foundation, live-wired.
+With one or more remote host subscriptions enabled, the feed shows host
+chips and status rows, cards carry a host chip, and verbs forward the
+card's `hostId` (`Feed.tsx` host filter; `hooks/useFeedSubscriptions.ts`
+key `feed.subscriptions.<hostId>.enabled`; `VerbActions.tsx`).
 
-> Source: `components/for-you/Feed.tsx:263` (`useQueueItemMap`),
-> `sliceForCard` `:182-201`, `proofPreviewForSlice` `:203-213`,
-> per-card proof wiring `:421-427`; `FeedCard.tsx` proof block
-> `:453-471` (`ProofPacketHeader`+`ProofThumbnailGrid`),
-> `ProofImageViewer` `:521` @HEAD.
+### 2.3 Queue-item hydration + proof previews
 
-### 2.3 Verb actions on action/approval cards (the 7-verb system; OPEN-3)
+For cards carrying a `qitemId`, `useQueueItemMap` hydrates the queue item;
+for `shipped` cards `sliceForCard` matches a slice by tag/text and
+`proofPreviewForSlice` pulls the first proof packet with screenshots, so
+the card renders an inline `ProofThumbnailGrid` → `ProofImageViewer`.
 
-An actionable card (`action-required` or `approval`, no recorded
-outcome, non-terminal qitem) embeds `VerbActions`. The **canonical
-Mission Control action vocabulary is the 7-verb system** —
+> Source: `components/for-you/Feed.tsx` (`useQueueItemMap`,
+> `sliceForCard`, `proofPreviewForSlice`); `FeedCard.tsx` proof block and
+> `<ProofImageViewer>`.
+
+### 2.4 Verb actions on action/approval cards
+
+The **canonical Mission Control action vocabulary is the 7-verb system** —
 `MISSION_CONTROL_VERBS = [approve, deny, route, annotate, hold, drop,
-handoff]` — defined at the Mission Control system level (slice-00
-0.3.0-GT §1.6/seam (c): the vocabulary *originates in 0.3.0 source*).
+handoff]`. `VerbActions` defaults to all seven
+(`enabledVerbs = [...MISSION_CONTROL_VERBS]`); route/handoff need a
+destination, annotate an annotation, hold/drop a reason.
 
-> Source: `components/mission-control/hooks/useMissionControlAction.ts:5-15`
-> (`MISSION_CONTROL_VERBS` 7-element const `:5-13` + `MissionControlVerb`
-> type `:15`), `components/mission-control/components/VerbActions.tsx:82`
-> (defaults to all 7 via `enabledVerbs = [...MISSION_CONTROL_VERBS]`),
-> per-verb input needs `:97-99` (route/handoff→destination L97;
-> annotate→annotation L98; hold/drop→reason L99) @HEAD; slice-00
-> 0.3.0-GT §1.6 + seam (c).
+> Source: `components/mission-control/hooks/useMissionControlAction.ts:5-15`;
+> `components/mission-control/components/VerbActions.tsx` (`enabledVerbs`
+> default `:108`).
 
-> **OPEN-3 RESOLVED (v0.4.4 living-notes corrective, founder ruling
-> N-1, 2026-07-05).** The For-You actionable-card surface is **bare
-> one-tap APPROVE + CHAT — nothing else**. `FeedCard` passes
-> `enabledVerbs={["approve"]}` + `oneClickVerbs={["approve"]}` + the
-> v0.4.4 `bare` prop (JSX-only: skips the "Choose response" header
-> chrome; the mutation/receipt/error paths are byte-identical — pinned
-> by a raw-body test), beside a CHAT button that opens the **shared
-> `ProgressiveTerminal`** seeded via `buildChatPreamble` (terminal,
-> never a chat panel — BR-12). Deny/route are RETIRED from this
-> surface (including the action-required lens's empty-state copy:
-> "one-tap approve and chat with the owning agent"); the card-level
-> kind tag is the status label "Action required", never instruction
-> chrome. The 7-verb vocabulary above remains the MISSION-CONTROL
-> system-level vocabulary; For-You offers the two-action subset.
->
-> Source @`bb5ad219`: `FeedCard.tsx:547-593` (bare `VerbActions`
-> `enabledVerbs=["approve"]` :561-566 + chat button + inline
-> `ProgressiveTerminal`), `:87-94` (`resolveCardTerminalSession` —
-> human-action cards chat with the SENDER), `Feed.tsx:76-82`
-> (`EMPTY_COPY["action-required"]`), `VerbActions.tsx` (`bare` prop),
-> `review/chat.ts:21` (`buildChatPreamble`); tests
-> `test/foryou-bare-approve-chat.test.tsx` (byte-identical mutation +
-> chatBtns:1/denyRoute:0 + retired-copy source-scan).
+**The For-You actionable-card surface is bare one-tap APPROVE + CHAT.**
+`FeedCard` passes `bare`, `enabledVerbs={["approve"]}` and
+`oneClickVerbs={["approve"]}`, beside a CHAT button that opens the shared
+`ProgressiveTerminal` seeded via `buildChatPreamble` (human-action cards
+chat with the sender). Deny/route are not offered here, and the
+action-required empty state reads "one-tap approve and chat with the
+owning agent". The 7-verb vocabulary remains the Mission Control
+system-level vocabulary.
+
+> Source: `components/for-you/FeedCard.tsx:558-570` (`bare` `:561`,
+> `enabledVerbs` `:563`, `oneClickVerbs` `:564`),
+> `resolveCardTerminalSession`; `Feed.tsx:76-82` (`EMPTY_COPY`);
+> `review/chat.ts:21` (`buildChatPreamble`); test
+> `test/foryou-bare-approve-chat.test.tsx`.
 
 On mutation success `VerbActions` fires `onOptimisticOutcome`; `Feed`
 keeps an optimistic-outcome map keyed by `qitemId` so the
-`ActionOutcomePanel` receipt renders instantly without waiting for the
-audit-log re-fetch (the audit re-fetch eventually surfaces the same
-shape). A terminal qitem with no recorded outcome derives a fallback
-receipt from its closure reason.
+`ActionOutcomePanel` receipt renders before the audit re-fetch. A terminal
+qitem with no recorded outcome derives a fallback receipt from its closure
+reason. Card footers also carry a "show context" queue-item trigger, a
+terminal drill, the evidence reference, and a "review →" link to the
+slice's Review tab.
 
-> Source: `components/for-you/Feed.tsx:224-236` (optimistic-outcome
-> map + `setOptimisticOutcome`), `:426-428` (optimistic-first, audit
-> fallback: `optimisticOutcomes.get ?? actionOutcomes.get ?? null`);
-> `FeedCard.tsx:473-500` (`isActionableCard` gate L473 + `VerbActions`
-> wiring L489-499), `isActionableCard` `:166-175`,
-> `fallbackOutcomeFromQueueItem` `:177-198`, `ActionOutcomePanel`
-> `:271-310`; `VerbActions.tsx:138-145` (`onOptimisticOutcome` on
-> mutation `onSuccess`) @HEAD.
+> Source: `Feed.tsx` (optimistic map; optimistic-first lookup);
+> `FeedCard.tsx` (`isActionableCard`, `fallbackOutcomeFromQueueItem`,
+> `ActionOutcomePanel`, `QueueItemTrigger`, `FeedCardTerminalDrill`).
 
-### 2.4 Card surface — vellum-coherent (0.3.1 brand layer)
+### 2.5 Card surface (0.3.1 brand layer)
 
-`FeedCard` renders on the **0.3.1 vellum brand system**: a
-`bg-stone-100/45 backdrop-blur` surface with a 3-stop ambient box-shadow
-(no border), four `CornerBracket` marks registering the bounds through
-the vellum, a mono-uppercase kind tag + colored dot, and runtime
-graphics marks (`ActorMark` for sessions) — the slice-00 §1.7 "shared
-graphics marks across drawers / proof rows / queue refs / story rows"
-foundation, now expressed in the matured vellum vocabulary. Cards are
-keyboard-dismissable (Backspace/Delete) and swipe-dismissable, with an
-`UndoToast`.
+`FeedCard` renders a `bg-surface-low/45 backdrop-blur-[10px]` surface with
+a 3-stop ambient box-shadow (no border), four `CornerBracket` marks, a
+mono-uppercase kind tag with a tone-coloured icon (a dot only when a kind
+has no icon), and `ActorMark` runtime marks. Cards dismiss by keyboard
+(Backspace/Delete) or swipe, with an `UndoToast`.
 
-> Source: `components/for-you/FeedCard.tsx:72-73` (`CARD_SURFACE_CLASS`),
-> `:74-80` (`CARD_SHADOW_STYLE` 3-stop box-shadow), corner brackets
-> `:401-404` (4× `<CornerBracket position=…>`), `KIND_DOT` `:33-39`,
-> kind tag span `:410-414`, `ActorMark` import `:25` + usage `:229`;
-> `CornerBracket` from the 0.3.1 brand barrel
-> `dashboard/vellum/index.ts:17`; slice-00 0.3.0-GT seam (b) + §1.7 @HEAD.
+> Source: `components/for-you/FeedCard.tsx` — `CARD_SURFACE_CLASS`
+> `:108-109`, `CARD_SHADOW_STYLE`, `KIND_TOKEN`, corner brackets
+> `:452-455`, `ActorMark` `:265`; `CornerBracket` from
+> `dashboard/vellum/index.ts`.
 
-### 2.5 Storytelling preview band
-
-Above the legacy card list `Feed` renders a `StorytellingFeed` preview
-built by `buildStorytellingFeedItems` from discovered missions
-(`useMissionDiscovery` → `ProgressCard`, first 2) + slices
-(`useSlices` → `ShippedCard` for shipped/done, `IncidentCard`
-otherwise, capped at 3). Mission rows carry a daemon-derived
-`status` so the "Getting Started"-style complete-and-hide filters
-durably (`status === "complete"`), with an optimistic local hide +
-best-effort `POST /api/missions/:id/complete` audit write that swallows
-network errors so a partial-air-gapped daemon does not block the hide.
-
-> Source: `components/for-you/Feed.tsx:319-343` (mission/slice adapters:
-> `useMissionDiscovery` L319, `missionsWithStatus` L329-335,
-> `buildStorytellingFeedItems` L336-343; adapter comment L305-318),
-> `handleMarkMissionComplete` `:351-361` (best-effort `void fetch` L354,
-> error-swallowed L357), preview render `:399-409`;
-> `components/feed/cards/storytelling-cards.tsx:36` (`CardKind`),
-> `ShippedCard` `:184`, `IncidentCard` `:235`, `ProgressCard` `:289`
-> @HEAD.
+The 0.3.1 storytelling preview band is **gone**: `Feed.tsx:375-380` records
+its removal. The `components/feed/cards/storytelling-cards.tsx` primitives
+remain for the `/lab/card-previews` gallery. No UI code calls
+`POST /api/missions/:id/complete` any more; the daemon route still exists
+(`packages/daemon/src/routes/missions.ts`).
 
 ## 3. Project — workspace / mission / slice scope pages (0.3.0 spine)
 
-`/project*` mounts three scope pages, all built on a shared
-`ScopeShell` + tabbed-rollup pattern (slice-00 §1.5 project
-observability foundation). A `SHARED_TABS` set —
-`overview / story / progress / artifacts / tests / queue / topology` —
-drives `WorkspaceScopePage` and `MissionScopePage`; `SLICE_TABS`
-reorders `story` first for `SliceScopePage` but `SliceScopePage`'s
-`useState` default is `overview` (README + readiness first, not a
-metric grid).
+`/project*` mounts three scope pages on a shared `ScopeShell` +
+`TabNav` tabbed pattern. Tab sets:
 
-> Source: `components/project/ScopePages.tsx:75-76` (`SharedTab` /
-> `SliceTab` types), `SHARED_TABS` `:78-86`, `SLICE_TABS` `:88-96`,
-> `ScopeShell` `:137-166`, `TabNav` `:98-135` @HEAD.
+| Page | Tabs | Default |
+|---|---|---|
+| `WorkspaceScopePage` | `SHARED_TABS`: Overview, Story, Progress, Artifacts, Proof, Queue, Workflow (`topology`) | `overview` |
+| `MissionScopePage` | `MISSION_TABS`: Overview, Steering, Review, Story, Progress, Artifacts, Proof, Queue, Workflow | `steering` |
+| `SliceScopePage` | `SLICE_TABS`: Review, Story, Overview, Progress, Artifacts, Proof, Queue, Workflow | `review` |
+
+> Source: `components/project/ScopePages.tsx` — `SharedTab`/`SliceTab`
+> `:83-84`, `SHARED_TABS` `:86-94`, `MISSION_TABS` `:98-110`, `SLICE_TABS`
+> `:112-123`, `TabNav`, `ScopeShell`; defaults `useState` at `:698`,
+> `:798`, `:1226`.
+
+Off the local host, the workspace and mission headers show an `ON <host>`
+chip (the slice header does not), the Review tab is local-only, and
+file-backed sections explain why local files are not shown.
 
 ### 3.1 WorkspaceScopePage (`/project`)
 
-Reads the live workspace name (`useWorkspaceName`); honest empty-state
-(`NO WORKSPACE CONNECTED` with an Open-settings action) when unset. The
-`overview` tab renders `WorkspaceOverviewPanel`: slices grouped into
-missions, then `partitionProjectMissions` splits them into a
-two-column **Current Work / Archive** layout (slice-00 §1.5
-"current/archive grouping"). Each mission card lists its slices as
-`Link`s to `/project/slice/$sliceId` with a `QueueCountIcon` +
-`StatusDot`. The other tabs are the scope rollups (§3.4).
+Reads the live workspace name; honest empty state (`NO WORKSPACE
+CONNECTED` with an Open-settings action) when unset. Tabs: Overview →
+`WorkspacePortfolioPanel`; Story/Progress/Artifacts/Proof/Queue → the
+scope rollups (§3.4); Workflow → `HostMultiRigGraph`.
+(`WorkspaceOverviewPanel`, the older Current Work / Archive grid, is still
+defined but not rendered.)
 
-> Source: `components/project/ScopePages.tsx:676-749` (`WorkspaceScopePage`;
-> no-workspace empty-state guard `:682-693`, `workspace-scope-no-workspace`
-> `:689`), `WorkspaceOverviewPanel` `:534-674` (mission bucketing
-> `:536-551`, `partitionProjectMissions` `:552`, two-column panel `:631`,
-> Current section `:632-651`, Archive section `:652-671`) @HEAD.
+> Source: `ScopePages.tsx` `WorkspaceScopePage` (no-workspace guard;
+> `WorkspacePortfolioPanel` `:745`; `HostMultiRigGraph` `:788`).
 
 ### 3.2 MissionScopePage (`/project/mission/$missionId`)
 
-Same `ScopeShell`/`SHARED_TABS`. `overview` renders the mission README
-(`useScopeMarkdown(missionPath, "README.md")` via `MarkdownViewer`)
-above a slice rail; `progress` renders a `MissionProgressHeatmap` + the
-mission `PROGRESS.md` + the shared `ScopeProgressRollup`. The `topology`
-tab renders the **projected workflow spec graph** via `TopologyTab`
-when the mission's README frontmatter declares a `workflow_spec` that is
-in the `WorkflowSpecCache` (daemon returns `topology.specGraph`),
-falling back to session-name aggregation otherwise.
+Lands on **Steering** (`SteeringTab`). Review → `MissionReviewTab` (§3.5).
+Overview renders the mission README (`MarkdownViewer`) above a slice rail.
+Progress renders `MissionProgressHeatmap` plus the mission `PROGRESS.md`
+(the per-slice rollup cards were removed). Artifacts → `ArtifactsNavigator`;
+Proof → `ScopeProofRollup`. Workflow renders the **projected workflow
+spec graph** via `TopologyTab` when the mission README declares a
+`workflow_spec` that is in the workflow-spec cache (the daemon returns
+`topology.specGraph`), otherwise `ScopeTopologyRollup`.
 
-> Source: `components/project/ScopePages.tsx:751-895` (`MissionScopePage`;
-> `useMission` `:759`, `missionPath` `:760-761`, README/PROGRESS
-> markdown `:762-763`, overview README section `:775`, progress
-> heatmap `:832`, `mission-progress-readme` `:838`, spec-graph topology
-> branch `:875-891` — `missionTopology` `:875`, `specGraph` check
-> `:879`, session-name fallback `:890`) @HEAD.
+> Source: `ScopePages.tsx` `MissionScopePage` (`SteeringTab` `:834`,
+> `MissionReviewTab` `:843`, `MissionProgressHeatmap` `:906`,
+> rollup-cards removal note `:979-983`, `ArtifactsNavigator` `:990`,
+> spec-graph branch `:1010-1036`).
 
 ### 3.3 SliceScopePage (`/project/slice/$sliceId`)
 
-Default tab `overview` (`SliceOverviewTab` — README + current step +
-readiness). Loading/error states are honest empty-states (the error
-state names `rig config get workspace.slices_root` as the likely
-misconfiguration). `progress` folds in `AcceptanceTab` (acceptance is
-the canonical slice-scope progress proof); `story` renders `TimelineTab`
-with curated `timeline.md` (`useSliceTimelineMarkdown`) above the
-auto-captured event feed; `topology` renders the slice's
-workflow-instance-aware `TopologyTab`; **`review` (v0.4.4) renders the
-Living Notes `SliceReviewTab`** (§3.5).
+Lands on **Review** (`SliceReviewTab`, §3.5). Overview →
+`SliceOverviewTab` (a 4-metric summary — status, progress, qitems, last
+activity — then the README). Story → `ScopeStoryRollup` (the queue-lineage
+story graph). Progress → `AcceptanceTab`. Artifacts → `ArtifactsNavigator`;
+Proof → `SliceProofTab`; Queue → `SliceQueueTab`; Workflow → `TopologyTab`.
+Loading and error states are honest (the error names
+`rig config get workspace.slices_root` as the likely misconfiguration).
 
-> Source: `components/project/ScopePages.tsx:1187-1297` (`SliceScopePage`;
-> default `overview` `:1192`, timeline md `:1204`, loading-state
-> guard `:1206`, error-state guard `:1225` (slices_root remediation
-> hint `:1239`), story=`TimelineTab` `:1258-1265`,
-> progress=`AcceptanceTab` `:1269-1273`, topology `:1294`) @HEAD.
+> Source: `ScopePages.tsx` `SliceScopePage` (`SliceReviewTab` `:1307`,
+> `ScopeStoryRollup` `:1317`, `SliceOverviewTab` `:1325`, `AcceptanceTab`
+> `:1354`, `ArtifactsNavigator` `:1363`, `SliceProofTab` `:1366`,
+> `TopologyTab` `:1379`, slices_root hint `:1276`), `SliceOverviewTab`
+> summary grid `:1157-1162`.
 
 ### 3.4 Shared scope rollups
 
 `ScopeStoryRollup`, `ScopeProgressRollup`, `ScopeArtifactsRollup`,
-`ScopeTestsRollup`, `ScopeQueueRollup`, `ScopeTopologyRollup` (the
-non-overview tabs) all read from one `useProjectScopeRollup(missionId,
-loadDetails)` hook so workspace and mission scopes share identical
-rollup behavior over their respective slice sets — the slice-00 §1.5
-"workspace/mission rollups" foundation. Detail fetching is gated on the
-active tab (`active !== "overview"`) so the overview path stays cheap.
+`ScopeQueueRollup` and `ScopeTopologyRollup` read from one
+`useProjectScopeRollup(missionId, loadDetails)` hook so workspace and
+mission scopes share rollup behavior; `ScopeProofRollup`
+(`project/ProofTab.tsx`) covers Proof. Detail fetching is gated on the
+active tab (`active !== "overview"` for the workspace;
+`active !== "overview" && active !== "steering"` for a mission).
 
-> Source: `components/project/ScopePages.tsx:198-217`
-> (`useProjectScopeRollup`; `rowsForScope` `:193-196`),
-> rollup components `:219-532`; gate `:679`,`:754` (`active !== "overview"`)
-> @HEAD.
+> Source: `ScopePages.tsx` `useProjectScopeRollup`, rollup components,
+> gates `:700`, `:803`.
 
-### 3.5 Review tabs (v0.4.4 — the Living Notes surface)
+### 3.5 Review tabs (the Living Notes surface)
 
-Both the slice and mission scope pages mount a `Review` tab
-(`SLICE_TABS`/mission tabs, `ScopePages.tsx:99-113`). The slice tab
-(`review/SliceReviewTab.tsx`) renders the ONE reviewable structure per
-slice — bands in order **NEEDS YOU → AGENTS → INTENT / PLAN / DELIVERED →
-verify-lineage → SETTLED** — from `GET /api/review/slice/:name`
-(`hooks/useReview.ts`):
+The slice tab (`review/SliceReviewTab.tsx`) renders one reviewable
+structure per slice — bands in order **NEEDS YOU → AGENTS → INTENT / PLAN
+/ DELIVERED → verify-lineage → SETTLED** — from `GET /api/review/slice/:name`
+(`hooks/useReview.ts`), with a proof-readiness status line and a defects
+box above NEEDS YOU:
 
-- **DELIVERED** pairs each planned deliverable with its curated proof down
-  the column (planned mockup above delivered artifact), media inline at text
-  height expanding on tap one-at-a-time (`?item=` deep link); `verified`
-  renders QA's recorded comparison in plain words (✓ QA-verified · ◇
-  unverified · ✗ missing + QA's note) — visible, never blocking. "See all
-  proof" drills into `proof/`.
-- **Media actually plays**: video renders inline with native controls
-  (`?seek`/`?play` deep links for capture verification); images open the
-  shipped `Lightbox`; evidence and the "full PRD →" door open the shipped
-  `FileViewer` in the shared **right-edge** drawer (the v0.4.4 corrective
-  reverted the FR-11.1 left flip at its three tokens).
-- **Two locks** (§4 of the architecture module) render as deliberate stamps:
-  plan-lock in PLAN, both stamps in SETTLED; an unaudited stamp renders
-  loudly as UNVERIFIED.
-- Review cards ride ONE vellum recipe (`review/vellum.ts` —
-  background-matched translucency + backdrop blur, token-driven for both
-  themes); DELIVERED rows stack vertically below the `sm` breakpoint
-  (phone-first single-column scan).
+- **DELIVERED** pairs each planned deliverable with its curated proof,
+  media inline and expanding one at a time (`?item=` deep link). Without a
+  configured readiness policy, `verified` renders as `✓ legacy QA-verified
+  (item revision unbound)` · `◇ unverified — no PASSING QA comparison` ·
+  `✗ missing — promised, nothing delivered`; with one, as `✓ accepted under
+  selected policy` / `◇ current acceptance absent`. A note renders as
+  "Judgment note:". Visible, never blocking. "See all proof" drills into
+  `proof/`.
+- **Media plays**: video inline with native controls (`?seek`/`?play` deep
+  links); images open `Lightbox`; evidence and the "full PRD →" door open
+  `FileViewer` in the shared right-edge drawer.
+- **Two locks** render as stamps: plan-lock in PLAN, both stamps in
+  SETTLED; an unaudited stamp renders as UNVERIFIED.
+- Review cards share one vellum recipe (`review/vellum.ts`); DELIVERED rows
+  stack below the `sm` breakpoint.
 - The mission tab (`review/MissionReviewTab.tsx`) is board-first: stage
-  cells from the collapsed contract, the completion ledger, cut-complete,
-  and a U5 row expansion reading the SAME contract (intent verbatim + a
-  bounded per-item verified summary; the full pairing lives on the slice
-  page). The rig altitude (`review/RigAgentsPage.tsx`) reads
-  `GET /api/review/rig`.
+  cells, the completion ledger, cut-complete, and a row expansion reading
+  the same contract. The rig altitude (`review/RigAgentsPage.tsx`, route
+  `/agents`) reads `GET /api/review/rig`.
 
-Backend contract + composition: see
+Backend contract: see
 [`../architecture/living-notes-review.md`](../architecture/living-notes-review.md).
 
-> Source @`bb5ad219`: `components/review/{SliceReviewTab,MissionReviewTab,
+> Source: `components/review/{SliceReviewTab,MissionReviewTab,
 > NeedsYouAccordion,AgentsBandView,VerifyLineageCard,EvidenceOpener,
 > RigAgentsPage}.tsx`, `review/vellum.ts`, `hooks/useReview.ts`,
-> `SharedDetailDrawer.tsx` (right-edge anchor + pre-flip z);
-> tests `test/{fileviewer-resolvable-target,drawer-primitives}.test.tsx`.
-> The rejected three-column compare and the separate item-join table are
-> DELETED files (corrective delete-not-demote; zero references remain).
+> `SharedDetailDrawer.tsx`; verified labels `SliceReviewTab.tsx:131-135`,
+> `:164`, `:194`.
 
-## 4. Dashboard — the landing surface (`/` → `Dashboard`)
+## 4. Dashboard — the launcher (`/` → `Dashboard`)
 
-`Dashboard` is a thin composition over the **0.3.1 vellum brand
-system**: it imports `MidLayerContent`, `TopLayerContent`,
-`DestinationsLayer` from `dashboard/vellum/index.js` — the SAME barrel
-`/lab/vellum-lab` imports, so the production dashboard tracks the design
-lab exactly (single source of truth). Real-data wiring: `useRigSummary`
-→ totalRigs/totalAgents, `usePsEntries` → activeAgents, `useSpecLibrary`
-→ librarySize, `window.location.hostname` → classification eyebrow. Per
-a 2026-05-15 founder dispatch the heavy `BackLayerContent` /
-`BackVellumSheet` back-layer was removed so the dashboard sits on the
-page-level cream paper-grid; the barrel still exports them (used by the
-lab).
+`Dashboard` is the paper-draft launcher (OPR.0.4.1.14). It renders, in
+order: a header with the station online state; `FieldEnvironment` (live
+rows: RIGS from `useRigSummary`, AGENTS as the sum of `nodeCount` from
+`usePsEntries`, STATION from `window.location.hostname`, OPERATOR ID from
+the `agents.operator_session` setting with an `OPERATOR` fallback, and
+VERSION from `useDaemonVersion` via `/api/health-summary/version`);
+`KernelStatusCard` (from `/api/kernel/status`); `HostConfigCard`; a grid of
+six destinations (Topology, Project, For You, Library, Search & Audit,
+Settings); and `DashboardFooter`. Its glyphs come from
+`dashboard/vellum/fidelity-glyphs.js`.
 
-> Source: `components/dashboard/Dashboard.tsx:1-52` (vellum-barrel
-> import `:12-16`, single-source-of-truth note `:2-5`, real-data hooks
-> `:29-39`, back-layer-removal note `:21-27`, render `:40-50`);
-> `components/dashboard/vellum/index.ts:1-26` (barrel; `BackLayerContent`
-> `:5` / `BackVellumSheet` `:6` still exported); slice-00 0.3.0-GT
-> seam (b) + §2 rows 1/2 @HEAD.
+The vellum barrel `dashboard/vellum/index.ts` still exports
+`BackLayerContent` and `BackVellumSheet`; `/lab/vellum-lab`
+(`lab/VellumLab.tsx`) imports from it.
+
+> Source: `components/dashboard/Dashboard.tsx` (header comment `:1-24`,
+> glyph import, `DESTINATIONS`, data wiring, render order);
+> `hooks/useDaemonVersion.ts`; `components/dashboard/vellum/index.ts:5-6`.
 
 ## 5. Cross-cutting properties
 
-- **Live daemon state, no UI-local persistence beyond soft-dismiss** —
-  every surface reads daemon hooks; the only UI-local state is the
-  per-event-seq dismiss set + transient lens chips + optimistic-outcome
-  map (`Feed.tsx:217` lens, `:224` optimistic map, `:240-241` dismiss
-  set; `ScopePages.tsx` `useState` tab state `:677`,`:753`,`:1192`)
-  @HEAD.
-- **Honest empty/error states** — `WorkspaceScopePage` no-workspace
-  (`ScopePages.tsx:682-693`), `WorkspaceOverviewPanel` index-unavailable
-  (`:565-573`, label `:568`), `SliceScopePage` not-available
-  (`:1225-1245`, label `:1235`) all surface the cause + a remediation
-  pointer, never a blank screen @HEAD.
+- **Live daemon state** — every surface reads daemon hooks. UI-local state
+  on these surfaces is the two For You dismissal sets (localStorage), the
+  lens, host filter and optimistic-outcome map (transient), and each scope
+  page's tab state.
+- **Honest empty/error states** — `WorkspaceScopePage` no-workspace and
+  `SliceScopePage` not-available surface the cause and a remediation
+  pointer, never a blank screen.
 - **0.3.0 observability spine on the 0.3.1 vellum brand layer** — the
-  classifier / verb-action / scope-rollup *logic* is the 0.3.0
-  foundation (§0); the *visual surface* (vellum cards, corner brackets,
-  graphics marks, dashboard) is the 0.3.1 brand maturation. The split is
-  slice-00 0.3.0-GT seam (b); do not collapse either direction @HEAD.
+  classifier / verb-action / scope-rollup logic is the 0.3.0 foundation
+  (§0); the visual surface is the 0.3.1 brand layer and later refreshes.
 
 ## OPEN items (carried, not smoothed)
 
-- **OPEN — For-You verb subset (slice-00 0.3.0-GT OPEN-3).** The exact
-  shipped For-You-surface verb subset is an unresolved velocity slice-01
-  ruling (CHANGELOG `[0.3.1]` "all 7" vs source-material §6 "subset"
-  discrepancy). This module describes the **7-verb system-level
-  vocabulary only** and reports the literal current `enabledVerbs`
-  prop value (§2.3) as source state, NOT as a resolution. Defer
-  For-You-subset enumeration to the pending velocity ruling.
 - **OPEN — `/project` redirect-stub consolidation.** `/progress`,
   `/slices`, `/steering` are `<Navigate to="/project">` stubs and
-  `/slices/$name` redirects into `/project/slice/$sliceId` (§1). The
-  former standalone surfaces fold into Project tabs; whether the stubs
-  are permanent or transitional is a product decision not resolvable
-  from source.
-- No slice-00 numeric-drift OPEN (1–5) applies — this module carries no
-  migration / route-group / PL-004-event counts.
+  `/slices/$name` redirects into `/project/slice/$sliceId` (§1). Whether
+  the stubs are permanent or transitional is a product decision not
+  resolvable from source.

@@ -65,7 +65,7 @@ describe("one instance-scoped view-state (PIN 1, FR-12/13)", () => {
     const s = createViewState({ instanceId: "t", ...withSnap });
     s.dispatch({ type: "cross", kind: "spec-of", name: "dev50.driver" });
     expect(s.get().section).toBe("specs");
-    expect(s.get().drill.at(-1)).toEqual({ kind: "spec", name: "driver-agent" });
+    expect(s.get().drill.at(-1)).toEqual({ kind: "spec", name: "driver-agent", specKind: "agent" });
   });
 
   it("cross-navs running: spec → topology scoped to its seats", () => {

@@ -8,6 +8,8 @@
 //  - the composed view handed to the provider carries the composer's partition.
 
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
+import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import type {
   ComposedView,
@@ -87,6 +89,38 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
 }
 
 describe("TerminalService — view resolution + one-shape result", () => {
+  it.each([false, true])("keeps the view outcome and puts the human handoff beside it (provider unavailable=%s)", async unavailable => {
+    const { deps, herdr } = makeDeps({ resolveLocalTmux: () => "/opt/tools/tmux" });
+    let calls = 0;
+    herdr.openView = async view => {
+      calls++;
+      return {
+        provider: "herdr", ok: !unavailable,
+        opened: unavailable ? [] : view.opened.map(pane => pane.seat),
+        absent: view.absent, degraded: view.degraded, pages: unavailable ? 0 : 1,
+        ...(unavailable ? { code: "herdr_unavailable", error: "not running" } : {}),
+        notes: ["Original provider detail"],
+      };
+    };
+    const result = await new TerminalService(deps).openView({ view: "acme-build" });
+    expect(calls).toBe(1);
+    expect(result).toMatchObject({ ok: !unavailable, opened: unavailable ? [] : rigRows.map(row => row.canonicalSessionName), absent: [], degraded: [] });
+    expect(result.code).toBe(unavailable ? "herdr_unavailable" : undefined);
+    expect(result.notes).toContain("Original provider detail");
+    const notes = result.notes!.join("\n");
+    expect(notes).toContain("shared dashboard is the overview");
+    expect(notes).toContain("lead pane");
+    expect(notes).toContain("Can you see the team?");
+    expect(notes).toContain("does not confirm");
+    if (unavailable) {
+      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -t 'dev-driver@acme-build'");
+      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -t 'rev-r1@acme-build'");
+      expect(notes).toContain("include every command in full, unchanged");
+    } else {
+      expect(notes).not.toContain("attach -t");
+    }
+  });
+
   it("opens a rig NAME as an interactive derived view (read-write panes)", async () => {
     const { deps, herdr } = makeDeps();
     const svc = new TerminalService(deps);
@@ -125,13 +159,24 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect((await svc.openView({ view: "pod:acme-build/ghost" })).code).toBe("view_not_found"); // unknown pod
   });
 
-  it("opens mission:/slice: as a READ-ONLY derived view (cross-rig observational)", async () => {
+  it.each(["mission:4.6", "slice:02"])("opens %s as a watch view without a team-conversation handoff", async view => {
     const { deps, herdr } = makeDeps();
     const svc = new TerminalService(deps);
-    const res = await svc.openView({ view: "mission:4.6" });
+    const res = await svc.openView({ view });
     expect(res.ok).toBe(true);
     expect(herdr.lastView?.opened.every((p) => p.readOnly === true)).toBe(true);
     expect(herdr.lastView?.opened[0]?.paneCommand).toContain("attach -r -t");
+    expect(res.notes?.join("\n") ?? "").not.toMatch(/lead pane|Can you see the team/);
+  });
+
+  it("omits the team-conversation handoff when every saved pane is read-only", async () => {
+    const { deps, herdr } = makeDeps({
+      viewsStore: { list: () => [], get: () => ({ ...savedView, members: savedView.members.map(member => ({ ...member, readOnly: true })) }) },
+    });
+    const result = await new TerminalService(deps).openView({ view: "watchtower" });
+    expect(result.opened).toEqual(savedView.members.map(member => member.seat));
+    expect(herdr.lastView?.opened.every(pane => pane.readOnly)).toBe(true);
+    expect(result.notes?.join("\n") ?? "").not.toMatch(/lead pane|Can you see the team/);
   });
 
   it("opens a saved view with per-member read-only", async () => {
@@ -226,5 +271,226 @@ describe("one terminal catalog inventory", () => {
     expect(batches).toBe(1);
     expect(singles).toBe(0);
     expect(batched.herdr.lastView).toBeNull();
+  });
+});
+
+describe("default saved kernel conversations", () => {
+  function kernel(operatorRuntime = "codex", advisorRuntime = "claude-code"): LiveSeatRow[] {
+    // Bindings deliberately differ from the logical IDs and inventory order.
+    return [
+      { logicalId: "queue.worker", runtime: "codex", canonicalSessionName: "queue-bound", attachmentType: "tmux" },
+      { logicalId: "operator.human", runtime: "terminal", canonicalSessionName: "tui-bound", tmuxSession: "actual-tui", attachmentType: "tmux" },
+      { logicalId: "operator.agent", runtime: operatorRuntime, canonicalSessionName: "operator-bound", attachmentType: "tmux" },
+      { logicalId: "advisor.lead", runtime: advisorRuntime, canonicalSessionName: "advisor-bound", attachmentType: "tmux" },
+    ];
+  }
+  function makeKernel(rows: LiveSeatRow[], saved: SavedView[] = []) {
+    return makeDeps({
+      viewsStore: { list: () => saved, get: id => saved.find(view => view.id === id) ?? null },
+      listRigNames: () => ["kernel"], listRigSeats: name => name === "kernel" ? rows : null,
+    });
+  }
+
+  it.each([false, true])("keeps the default kernel handoff distinct from a team (provider unavailable=%s)", async unavailable => {
+    const { deps, herdr } = makeKernel(kernel());
+    if (unavailable) herdr.openView = async view => ({
+      provider: "herdr", ok: false, opened: [], absent: view.absent, degraded: view.degraded,
+      pages: 0, code: "herdr_unavailable", error: "not running",
+    });
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(!unavailable);
+    expect(result.opened).toEqual(unavailable ? [] : ["tui-bound", "advisor-bound", "operator-bound"]);
+    expect(result.notes?.join("\n")).toContain("Default kernel view:");
+    expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
+    if (unavailable) expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
+  });
+
+  it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
+    const { deps, herdr, cmux } = makeKernel(kernel());
+    deps.hasSession = session => session !== "advisor-bound";
+    const provider = providerName === "herdr" ? herdr : cmux;
+    provider.openView = async view => ({
+      provider: providerName, ok: false, opened: [], pages: 0,
+      absent: view.absent, degraded: view.degraded,
+      code: `${providerName}_unavailable`, error: "not running", notes: ["Original provider detail"],
+    });
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
+    expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
+    expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
+    expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("operator.human: env -u TMUX tmux attach -t 'actual-tui'");
+    expect(result.notes).toContain("Original provider detail");
+    expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
+    expect(result.notes!.join("\n")).not.toContain("queue-bound");
+  });
+
+  it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("kernel geometry keeps three columns in preview, fingerprint and open for %s/%s", async (advisorRuntime, operatorRuntime) => {
+    const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime));
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:kernel" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.columns).toBe(3);
+    expect(preview.grids).toHaveLength(1);
+    expect(preview.grids[0]).toMatchObject({ columns: 3, rows: 1, blanks: 0 });
+    expect(preview.grids[0]!.root).toMatchObject({
+      type: "split", direction: "right", ratio: 1 / 3,
+      first: { type: "pane", label: "operator.human" },
+      second: { type: "split", direction: "right", ratio: 1 / 2,
+        first: { type: "pane", label: "advisor.lead" },
+        second: { type: "pane", label: "operator.agent" } },
+    });
+    expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
+      provider: "herdr", composed: preview.composed, grids: preview.grids,
+    })).digest("hex"));
+    const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
+    expect(result.ok).toBe(true);
+    expect(herdr.lastView).toEqual(preview.composed);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+  });
+
+  it.each(["saved:kernel", "saved:custom", "rig:kernel"])("kernel geometry preserves auto-grid for %s outside the default", async view => {
+    const custom: SavedView = { id: view.slice(6), name: "Custom", members: ["a", "b", "c"].map(seat => ({ seat })) };
+    const { deps, herdr } = makeKernel(kernel().filter(row => row.logicalId !== "queue.worker"), [custom]);
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.columns).toBeUndefined();
+    expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 2, blanks: 1 });
+    expect((await service.openView({ view, expectedPlan: preview.planId })).ok).toBe(true);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+  });
+
+  it("kernel geometry caps partial views to available panes while retaining named absences", async () => {
+    const rows = kernel();
+    rows.find(row => row.logicalId === "operator.agent")!.canonicalSessionName = null;
+    const { deps, herdr } = makeKernel(rows);
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:kernel" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.columns).toBe(3);
+    expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 1, blanks: 0 });
+    const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
+    expect(result.opened).toEqual(["tui-bound", "advisor-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.agent"]);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+  });
+
+  it("kernel geometry keeps auto-grid on each page without treating map indexes as columns", async () => {
+    const custom: SavedView = { id: "custom", name: "Custom", members: Array.from({ length: 6 }, (_, i) => ({ seat: `s${i}` })) };
+    const { deps } = makeKernel(kernel(), [custom]);
+    class PagedProvider extends RecordingProvider { readonly panesPerPage = 3; }
+    const provider = new PagedProvider("herdr");
+    deps.resolveProvider = () => provider;
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:custom" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.grids.map(({ columns, rows, blanks }) => ({ columns, rows, blanks }))).toEqual([
+      { columns: 2, rows: 2, blanks: 1 }, { columns: 2, rows: 2, blanks: 1 },
+    ]);
+    expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
+      provider: "herdr", composed: preview.composed, grids: preview.grids,
+    })).digest("hex"));
+    expect((await service.openView({ view: "saved:custom", expectedPlan: preview.planId })).ok).toBe(true);
+    expect(planHerdrLayout(provider.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
+  });
+
+  it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("resolves the %s/%s layout from installed bindings without saving it", async (advisorRuntime, operatorRuntime) => {
+    const saved: SavedView[] = [];
+    const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime), saved);
+    const service = new TerminalService(deps);
+    const expected = ["tui-bound", "advisor-bound", "operator-bound"];
+    expect((await service.listViews()).saved[0]?.members.map(member => member.seat)).toEqual(expected);
+    expect(herdr.lastView).toBeNull();
+    const preview = await service.previewView({ view: "saved:kernel" });
+    expect("composed" in preview && preview.composed.opened.map(member => member.seat)).toEqual(expected);
+    expect(herdr.lastView).toBeNull();
+    expect((await service.openView({ view: "saved:kernel" })).opened).toEqual(expected);
+    expect(herdr.lastView?.opened[0]?.paneCommand).toContain("'actual-tui'");
+    expect(herdr.lastView?.opened[1]?.runtime).toBe(advisorRuntime);
+    expect(saved).toEqual([]);
+  });
+
+  it("preserves a user kernel override, including remote membership and read-only flags", async () => {
+    const custom = { id: "kernel", name: "My view", members: [{ seat: "custom", host: "elsewhere", readOnly: true }] };
+    const views = [savedView, custom];
+    const { deps } = makeKernel(kernel(), views);
+    deps.listRigSeats = () => { throw new Error("must not resolve the default for an override"); };
+    const service = new TerminalService(deps);
+    expect((await service.listViews()).saved).toEqual(views);
+    const result = await service.openView({ view: "saved:kernel" });
+    expect(result.degraded).toEqual([{ seat: "custom", host: "elsewhere", reason: "host elsewhere is not in the hosts registry" }]);
+    expect(views).toEqual([savedView, custom]);
+  });
+
+  it("leaves unrelated custom views and the full rig view unchanged", async () => {
+    const { deps } = makeKernel(kernel(), [savedView]);
+    const service = new TerminalService(deps);
+    expect((await service.listViews()).saved[0]).toEqual(savedView);
+    expect((await service.openView({ view: "saved:watchtower" })).opened).toEqual(["lead@acme-ops", "builder@acme-ops"]);
+    expect((await service.openView({ view: "kernel" })).opened).toContain("queue-bound");
+    expect((await service.openView({ view: "rig:kernel" })).opened).toContain("queue-bound");
+  });
+
+  it("reports dead bound seats and never invents an unbound session", async () => {
+    const rows = kernel(); rows[1]!.canonicalSessionName = null;
+    const { deps } = makeKernel(rows);
+    deps.hasSession = name => name !== "advisor-bound";
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.opened).toEqual(["operator-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.human", "advisor-bound"]);
+    expect(result.notes).toContain("Default kernel view: dual-runtime.");
+  });
+
+  it.each(["claude-code", "codex"])("names an unbound operator in a %s-only kernel", async runtime => {
+    const rows = kernel(runtime, runtime);
+    rows.find(row => row.logicalId === "operator.agent")!.canonicalSessionName = null;
+    const { deps } = makeKernel(rows);
+    const probed: string[] = [];
+    deps.hasSession = name => { probed.push(name); return true; };
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(true);
+    expect(result.opened).toEqual(["tui-bound", "advisor-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.agent"]);
+    expect(probed).toEqual(["actual-tui", "advisor-bound"]);
+  });
+
+  it("keeps missing roles named while opening the remaining TUI", async () => {
+    const { deps } = makeKernel([kernel()[1]!]);
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(true);
+    expect(result.opened).toEqual(["tui-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead", "operator.agent"]);
+    expect(result.notes?.join(" ")).toContain("runtime layout unverified");
+  });
+
+  it("keeps a bound operator when the advisor row and runtime are missing", async () => {
+    const { deps } = makeKernel(kernel().filter(row => row.logicalId !== "advisor.lead"));
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(true);
+    expect(result.opened).toEqual(["tui-bound", "operator-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead"]);
+    expect(result.notes?.join(" ")).toContain("runtime layout unverified");
+  });
+
+  it.each(["unbound", "non-tmux", "missing"])("names all unavailable roles for %s kernels without calling the provider", async kind => {
+    const rows = kind === "missing" ? [] : kernel().map(row => ({ ...row,
+      ...(kind === "unbound" ? { canonicalSessionName: null, tmuxSession: null } : { attachmentType: "external_cli" }),
+    }));
+    const { deps, herdr } = makeKernel(rows);
+    deps.hasSession = () => { throw new Error("must not probe a guessed session"); };
+    const service = new TerminalService(deps);
+    const result = await service.openView({ view: "saved:kernel" });
+    expect(result.code).toBe("kernel_seats_unavailable");
+    expect(result.opened).toEqual([]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.human", "advisor.lead", "operator.agent"]);
+    for (const member of result.absent) expect(result.error).toContain(member.seat);
+    expect(herdr.lastView).toBeNull();
+  });
+
+  it("does not add the default when no kernel is installed", async () => {
+    const { deps } = makeDeps();
+    const service = new TerminalService(deps);
+    expect((await service.listViews()).saved).toEqual([savedView]);
+    expect((await service.openView({ view: "saved:kernel" })).code).toBe("view_not_found");
   });
 });

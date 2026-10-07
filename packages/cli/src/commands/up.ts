@@ -8,7 +8,8 @@ import { parse as parseYamlDoc } from "yaml";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
-import type { RiggedConfig } from "../config-store.js";
+import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
+import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { formatThreePart, type ThreePartRejection } from "./workflow-errors.js";
@@ -75,6 +76,12 @@ Examples:
   rig up secrets-manager
   rig up ./rig.yaml
   rig up ./demo.rigbundle --target ~/work
+
+An existing rig's name restores that rig from its automatically selected usable
+snapshot, resuming seats where their harness allows; it refuses while any of its seats is live. A spec
+whose rig name already exists starts a new team in place of the stopped one, which
+is archived, and refuses if the old one may still be running. To bring a stopped
+team back with its conversations, run rig up <rig-name> --existing, not the spec.
 `);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
@@ -130,12 +137,12 @@ Examples:
           if (opts.json) console.log(JSON.stringify(data));
           else {
             for (const line of bundleIdentityLines(data)) console.log(line);
-            console.log(`Status: ${installed.data.status ?? "unknown"}`);
+            console.log(`Status: ${installed.data.status ?? (installed.status >= 400 ? "not attempted" : "unknown")}`);
             for (const line of startupAttentionSummary(installed.data)) console.log(line);
             if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
             for (const line of bundleRoutingSummary(installed.data)) console.log(line);
             for (const warning of (installed.data.warnings as string[] | undefined) ?? []) console.warn(warning);
-            if (installed.status >= 400) console.error(bundleInstallError(installed.data));
+            if (installed.status >= 400) console.error(bundleInstallError(installed.data, false));
           }
           if (installed.status >= 400 || ["failed", "partial", "partially_restored", "not_attempted"].includes(String(installed.data.status ?? installed.data.rigResult))) process.exitCode = installed.status === 409 ? 1 : 2;
         } catch (err) { printBundleLinkError(err, opts.json); }
@@ -188,42 +195,11 @@ Examples:
       // Run preflight before auto-start
       let status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running") {
-        let resolvedConfig: RiggedConfig | null = null;
-        // bug-fix slice auth-bearer-tailscale-trust: track whether
-        // daemon.host was operator-explicit (env or config file) vs
-        // default-fallback. The daemon's multi-bind path (loopback +
-        // tailscale auto-detect) only runs when OPENRIG_HOST is NOT
-        // exported to the child, so we omit it on the default path.
-        // Hoisted to function scope so the startDaemon block below can
-        // read it after the preflight try-catch.
-        let hostForDaemon: string | undefined;
+        let startOptions: StartOptions;
         try {
-          const { ConfigStore } = await import("../config-store.js");
-          const { SystemPreflight } = await import("../system-preflight.js");
-          const { execSync } = await import("node:child_process");
-          const { OPENRIG_DIR, resolveBindIntent } = await import("../daemon-lifecycle.js");
-          const configStore = new ConfigStore();
-          resolvedConfig = configStore.resolve();
-          const hostResolution = configStore.resolveWithSource("daemon.host");
-          // S20 (r2 repair): the SHARED dedicated-intent seam — an env-sourced
-          // daemon.host (ENV_MAP ← OPENRIG_HOST, the injected routing channel) never
-          // creates bind intent through auto-start; flag-less auto-start honors only a
-          // FILE-sourced daemon.host or OPENRIG_BIND_HOST.
-          hostForDaemon = resolveBindIntent({
-            flagHost: undefined,
-            envBindHost: process.env["OPENRIG_BIND_HOST"],
-            configSource: hostResolution.source,
-            configHost: resolvedConfig.daemon.host,
-          }).host;
-          const preflightExec = depsOverride?.preflightExec ?? (async (cmd: string) =>
-            execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }));
-          const preflight = new SystemPreflight({
-            exec: preflightExec,
-            configStore,
-            getDaemonStatus: () => getDaemonStatus(deps.lifecycleDeps),
-            openrigHome: OPENRIG_DIR,
-          });
-          const preflightResult = await preflight.run();
+          const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
+          startOptions = prepared.options;
+          const preflightResult = prepared.preflight;
           if (!preflightResult.ready) {
             for (const check of preflightResult.checks.filter((c) => !c.ok)) {
               console.error(`✗ ${check.name}: ${check.error}`);
@@ -240,17 +216,7 @@ Examples:
         }
 
         try {
-          await startDaemon({
-            port: resolvedConfig?.daemon.port,
-            host: hostForDaemon,
-            db: resolvedConfig?.db.path,
-            transcriptsEnabled: resolvedConfig?.transcripts.enabled,
-            transcriptsPath: resolvedConfig?.transcripts.path,
-            workspaceRoot: resolvedConfig?.workspace.root,
-            contextRoot: resolvedConfig?.context.root,
-            skillsRoot: resolvedConfig?.skills.root,
-            topologyRoot: resolvedConfig?.topology.root,
-          }, deps.lifecycleDeps);
+          await startDaemon(startOptions, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {
           console.error(err instanceof Error ? err.message : String(err));
@@ -292,15 +258,15 @@ Examples:
       // rig of that name), refuse with an honest error pointing at
       // `rig unarchive` - never silently restore an archived rig, never
       // silently fall through. Applies to both default and --existing paths.
-      if (isRigName) {
+      const refuseArchivedName = async (name: string): Promise<boolean> => {
         const activeSummaries = await fetchRigSummaries();
-        const activeMatch = activeSummaries.some((r) => r.name === source);
+        const activeMatch = activeSummaries.some((r) => r.name === name);
         if (!activeMatch) {
           try {
             const archRes = await client.get<Array<{ id: string; name: string }>>(
               "/api/rigs/summary?archived=only",
             );
-            const archivedMatches = (archRes.data ?? []).filter((r) => r.name === source);
+            const archivedMatches = (archRes.data ?? []).filter((r) => r.name === name);
             if (archivedMatches.length > 0) {
               // `rig unarchive` resolves by rig ID, not name (it posts to
               // /api/rigs/<rigId>/unarchive), so the remediation MUST name the
@@ -311,30 +277,32 @@ Examples:
               if (opts.json) {
                 console.log(JSON.stringify({
                   error: "rig_archived",
-                  rig: source,
+                  rig: name,
                   archivedRigIds: ids,
                   action: ids.length === 1
                     ? `rig unarchive ${ids[0]}`
-                    : `rig unarchive <rigId> (archived rigs named '${source}': ${ids.join(", ")})`,
+                    : `rig unarchive <rigId> (archived rigs named '${name}': ${ids.join(", ")})`,
                 }));
               } else if (ids.length === 1) {
-                console.error(`Rig "${source}" is archived, so it is hidden from 'rig up' name resolution.`);
+                console.error(`Rig "${name}" is archived, so it is hidden from 'rig up' name resolution.`);
                 console.error(`  Bring it back first: rig unarchive ${ids[0]}`);
-                console.error(`  Then power it on:    rig up ${source}`);
+                console.error(`  Then power it on:    rig up ${name}`);
               } else {
-                console.error(`${ids.length} archived rigs are named "${source}"; they are hidden from 'rig up' name resolution.`);
+                console.error(`${ids.length} archived rigs are named "${name}"; they are hidden from 'rig up' name resolution.`);
                 console.error(`  Unarchive the one you want by id (then 'rig up'):`);
                 for (const id of ids) console.error(`    rig unarchive ${id}`);
               }
               process.exitCode = 1;
-              return;
+              return true;
             }
           } catch {
             // Archived-summary probe failed (e.g. older daemon) - fall through
             // to normal resolution; there are no archive semantics to enforce.
           }
         }
-      }
+        return false;
+      };
+      if (isRigName && await refuseArchivedName(source)) return;
       if (isRigName && !opts.existing) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");
@@ -342,12 +310,16 @@ Examples:
           // Library match found — check for existing-rig collision
           // Use /api/rigs/summary which mirrors findRigsByName (includes stopped rigs)
           const rigSummaries = await fetchRigSummaries();
-          const rigMatches = rigSummaries.filter((r) => r.name === source);
+          // An alias must not bypass the canonical name's existing/archive checks.
+          const resolvedName = source === "first-project" && entry.name === "starter" && entry.sourceType === "builtin"
+            ? entry.name : source;
+          if (resolvedName !== source && await refuseArchivedName(resolvedName)) return;
+          const rigMatches = rigSummaries.filter((r) => r.name === source || r.name === resolvedName);
           if (rigMatches.length > 0) {
             console.error(`'${source}' is ambiguous — it matches both an existing rig restore target and a library spec.`);
             console.error(`  To launch the library spec: rig up ${entry.sourcePath}`);
             console.error(`  The rig-name match refers to a stopped rig / snapshot-backed restore path.`);
-            console.error(`  To recover the existing rig instead of importing a starter: rig up ${source} --existing`);
+            console.error(`  To recover the existing rig instead of importing a starter: rig up ${rigMatches[0]!.name} --existing`);
             process.exitCode = 1;
             return;
           }
@@ -507,10 +479,6 @@ Examples:
           for (const node of nodes ?? []) {
             console.error(`  ${node.logicalId}${node.sessionName ? ` (${node.sessionName})` : ""}: ${node.reason}`);
           }
-          // #141: the rig is kept on this path, so its warnings (e.g. the archived earlier generation) still apply.
-          for (const w of (res.data["warnings"] as string[]) ?? []) {
-            console.error(`  warning: ${w}`);
-          }
         } else if (code === "cycle_error") {
           console.error("Cycle detected in rig topology. Check edge definitions for circular dependencies.");
         } else if (code === "validation_failed") {
@@ -530,16 +498,19 @@ Examples:
           // nothing-created, alternatives) — render it verbatim, never the
           // generic unknown-error/validate-your-spec fallback. #141's
           // generation_unconfirmed refusal is self-describing the same way.
-          const teaching = String(res.data["error"] ?? ((res.data["errors"] as string[]) ?? [])[0] ?? "A rig with this name is already running.");
+          const teaching = bundleInstallError(res.data, false);
           console.error(teaching);
         } else {
-          const errorText = String(res.data["error"] ?? "unknown error");
+          const errorText = bundleInstallError(res.data, false);
           console.error(`Up failed: ${errorText} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
           if (/agent_ref resolution failed|No agent\.yaml found/i.test(errorText)) {
             console.error("Hint: local: agent_ref paths resolve relative to the rig spec directory, not your shell cwd.");
             console.error("      Keep the agents/ tree beside the rig YAML, or switch those refs to path:/absolute/path.");
           }
         }
+        // File disposition and generation recovery matter on every failure,
+        // including validation and preflight refusals after materialization.
+        for (const warning of (res.data["warnings"] as string[]) ?? []) console.error(`  warning: ${warning}`);
         const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
         for (const s of stages) {
           console.log(`  ${s.stage}: ${s.status}`);

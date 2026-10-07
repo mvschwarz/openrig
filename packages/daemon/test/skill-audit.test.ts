@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { auditSkills, type SkillAuditEntry } from "../src/domain/skill-audit.js";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { auditSkills, listBundledSkillSources, type SkillAuditEntry } from "../src/domain/skill-audit.js";
 import type { SkillProvenanceEntry, SkillFrontmatter } from "../src/domain/skill-discovery.js";
 
 function makeEntry(overrides: Partial<SkillProvenanceEntry> & { fmOverrides?: Record<string, unknown> }): SkillProvenanceEntry {
@@ -436,5 +439,141 @@ describe("skill-audit", () => {
 
     const { entries: [result] } = auditSkills([entry]);
     expect(result!.verified.status).toBe("verified");
+  });
+});
+
+// #802 (a): a projected copy of a skill an installed plugin ships has known provenance (the plugin and its
+// version, verified by that release) while its bytes match the plugin's. An edited copy is audited as before.
+describe("skill-audit — bundled plugin skills", () => {
+  const SKILL = "---\nname: openrig-skills\ndescription: index\nmetadata:\n  openrig:\n    stage: shipped\n---\n\n# index\n";
+  let root: string;
+  let pluginsDir: string;
+  let projected: string;
+
+  function writePlugin(files: Record<string, string>, version = "0.1.4"): void {
+    const plugin = join(pluginsDir, "openrig-core");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin/plugin.json"), JSON.stringify({ name: "openrig-core", version }));
+    for (const [rel, content] of Object.entries(files)) {
+      mkdirSync(join(plugin, "skills/openrig-skills", rel, ".."), { recursive: true });
+      writeFileSync(join(plugin, "skills/openrig-skills", rel), content);
+    }
+  }
+
+  function writeProjected(files: Record<string, string>): void {
+    for (const [rel, content] of Object.entries(files)) {
+      mkdirSync(join(projected, rel, ".."), { recursive: true });
+      writeFileSync(join(projected, rel), content);
+    }
+  }
+
+  function projectedEntry(): SkillProvenanceEntry {
+    return makeEntry({
+      id: "openrig-skills",
+      path: projected,
+      sourceRoot: join(root, "home/.claude/skills"),
+      sourceKind: "runtime_user",
+      fmOverrides: { metadata: { openrig: { stage: "shipped" } } },
+    });
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "skill-audit-bundled-"));
+    pluginsDir = join(root, "openrig-home/plugins");
+    projected = join(root, "home/.claude/skills/openrig-skills");
+  });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); vi.useRealTimers(); });
+
+  it("a byte-identical projected copy has the plugin's provenance and no findings", () => {
+    writePlugin({ "SKILL.md": SKILL });
+    // The projection adds its own version marker beside the plugin's files.
+    writeProjected({ "SKILL.md": SKILL, ".openrig-vendor-version": "0.1.4\n" });
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.findings).toEqual([]);
+    expect(result!.bundledFrom).toEqual({ plugin: "openrig-core", version: "0.1.4" });
+    expect(result!.owner).toBe("openrig-core");
+    expect(result!.sourceRef).toBe("openrig-core@0.1.4");
+    expect(result!.verified).toEqual({ status: "bundled", plugin: "openrig-core", version: "0.1.4" });
+    expect(result!.state).toBe("active");
+  });
+
+  it("does not expire: the same copy is still clean years later", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2030-01-01T00:00:00Z"));
+    writePlugin({ "SKILL.md": SKILL });
+    writeProjected({ "SKILL.md": SKILL });
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.findings).toEqual([]);
+  });
+
+  it("an edited copy is audited like any other skill", () => {
+    writePlugin({ "SKILL.md": SKILL });
+    writeProjected({ "SKILL.md": SKILL + "\nLocal note.\n" });
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.bundledFrom).toBeNull();
+    expect(result!.findings.map((f) => f.class).sort()).toEqual(["missing_provenance", "missing_provenance", "missing_verified"]);
+  });
+
+  it("a copy missing a file the plugin ships is audited like any other skill", () => {
+    writePlugin({ "SKILL.md": SKILL, "scripts/helper.mjs": "export {};\n" });
+    writeProjected({ "SKILL.md": SKILL });
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.bundledFrom).toBeNull();
+    expect(result!.findings).toHaveLength(3);
+  });
+
+  it("a copy with a file added locally is audited like any other skill", () => {
+    writePlugin({ "SKILL.md": SKILL });
+    writeProjected({ "SKILL.md": SKILL, ".openrig-vendor-version": "0.1.4\n", "references/local.md": "# local\n" });
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.bundledFrom).toBeNull();
+    expect(result!.findings).toHaveLength(3);
+  });
+
+  it("a copy holding self-referencing directory symlinks completes and is audited like any other skill", () => {
+    writePlugin({ "SKILL.md": SKILL });
+    writeProjected({ "SKILL.md": SKILL, ".openrig-vendor-version": "0.1.4\n" });
+    symlinkSync(".", join(projected, "a"));
+    symlinkSync(".", join(projected, "b"));
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.bundledFrom).toBeNull();
+    expect(result!.findings).toHaveLength(3);
+  });
+
+  it("a copy that is itself a symlink to the plugin's skill directory still counts as bundled", () => {
+    writePlugin({ "SKILL.md": SKILL });
+    mkdirSync(join(projected, ".."), { recursive: true });
+    symlinkSync(join(pluginsDir, "openrig-core/skills/openrig-skills"), projected);
+
+    const { entries: [result] } = auditSkills([projectedEntry()], { bundledSources: listBundledSkillSources(pluginsDir) });
+    expect(result!.bundledFrom).toEqual({ plugin: "openrig-core", version: "0.1.4" });
+    expect(result!.findings).toEqual([]);
+  });
+
+  it("without bundled sources the projected copy is audited as before", () => {
+    writePlugin({ "SKILL.md": SKILL });
+    writeProjected({ "SKILL.md": SKILL });
+
+    const { entries: [result] } = auditSkills([projectedEntry()]);
+    expect(result!.bundledFrom).toBeNull();
+    expect(result!.findings).toHaveLength(3);
+  });
+
+  it("listBundledSkillSources reads each plugin's manifest version and skips plugins it can't version", () => {
+    writePlugin({ "SKILL.md": SKILL }, "0.1.5");
+    mkdirSync(join(pluginsDir, "no-manifest/skills"), { recursive: true });
+    mkdirSync(join(pluginsDir, "no-skills/.claude-plugin"), { recursive: true });
+    writeFileSync(join(pluginsDir, "no-skills/.claude-plugin/plugin.json"), JSON.stringify({ version: "1.0.0" }));
+
+    expect(listBundledSkillSources(pluginsDir)).toEqual([
+      { plugin: "openrig-core", version: "0.1.5", skillsDir: join(pluginsDir, "openrig-core/skills") },
+    ]);
+    expect(listBundledSkillSources(join(root, "missing"))).toEqual([]);
   });
 });

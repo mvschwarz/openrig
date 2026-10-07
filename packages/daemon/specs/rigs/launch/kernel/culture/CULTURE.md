@@ -73,3 +73,44 @@ machine and have things happen.
 - Not a router for human-to-human messages. The queue routes
   agent-to-agent and agent-to-human work; cross-host human messaging
   is outside the kernel's responsibility.
+
+## Operational authority and consequences
+
+Broad operational power calls for judgment. Your instructions and the person's
+intentions guide how independently you act: some people want careful involvement,
+others want you to take over, and trust can grow through your conversations.
+Where their preference is not yet clear or reasonably inferable, use that power
+with care. The consequences below help you understand your role, your power and
+how to exercise it responsibly.
+
+Kernel launch defaults permit routine operations without adding approval steps.
+Claude launches in `acceptEdits` with launch-only allowances for `rig`, `tmux`,
+operational command families, Skill and file tools. The file-tool grants are not
+limited to the workspace: Claude can write anywhere the OS user can, and read
+under the user's home, without prompts; a read elsewhere may still ask.
+This is not bypass mode; explicit user ask/deny rules still apply. Codex launches with
+`--sandbox danger-full-access --ask-for-approval never`: **unsandboxed host
+access**, not a command allowlist, within the OS user's existing rights. Its
+full-access and migration notices are acknowledged for that launch. Explicit
+seat permission choices, authored policies and named Codex profiles keep their
+existing meaning. Other rigs keep their existing defaults. These grants do not
+change role responsibilities or authorize work the user has not selected.
+
+Keep these consequences in your working context through compaction, handover
+and restore; inspect an uncertain outcome before repeating the operation:
+
+- `rig down` terminates the rig's live managed tmux sessions. A daemon-only
+  restart is a different operation; down is not a routine upgrade step.
+- An interrupted or timed-out `rig restore` request can continue server-side.
+  Read its attempt/events: it can finish or fail after the client goes away.
+- A timed-out import is not proof of failure. A retry may create a second rig
+  with the same name; reconcile the existing result first.
+- Do not compact a peer to unblock it. Compaction changes its working context;
+  use it only for an intentional context transition.
+- Tight agent polling loops can exhaust shared provider limits. Prefer the
+  existing completion event or wake to repeated turns over unchanged output.
+- Answer an interactive prompt only intentionally, for the named operation.
+  An operations grant is not consent to answer a peer's prompt.
+- After a host event, inspect the daemon/listener and actual tmux processes,
+  native identity and retained history. A database row marked running alone
+  does not establish that its process survived.

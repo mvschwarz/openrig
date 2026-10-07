@@ -24,11 +24,12 @@ interface AuditEntry {
   sourceKind: string;
   shadowed: boolean;
   stage: string | null;
-  verified: { status: string; date?: string; source?: string };
+  verified: { status: string; date?: string; source?: string; plugin?: string; version?: string };
   contentHash: string;
   state: string;
   owner: string | null;
   sourceRef: string | null;
+  bundledFrom?: { plugin: string; version: string } | null;
   findings: AuditFinding[];
 }
 
@@ -37,6 +38,7 @@ interface AuditResponse {
   entries: AuditEntry[];
   totalFindings: number;
   mirrorDriftError?: string;
+  mirrorDriftSkipped?: string;
   error?: string;
 }
 
@@ -118,7 +120,7 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      const { entries, totalFindings, mirrorDriftError } = res.data;
+      const { entries, totalFindings, mirrorDriftError, mirrorDriftSkipped } = res.data;
       const hasFail = totalFindings > 0 || !!mirrorDriftError;
 
       if (opts.json) {
@@ -148,6 +150,10 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
 
       if (mirrorDriftError) {
         console.log(`MIRROR DRIFT CHECK UNAVAILABLE: ${mirrorDriftError}`);
+        console.log("");
+      } else if (mirrorDriftSkipped) {
+        // Informational: an installed package has no source mirror to compare.
+        console.log(`MIRROR DRIFT CHECK SKIPPED: ${mirrorDriftSkipped}`);
         console.log("");
       }
 

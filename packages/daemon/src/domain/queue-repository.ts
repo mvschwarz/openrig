@@ -2220,7 +2220,7 @@ export class QueueRepository {
           .prepare(
             `UPDATE queue_items
                SET state = 'in-progress', ts_updated = ?, claimed_at = ?, closure_required_at = ?,
-                   claimed_by_generation_uuid = ?
+                   claimed_by_generation_uuid = ?, blocked_on = NULL
              WHERE qitem_id = ?`
           )
           .run(ts, ts, closureRequiredAt, claimedByGeneration, input.qitemId);
@@ -2228,7 +2228,7 @@ export class QueueRepository {
         this.db
           .prepare(
             `UPDATE queue_items
-               SET state = 'in-progress', ts_updated = ?, claimed_at = ?, closure_required_at = ?
+               SET state = 'in-progress', ts_updated = ?, claimed_at = ?, closure_required_at = ?, blocked_on = NULL
              WHERE qitem_id = ?`
           )
           .run(ts, ts, closureRequiredAt, input.qitemId);
@@ -2239,6 +2239,9 @@ export class QueueRepository {
         state: "in-progress",
         actorSession: input.destinationSession,
         transitionNote: "claimed",
+        // Preserve the former gate as an audit pointer without marking a closure
+        // or changing the note execution-view uses to exclude claim activity.
+        closureTarget: qitem.state === "blocked" ? qitem.blockedOn ?? undefined : undefined,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
@@ -2364,6 +2367,16 @@ export class QueueRepository {
     return { qitemId: input.qitemId, ...result };
   }
 
+  /** Internal read-only audit pointer for non-state receipts. Never search past a state write. */
+  retainedClaimBlocker(qitemId: string): string | undefined {
+    const latest = this.transitionLog.listForQitem(qitemId).at(-1);
+    // Explicit state writes do not carry this non-closure audit pointer. Do not
+    // search past one, even if an older claim still records a gate in history.
+    return latest?.state === "in-progress" && latest.closureReason === null
+      ? latest.closureTarget ?? undefined
+      : undefined;
+  }
+
   /**
    * Internal: closure validation + UPDATE + transition log + emit
    * queue.updated event. Caller is responsible for transaction wrapping
@@ -2418,6 +2431,9 @@ export class QueueRepository {
         state: qitem.state,
         actorSession: input.actorSession,
         transitionNote: input.transitionNote,
+        // A note-only append does not clear the claim's retained park gate.
+        // Carry its audit pointer so a later state write can end this chain.
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
         identityProvenance: input.identityProvenance ?? null,
       });
       const persistedEvent = this.eventBus.persistWithinTransaction({
@@ -2542,7 +2558,13 @@ export class QueueRepository {
     // enforcement is here at the write path — the `rig queue block` verb and
     // raw `update --state blocked` hit the same validator (no verb-only
     // enforcement). Blocking on another qitem requires nothing new (BR-1).
-    const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn;
+    // A claimed item has no current gate, but re-parking without --blocked-on
+    // retains the previous park's gate, as it did before claim cleared the row.
+    const previousClaimBlocker = input.state === "blocked" && qitem.state === "in-progress"
+      && input.blockedOn == null && qitem.blockedOn == null
+      ? this.retainedClaimBlocker(input.qitemId)
+      : null;
+    const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn ?? previousClaimBlocker ?? null;
     if (input.state === "blocked" && effectiveBlockedOn && this.getById(effectiveBlockedOn)?.humanIntent === "update") {
       throw new QueueRepositoryError("invalid_human_notification", "An informational update is not an approval dependency. Create a separate decision request if a human decision is needed.");
     }
@@ -3407,6 +3429,7 @@ export class QueueRepository {
           state: qitem.state,
           actorSession: "daemon@system",
           transitionNote: "closure-overdue",
+          closureTarget: this.retainedClaimBlocker(qitemId),
         });
       }
       return this.eventBus.persistWithinTransaction({
@@ -3682,6 +3705,7 @@ export class QueueRepository {
         state: qitem.state,
         actorSession: "system:queue-fallback",
         transitionNote: `fallback-routed: ${originalDestination} → ${fallbackDestination} (${reason})`,
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined,
       });
 
       return this.eventBus.persistWithinTransaction({

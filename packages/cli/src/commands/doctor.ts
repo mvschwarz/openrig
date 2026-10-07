@@ -386,7 +386,9 @@ function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
 }
 
 export function doctorCommand(depsOverride?: DoctorDeps): Command {
-  const cmd = new Command("doctor").description("Verify OpenRig install health");
+  const cmd = new Command("doctor")
+    .description("Check installation, dependencies, writable paths, port/daemon and conditional cmux control")
+    .addHelpText("after", "\nWith --spec, compares declared and live topology. This is not an end-to-end readiness check.\nProvider login and agent task-readiness are not established. Check only your selected providers: claude auth status or codex login status.\nInspect your team with rig ps --nodes --rig <rig> and rig capture <seat> --lines 30.");
 
   cmd
     .option("--json", "JSON output for agents")
@@ -442,7 +444,10 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       }
 
       console.log("");
-      console.log(healthy ? "System checks look good." : "Some checks failed.");
+      console.log(healthy ? "No failures in the checks above. Review any WARN or SKIP rows." : "Some checks failed. Review the FAIL rows and their fixes above.");
+      console.log("This is not an end-to-end readiness verdict: provider login and agent task-readiness are not established.");
+      console.log("Check only your selected providers: `claude auth status` or `codex login status`.");
+      console.log("Inspect your team with `rig ps --nodes --rig <rig>` and `rig capture <seat> --lines 30`.");
       if (!healthy) process.exitCode = 1;
     });
 

@@ -1,6 +1,8 @@
+import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
 const MENU = [
@@ -8,6 +10,7 @@ const MENU = [
   "› 1. Update now (runs `npm install -g @openai/codex`)",
   "  2. Skip", "  3. Skip until next version", "Press enter to continue",
 ].join("\n");
+const CURRENT_MENU = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
 const READY = "OpenAI Codex (v0.155.1)\n› Ask Codex to do anything";
 const binding = {
   id: "b", nodeId: "n", tmuxSession: "checker@test", tmuxWindow: null, tmuxPane: null,
@@ -43,7 +46,7 @@ const processRows = (shape: "wrapper" | "exec-wrapper" | "native"): ProcessRow[]
     { pid: 103, ppid: 102, command: native, pgid: 102, tpgid: 102, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
   ];
 };
-function fixture(options: { delay?: number; beforeMenu?: number; failInput?: boolean; screen?: string; command?: string; panePid?: number; processes?: ProcessRow[]; shape?: "wrapper" | "exec-wrapper" | "native" } = {}) {
+function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; failInput?: boolean; screen?: string; command?: string; panePid?: number; processes?: ProcessRow[]; shape?: "wrapper" | "exec-wrapper" | "native" } = {}) {
   let selected = false;
   let ticks = 0;
   let updates = 0;
@@ -52,7 +55,7 @@ function fixture(options: { delay?: number; beforeMenu?: number; failInput?: boo
   const commands: string[] = [];
   const leaked: string[] = [];
   const ready = () => selected && ticks >= (options.delay ?? 0);
-  const screen = () => options.screen ?? (ticks < (options.beforeMenu ?? 0) ? "Starting Codex..." : ready() ? READY : MENU);
+  const screen = () => options.screen ?? (ticks < (options.beforeMenu ?? 0) ? "Starting Codex..." : ready() ? READY : (options.menu ?? MENU));
   const tmux = new TmuxAdapter(async (cmd) => {
     commands.push(cmd);
     if (cmd.includes("paste-buffer")) {
@@ -96,6 +99,47 @@ const paths = [
   { name: "resume", opts: { name: "checker@test", resumeToken: "original-thread" } },
   { name: "fork", opts: { name: "checker@test", forkSource: { kind: "native_id" as const, value: "parent-thread" } } },
 ];
+
+it.each(paths)("current update header sends one key through real tmux serialization: $name", async ({ opts }) => {
+  const f = fixture({ menu: CURRENT_MENU, delay: 4 });
+  const result = await f.adapter.launchHarness(binding, opts);
+  expect(f.commands).toEqual(["tmux send-keys -t 'checker@test' '3'"]);
+  expect(f.counts()).toEqual({ updates: 0, dismissals: 1 });
+  expect(f.leaked).toEqual([]);
+  expect(result.ok).toBe(true);
+});
+
+describe.each(paths)("copied current update text: $name", ({ opts }) => {
+  it.each([
+    ["header", "  Update available · 0.160.0 → 0.160.1"],
+    ["menu", CURRENT_MENU.trimEnd()],
+  ])("preserves the later live composer after a copied %s", async (_label, copied) => {
+    const screen = `The documentation shows this:\n${copied}\n› Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`;
+    const f = fixture({ screen });
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent: screen }))
+      .toMatchObject({ status: "resumed", code: "active_runtime" });
+    await f.adapter.launchHarness(binding, opts);
+    expect(f.commands).toEqual([]);
+  });
+
+  it("keeps a genuine menu with a custom footer and no later composer gated", async () => {
+    const menu = `${CURRENT_MENU.trimEnd()}\n  5h 71% left · GPT-6-Astra high · Context 81% left`;
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent: menu }))
+      .toMatchObject({ status: "inconclusive", code: "update_gate" });
+    const f = fixture({ menu });
+    await f.adapter.launchHarness(binding, opts);
+    expect(f.commands).toEqual(["tmux send-keys -t 'checker@test' '3'"]);
+    expect(f.counts()).toEqual({ updates: 0, dismissals: 1 });
+  });
+
+  it.each([
+    "› Continue", "» Continue",
+  ])("does not choose from copied menu text before the later marker: %s", async (marker) => {
+    const f = fixture({ screen: `${CURRENT_MENU.trimEnd()}\n${marker}` });
+    await f.adapter.launchHarness(binding, opts);
+    expect(f.commands).toEqual([]);
+  });
+});
 
 describe.each(paths)("Codex update input: $name", ({ opts }) => {
   it.each([0, 4, 100])("sends one real key, no Enter or retry, with %i delayed ticks", async (delay) => {

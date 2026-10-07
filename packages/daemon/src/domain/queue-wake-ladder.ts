@@ -508,6 +508,8 @@ function appendMarker(repo: QueueRepository, row: QueueItem, note: string): void
     state: row.state,
     actorSession: LADDER_ACTOR,
     transitionNote: note,
+    // A scheduler receipt does not clear the claim's original gate. State writes do.
+    closureTarget: row.state === "in-progress" ? repo.retainedClaimBlocker(row.qitemId) : undefined,
   });
 }
 
@@ -893,17 +895,18 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 }
 
 /** An old idle observation cannot clear a newly observed transport refusal.
- * Keep uncertainty until the existing oracle supplies a newer clear state. */
+ * Keep uncertainty until the existing oracle supplies a newer clear state: needs-input
+ * evidence observed after the refusal. A declared rung that never reported, or a newer
+ * working/idle update on top of an older clear, is not that evidence. */
 export function classifyPromptAfterRefusal(
-  state: Pick<ArbitratedSeatState, "activity" | "needsInput" | "changedAt" | "rungs"> | null | undefined,
+  state: Pick<ArbitratedSeatState, "activity" | "needsInput" | "needsInputEvidence"> | null | undefined,
   refusedAt: string,
 ): "blocked" | "clear" | "unknown" {
   if (!state || state.activity === "unknown") return "unknown";
   if (state.needsInput.count > 0) return "blocked";
-  const canObservePrompt = state.rungs.some(({ rung, trust }) => trust === "authoritative"
-    && (rung === "needs-input-chrome" || rung === "lifecycle-hooks" || rung === "self-report"));
-  if (!canObservePrompt) return "unknown";
-  return Date.parse(state.changedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
+  const evidence = state.needsInputEvidence;
+  if (!evidence) return "unknown";
+  return Date.parse(evidence.observedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
 }
 
 const PROMPT_ALERT_TAG = "wake-prompt-refusal";
@@ -1137,7 +1140,8 @@ async function refreshEscalationRowIfExists(
   deps.db.transaction(() => {
     deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify([...tags, ...added]), existing.qitem_id);
     deps.queueRepo.transitionLog.append({ qitemId: existing.qitem_id, state: row.state, actorSession: LADDER_ACTOR,
-      transitionNote: `wake-escalation members added: ${added.join(", ")}` });
+      transitionNote: `wake-escalation members added: ${added.join(", ")}`,
+      closureTarget: row.state === "in-progress" ? deps.queueRepo.retainedClaimBlocker(existing.qitem_id) : undefined });
   })();
 }
 

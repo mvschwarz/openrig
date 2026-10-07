@@ -28,7 +28,7 @@ function fixture() {
   });
   return { controller, seat, posts, startDaemon, onWork, onNative, response: (fn: typeof response) => { response = fn; }, down: () => { probeState = "down"; } };
 }
-async function chooseOperator(f: ReturnType<typeof fixture>) { await f.controller.refresh(); await f.controller.key("enter"); }
+async function chooseOperator(f: ReturnType<typeof fixture>) { await f.controller.open(); await f.controller.key("enter"); }
 
 describe("TUI startup choices", () => {
   const stagedWarning = "Startup prompt still staged in worker@example; press Enter in that pane.";

@@ -10,7 +10,8 @@ import type {
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
-import { inspectSkillDirectory, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
+import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
+import { resolvePluginPath } from "./projection-planner.js";
 
 // -- Types --
 
@@ -282,6 +283,29 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     else selectedResult!.skills.push(qualified);
   }
   selectedResult!.skills.sort((a, b) => a.effectiveId < b.effectiveId ? -1 : a.effectiveId > b.effectiveId ? 1 : 0);
+
+  // A selected plugin's skills reach Claude Code and Codex seats through the managed
+  // loadout, because neither runtime reads skills from the plugin folder projected into
+  // the working directory. A skill the profile already selects keeps that source.
+  if (runtime === "claude-code" || runtime === "codex") {
+    const selectedIds = new Set(selectedResult!.skills.map((skill) => skill.effectiveId));
+    for (const plugin of selectedResult!.plugins) {
+      const resource = plugin.resource as PluginResource;
+      const pluginSkills = resolvePluginSkills({
+        pluginId: resource.id,
+        pluginRoot: resolvePluginPath(resource.source.path, plugin.sourcePath),
+        runtime,
+        pluginType: resource.pluginType,
+      });
+      skillWarnings.push(...pluginSkills.warnings);
+      for (const skill of pluginSkills.entries) {
+        if (selectedIds.has(skill.id)) continue;
+        selectedIds.add(skill.id);
+        catalogResult.loadout.entries.push(skill);
+      }
+    }
+    catalogResult.loadout.entries.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  }
 
   // 7. Resolve restorePolicy with narrowing
   const restorePolicyResult = resolveRestorePolicy(spec, profile, member);

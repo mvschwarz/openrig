@@ -208,8 +208,8 @@ function herdrPaneCommand(pane: ComposedPane): string {
 }
 
 /**
- * Build the EQUAL auto-grid layout tree for one page of panes. PURE. The grid
- * shape matches the UI TerminalLauncher `suggestLayout` exactly —
+ * Build an equal grid for one page. Explicit columns are capped to its pane
+ * count, as in cmux; otherwise use the UI TerminalLauncher `suggestLayout` —
  * cols = ceil(sqrt(N)), rows = ceil(N/cols): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3
  * (cols×rows). An incomplete rectangle is padded with inert blank panes so
  * every cell is the same size; blanks are layout filler only — they are never
@@ -219,8 +219,8 @@ function herdrPaneCommand(pane: ComposedPane): string {
  * hint. Rows are built as equal `right` strips,
  * then combined with equal `down` strips.
  */
-export function buildGridRoot(panes: ComposedPane[]): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
-  const cols = autoGridCols(panes.length);
+export function buildGridRoot(panes: ComposedPane[], columns?: number): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
+  const cols = Math.min(columns ?? autoGridCols(panes.length), panes.length || 1);
   const rows = Math.ceil(panes.length / cols);
   const blanks = rows * cols - panes.length;
   const leaves: HerdrLayoutNode[] = panes.map((pane) => ({
@@ -268,7 +268,7 @@ export function planHerdrLayout(
   // Tab labels keep the launch token, so every open is still a fresh, distinct space.
   const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
-    const grid = buildGridRoot(page);
+    const grid = buildGridRoot(page, view.columns);
     return {
       tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
       root: grid.root,

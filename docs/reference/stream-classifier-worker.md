@@ -62,8 +62,13 @@ Unknown answers remain null; a wholly unknown answer abstains. Invalid model,
 provider, answer keys, choices, probabilities or response bytes reject the whole
 answer. Probability sums retain the strict 0.001 tolerance; there is no rounding
 repair or partial salvage. Unavailable/invalid provider work, Ctrl-C or SIGTERM
-stops that run with no classification write; the item in hand is recorded as an
-abstention, final for that classifier version, taxonomy version and evidence epoch. Inspect the returned attempt state: terminal abstentions
+stops that run with no classification write; when the classifier returns that
+outcome, the item in hand is recorded as an abstention, final for that classifier
+version, taxonomy version and evidence epoch. The worker's own deadline (the lesser
+of the request timeout and the time left before the next lease heartbeat) is
+different: when it fires
+first, the attempt is recorded as `error` with a retry time, or `exhausted` once the
+retry budget is spent, not as an abstention. Inspect the returned attempt state: terminal abstentions
 are not reopened, and failed/unknown daemon writes must be reconciled through the
 existing ledger. Never change the evidence epoch merely to retry an experiment.
 

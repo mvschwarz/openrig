@@ -19,6 +19,7 @@ function oracleState(overrides: Partial<ArbitratedSeatState>): ArbitratedSeatSta
     seatNodeId: SEAT.seatNodeId,
     activity: "idle-at-prompt",
     needsInput: { count: 0, reason: null },
+    needsInputEvidence: null, // sampling-decided: no needs-input evidence supplied the zero
     decidedBy: "window-sampling",
     seq: 7,
     changedAt: "2026-08-26T23:00:00.000Z",

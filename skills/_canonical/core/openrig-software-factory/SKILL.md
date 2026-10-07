@@ -37,13 +37,16 @@ read [references/worked-example.md](references/worked-example.md). Installed cop
 `rig context get skills/core/openrig-software-factory/references/worked-example.md`.
 A roadmap, YAML file or wake does not execute work or authorize a new outcome.
 
-## Choose the first project's providers
+## Choose the first team and its providers
 
-Ask which working account(s) the user wants: Claude Code, Codex, or both. Reuse
-an explicit choice and recommend the account they already have working. Use
-`first-project-claude` (two Claude), `first-project` (two Codex), or
-`first-project-mixed` (Claude owner, Codex checker). All share the same task and
-owner/checker culture. Check only selected CLIs/logins; request `claude auth login`
+Ask what the user wants to build and which working account(s) they have: Claude
+Code, Codex, or both. Recommend one of three teams: `starter` (a Claude builder
+and a Codex reviewer, for one bounded change), `workshop` (a lead, a builder, QA
+and a reviewer; a rig bundle installed from its pinned listing) or `factory` (seven
+agents for sustained product work). When the user lacks a provider a team needs,
+write an adapted copy of the team under the same name, as the kernel operator's
+guidance describes; never offer per-provider variants. `first-project` is
+starter's old name. Check only the CLIs/logins the team needs; request `claude auth login`
 or `codex login` once when that selected login is missing. No credential copying,
 unused provider prerequisite or silent model/provider fallback.
 
@@ -55,8 +58,8 @@ Do not add an unused-provider login gate or manual kernel setup to this path.
 An instance-wide provider restriction is a separate request. Preserve an
 existing kernel and working user rigs.
 
-Show the chosen recipe, resolved runtimes/models and exact
-`rig up <starter> --cwd . --plan` / `rig up <starter> --cwd .` commands. Codex seats
+Show the chosen team, resolved runtimes/models and exact
+`rig up <team> --cwd . --plan` / `rig up <team> --cwd .` commands. Codex seats
 retain `gpt-6-astra`; Claude seats use the configured native default without an
 OpenRig model override. Confirm that model with the user and its availability;
 verify the native session's actual model before consequential work. Use the

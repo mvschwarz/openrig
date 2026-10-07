@@ -223,8 +223,8 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     void indentOf;
     // PIN-1 untouched: the child's action is still the spec drill from the row model
     const rows = computeExplorerRows(s.get(), nsSnap);
-    const childRow = rows.find((r) => r.key === "spec:vault-specialist")!;
-    expect(childRow.action).toEqual({ type: "drill", resource: "spec", name: "vault-specialist" });
+    const childRow = rows.find((r) => r.key === "spec:agent:vault-specialist")!;
+    expect(childRow.action).toEqual({ type: "drill", resource: "spec", name: "vault-specialist", specKind: "agent" });
   });
 
   it("pod rows carry their agent count right-aligned (moved out of the inline label)", () => {

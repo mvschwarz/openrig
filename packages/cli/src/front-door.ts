@@ -78,8 +78,9 @@ export function resolveTuiPath(baseDir: string, exists: (p: string) => boolean =
 export const USAGE_LINES = [
   "rig — the OpenRig control plane",
   "",
-  "  rig              open mission control (interactive terminal only)",
-  "  rig tui          open mission control (explicit alias of bare `rig`)",
+  "  rig              open the status dashboard (interactive terminal only; not agent chat)",
+  "  rig tui          open the same dashboard; --shared joins its existing kernel terminal",
+  "  rig terminal open saved:kernel   open the kernel dashboard and agent conversations together",
   "  rig --help       full command list",
   "  rig up <rig>     bring a rig up",
   "  rig ps           list live seats",

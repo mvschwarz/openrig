@@ -1,8 +1,8 @@
 // Slice 16 (OPR.0.4.7.16) — product-team starter bootstrap hygiene.
 // Content assertions on the SHIPPED starter source so the flagship rig works
 // out of the box: (1) the claude-settings fragment carries the dev toolchain a
-// TDD factory needs while rig up/down stays gated; (3) the QA agent carries the
-// test-driven-development skill it enforces. (Item 2, culture seat-id staleness,
+// factory needs while rig up/down stays gated; (3) development defaults do not
+// select the optional test-driven-development skill. (Item 2, culture seat-id staleness,
 // is covered by the rig-spec-audit test in packages/cli/test/rig.test.ts.)
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -21,9 +21,10 @@ describe("Slice 16 — starter bootstrap hygiene", () => {
     expect(frag.permissions.deny).toBeUndefined();
   });
 
-  it("item 3: the QA agent carries the test-driven-development skill it enforces", () => {
-    const qa = readFileSync(specs + "agents/development/qa/agent.yaml", "utf8");
-    // present in the skills array (not merely anywhere in the file)
-    expect(qa).toMatch(/skills:\s*\[[^\]]*test-driven-development/);
+  it("item 3: implementer and QA defaults do not select the optional TDD skill", () => {
+    for (const agent of ["implementer", "qa"]) {
+      const spec = readFileSync(specs + `agents/development/${agent}/agent.yaml`, "utf8");
+      expect(spec).not.toContain("test-driven-development");
+    }
   });
 });

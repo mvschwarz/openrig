@@ -282,7 +282,7 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
  * `~user/...` (with explicit username) is NOT expanded; treated as a
  * literal relative segment per Node's nodePath convention.
  */
-function resolvePluginPath(rawPath: string, specSourcePath: string, openrigHome: string): string {
+export function resolvePluginPath(rawPath: string, specSourcePath: string, openrigHome: string = OPENRIG_HOME): string {
   if (rawPath.startsWith("openrig-home:")) return nodePath.resolve(openrigHome, rawPath.slice("openrig-home:".length));
   if (rawPath === "~") return os.homedir();
   if (rawPath.startsWith("~/")) return nodePath.join(os.homedir(), rawPath.slice(2));

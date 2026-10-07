@@ -232,23 +232,37 @@ describe("rig setup", () => {
   it("AC-1: goldenPathNextSteps is the ordered sequence over existing verbs, with the durable doc", () => {
     const out = goldenPathNextSteps().join("\n");
     const upIdx = out.indexOf("rig up");
+    const loginIdx = out.indexOf("claude auth status");
+    const daemonIdx = out.indexOf("rig daemon start");
     const statusIdx = out.indexOf("rig status");
+    const offerIdx = out.indexOf("Open the OpenRig view now?");
+    const viewIdx = out.indexOf("rig terminal open saved:kernel");
     const wsIdx = out.indexOf("rig workspace doctor");
     const wfIdx = out.indexOf("rig workflow specs");
     const scopeIdx = out.indexOf("rig scope");
     expect(upIdx).toBeGreaterThan(-1);
-    expect(statusIdx).toBeGreaterThan(upIdx);
+    expect(loginIdx).toBeGreaterThan(-1);
+    expect(daemonIdx).toBeGreaterThan(loginIdx);
+    expect(statusIdx).toBeGreaterThan(daemonIdx);
+    expect(offerIdx).toBeGreaterThan(statusIdx);
+    expect(viewIdx).toBeGreaterThan(offerIdx);
+    expect(upIdx).toBeGreaterThan(viewIdx);
     expect(wsIdx).toBeGreaterThan(statusIdx);
     expect(wfIdx).toBeGreaterThan(wsIdx);
     expect(scopeIdx).toBeGreaterThan(wsIdx);
-    expect(out).toContain("rig up <starter> --cwd . --plan");
-    for (const name of ["first-project", "first-project-claude", "first-project-mixed"]) expect(out).toContain(name);
-    expect(out).toContain("check only selected logins");
-    expect(out).toContain("rig send dev-owner@<starter>");
-    expect(out).toContain("rig queue list --destination dev-owner@<starter>");
+    expect(out).toContain("rig up <team> --cwd . --plan");
+    for (const name of ["starter", "workshop", "factory"]) expect(out).toContain(name);
+    expect(out).not.toContain("first-project-claude");
+    expect(out).not.toContain("first-project-mixed");
+    expect(out).toContain("Check only selected logins");
+    expect(out).toContain("Started is not ready");
+    expect(out).toContain("No: give the command to open it later");
+    expect(out).toContain("Over SSH: give the exact connection/attach command");
+    expect(out).toContain("rig send dev-build@starter");
+    expect(out).toContain("rig queue list --destination dev-build@starter");
     expect(out).not.toContain("rig queue list --rig");
     expect(out).toContain("rig tui --shared");
-    expect(out).toContain("docs/reference/getting-started.md");
+    expect(out).toContain("rig context get reference/getting-started.md");
     // no magic mega-command - the path is existing verbs only
     expect(out).not.toMatch(/rig (journey|onboarding)\b/);
     // built-in discovery surface is `rig workflow specs` (lists registered specs,

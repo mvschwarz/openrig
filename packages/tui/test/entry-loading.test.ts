@@ -101,12 +101,29 @@ describe("entry never takes navigation from the user", () => {
     expect(onWork).toHaveBeenCalledTimes(calls);
     if (key === "?") expect(onHelp).toHaveBeenCalledOnce();
   });
-  it.each(["stopped", "recoverable", "degraded", "attention_required", undefined])("does not infer running from %s", async lifecycleState => {
-    const onWork = vi.fn(); const startDaemon = vi.fn();
-    const client = new DaemonClient({ fetchImpl: (async () => new Response(JSON.stringify([{ id: "r", name: "r", lifecycleState }]))) as typeof fetch });
-    const startup = new StartupController({ client, home: "/fixture", probe: async () => '{"state":"up"}', startDaemon, onWork, onChange: () => {} });
+  it.each(["stopped", "recoverable", "degraded", "attention_required", undefined])("opens ordinary views while retaining the %s observation, without effects", async lifecycleState => {
+    const onWork = vi.fn(); const startDaemon = vi.fn(); const probe = vi.fn();
+    const rigs = [{ id: "r", name: "r", lifecycleState }];
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json(rigs));
+    const client = new DaemonClient({ fetchImpl });
+    const startup = new StartupController({ client, home: "/fixture", probe, startDaemon, onWork, onChange: () => {} });
     await startup.refresh();
-    expect(startup.state.open).toBe(true); expect(onWork).not.toHaveBeenCalled(); expect(startDaemon).not.toHaveBeenCalled();
+    expect(startup.state.open).toBe(false); expect(onWork).toHaveBeenCalledOnce(); expect(onWork).toHaveBeenCalledWith();
+    expect(startup.state.rigs).toEqual(rigs);
+    expect(startDaemon).not.toHaveBeenCalled(); expect(probe).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).not.toBe("POST");
+  });
+  it("opens ordinary views for an empty instance and keeps explicit recovery open across refreshes", async () => {
+    const onWork = vi.fn(); const startDaemon = vi.fn();
+    const client = new DaemonClient({ fetchImpl: async () => Response.json([]) });
+    const startup = new StartupController({ client, home: "/fixture", probe: vi.fn(), startDaemon, onWork, onChange: () => {} });
+    await startup.refresh();
+    expect(startup.state.open).toBe(false); expect(onWork).toHaveBeenCalledOnce();
+    await startup.open(); // The ordinary view's S key deliberately opens Start and return.
+    await startup.refresh();
+    expect(startup.state).toMatchObject({ open: true, page: "rigs", connection: "up", rigs: [] });
+    expect(onWork).toHaveBeenCalledOnce(); expect(startDaemon).not.toHaveBeenCalled();
   });
 });
 

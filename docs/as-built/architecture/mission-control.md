@@ -11,8 +11,8 @@ applies-when: |
   coordination primitive's sources.
 siblings: [coordination-primitive.md, workflow-runtime.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, coordination-primitive.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-updated: 2026-10-05
 ---
 
 # Mission Control — Queue Observability + Verb Contract
@@ -25,7 +25,7 @@ seven views, eight verbs, a recent-ships cap of 10
 table. In the web UI the old `/mission-control` page now redirects to
 `/for-you`, and the For You feed carries the verb actions (§6).
 
-> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. A bare file name such as
+> Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. A bare file name such as
 > `mission-control-read-layer.ts:31` is in
 > `packages/daemon/src/domain/mission-control/`; `domain/…`, `routes/…`,
 > `middleware/…`, `db/…`, `index.ts`, `server.ts` and `startup.ts` are under
@@ -55,13 +55,18 @@ Required row fields: **9** — `sed -n '/^export interface CompactStatusRow {/,/
 each view to its source:
 
 - `my-queue` / `human-gate` / `active-work` / `recent-ships` query
-  `queue_items` via `QueueRepository`.
+  `queue_items` via `QueueRepository`. `my-queue` uses the `operatorSession`
+  query parameter when given, else `workspace.operator_seat_name` (default
+  empty), else the only registered human; when none is found, or more than
+  one, it returns no rows and a `degradedFields` note rather than widening the
+  view (`mission-control-read-layer.ts:137–141`, `:166–168`;
+  `routes/mission-control.ts:521`).
 - `fleet` calls `MissionControlFleetCliCapability.rollupFleet()`
   (`mission-control-read-layer.ts:197`;
   `mission-control-fleet-cli-capability.ts:109`), which walks the rig
   registry (`:110`), summarises each rig's `queue_items` (`:135`), and runs a
   per-rig CLI capability probe (`makeLocalCliCapabilityProbe`, `:77`, wired
-  at `startup.ts:1547`).
+  at `startup.ts:1572`).
 - `recently-active` delegates to the view projector's built-in
   `ViewProjector.show("recently-active")` (`mission-control-read-layer.ts:246`).
 - `recent-observations` reads the latest 50 `stream_items` via `StreamStore`
@@ -76,7 +81,9 @@ There is no filesystem fallback. When no `StreamStore` is wired,
 
 > Scope note: this module describes the daemon's verb vocabulary. It does
 > NOT enumerate which verbs the For You cards offer; that surface is
-> described in `../ui/project-and-for-you.md`.
+> described in `../ui/project-and-for-you.md`. The terminal UI opened by bare
+> `rig` or `rig tui` is called the "mission-control TUI" in source
+> (`packages/tui/README.md:1`), but it does not call these routes.
 
 ## 2. The eight verbs (the write contract)
 
@@ -96,10 +103,22 @@ Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as cons
 | `hold` | `state="blocked"`, `closure_reason="blocked_on"` |
 | `drop` | `state="done"`, `closure_reason="canceled"` |
 | `handoff` | same closure and new destination item as `route`; the 4-step shape (see below) |
-| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`) |
+| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:825`) |
+
+`annotate` requires `annotation`, `hold` and `drop` require `reason`, `route`
+and `handoff` require `destinationSession`, and `resolve` requires a non-empty
+`decision`. A missing `annotation`, `destinationSession` or `decision` returns
+400. A `drop` without `reason` passes the queue closure check and is refused by
+the audit record instead; the wrapped `reason_required` error has no status
+mapping, so it returns 500 (`mission-control-action-log.ts:128–133`,
+`mission-control-write-contract.ts:245–248`). Items already `done` or
+`handed-off` are refused with 409 `qitem_already_terminal`, except under
+`resolve`, which answers 409 `qitem_not_leg1_parked` for any item not parked on
+a human seat. An unknown item returns 404 `qitem_not_found`
+(`routes/mission-control.ts:240–251`, `:330–341`).
 
 Each verb is one atomic daemon transaction: the queue mutation via
-`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2337`,
+`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2358`,
 which keeps the hot-potato closure validation — see
 `coordination-primitive.md` §3), an audit row in `mission_control_actions`
 (`mission-control-write-contract.ts:207`), and a persisted
@@ -134,8 +153,18 @@ NULL ISO timestamp, `037_mission_control_actions.ts:63`);
 indexes `(acted_at DESC, action_verb)`, `(qitem_id, acted_at DESC)`,
 `(actor_session, acted_at DESC)` (`037_mission_control_actions.ts:72–77`).
 One later migration adds a nullable `identity_provenance` column
-(`db/migrations/065_identity_provenance.ts:18`). The audit browse (§4) reads
-only this table.
+(`db/migrations/065_identity_provenance.ts:18`). The acting session comes
+from the `X-OpenRig-Session` header when present (the CLI sends it); a
+headerless browser request falls back to the body `actorSession`. The row
+records how the actor was established: `transport:v1`, `relay:v1` for a
+forwarded request, `claimed:v1` for a headerless body actor, or
+`origin-unknown:v1` (`routes/mission-control.ts:347–351`;
+`routes/require-sender-identity.ts:120`).
+
+Scope approvals (`POST /api/scope/approve`) also append `approve` rows through
+the same `MissionControlActionLog`, with `qitem_id` null and the scope target
+in `audit_notes_json` (`domain/scope/scope-approve.ts:292`). The audit browse
+(§4) reads only this table.
 
 ## 4. Bearer middleware, notifications, audit browse
 
@@ -143,36 +172,50 @@ only this table.
   Constant-time comparison via Node `crypto.timingSafeEqual`
   (`constantTimeEqual`, `:36`, `:50`). `authBearerTokenMiddleware` (`:93`)
   passes every request through when no token is configured (`:98`). The
-  token comes from `OPENRIG_AUTH_BEARER_TOKEN` (`index.ts:280`). The daemon
+  token comes from `OPENRIG_AUTH_BEARER_TOKEN` (`index.ts:288`). The daemon
   refuses to start when the bind host is set explicitly, is neither loopback
   nor Tailscale (a hostname is resolved first), and no bearer token is set
   (`assertBindAuthInvariant`, `auth-bearer-token.ts:240`, called at
-  `index.ts:288`). Bearer enforced on the write routes:
+  `index.ts:296`). Bearer enforced on the write routes:
   `app.post("/action", requireAuth)` (`routes/mission-control.ts:307`) and
   `app.post("/notifications/test", requireAuth)` (`:308`). Reads are not
-  gated. It is one static token; no OAuth/SSO/per-user model
-  (`auth-bearer-token.ts:11–14`).
+  bearer-gated. It is one static token; no OAuth/SSO/per-user model
+  (`auth-bearer-token.ts:11–14`). Every Mission Control request, read or
+  write, first passes the daemon's `/api/*` browser boundary
+  (`server.ts:647`; `middleware/browser-boundary.ts`): only known target host
+  names, and, when an `Origin` header is present, only the daemon's own UI
+  origin or an `OPENRIG_ALLOWED_ORIGINS` entry. A valid bearer token waives
+  only the host-name check.
 - **Notification dispatcher** — two adapters
   (`notification-adapter-ntfy.ts`, `notification-adapter-webhook.ts`) plus
   `notification-dispatcher.ts`. `OPENRIG_NOTIFICATIONS_MECHANISM` selects
   `ntfy`, `webhook` or `none`, and the default is `none`
-  (`startup.ts:1592`). A dispatcher starts only when
-  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1593`, `:1600`) and the
-  target URL passes validation (`:1611`). The ntfy adapter posts to a topic
-  URL that the ntfy phone app subscribes to
-  (`notification-adapter-ntfy.ts:1–6`).
+  (`startup.ts:1617`). A dispatcher starts only when
+  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1618`, `:1625`) and the
+  target URL passes validation (`:1636`); an unrecognized mechanism with a
+  target set throws during daemon startup (`:1631–1634`). The ntfy adapter
+  posts to a topic URL that the ntfy phone app subscribes to
+  (`notification-adapter-ntfy.ts:1–6`). Notifications fire when a
+  `human-gate` queue item is created, and also on each completed verb when
+  `OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1` (`startup.ts:1623–1624`);
+  each item, trigger and mechanism is sent at most once per daemon run
+  (`notification-dispatcher.ts:119–134`, `:156–158`). `POST
+  /notifications/test` returns 503 `notifications_unconfigured` when no
+  dispatcher is running (`routes/mission-control.ts:481–492`).
 
   Adapters: **2** — `git grep -l 'implements NotificationAdapter' -- packages/daemon/src | wc -l`
 - **Read-only audit-history browse** — `MissionControlAuditBrowse.query`
   (`audit-browse.ts:78`) over `mission_control_actions`, exposed at
   `GET /api/mission-control/audit` (`routes/mission-control.ts:441`) with
-  filters and `(limit, before_id)` pagination cursored on SQLite `rowid`
-  (`audit-browse.ts:134`).
+  filters (including `scope_tier`, `scope_id`, `scope_path` and
+  `approval_scope` for scope-approval rows) and `(limit, before_id)`
+  pagination cursored on SQLite `rowid` (`audit-browse.ts:134`); the page size
+  defaults to 50 and is capped at 200 (`audit-browse.ts:61–62`).
 
 ## 5. Mission Control events
 
-The `RigEvent` union starts at `domain/types.ts:106`; its four
-`mission_control.*` members are at `domain/types.ts:306–311`.
+The `RigEvent` union starts at `domain/types.ts:108`; its four
+`mission_control.*` members are at `domain/types.ts:308–313`.
 
 `RigEvent` members: **98** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
 
@@ -191,13 +234,19 @@ The `RigEvent` union starts at `domain/types.ts:106`; its four
 ## 6. Route surface
 
 `missionControlRoutes({ bearerToken })` is mounted at `/api/mission-control`
-(`server.ts:791–794`). Routes (`routes/mission-control.ts`): `GET /views`
+(`server.ts:790–793`). Routes (`routes/mission-control.ts`): `GET /views`
 (`:259`), `GET /cli-capabilities` (`:264`), `GET /destinations` (`:276`),
 `GET /sse` and its alias `GET /watch` (`:303–304`; they forward
 `action_executed` and `cli_drift_detected` events,
 `:289–291`), `POST /action` (`:314`, auth-gated), `GET /audit` (`:441`),
 `POST /notifications/test` (`:481`, auth-gated), and `GET /views/:view-name`
 (`:509`).
+
+`POST /action` accepts an optional `hostId`: for a non-local host it forwards
+the same verb to that host's daemon (http-transport host entries only; 10 s
+timeout). The origin host writes the audit row and nothing is written
+locally; a forwarding failure returns 502 `remote_action_failed` with a
+`failureClass` (`routes/mission-control.ts:13`, `:352–414`).
 
 In the web UI (`packages/ui/src/routes.tsx`), `/mission-control` is a
 redirect to `/for-you` (`:495–500`). `/for-you` renders the For You `Feed`

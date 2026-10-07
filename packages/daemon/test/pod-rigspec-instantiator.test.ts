@@ -343,6 +343,81 @@ profiles:
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it.each(["claude-code", "codex"] as const)("projects a selected plugin's skills for %s and keeps a same-name skill it does not own", async (runtime) => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const plugin = nodePath.join(installed, "agents/impl/plugins/core");
+      const project = nodePath.join(root, "project");
+      const skills = nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills");
+      const skill = (id: string, body: string) => `---\nname: ${id}\ndescription: Skill fixture\n---\n${body}\n`;
+      for (const manifest of [".claude-plugin", ".codex-plugin"]) {
+        fs.mkdirSync(nodePath.join(plugin, manifest), { recursive: true });
+        fs.writeFileSync(nodePath.join(plugin, manifest, "plugin.json"), '{"name":"core","version":"0.1.4"}');
+      }
+      for (const id of ["delegating-work", "openrig-skills", "queue-handoff"]) {
+        fs.mkdirSync(nodePath.join(plugin, "skills", id), { recursive: true });
+        fs.writeFileSync(nodePath.join(plugin, "skills", id, "SKILL.md"), skill(id, "Plugin"));
+      }
+      fs.mkdirSync(nodePath.join(skills, "delegating-work"), { recursive: true });
+      fs.writeFileSync(nodePath.join(skills, "delegating-work/SKILL.md"), skill("delegating-work", "The project's own"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: core\n      source:\n        kind: local\n        path: plugins/core\nprofiles:\n  default:\n    uses:\n      plugins: [core]\n');
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => nodePath.join(root, "no-catalog"), skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime, cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler.mock.results[0]?.value.ok).toBe(true);
+      for (const id of ["openrig-skills", "queue-handoff"]) {
+        expect(fs.readFileSync(nodePath.join(skills, id, "SKILL.md"), "utf8")).toBe(skill(id, "Plugin"));
+      }
+      expect(fs.readFileSync(nodePath.join(skills, "delegating-work/SKILL.md"), "utf8")).toBe(skill("delegating-work", "The project's own"));
+      const owner = reconciler.mock.calls[0]![0].topologyOwner;
+      expect(JSON.stringify(result)).toContain(`${owner}: plugin_skill_kept: delegating-work`);
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("starts the seat without plugin skills when they cannot be projected, and says why", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-refused-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const plugin = nodePath.join(installed, "agents/impl/plugins/core");
+      const project = nodePath.join(root, "project");
+      fs.mkdirSync(nodePath.join(plugin, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, ".claude-plugin/plugin.json"), '{"name":"core","version":"0.1.4"}');
+      fs.mkdirSync(nodePath.join(plugin, "skills/queue-handoff"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, "skills/queue-handoff/SKILL.md"), "---\nname: queue-handoff\ndescription: Skill fixture\n---\nPlugin\n");
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: core\n      source:\n        kind: local\n        path: plugins/core\nprofiles:\n  default:\n    uses:\n      plugins: [core]\n');
+      // The project keeps its own ignore file where OpenRig would add its exclusions.
+      fs.mkdirSync(nodePath.join(project, ".claude/skills"), { recursive: true });
+      fs.writeFileSync(nodePath.join(project, ".claude/skills/.gitignore"), "*.tmp\n");
+      execFileSync("git", ["init", "-q", project]);
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => nodePath.join(root, "no-catalog"), skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler.mock.results.map((call) => call.value.ok)).toEqual([false, true]);
+      expect(JSON.stringify(result)).toContain("plugin_skills_not_projected: git_exclusion_failed");
+      expect(fs.existsSync(nodePath.join(project, ".claude/skills/queue-handoff"))).toBe(false);
+      expect(fs.readFileSync(nodePath.join(project, ".claude/skills/.gitignore"), "utf8")).toBe("*.tmp\n");
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("dedupes role guidance when the same file is referenced by resources.guidance and startup.files", async () => {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);

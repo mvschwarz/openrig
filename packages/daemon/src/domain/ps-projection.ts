@@ -101,26 +101,27 @@ export function seatNeedsAttention(
 
 /**
  * #180 review — the arbitrated needs-input answer is TRI-STATE; collapsing it to
- * `needsInput.count > 0` treats `count: 0` as a definite "no" even when the seat has
- * no source trusted to say "no". For a Codex seat (hooks at `trial`), a generic/Pi/OMP
- * seat (sampling floor only), or a seat with no declaration, `count: 0` is the default
- * for "no trusted evidence" — a live `PermissionRequest` in the hook store must still
- * count. Rules:
+ * `needsInput.count > 0` treats `count: 0` as a definite "no" even when no source said
+ * "no". `count: 0` is also the default when no authoritative rung reported needs-input:
+ * a Codex seat (hooks at `trial`), a generic/Pi/OMP seat (sampling floor only), a seat
+ * with no declaration, or a Claude seat whose declared rungs have not reported (after a
+ * daemon restart, or once its hook rung is downgraded). A live `PermissionRequest` in
+ * the hook store must still count there. Rules:
  *   - count > 0                                    → true  (the service only reports a
  *     positive count from an authoritative source)
- *   - count is 0 AND a needs-input rung is `authoritative` → false (a trusted clear
- *     legitimately supersedes a stale hook)
- *   - otherwise                                    → null (let the hook store decide)
+ *   - count is 0 AND needs-input evidence from an authoritative rung supplied it → false
+ *     (an observed clear legitimately supersedes a stale hook)
+ *   - otherwise                                    → null (let the hook store decide).
+ *     A declared rung is a capability, not an observation that the seat is clear.
  */
 export function arbitratedNeedsInputSignal(
-  state: Pick<ArbitratedSeatState, "needsInput" | "rungs"> | null,
+  state: Pick<ArbitratedSeatState, "needsInput" | "needsInputEvidence"> | null,
 ): boolean | null {
   if (!state) return null;
   if (state.needsInput.count > 0) return true;
-  const trustedClear = state.rungs.some(
-    (r) => NEEDS_INPUT_RUNGS.includes(r.rung) && r.trust === "authoritative",
-  );
-  return trustedClear ? false : null;
+  const observedClear = state.needsInputEvidence != null
+    && NEEDS_INPUT_RUNGS.includes(state.needsInputEvidence.rung);
+  return observedClear ? false : null;
 }
 
 /**
@@ -311,8 +312,8 @@ export class PsProjectionService {
       // per-seat row renders (`activityState` on node-inventory), which also
       // sees pane chrome a hook-silent gated seat never reports. The hook
       // store is the fallback when the arbitrated signal is `null` — service
-      // unwired, session not in the ladder, or a `count: 0` from a seat with no
-      // authoritative needs-input source (#180 review); `now` keeps its
+      // unwired, session not in the ladder, or a `count: 0` that no authoritative
+      // needs-input evidence supplied (#180 review; discussion #879); `now` keeps its
       // staleness honest (stale hooks come back `unknown` and contribute
       // nothing). Preferring one source over the other is what let a gated seat
       // show `needs-input x1` on its row while the rig total read ATTN 0.

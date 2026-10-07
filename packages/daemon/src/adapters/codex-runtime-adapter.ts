@@ -1,4 +1,4 @@
-import { nonInterruptiveArg } from "./non-interruptive.js";
+import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -24,13 +24,13 @@ import {
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
-import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
-import { parseSessionName } from "../domain/session-name.js";
+import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 
@@ -89,6 +89,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // Issue #121: git metadata dirs for the fresh-launch `--add-dir`s (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
+  private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   // OPR.0.4.1.10 FR-B — absolute path to the daemon's own shipped activity-relay.cjs,
   // resolved by startup from import.meta.dirname. Used by ensureCodexActivityHooks
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
@@ -112,8 +113,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
+    prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   }) {
     this.tmux = deps.tmux;
+    this.prepareTeamWorkspace = deps.prepareTeamWorkspace;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
@@ -357,7 +360,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
     const posture = codexPostureArg(profileArg, process.env, binding.launchPosture);
     const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + nonInterruptiveArg(this.runtime, binding);
+    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
@@ -372,7 +375,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
     }
-    const queueStateDirArg = this.buildQueueStateAddDirArg(opts.name);
+    const teamWorkspaceArg = binding.teamPermissionDefault && !profile
+      && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
+      ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, opts.name) : "";
+    const queueStateDirArg = teamWorkspaceArg || this.buildQueueStateAddDirArg(opts.name);
     // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
     // (its cwd, the launch PATH), applied to fresh, fork and resume.
     const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd) : undefined;
@@ -461,14 +467,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private buildQueueStateAddDirArg(sessionName: string): string {
-    const identity = parseCanonicalSessionName(sessionName);
-    if (!identity) return "";
-
     const sharedDocsRoot = process.env.OPENRIG_SHARED_DOCS_ROOT?.trim()
-      // OPR.0.3.2.14 — subpath scrubbed (internal-team layout → generic placeholder).
       || nodePath.join(this.fs.homedir ?? os.homedir(), ".openrig", "shared-docs");
-    const queueStateRoot = nodePath.join(sharedDocsRoot, "rigs", identity.rig, "state", identity.pod);
-    return ` --add-dir ${shellQuote(queueStateRoot)}`;
+    const root = codexQueueStateRoot(sessionName, sharedDocsRoot);
+    return root ? ` --add-dir ${shellQuote(root)}` : "";
   }
 
   private async captureProbeScreen(target: string): Promise<string> {
@@ -1109,30 +1111,6 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string)
   return `${lines.join("\n").replace(/\n*$/, "\n")}`;
 }
 
-function parseCanonicalSessionName(sessionName: string): { pod: string; member: string; rig: string } | null {
-  // OPR.0.4.6.MH1 FR-8: the member/rig split rides the shared parse
-  // contract. A multi-@ name now parses with a greedy rig ("rig@x"),
-  // which isSafeQueueSegment rejects ("@" is unsafe) — the same null this
-  // site returned via its old single-@ check.
-  const trimmed = sessionName.trim();
-  const parsed = parseSessionName(trimmed);
-  if (parsed.kind !== "canonical") return null;
-
-  const rig = parsed.rig;
-  const separatorIndex = parsed.member.indexOf("-");
-  if (separatorIndex <= 0 || separatorIndex === parsed.member.length - 1) return null;
-
-  const pod = parsed.member.slice(0, separatorIndex);
-  const member = parsed.member.slice(separatorIndex + 1);
-  if (!isSafeQueueSegment(pod) || !isSafeQueueSegment(member) || !isSafeQueueSegment(rig)) return null;
-
-  return { pod, member, rig };
-}
-
-function isSafeQueueSegment(segment: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment);
-}
-
 export function isCodex013xOrLater(version: string): boolean {
   const match = /^(\d+)\.(\d+)/.exec(version);
   if (!match) return false;
@@ -1560,6 +1538,6 @@ function commandLooksLikeCodex(command: string): boolean {
 }
 
 function isSkippableCodexUpdatePrompt(paneContent: string): boolean {
-  return paneContent.includes("Update available!")
+  return hasCodexUpdateHeader(paneContent)
     && /^\s*[›>]?\s*3\. Skip until next version\s*$/m.test(paneContent);
 }

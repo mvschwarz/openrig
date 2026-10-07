@@ -9,6 +9,7 @@ import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
+import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -151,6 +152,60 @@ describe("RECENT queue transition projection", () => {
     const response = await app.request("/api/queue/recent-transitions?rig=rig-a&limit=20");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(rows);
+  });
+
+  it("qualifies complete live/archive histories before selecting the newest twenty", () => {
+    migrate(db, [queueTransitionsArchiveSchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+    const archived = db.prepare(`INSERT INTO queue_transitions_archive
+      (transition_id, qitem_id, ts, state, actor_session, archived_at)
+      VALUES (?, ?, ?, ?, 'owner@rig-a', '2026-09-01')`);
+    const live = db.prepare(`INSERT INTO queue_transitions
+      (transition_id, qitem_id, ts, state, actor_session)
+      VALUES (?, ?, ?, ?, 'owner@rig-a')`);
+    for (let index = 0; index < 25; index += 1) {
+      const id = `history-${index}`;
+      item(id, "rig-a", "in-progress", ["slice:history"], { summary: `  Item ${index}  ` });
+      // ID, not timestamp, defines the predecessor, even across storage tables.
+      archived.run(index + 1, id, "2026-12-01", "pending");
+      (index % 2 === 0 ? live : archived).run(index + 101, id, "2026-09-02", "in-progress");
+      for (let note = 0; note < 30; note += 1) {
+        live.run(1001 + note * 25 + index, id, "2026-10-01", "in-progress");
+      }
+    }
+    item("foreign", "rig-b", "failed");
+    live.run(5000, "foreign", "2027-01-01", "failed");
+
+    const rows = repo.listRecentTransitions("rig-a");
+    expect(rows.map((row) => row.transitionId)).toEqual(Array.from({ length: 20 }, (_, i) => 106 + i));
+    expect(rows.map((row) => row.summary)).toEqual(Array.from({ length: 20 }, (_, i) => `Item ${i + 5}`));
+    expect(rows.every((row) => row.change === "claimed" && row.target === "history" && row.rig === "rig-a")).toBe(true);
+    expect(repo.listRecentTransitions("rig-a", 1).map((row) => row.transitionId)).toEqual([125]);
+    expect(repo.listRecentTransitions("rig-b").map((row) => row.transitionId)).toEqual([5000]);
+  });
+
+  it("orders by timestamp then ID while deriving state from interleaved ID order", () => {
+    migrate(db, [queueTransitionsArchiveSchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+    for (const id of ["a", "b", "c"]) item(id, "rig-a", "in-progress");
+    const add = (id: number, qitem: string, ts: string, state: string, archive = false) => {
+      db.prepare(`INSERT INTO ${archive ? "queue_transitions_archive" : "queue_transitions"}
+        (transition_id, qitem_id, ts, state, actor_session${archive ? ", archived_at" : ""})
+        VALUES (?, ?, ?, ?, 'owner@rig-a'${archive ? ", '2026-09-01'" : ""})`).run(id, qitem, ts, state);
+    };
+    add(1, "a", "2099-01-01", "pending", true);
+    add(2, "b", "2020-01-01", "pending");
+    add(3, "a", "2023-01-01", "blocked");
+    add(4, "b", "2025-01-01", "in-progress", true);
+    add(5, "a", "2022-01-01", "in-progress");
+    add(6, "a", "2030-01-01", "in-progress");
+    // Same-state terminal events are still qualifying under the existing allowlist.
+    add(7, "c", "2026-01-01", "failed", true);
+    add(8, "c", "2026-01-01", "failed");
+
+    expect(repo.listRecentTransitions("rig-a").map((row) => [row.transitionId, row.change])).toEqual([
+      [5, "resumed"], [3, "blocked"], [4, "claimed"], [7, "failed"], [8, "failed"],
+    ]);
   });
 
   it("returns only the newest 20 qualifying transitions and refuses an unscoped read", async () => {

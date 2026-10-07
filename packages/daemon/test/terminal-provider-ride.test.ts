@@ -414,6 +414,22 @@ describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + equal auto-grid r
       "openrig:acme-build#l9/2",
     ]);
   });
+
+  it("kernel geometry uses the composed three columns for the herdr open plan", () => {
+    const panes = ["TUI", "advisor", "operator"].map(label => ({ seat: label, label, paneCommand: `attach ${label}`, readOnly: false }));
+    const grid = buildGridRoot(panes, 3);
+    expect(grid).toMatchObject({ columns: 3, rows: 1, blanks: 0 });
+    expect(grid.root).toMatchObject({
+      type: "split", direction: "right", ratio: 1 / 3, first: { type: "pane", label: "TUI" },
+      second: { type: "split", direction: "right", ratio: 1 / 2,
+        first: { type: "pane", label: "advisor" }, second: { type: "pane", label: "operator" } },
+    });
+    const plan = planHerdrLayout({ id: "kernel", opened: panes, pages: [panes], absent: [], degraded: [], columns: 3 }, "fixed");
+    expect(plan.pages[0]!.root).toEqual(grid.root);
+    expect(plan.pages[0]!.blanks).toBe(0);
+    expect(buildGridRoot(panes)).toMatchObject({ columns: 2, rows: 2, blanks: 1 });
+    expect(buildGridRoot(panes.slice(0, 2), 3)).toMatchObject({ columns: 2, rows: 1, blanks: 0 });
+  });
 });
 
 describe("herdr adapter — socket ping probe + workspace.create → layout.apply (FB4)", () => {
@@ -732,6 +748,18 @@ describe("cmux provider — ONE gridded workspace per page (never a window per s
     expect(res.degraded).toEqual([
       { seat: "c@r", host: "local", reason: "cmux: cmux daemon not ready" },
     ]);
+  });
+
+  it("kernel geometry passes three columns to cmux while ordinary views keep auto-grid", async () => {
+    const panes = ["TUI", "advisor", "operator"].map(label => ({ seat: label, label, paneCommand: `attach ${label}`, readOnly: false }));
+    const { layoutService, builds } = fakeLayoutService();
+    const adapter = new CmuxProviderAdapter({ cmuxAdapter: fakeCmuxAdapter(true), layoutService, newLaunchToken: () => "fixed" });
+    const composed: ComposedView = { id: "kernel", opened: panes, pages: [panes], absent: [], degraded: [] };
+    expect((await adapter.openView({ ...composed, columns: 3 })).opened).toEqual(["TUI", "advisor", "operator"]);
+    expect(builds[0]!.cols).toBe(3);
+    expect(builds[0]!.commands).toEqual(["attach TUI", "attach advisor", "attach operator"]);
+    await adapter.openView(composed);
+    expect(builds[1]!.cols).toBe(2);
   });
 
   it("cmux not connected → honest refuse cmux_unavailable; nothing is built", async () => {

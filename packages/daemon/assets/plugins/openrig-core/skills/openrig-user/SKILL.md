@@ -301,7 +301,10 @@ OpenRig v0.3.0 adds `rig agent-image`, `rig context-pack`, `rig workspace`, and
 `rig config init-workspace`. *(0.5.0: the `rig context-pack` alias is retired — the store + compose library is the single `rig context` noun; see "Context packs and paced delivery (0.5.0)".)* It also shifts fresh-user starter guidance toward
 `product-team` for human-directed work and `conveyor` for workflow-oriented
 work. Treat `demo` as legacy/test content unless a task specifically asks for
-the old demo spec.
+the old demo spec. *(0.6.6: the built-in teams are `starter` and `factory`, plus the
+specialist teams `code-review`, `research` and `pm`. `product-team`, `conveyor` and
+`demo` are gone, and `first-project` is starter's old name. `workshop` is a rig
+bundle.)*
 
 OpenRig v0.3.1 adds public package/source surfaces for Plugin Primitive v0,
 Claude Auto-Compaction Policy, migration `040_workflow_specs_diagnostic`,
@@ -327,7 +330,9 @@ before relying on a policy or its default.
 
 Compatibility checks:
 - `rig down` accepts a rig name or id. An ambiguous name matching more than one
-  active rig is refused with matching ids; use the intended id.
+  active rig is refused with matching ids; use the intended id. It ends every
+  agent's session and any work in progress, so check `rig ps --nodes --rig <rig>`
+  and that the person asked; `rig up <rig> --existing` restores it.
 - For queue/view JSON or limit differences, compare the installed command's help,
   the running daemon version and the actual response. A wrapper mismatch is not
   by itself a daemon-health failure, and historical workarounds are not current
@@ -357,8 +362,8 @@ rig start --json             # JSON output for agents
 ```
 
 Framing: `rig start` is the RECOVERY entry point, not the getting-started
-hero. The fresh-user boot hero remains `rig up <starter>` (typically
-`rig up product-team`). Reach for `rig start` after a host reboot, daemon
+hero. The fresh-user boot hero remains `rig up <team>` (typically
+`rig up starter` for a first change, or `rig up factory`). Reach for `rig start` after a host reboot, daemon
 restart, or any "bring my rigs back" moment.
 
 ### `rig reconcile-session` — no-launch adopt of a hand-resumed session

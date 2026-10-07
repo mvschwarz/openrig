@@ -143,9 +143,13 @@ const CLAUDE_STATUS_WARNINGS = [
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
 ];
+// Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
+// vim-mode marker such as "-- INSERT --" (#808). A suffix such as "· 1 shell" can follow the mode.
+const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts\b)/;
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
-const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+// While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
+const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:running [^()·]+ hook · )?(?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
 
 function findClaudeComposer(paneContent: string) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
@@ -156,6 +160,7 @@ function findClaudeComposer(paneContent: string) {
   let bar = lines.length - 1;
   while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
+  const modeFooter = CLAUDE_MODE_FOOTER.test(lines[bar]?.trim() ?? "");
   let indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
   const framed = indent !== undefined;
   let prompt = lines[bar - 2] ?? "";
@@ -188,7 +193,7 @@ function findClaudeComposer(paneContent: string) {
     // or completed status ends this block; do not revive an older work row.
     if (!/^\s/.test(line)) { headSeen = true; break; }
   }
-  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, headSeen, liveStatus };
+  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus };
 }
 
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
@@ -273,7 +278,9 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   if (claudeComposer && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
     return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
   }
-  if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.supportedWarningFooter) &&
+  // Below warning rows, any Claude mode footer completes the frame for an EMPTY composer (#808).
+  // Drafts keep the narrower check above: attention is needs_input, a send refusal for other modes.
+  if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.modeFooter) &&
       IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
     return { state: "agent_idle", reason: idleStatusBarLine ? "idle_status_bar" : "idle_prompt",
       evidence: truncateEvidence(idleStatusBarLine ?? claudeComposer.text) };

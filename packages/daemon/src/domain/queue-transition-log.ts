@@ -259,6 +259,8 @@ export class QueueTransitionLog {
     const sessionPatterns = rigNames.map((rig) => `%@${rig.replace(/%/g, "\\%").replace(/_/g, "\\_")}`);
     const scopeSql = sessionPatterns.map(() => "(q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')").join(" OR ");
     const scopeParams = sessionPatterns.flatMap((pattern) => [pattern, pattern]);
+    // Keep display metadata out of the full-history window/sort. Fetch it only
+    // for the qualified window; limiting raw history would change predecessors.
     const rows = this.db.prepare(`
       WITH rig_history AS (
         SELECT
@@ -269,10 +271,6 @@ export class QueueTransitionLog {
           t.actor_session,
           t.closure_reason,
           t.closure_target,
-          q.tags,
-          q.summary,
-          q.destination_session,
-          q.source_session,
           LAG(t.state) OVER (
             PARTITION BY t.qitem_id
             ORDER BY t.transition_id
@@ -288,13 +286,17 @@ export class QueueTransitionLog {
            OR (state = 'done' AND closure_reason = 'no-follow-on')
            OR state IN ('failed', 'denied', 'canceled')
            OR closure_reason IN ('denied', 'canceled', 'escalation')
+      ), latest AS (
+        SELECT * FROM qualifying
+        ORDER BY ts DESC, transition_id DESC
+        LIMIT ?
       )
-      SELECT transition_id, qitem_id, ts, state, actor_session,
-             closure_reason, closure_target, tags, summary, previous_state,
-             destination_session, source_session
-      FROM qualifying
-      ORDER BY ts DESC, transition_id DESC
-      LIMIT ?
+      SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session,
+             t.closure_reason, t.closure_target, q.tags, q.summary, t.previous_state,
+             q.destination_session, q.source_session
+      FROM latest t
+      JOIN queue_items q ON q.qitem_id = t.qitem_id
+      ORDER BY t.ts DESC, t.transition_id DESC
     `).all(...scopeParams, limit) as RecentQueueTransitionRow[];
 
     return rows.reverse().flatMap((row) => {

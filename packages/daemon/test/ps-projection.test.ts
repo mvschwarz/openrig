@@ -6,7 +6,7 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { AgentActivity, NodeInventoryEntry } from "../src/domain/types.js";
-import type { EvidenceRungId, RungTrust } from "../src/domain/activity-taxonomy.js";
+import type { EvidenceRungId } from "../src/domain/activity-taxonomy.js";
 
 describe("PsProjectionService", () => {
   let db: Database.Database;
@@ -513,17 +513,18 @@ describe("PsProjectionService", () => {
       expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), null)).toBe(true);
     });
 
-    it("#180 review: arbitratedNeedsInputSignal is tri-state over rung trust", () => {
-      const rung = (r: EvidenceRungId, trust: RungTrust) => ({ rung: r, sourceId: "src", trust, lastEvidenceAt: null });
+    it("#180 review: arbitratedNeedsInputSignal is tri-state over observed needs-input evidence", () => {
+      const zero = { count: 0, reason: null };
+      const observed = (rung: EvidenceRungId) => ({ rung, observedAt: new Date().toISOString() });
       expect(arbitratedNeedsInputSignal(null)).toBeNull();
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 1, reason: "prompt" }, rungs: [] })).toBe(true);
-      // count: 0 with no authoritative needs-input source is "no trusted evidence"
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("lifecycle-hooks", "trial")] })).toBeNull();
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("window-sampling", "authoritative")] })).toBeNull();
-      // ...and a trusted clear is a real no
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("self-report", "authoritative")] })).toBe(false);
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("needs-input-chrome", "authoritative")] })).toBe(false);
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("lifecycle-hooks", "authoritative")] })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: { count: 1, reason: "prompt" }, needsInputEvidence: observed("lifecycle-hooks") })).toBe(true);
+      // count: 0 that no needs-input evidence supplied is "no trusted evidence", whatever rungs are declared
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: null })).toBeNull();
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("window-sampling") })).toBeNull();
+      // ...and an observed clear from a needs-input rung is a real no
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("self-report") })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("needs-input-chrome") })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("lifecycle-hooks") })).toBe(false);
     });
 
     it("getEntries: multi-signal seat counts ONCE; healthy peers count zero", () => {
@@ -601,16 +602,17 @@ describe("PsProjectionService", () => {
           sampledAt: new Date().toISOString(), eventAt: new Date().toISOString(), evidence: "permission_prompt", fallback: false, stale: false },
       } as never);
       // The hook store still carries needs_input, but the seat's arbitrated state
-      // (what its row renders) is already clear from an AUTHORITATIVE source —
-      // the totals must agree.
+      // (what its row renders) is already clear from AUTHORITATIVE needs-input
+      // evidence (a later hook turn boundary) — the totals must agree.
       const seatActivity = {
         getSeatActivity: () => null,
         getSeatStateBySession: () => ({
           seatNodeId: n, activity: "working",
           needsInput: { count: 0, reason: null },
-          decidedBy: "self-report", seq: 2,
+          needsInputEvidence: { rung: "lifecycle-hooks", observedAt: new Date().toISOString() },
+          decidedBy: "lifecycle-hooks", seq: 2,
           changedAt: new Date().toISOString(),
-          rungs: [{ rung: "self-report", sourceId: "claude:pid-json", trust: "authoritative", lastEvidenceAt: new Date().toISOString() }],
+          rungs: [{ rung: "lifecycle-hooks", sourceId: "claude-code:hooks", trust: "authoritative", lastEvidenceAt: new Date().toISOString() }],
           lastSwap: null,
         }),
       };

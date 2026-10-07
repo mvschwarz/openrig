@@ -91,6 +91,12 @@ describe("WorkflowStepTrailLog (PL-004 Phase D; append-only)", () => {
     expect(list[1]?.stepId).toBe("a");
   });
 
+  it("listForInstanceInAppendOrder keeps record order when closed_at steps back", () => {
+    log.record({ instanceId, stepId: "a", stepRole: "r", closedAt: "2026-05-03T08:00:00.000Z", closureReason: "handoff", actorSession: "a@r", priorQitemId: "q-prior" });
+    log.record({ instanceId, stepId: "b", stepRole: "r", closedAt: "2026-05-03T07:00:00.000Z", closureReason: "handoff", actorSession: "a@r", priorQitemId: "q-prior" });
+    expect(log.listForInstanceInAppendOrder(instanceId).map((entry) => entry.stepId)).toEqual(["a", "b"]);
+  });
+
   it("FK violation: record() against unknown instance_id throws SQLite FK error", () => {
     expect(() =>
       log.record({

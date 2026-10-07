@@ -57,7 +57,7 @@ describe("selection sync + cursor stability (item 2)", () => {
     const s = fresh();
     s.dispatch(parseCommand("spec-of dev50.driver"));
     const rows = computeExplorerRows(s.get(), snap);
-    expect(rows[s.get().selection]?.key).toBe("spec:driver-agent");
+    expect(rows[s.get().selection]?.key).toBe("spec:agent:driver-agent");
   });
 });
 

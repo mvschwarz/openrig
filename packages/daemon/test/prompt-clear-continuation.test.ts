@@ -9,6 +9,8 @@ import type { PolicyJob } from "../src/domain/policies/types.js";
 import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal, readWakeLadderBackstop } from "../src/domain/queue-wake-ladder.js";
 import { LADDER_ATTEMPT_PREFIX, LADDER_EXHAUSTED_PREFIX } from "../src/domain/queue-stuck-sweep.js";
+import { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import { CLAUDE_ACTIVITY_RUNG_INVENTORY, type ActivityEvidence } from "../src/domain/activity-taxonomy.js";
 
 const seat = "worker@fixture";
 const epoch = Date.parse("2026-01-01T00:00:00.000Z");
@@ -53,6 +55,7 @@ describe("original wake continuation after prompt clearing", () => {
     const observe = (state: "blocked" | "clear" | "unknown", second: number) => {
       observed = { activity: state === "unknown" ? "unknown" : "idle-at-prompt",
         needsInput: { count: state === "blocked" ? 1 : 0, reason: state === "blocked" ? "fixture prompt" : null },
+        needsInputEvidence: state === "unknown" ? null : { rung: "needs-input-chrome", observedAt: at(second).toISOString() },
         changedAt: at(second).toISOString(), rungs: [{ rung: "needs-input-chrome", sourceId: "fixture", trust: "authoritative", lastEvidenceAt: at(second).toISOString() }] };
     };
     const policy = makeParkedOwnerConsumerPolicy({
@@ -116,7 +119,8 @@ describe("original wake continuation after prompt clearing", () => {
     }
     const alert = repo.list({ limit: 1000 }).find(row => row.tags?.includes("wake-prompt-refusal"));
     if (withRefusal) expect(alert).toBeDefined();
-    return { id, alert, tick, evaluate, observe, wakes };
+    const setObserved = (state: Parameters<typeof classifyPromptAfterRefusal>[0]) => { observed = state; };
+    return { id, alert, tick, evaluate, observe, setObserved, wakes };
   }
 
   for (const kind of kinds) for (const mode of modes) it(`${kind}: ${mode}`, async () => {
@@ -202,5 +206,50 @@ describe("original wake continuation after prompt clearing", () => {
     expect(f.wakes).toEqual([]);
     expect(readWakeLadderBackstop(db, f.id)?.mechanism).toContain("queue-wake-ladder:exhausted");
     expect(repo.listTransitions(f.id).filter(t => t.transitionNote?.startsWith(LADDER_EXHAUSTED_PREFIX))).toHaveLength(1);
+  });
+
+  // The daemon classifies the refused seat from the oracle's arbitrated state (src/index.ts
+  // readPromptState). These drive a real SeatActivityService for a Claude seat, whose
+  // needs-input rungs are all declared authoritative, after a refusal at second 0.
+  describe("a prompt episode retires only on needs-input evidence observed after the refusal", () => {
+    const node = "worker-node";
+    async function episode(drive: (report: (e: Omit<ActivityEvidence, "seatNodeId" | "sessionName" | "seq">) => void) => void) {
+      const f = await fixture("pending-failed");
+      const svc = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3, now: () => new Date() });
+      svc.declareRungInventory({ seatNodeId: node, sessionName: seat }, CLAUDE_ACTIVITY_RUNG_INVENTORY);
+      let n = 0;
+      vi.setSystemTime(at(20));
+      drive((e) => svc.reportEvidence({ seatNodeId: node, sessionName: seat, seq: ++n, ...e } as ActivityEvidence));
+      f.setObserved(svc.getSeatState(node));
+      await f.tick(20);
+      await f.tick(60);
+      return f;
+    }
+    const hookClear = (second: number) => ({ rung: "lifecycle-hooks" as const, sourceId: "claude-code:hooks",
+      observedAt: at(second).toISOString(), activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null } });
+
+    it("a declared needs-input rung that never reported keeps the episode open", async () => {
+      const f = await episode((report) => report({ rung: "window-sampling", sourceId: "tmux:window-activity", observedAt: at(20).toISOString(), activity: "working" }));
+      expect(repo.getById(f.alert!.qitemId)?.state).toBe("pending");
+    });
+
+    it("working/idle-only evidence (self-report busy) keeps the episode open", async () => {
+      const f = await episode((report) => report({ rung: "self-report", sourceId: "claude:pid-json", observedAt: at(20).toISOString(), activity: "working" }));
+      expect(repo.getById(f.alert!.qitemId)?.state).toBe("pending");
+    });
+
+    it("an older explicit clear plus a newer busy/idle update keeps the episode open", async () => {
+      const f = await episode((report) => {
+        report(hookClear(-5));
+        report({ rung: "self-report", sourceId: "claude:pid-json", observedAt: at(20).toISOString(), activity: "working" });
+      });
+      expect(repo.getById(f.alert!.qitemId)?.state).toBe("pending");
+    });
+
+    it("an explicit clear observed after the refusal retires the episode", async () => {
+      const f = await episode((report) => report(hookClear(20)));
+      expect(repo.getById(f.alert!.qitemId)?.state).toBe("done");
+      expect(repo.listTransitions(f.alert!.qitemId)).toContainEqual(expect.objectContaining({ actorSession: f.alert!.sourceSession, transitionNote: retiredNote }));
+    });
   });
 });

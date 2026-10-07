@@ -3,9 +3,11 @@
 The first PR automation increment is described in [ci/README.md](ci/README.md).
 It runs the existing daemon-restart baton fixture plus a fault control in the
 installed-package testbed, now alongside the library's queue-baton scenario and
-its explicit seed binding. Hosted green/red execution is required before claiming
-either verified. The eleven authored scenarios below are a broader target;
-they are not eleven admitted CI passes.
+its explicit seed binding. The same job also runs `transcript-reads-addressed-seat`
+and `capture-returns-addressed-seat` once each, healthy only (`ci/result.mjs`).
+Hosted green/red execution is required before claiming either verified. The
+fifteen authored scenarios below are a broader target; they are not fifteen
+admitted CI passes.
 
 ## Historical 51-03 seed contract — the ten (+ one)
 
@@ -29,22 +31,30 @@ and becomes standing infrastructure instead of a hand-built probe.
   no scenario surface reads it), and the validator rejects it. No internal DB pokes.
 
 ## Layout
-- `scenarios/` — the eleven scenarios (§6 ten + the A1 eleventh), one YAML file each,
-  the scenario name naming its defect class. Beside them: the topology rig specs they
-  bring up (`*-stub.yaml`, seats `runtime: stub`) and the `agents/` and `culture.md`
-  those specs reference.
-- `scripts/` — holds no scripts yet. A scenario names per-seat stub scripts with
+- `scenarios/` — the fifteen scenarios (§6 ten, the A1 eleventh, and four later ones:
+  `capture-returns-addressed-seat`, `down-stops-every-seat`,
+  `send-renders-in-addressed-pane`, `transcript-reads-addressed-seat`), one YAML file
+  each, the scenario name naming its defect class. Beside them: the topology rig specs
+  they bring up (`*-stub.yaml`, seats `runtime: stub`) and the `agents/` and
+  `culture.md` those specs reference.
+- `scenarios/scripts/` — four per-seat stub scripts (JSON). A scenario names them with
   `env.stub_scripts` (paths relative to the scenario file); the built-in default script
   applies when a scenario names none.
+- `scripts/` — only its README, on the scripted-response contract.
+- `evals/` — the live-model eval harness, a separate gate from these scenarios (see
+  `evals/README.md`).
 - `ROUTING.md` — the runner, stub and format capabilities this set depends on, and which
   of them have landed. Per 51-03 mini-req 2 these are ROUTED, never shimmed here.
 
 ## The seed contract (per-scenario, binding — kills the unfalsifiable-RED risk)
-Every scenario carries a `seed_regression: {class: …}` step and, in its header, a
-**SEED definition**: exactly what a seeded regression of its class plants, and why the
+Each of the eleven historical scenarios carries a `seed_regression: {class: …}` step
+and, in its header, a **SEED definition**: exactly what a seeded regression of its class plants, and why the
 scenario's `expect` legs MUST catch it. Acceptance per scenario = the PAIR: GREEN on the
 shipped tip + RED on the seeded run whose runner diff (expected vs last-observed) names
 the class. A scenario that cannot be shown RED is not delivered.
+
+The four later scenarios carry no seed step. Each header names a planted negative
+instead, and that negative is a product-code mutation.
 
 For executable seeds, place the step before the affected action and supply the
 pipeline's `deps.seedRegression` controller. It must arm a real local fault in the
@@ -57,9 +67,11 @@ The runner (`packages/daemon/scripts/run-scenarios.mjs`, over
 `packages/daemon/test/helpers/scenario-*.ts`) and its hermetic env-helper exist. The stub
 runs the four emit behaviors only from a per-seat launch script (`env.stub_scripts`); the
 step verbs `emit`, `restore`, `mutate` and `policy` parse, but the runner throws
-`UnboundActionError` when it reaches one. Only `queue-baton-survives-restart` runs in CI
-(see [ci/README.md](ci/README.md)); the other ten are not yet runnable as meaningful
-checks. Scenario #11 is RED-FIRST: its GREEN gates on the 51-06 transactional
+`UnboundActionError` when it reaches one. In CI, `queue-baton-survives-restart` runs with
+its seed, and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` run
+healthy only (see [ci/README.md](ci/README.md)). The other ten historical scenarios are
+not yet runnable as meaningful checks, and `down-stops-every-seat` and
+`send-renders-in-addressed-pane` don't run in CI. Scenario #11 is RED-FIRST: its GREEN gates on the 51-06 transactional
 execution-closure fix and on its own setup and assertion-shape gaps (R-17, R-20); until
 then its expected-RED runs are recorded as expected-RED, never massaged. See `ROUTING.md`
 for the exact per-item dependencies.

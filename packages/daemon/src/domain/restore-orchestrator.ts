@@ -3,7 +3,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
-import { permissionBindingOverride } from "./native-permission-selection.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -1481,17 +1480,21 @@ export class RestoreOrchestrator {
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
     const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined;
     const nonInterruptive = node ? this.rigRepo.getRigNonInterruptive(node.rig_id) : false;
-    const launchTail: [effort?: string | null, nonInterruptive?: boolean] = nonInterruptive ? [effort, true] : effort !== undefined ? [effort] : [];
+    let kernelAuthority = false;
+    let teamPermissionDefault = false;
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
         : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
-      const selection = new NativePermissionStore(this.db).read(nodeId);
-      if (selection && selection.runtime !== runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
-      const override = permissionBindingOverride(selection);
+      const override = new NativePermissionStore(this.db).launchOverride(nodeId, runtime);
+      kernelAuthority = override.kernelAuthority === true;
+      teamPermissionDefault = override.teamPermissionDefault === true;
       resolvedPosture = override.launchPosture ?? resolvedPosture;
       permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
+    const launchTail: [effort?: string | null, nonInterruptive?: boolean, kernelAuthority?: boolean, teamPermissionDefault?: boolean] = teamPermissionDefault
+      ? [effort, nonInterruptive, false, true] : kernelAuthority
+      ? [effort, nonInterruptive, true] : nonInterruptive ? [effort, true] : effort !== undefined ? [effort] : [];
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...launchTail);
       if (result.ok) {

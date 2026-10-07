@@ -223,7 +223,7 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
       };
     }
-    if (paneContent.includes("Update available!") || paneContent.includes("Updating Codex")) {
+    if (hasCodexUpdateHeader(paneContent) || paneContent.includes("Updating Codex")) {
       return {
         status: "inconclusive",
         code: "update_gate",
@@ -336,22 +336,35 @@ function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
     && paneContent.includes("Enter to confirm");
 }
 
-function looksLikeCodexTui(paneContent: string): boolean {
-  const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
-  if (/model:\s*loading\b/i.test(current)) return false;
-  const recentLines = current.trimEnd().split("\n").slice(-20).join("\n");
-  const hasPromptLine = recentLines.split("\n").some((line) => {
+/** Header formats observed before and since Codex 0.160.0. */
+export function hasCodexUpdateHeader(paneContent: string): boolean {
+  // Preserve legacy-header behavior. A current-format header may instead be
+  // quoted output above a later live composer. A footer alone does not end it.
+  if (paneContent.includes("Update available!")) return true;
+  const header = [...paneContent.matchAll(/^[ \t]*Update available · \S+ → \S+[ \t]*$/gm)].at(-1);
+  return !!header && !hasCodexComposer(paneContent.slice(header.index! + header[0].length));
+}
+
+function hasCodexComposer(paneContent: string): boolean {
+  return paneContent.split("\n").some((line) => {
     const text = line.trimStart();
     const hasPrompt = text.startsWith("›") || text.startsWith("»");
     return hasPrompt && !/^\d+\.\s/.test(text.slice(1).trimStart());
   });
+}
+
+function looksLikeCodexTui(paneContent: string): boolean {
+  const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
+  if (/model:\s*loading\b/i.test(current)) return false;
+  const recentLines = current.trimEnd().split("\n").slice(-20).join("\n");
+  const hasPromptLine = hasCodexComposer(recentLines);
   const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
   // Custom status lines can put the model's display name in any field. Keep
   // corroboration structural: an indented status row and a whole model field,
   // not a model mentioned somewhere in conversation prose.
   // A custom row must not make an unresolved trust/update panel disappear.
   const hasCustomModelFooter = !looksLikeCodexTrustPrompt(current)
-    && !current.includes("Update available!") && !current.includes("Updating Codex")
+    && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex")
     && recentLines.split("\n").some((line) => {
       const fields = line.trim().split(" · ");
       return /^[ \t]{2,}\S/.test(line) && fields.length > 1

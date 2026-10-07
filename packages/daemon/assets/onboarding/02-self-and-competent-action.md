@@ -42,6 +42,42 @@ looked like. State scoped absences honestly: “not represented on the surface c
 than a global absence you did not establish. If another seat must act, transfer durable work rather
 than printing a summary and disappearing.
 
+## When you are installing OpenRig for someone
+
+After setup and a working selected login, use `rig daemon start` if stopped. On a fresh instance it also starts the
+kernel, including the operator and advisor. They are part of installation; choosing a project team comes later.
+Keep the kernel for a normal install. `rig daemon start --no-kernel` is for automation or an explicit request to
+omit its startup, including the operator that helps the person start a team.
+Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The view may open
+while agents finish starting; report their actual state and use the guide's existing recovery routes when needed.
+Ask the person: **“Open the OpenRig view now?”** Yes opens a new terminal space using installed herdr, else cmux,
+else the guide's exact new-terminal command. No gives the command to open it later. Over SSH, give the exact
+connection/attach command. Never attach into your own terminal or take over an existing space; no new provider install.
+No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check what
+the person sees; creating a workspace or running the CLI in a new OS window is not proof that its view is visible.
+Use `rig terminal open saved:kernel --provider herdr` (or `--provider cmux`); the default view needs no YAML edit.
+Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixed kernels.
+Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
+`rig tui --shared` is the team dashboard, not the operator's conversation. Without herdr or cmux, find the
+`operator.agent` row with `rig ps --nodes --rig kernel --json`. Give the person
+`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`, with that row's actual name filled in, for a new terminal on
+the same host and user (over SSH, connect there first). This shows the existing operator conversation and accepts
+their answers; Ctrl-b, then d detaches without stopping it. Do not attach in your own terminal.
+Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
+Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
+`rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
+or have the person type the goal and folder in the operator's pane. Show where the operator answers and let it
+help them choose a team before any starter launch.
+If the person gives you a goal later, forward it, the folder and constraints with `rig send`; leave implementation
+with the operator's team instead of taking over the work yourself.
+Installation is complete when the operator is ready and the person is talking to it, not merely when the daemon is
+healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
+
+Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual
+path. Without a working daemon, the same guide is `daemon/docs/reference/getting-started.md` in the installed
+`@openrig/cli` package. Confirm what actually opened; on a headless host or unavailable display, say so and give the
+person the exact connection/attach step. Opening a terminal is not permission to start or reset seats or provision accounts.
+
 ## When you need more
 
 When you need to know what OpenRig can do, run `rig context get onboarding-width`: its

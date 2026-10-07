@@ -73,6 +73,26 @@ describe("rig skill audit", () => {
     expect(logs.some((l) => l.includes("mirrorDriftError"))).toBe(true);
   });
 
+  it("a skipped mirror drift check (installed package) is informational: prints SKIPPED and PASS, exits 0", async () => {
+    const deps = makeDeps({
+      status: 200,
+      data: {
+        ok: true,
+        entries: [],
+        totalFindings: 0,
+        mirrorDriftSkipped: "Mirror drift check skipped: no scripts/mirror-skills.mjs under /pkg; it runs only in an OpenRig source checkout",
+      },
+    });
+
+    const cmd = skillCommand(deps);
+    await cmd.parseAsync(["node", "rig", "audit"]);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(logs.some((l) => l.includes("MIRROR DRIFT CHECK SKIPPED"))).toBe(true);
+    expect(logs.some((l) => l.includes("FAIL"))).toBe(false);
+    expect(logs.some((l) => l.includes("PASS"))).toBe(true);
+  });
+
   it("clean audit with no mirrorDriftError prints PASS and exits 0", async () => {
     const deps = makeDeps({
       status: 200,

@@ -166,6 +166,20 @@ export async function resolveLibrarySpec(
     );
   }
 
+  // Compatibility name only: real IDs/names (including user-authored specs) win.
+  // Do not alias agent/workflow lookups or unrelated user specs named starter.
+  if (nameOrId === "first-project" && (!opts?.kind || opts.kind === "rig")) {
+    const starters = entries.filter((entry) =>
+      entry.kind === "rig" && entry.name === "starter" && entry.sourceType === "builtin");
+    if (starters.length === 1) {
+      console.error("first-project is now starter (a Claude builder and a Codex reviewer); on a Codex-only machine, ask your OpenRig operator to adapt it");
+      return starters[0]!;
+    }
+    if (starters.length > 1) {
+      throw new Error("Spec alias 'first-project' is ambiguous — multiple built-in starter entries match. Use the ID instead.");
+    }
+  }
+
   const scope = opts?.kind ? ` ${opts.kind}` : "";
   throw new Error(
     `Spec '${nameOrId}' not found in${scope} library. Run 'rig specs ls' to see available rigs, agents, workflows, and managed apps.`
@@ -267,13 +281,16 @@ Examples:
         const client = await getClient();
         const entry = await resolveLibrarySpec(client, nameOrId, opts.kind ? { kind: opts.kind } : undefined);
         const res = await client.get<Record<string, unknown>>(`/api/specs/library/${encodeURIComponent(entry.id)}/review`);
+        const review = res.data;
+        const teamChoice = entry.sourceType === "builtin" && entry.kind === "rig" && ["starter", "factory"].includes(entry.name)
+          ? "First-team choices: starter (builder + reviewer, one bounded change), workshop (lead + builder + QA + reviewer, ongoing repository work; installed from its pinned listing), and factory (seven agents, sustained product work). Unless you already picked a team, the next conversation should sketch all three, recommend one for your goal, and let you choose before anything starts."
+          : undefined;
 
         if (opts.json) {
-          console.log(JSON.stringify(res.data, null, 2));
+          console.log(JSON.stringify(teamChoice ? { ...review, guidance: [...(review["guidance"] as string[] ?? []), teamChoice] } : review, null, 2));
           return;
         }
 
-        const review = res.data;
         console.log(`${review["name"]} (${review["kind"]}, ${review["format"] ?? "agent"})`);
         if (review["summary"]) console.log(`  ${review["summary"]}`);
         console.log(`  Source: ${review["sourcePath"]} [${review["sourceState"]}]`);
@@ -287,6 +304,7 @@ Examples:
             }
           }
         }
+        if (teamChoice) console.log(`  Next: ${teamChoice}`);
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

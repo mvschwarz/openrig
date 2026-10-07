@@ -10,6 +10,7 @@ import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-t
 import type { ComposedView, OpenViewResult, TerminalProvider } from "../src/domain/terminal/terminal-provider.js";
 
 const RIG = "big";
+const TEAM_HANDOFF_NOTE = "The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.";
 const rows = Array.from({ length: 17 }, (_, i) => {
   const s = `seat-${String(i + 1).padStart(2, "0")}@${RIG}`;
   return { canonicalSessionName: s, attachmentType: "tmux" as const, tmuxSession: s, rigName: RIG, logicalId: `pod.s${i + 1}` };
@@ -123,7 +124,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     expect(requests[2]!.params).toEqual({ workspace_id: "w1" });
     expect(requests[5]!.params).toEqual({ tab_id: "w1:t1" });
     expect(requests[6]!.params).toEqual({ tab_id: "w1:t0" });
-    expect(res.notes).toBeUndefined();
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
   });
 
   it("never closes a tab that holds a page, even if herdr reuses the starting tab", async () => {
@@ -163,7 +164,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     expect(requests.filter((r) => r.method === "workspace.create").map((c) => c.params["label"])).toEqual([RIG, `${RIG} (3)`]);
     expect(res.ok).toBe(true);
     // This fake answers pane.list with no listing, so the page is unconfirmed (#707) and stays opened.
-    expect(res.notes).toEqual([`A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`, HERDR_PANES_UNCONFIRMED_NOTE]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, `A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`, HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
   it("a refused focus or close is a note; the opened seats are unchanged", async () => {
@@ -176,7 +177,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(res.opened).toHaveLength(17);
     expect(res.degraded).toEqual([]);
-    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
   });
 
   it("honest partials: a page herdr refuses names its seats as degraded; the tile count never overclaims", async () => {
@@ -211,7 +212,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(requests.find((r) => r.method === "tab.focus")!.params).toEqual({ tab_id: "t2" });
     expect(res.opened).toHaveLength(17);
-    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("no page reports a tab id: no focus and no close, both said", async () => {
@@ -219,7 +220,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "layout.apply"]);
-    expect(res.notes).toEqual(["herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, "herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
   });
 
   it("a failed apply (which may still have taken effect) keeps the starting tab; its seats stay degraded, not counted", async () => {
@@ -234,7 +235,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
     expect(res.degraded).toHaveLength(16);
-    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("every page fails: nothing is focused or closed", async () => {
@@ -251,7 +252,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(closes(requests).map((r) => r.params)).toEqual([{ tab_id: "w1:t0" }]);
-    expect(res.notes).toBeUndefined();
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
   });
 });
 

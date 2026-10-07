@@ -97,7 +97,13 @@ async function resolveRigHandle(client: DaemonClient, handle: string): Promise<H
  * @returns Commander command
  */
 export function downCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("down").description("Tear down a rig");
+  const cmd = new Command("down").description("Tear down a rig")
+    .addHelpText("after", `
+rig down stops every agent in the rig: their sessions end, and any work in progress stops with them.
+Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
+don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
+rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
+--delete the rig record is removed too, so it can't be brought back that way.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd

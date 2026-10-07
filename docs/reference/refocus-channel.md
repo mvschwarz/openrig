@@ -82,7 +82,10 @@ This automatic hook path is additive to one-shot manual injection through
 The chain files are the durable, altitude-addressed home of orientation
 content; the refocus channel is its delivery schedule. A practice added to a
 rig's `LEARNED.md` today reaches running seats through their next refocus
-trace, which reads `LEARNED.md` at each topology level. A `CRAFT.md` practice
+trace, which reads `LEARNED.md` at each topology level. The default light trace
+shows only about the first 800 characters of each `LEARNED.md` body, so a
+practice appended to a longer file reaches seats only with
+`OPENRIG_REFOCUS_DEPTH=full` or through the configured refocus content. A `CRAFT.md` practice
 reaches them only through the configured refocus content (REF or FILE), and future
 installs through the shipped defaults
 (discovery → curation → ship, per the convention doc).

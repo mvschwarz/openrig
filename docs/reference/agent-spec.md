@@ -285,10 +285,11 @@ Each array contains resource IDs. These can be:
 The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `runtime_resources`. A `uses.hooks` key, even an
 empty list, is refused: hooks ship inside plugins.
 
-**Skills resolve more widely than other resources.** A skill ID that no declared resource provides is looked up at
-launch in the seat's runtime skill folder (`<cwd>/.claude/skills` or `<cwd>/.agents/skills`), then the spec folder's
-`skills/`, then the home skill folder, then the managed skills root; Pi looks only in the spec folder's `skills/`. A
-discovered skill's ID is its `SKILL.md` frontmatter `name`, and a declared resource wins over a discovered skill with the
+**Skills resolve more widely than other resources.** For Claude Code and Codex seats, a skill ID that no declared
+resource provides is looked up at launch in the seat's runtime skill folder (`<cwd>/.claude/skills` or
+`<cwd>/.agents/skills`), then the `skills/` folder beside the RigSpec, then the home skill folder, then the managed
+skills root. Pi looks only in the `skills/` folder beside the RigSpec. OMP does no filesystem discovery, so its
+`uses.skills` references need declared resources. A discovered skill's ID is its `SKILL.md` frontmatter `name`, and a declared resource wins over a discovered skill with the
 same ID. When a profile selects a skill from inside the spec's own folder and the managed catalog holds a different
 copy, the spec's copy is used and launch warns `skill_bundle_precedence`. Any other differing copy fails launch with
 `skill_identity_conflict`.
@@ -368,7 +369,7 @@ version.
 | `skills` | `id`, `path` | Skill directories containing a SKILL.md. Projected by the runtime adapter: Claude to `<cwd>/.claude/skills/<id>`, Codex to `<cwd>/.agents/skills/<id>`, Pi and OMP to the seat's own agent directory under OpenRig's state. |
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
 | `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
-| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Hooks ship inside plugins. |
+| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Neither Claude Code nor Codex reads skills from that plugin folder, so when a seat is instantiated a selected plugin's skills are also projected into the seat's skill folder (`.claude/skills/<name>` or `.agents/skills/<name>`) under their plain names. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone, with a `plugin_skill_kept` warning. Hooks ship inside plugins. |
 | `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. |
 
 *Fields marked with `*` are optional.
@@ -456,7 +457,7 @@ restore behavior, and the distinction between readiness and verified proof.
 
 | Hint | When Delivered | Mechanism |
 |------|---------------|-----------|
-| `auto` | Depends on the file | A `SKILL.md` is `skill_install`, any other `.md` is `guidance_merge`, and any other file is `send_text` |
+| `auto` | Depends on the file | A path ending in `SKILL.md`, or content beginning with `# SKILL`, is `skill_install`; otherwise a `.md` file is `guidance_merge`, and any other file is `send_text` |
 | `guidance_merge` | Before harness boot | Merged into CLAUDE.md/AGENTS.md as managed block |
 | `skill_install` | Before harness boot | Installed to runtime skill directory |
 | `send_text` | After harness is ready | Sent as text to agent terminal via tmux |

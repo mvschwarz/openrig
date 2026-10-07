@@ -18,7 +18,7 @@
   ],
   "excludeFiles": [],
   "rules": [
-    "Install with npm install -g @openrig/cli. OpenRig requires Node.js 22 or 24 and tmux; the first-project starter also requires an authenticated Codex CLI.",
+    "Install with npm install -g @openrig/cli. OpenRig requires Node.js 22 or 24, tmux, and Claude Code or Codex signed in. The starter team uses both, and the kernel operator adapts it when you have only one.",
     "Preview before launching: rig specs preview <spec>, then rig up <spec> --cwd . --plan, then rig up <spec> --cwd .",
     "Check seat readiness with rig ps --nodes --rig <rig>, not only daemon health from rig status.",
     "Inside a rig, an agent runs rig whoami --json first and treats its output as its identity.",

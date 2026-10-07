@@ -26,6 +26,8 @@ import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js
 import { runSyncSite } from "./sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { routeBundleContents, routingFailureWarnings, thrownMessage, type BundleContentRouting } from "./bundle-content-routing.js";
+import { bundleInstallContext, bundleInstallContextLines, isExistingBundleTarget, type BundleInstallContext } from "./bundle-install-context.js";
+import { confirmStoppedGenerations } from "./running-name-guard.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -64,6 +66,7 @@ export interface BootstrapResult {
   actionKeys?: string[];
   /** What a pod-aware bundle's pre-launch routing did, when it ran */
   bundleRouting?: BundleContentRouting;
+  bundleInstall?: BundleInstallContext;
 }
 
 import type { PodRigInstantiator } from "./rigspec-instantiator.js";
@@ -177,6 +180,20 @@ export class BootstrapOrchestrator {
           stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: podSource.manifest.name, source: "pod_bundle" } });
 
           try {
+            const parsedSpec = parsePodBundleManifest(rawYaml) as Record<string, unknown>;
+            const context = bundleInstallContext(this.deps.db, typeof parsedSpec?.name === "string" ? parsedSpec.name : "", {
+              name: podSource.manifest.name, version: podSource.manifest.version, source: sourceRef,
+            });
+            if (context.existing.length > 0) {
+              const lines = bundleInstallContextLines(context);
+              if (mode === "apply" && context.existing.some(rig => rig.state === "running")) {
+                const message = [...lines, "No bundle files were written and no team was created or launched."].join("\n");
+                stages.push({ stage: "import_rig", status: "failed", detail: { code: "rig_name_running", message } });
+                this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                return { runId: run.id, status: "failed", stages, errors: [message], warnings, bundleInstall: context };
+              }
+              warnings.push(...bundleInstallContextLines(context, mode === "plan"));
+            }
             // Reject service-backed bundles — services require a stable source directory
             try {
               const parsed = parsePodBundleManifest(rawYaml) as Record<string, unknown>;
@@ -194,7 +211,20 @@ export class BootstrapOrchestrator {
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
             if (opts.mode === "apply" && opts.targetRoot) {
               const targetRoot = nodePath.resolve(opts.targetRoot);
-              const materialized = materializePodBundle(podSource.tempDir, targetRoot);
+              const replacingOwnTarget = isExistingBundleTarget(context, targetRoot);
+              const tmux = this.deps.podInstantiator?.["deps"]?.tmuxAdapter;
+              if (replacingOwnTarget && tmux?.probeSession) {
+                // The instantiator repeats this under its name lock. This early
+                // read keeps a known-live or uncertain old session's files intact.
+                const stopped = await confirmStoppedGenerations(this.deps.db, context.existing.map(rig => rig.rigId), tmux.probeSession.bind(tmux));
+                if (!stopped.ok) {
+                  const message = `Could not confirm the existing team is stopped: ${stopped.reason}. No target files were written and no team was created.`;
+                  stages.push({ stage: "import_rig", status: "failed", detail: { code: "generation_unconfirmed", message } });
+                  this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                  return { runId: run.id, status: "failed", stages, errors: [message], warnings: [...warnings, ...context.resolutions], bundleInstall: context };
+                }
+              }
+              const materialized = materializePodBundle(podSource.tempDir, targetRoot, replacingOwnTarget);
               if (!materialized.ok) {
                 const shown = materialized.conflicts.slice(0, 10).join(", ");
                 const more = materialized.conflicts.length > 10 ? ` (and ${materialized.conflicts.length - 10} more)` : "";
@@ -204,10 +234,14 @@ export class BootstrapOrchestrator {
                 this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
                 return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
               }
+              if (materialized.backupPath) warnings.push(`Existing target files were preserved at ${materialized.backupPath} before installing the replacement. Unrelated target files were kept.`);
               specDir = nodePath.dirname(nodePath.join(targetRoot, podSource.manifest.rigSpec));
+              warnings.push(`Bundle files are installed in ${targetRoot}; a later launch failure does not remove them.`);
             }
 
-            return await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
+            const result = await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
+            if (mode === "apply" && result.status === "failed") result.warnings.push(...context.resolutions);
+            return { ...result, bundleInstall: { ...context, resolutions: mode === "apply" && result.status === "completed" ? [] : context.resolutions } };
           } finally {
             if (podBundleTempDir) this.deps.podBundleSourceResolver.cleanup(podBundleTempDir);
           }
@@ -660,7 +694,7 @@ export class BootstrapOrchestrator {
           status: preflight.ready ? "planned" : "failed",
           stages,
           errors: preflight.errors,
-          warnings: preflight.warnings,
+          warnings: [...warnings, ...preflight.warnings],
         };
       } catch (err) {
         stages.push({ stage: "resolve_spec", status: "failed", detail: { error: (err as Error).message } });
@@ -694,7 +728,12 @@ export class BootstrapOrchestrator {
           return serviceResult.ok ? bundleHook() : serviceResult;
         }
       : serviceHook ?? bundleHook;
-    const nonInterruptive = opts.nonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
+    let declaredNonInterruptive: boolean | undefined;
+    try {
+      const raw = RigSpecCodec.parse(rigSpecYaml) as Record<string, unknown> | null;
+      if (typeof raw?.["non_interruptive"] === "boolean") declaredNonInterruptive = raw["non_interruptive"];
+    } catch { /* The instantiator returns the existing structured validation failure. */ }
+    const nonInterruptive = opts.nonInterruptive ?? declaredNonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
     const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, prelaunchHook });
     if ((outcome.ok || "rigId" in outcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
     const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
@@ -734,7 +773,7 @@ export class BootstrapOrchestrator {
       const outWarnings = (outcome as { warnings?: string[] }).warnings ?? [];
       stages.push({ stage: "import_rig", status: "failed", detail: { code: outcome.code } });
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
-      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: outWarnings });
+      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: [...warnings, ...outWarnings] });
     }
 
     const result = outcome.result;

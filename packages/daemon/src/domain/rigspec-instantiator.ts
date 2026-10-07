@@ -321,7 +321,7 @@ import type {
   CompactionStrategy,
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
-import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillRuntime } from "./skill-catalog.js";
+import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
 import type { SystemWorldResolution } from "./system-world.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
@@ -1342,7 +1342,8 @@ export class PodRigInstantiator {
       const rig = create();
       rigId = rig.id;
       createdRigId = rig.id;
-      if (opts?.nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, opts.nonInterruptive);
+      const nonInterruptive = opts?.nonInterruptive ?? rigSpec.nonInterruptive;
+      if (nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, nonInterruptive);
       // PL-007: persist typed workspace block (when declared) on the rig
       // record. Whoami / node-inventory read it via getRigWorkspace().
       if (rigSpec.workspace) {
@@ -2021,24 +2022,39 @@ export class PodRigInstantiator {
     }
 
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
+    const keptSkillWarnings: string[] = [];
     if (
       configResult.config.skillLoadout
       && this.deps.skillReconciler
       && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex")
     ) {
-      const projection = this.deps.skillReconciler({
-        loadout: configResult.config.skillLoadout,
-        runtime: configResult.config.runtime,
+      const reconcile = (selected: SkillLoadout) => this.deps.skillReconciler!({
+        loadout: selected,
+        runtime: configResult.config.runtime as SkillRuntime,
         cwd: configResult.config.cwd,
         apply: true,
         topologyOwner: canonicalSessionName,
       });
+      const loadout = configResult.config.skillLoadout;
+      let projection = reconcile(loadout);
+      // Plugin skills never stop a seat that launched before them: if they cannot be
+      // projected, the seat starts with the rest of its loadout and says why.
+      if (!projection.ok && loadout.entries.some((entry) => entry.pluginId)) {
+        const withoutPlugins = reconcile({ ...loadout, entries: loadout.entries.filter((entry) => !entry.pluginId) });
+        if (withoutPlugins.ok) {
+          keptSkillWarnings.push(`plugin_skills_not_projected: ${projection.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}`);
+          projection = withoutPlugins;
+        }
+      }
       if (!projection.ok) {
         return {
           status: "failed",
           error: projection.errors.map((error) => `${error.code}: ${error.message}`).join("; "),
           sessionName: canonicalSessionName,
         };
+      }
+      for (const receipt of projection.receipts.filter(isKeptPluginSkill)) {
+        keptSkillWarnings.push(`plugin_skill_kept: ${receipt.id}: ${receipt.detail.slice("kept: ".length)} (${receipt.target})`);
       }
     }
     // Forward per-seat silenceWindowSeconds from the resolved profile.
@@ -2094,7 +2110,7 @@ export class PodRigInstantiator {
     // P17: a divergent target is never SILENT again — each conflict rides the
     // instantiate warnings surface with the file, reason, and consequence.
     (launchResult.warnings ??= []).push(
-      ...(configResult.config.skillWarnings ?? []).map(warning => `${canonicalSessionName}: ${warning}`),
+      ...[...(configResult.config.skillWarnings ?? []), ...keptSkillWarnings].map(warning => `${canonicalSessionName}: ${warning}`),
       ...projectionConflictWarnings(planResult.plan),
     );
 

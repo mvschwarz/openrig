@@ -29,6 +29,16 @@ profiles:
         - shared:codex-default-config
         - shared:claude-activity-hooks
 
+  advisor:
+    uses:
+      skills: [shared:orchestration-team]
+      plugins: [shared:openrig-core]
+      runtime_resources:
+        - shared:claude-default-settings
+        - shared:claude-default-mcp
+        - shared:codex-default-config
+        - shared:claude-activity-hooks
+
 resources:
   guidance:
     - id: role

@@ -193,6 +193,49 @@ describe("Specs CLI", () => {
     expect(parsed.libraryEntryId).toBe("abc123");
   });
 
+  it.each([
+    ["starter", "builtin", "rig", true],
+    ["factory", "builtin", "rig", true],
+    ["starter", "user_file", "rig", false],
+    ["research", "builtin", "rig", false],
+    ["starter", "builtin", "agent", false],
+  ])("preview %s/%s/%s keeps the review and scopes first-team guidance", async (name, sourceType, kind, guided) => {
+    const entry = { ...LIBRARY_ENTRIES[0], name, sourceType, kind };
+    const review = { ...RIG_REVIEW, name, kind };
+    const previewServer = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(req.url?.endsWith("/review") ? review : [entry]));
+    });
+    await new Promise<void>(resolve => { previewServer.listen(0, resolve); });
+    try {
+      for (const json of [false, true]) {
+        const program = new Command().addCommand(specsCommand(runningDeps((previewServer.address() as { port: number }).port)));
+        const { logs, exitCode } = await captureLogs(() => program.parseAsync([
+          "node", "rig", "specs", "preview", entry.id, "--kind", String(kind), ...(json ? ["--json"] : []),
+        ]).then(() => {}));
+        expect(exitCode).toBeUndefined();
+        const output = logs.join("\n");
+        if (guided) {
+          expect(output).toContain("starter (builder + reviewer");
+          expect(output).toContain("workshop (lead + builder + QA + reviewer");
+          expect(output).toContain("factory (seven agents");
+          expect(output).toContain("Unless you already picked a team");
+          expect(output).toContain("sketch all three");
+          expect(output).toContain("recommend one for your goal");
+        } else {
+          expect(output).not.toContain("First-team choices");
+        }
+        if (json) {
+          const { guidance, ...original } = JSON.parse(output);
+          expect(original).toEqual(review);
+          expect(guidance?.length ?? 0).toBe(guided ? 1 : 0);
+        }
+      }
+    } finally {
+      await new Promise<void>(resolve => { previewServer.close(() => resolve()); });
+    }
+  });
+
   it("specs sync reports updated count", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "sync"]);
