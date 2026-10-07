@@ -146,10 +146,10 @@ describe("long human asks (#897)", () => {
   ])("keeps one message or a split when the mention changes between an interrupted attempt and its retry (mention %s)", async (_label, before, after) => {
     // A long subject makes the complete-fallback budget decide whether a brief fits in one message.
     const summary = "Approve the plan? ".repeat(62);
+    // Probes use the test's own decision id: its reconcile marker is part of the message text.
     const fitsBesideMention = async (length: number) => {
       const posts: Post[] = [];
-      const id = `probe-${length}`;
-      await subsystemSlackDeliver({ ...stores(id), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), resolveMentionUserId: () => "U0123456789" })(decision(id, { body: "a".repeat(length), summary }));
+      await subsystemSlackDeliver({ ...stores(`probe-${length}`), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), resolveMentionUserId: () => "U0123456789" })(decision("shape", { body: "a".repeat(length), summary }));
       return posts.length === 1;
     };
     // The shortest brief that doesn't fit in one message beside the mention.
