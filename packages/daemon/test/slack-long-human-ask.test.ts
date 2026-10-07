@@ -140,6 +140,45 @@ describe("long human asks (#897)", () => {
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(longBody);
   });
 
+  it.each([
+    ["none, then one", undefined, "U0123456789"],
+    ["one, then none", "U0123456789", undefined],
+  ])("keeps one message or a split when the mention changes between an interrupted attempt and its retry (mention %s)", async (_label, before, after) => {
+    // A long subject makes the complete-fallback budget decide whether a brief fits in one message.
+    const summary = "Approve the plan? ".repeat(62);
+    const fitsBesideMention = async (length: number) => {
+      const posts: Post[] = [];
+      const id = `probe-${length}`;
+      await subsystemSlackDeliver({ ...stores(id), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), resolveMentionUserId: () => "U0123456789" })(decision(id, { body: "a".repeat(length), summary }));
+      return posts.length === 1;
+    };
+    // The shortest brief that doesn't fit in one message beside the mention.
+    let fits = 0, splits = 6000;
+    while (splits - fits > 1) { const mid = (fits + splits) >> 1; if (await fitsBesideMention(mid)) fits = mid; else splits = mid; }
+    const body = "a".repeat(splits);
+
+    const posted: Post[] = [];
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${posted.length + 1}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    // The first attempt posts, then its receipt write fails, so the decision is retained for a retry.
+    let receiptFails = true;
+    const onPosted = () => { if (receiptFails) { receiptFails = false; throw new Error("synthetic receipt failure"); } };
+    let mention = before;
+    const opts = { ...stores("shape"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl, onPosted, resolveMentionUserId: () => mention };
+    const ask = decision("shape", { body, summary });
+    expect((await subsystemSlackDeliver(opts)(ask)).ok).toBe(false);
+    mention = after;
+    expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
+    // Joined back in posting order, the parts are the whole brief: nothing lost, nothing repeated.
+    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    expect(bodies[0]!.endsWith(NOTE)).toBe(true);
+    expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
+  });
+
   it("redacts secrets before cutting, so no part carries a piece of one", async () => {
     const posts: Post[] = [];
     const deliver = subsystemSlackDeliver({ ...stores("secret"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) });
