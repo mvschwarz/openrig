@@ -137,7 +137,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     runtime: "claude-code",
     path: ".claude/settings.local.json",
     purpose:
-      "Apply context-collector statusLine config and the acceptEdits floor fragment. OpenRig writes NO allow/ask/deny permission policy into settings files; launch can pass per-launch allow/ask lists (the team and kernel defaults), and the harness-native permissions are the control surface.",
+      "Apply context-collector statusLine config and the acceptEdits floor fragment. The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.",
   },
   {
     scope: "project",
@@ -833,8 +833,8 @@ export function goldenPathNextSteps(): string[] {
 export function permissionPolicyMenuLines(): string[] {
   return [
     "Before team launch, your agent recommends keeping the team default (reuse an existing explicit choice):",
-    "  Claude team seats with no policy run ordinary rig commands, project reads and common tests without prompts; lifecycle commands such as rig up and rig down still ask.",
-    "  It offers once: Remember these selected OpenRig commands in your native settings for this project?",
+    "  Claude team seats with no policy or explicit seat choice run ordinary rig commands, project reads and common tests without prompts; lifecycle commands such as rig up and rig down still ask.",
+    "  Only if you want more, it offers once: Remember these selected OpenRig commands in your native settings for this project?",
     "  Yes / No — keep the team default. No answer leaves settings unchanged too.",
     "  A remembered allowance can cover all rig verbs, but Claude team seats still ask before lifecycle commands; not global YOLO or authority to invent work.",
     "  Personal project scope unless you explicitly choose user-wide sessions. On Yes, the agent adds native rules, preserving stricter rules.",
@@ -850,7 +850,7 @@ export function permissionPolicyMenuLines(): string[] {
     "  YOLO Mode           The full-bypass built-in policy.",
     "  No policy — deliberate choice (recorded): the floor, without the team allowances",
     "",
-    "  If you skip: team seats launch with the team default; nothing is recorded",
+    "  If you skip: nothing is recorded; team seats launch with the team default unless a seat choice or named Codex profile applies",
     "",
     "  To record a choice into an existing spec:",
     "    rig setup --policy <locked|standard|open|yolo|auto|none> --spec <path>",

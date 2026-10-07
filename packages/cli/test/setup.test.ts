@@ -963,7 +963,7 @@ describe("rig setup permission-policy menu copy (frozen)", () => {
   it("renders the deliberate-none and skip-line copy with the team default", () => {
     const out = permissionPolicyMenuLines().join("\n");
     expect(out).toContain("No policy — deliberate choice (recorded): the floor, without the team allowances");
-    expect(out).toContain("If you skip: team seats launch with the team default; nothing is recorded");
+    expect(out).toContain("If you skip: nothing is recorded; team seats launch with the team default unless a seat choice or named Codex profile applies");
     expect(out).toContain("Yes / No — keep the team default.");
     expect(out).not.toContain("keep prompts");
   });

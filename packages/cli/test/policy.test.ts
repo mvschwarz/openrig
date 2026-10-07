@@ -8,7 +8,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { policyCommand } from "../src/commands/policy.js";
 
-const PIN = "OpenRig writes NO allow/ask/deny permission policy into settings files; launch can pass per-launch allow/ask lists (the team and kernel defaults), and the harness-native permissions are the control surface.";
+const PIN = "The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.";
 
 function runCapture(argv: string[]): Promise<{ logs: string[]; errs: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {

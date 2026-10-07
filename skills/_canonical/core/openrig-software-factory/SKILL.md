@@ -81,11 +81,12 @@ an event-driven wait to frequent empty reminders. Wakes cannot answer a user
 question, clear a permission prompt or guarantee progress.
 
 **Ask once before launching or assigning work.** For a team with no permission
-policy, recommend keeping the team default: Claude team seats run ordinary `rig`
-commands, project reads and common tests without prompts, and lifecycle commands
-such as `rig up` and `rig down` still ask. Then offer: “Remember these selected
-OpenRig commands in your native settings for this project?” **Yes** /
-**No — keep the team default**. Reuse an existing explicit choice for this scope.
+policy, seat choice or named Codex profile, recommend keeping the team default:
+Claude team seats run ordinary `rig` commands, project reads and common tests
+without prompts, and lifecycle commands such as `rig up` and `rig down` still
+ask. Only if they want more, offer: “Remember these selected OpenRig commands in
+your native settings for this project?” **Yes** / **No — keep the team default**.
+Reuse an existing explicit choice for this scope.
 Explain that a remembered allowance can cover all `rig` verbs, but Claude team
 seats still ask before lifecycle commands, at personal project scope unless the
 user explicitly chooses user-wide sessions. It is not global YOLO or permission
