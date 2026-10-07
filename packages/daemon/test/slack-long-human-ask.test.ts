@@ -269,6 +269,29 @@ describe("long human asks (#897)", () => {
     expect(failed.mock.calls.map((call) => call[1])).not.toContain("human-message-unrenderable");
   });
 
+  it("still refuses a one-message ask whose history scan is incomplete, rather than marking it delivered", async () => {
+    const { ask, body } = await askAtLabelLimit("unverified");
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      // One readable page that says there is more, with no cursor: the scan can't rule the message in or out.
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: [], has_more: true });
+      if (++calls === 1) throw new Error("synthetic timeout; the post may or may not have landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const failed = vi.fn();
+    const onPosted = vi.fn();
+    const base = { ...stores("unverified"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed, onPosted };
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
+    const retry = await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body));
+    expect(retry).toMatchObject({ ok: false, class: "human-message-unrenderable" });
+    expect(posted).toHaveLength(0);
+    expect(onPosted).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenLastCalledWith(expect.anything(), "human-message-unrenderable", expect.any(String), true);
+  });
+
   it("refuses the rest, loudly, when a split's first part is in Slack and the rest no longer renders", async () => {
     const ask = decision("partial", { sourceSession: undefined, body: "a".repeat(4000), summary: nearLimitSummary });
     const posted: Post[] = [];
