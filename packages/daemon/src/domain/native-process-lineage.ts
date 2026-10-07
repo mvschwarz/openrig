@@ -37,7 +37,7 @@ function tokens(command: string): string[] {
     if (quote !== null) {
       if (quote === '"' && char === "\\") { index += 1; continue; }
       if (char === quote) quote = null;
-    } else if (char === '"' && (index === start || command[start] === "{"
+    } else if (char === '"' && (command.startsWith('"{', start) || command[start] === "{"
       || command.startsWith("'{", start) || command.startsWith("--settings={", start)
       || command.startsWith('--settings="', start))) {
       quote = char;

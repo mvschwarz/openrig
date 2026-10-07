@@ -61,6 +61,20 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it.each([
+    ["relative settings file", ["--settings", '"review.json', "--session-id", "review-token"]],
+    ["name before identity", ["--name", '"review-desk', "--session-id", "review-token"]],
+  ] as const)("a leading literal quote in %s preserves the real identity", async (_name, args) => {
+    const f = fixture("review-token");
+    f.listProcesses.mockResolvedValue([root, { ...child,
+      command: "/tmp/review/.local/share/claude/versions/2.1.1 " + args.join(" "),
+    }]);
+    expect((await f.verify(true)).ok).toBe(true);
+    expect((await f.post()).status).toBe(200);
+    expect(f.startup()).toBe("ready");
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
   it("does not clear attention using identity text inside settings beside a literal quote", async () => {
     const f = fixture("review-token");
     f.listProcesses.mockResolvedValue([root, { ...child,
