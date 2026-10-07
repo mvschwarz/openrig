@@ -54,7 +54,8 @@ export function makeThreadRouteResolver(opts: {
           routeClass,
         };
       }
-      log(`inbound UNMAPPED thread_ts=${threadTs} -> unrouted-signal to ${opts.unroutedDestination} (never dropped, never guessed)`);
+      // #899 — a reaction on a message that isn't an ask is ignored by its caller, not sent here.
+      if (ev.type !== "reaction_added") log(`inbound UNMAPPED thread_ts=${threadTs} -> unrouted-signal to ${opts.unroutedDestination} (never dropped, never guessed)`);
       return { destination: opts.unroutedDestination, tags: [...BASE_TAGS, "unrouted-signal"], routeClass: "unmapped-thread" };
     }
     log(`inbound human-initiated (no thread_ts) -> unrouted-signal to ${opts.unroutedDestination}`);

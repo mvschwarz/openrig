@@ -13,10 +13,11 @@ export const FEATURE_SCOPES: ReadonlyArray<{ scope: string; usedBy: string }> = 
   { scope: "files:read", usedBy: "inbound attachments: authenticated url_private download (slack-subsystem inbound file port)" },
   { scope: "files:write", usedBy: "outbound attachments: files.getUploadURLExternal / files.completeUploadExternal (slack-api)" },
   { scope: "app_mentions:read", usedBy: "the app_mention event the inbound path admits (ADMITTED_EVENT_TYPES)" },
+  { scope: "reactions:read", usedBy: "the reaction_added event the inbound path admits: a reaction on an ask reaches the asking seat (InboundRouter.routeReaction)" },
 ];
 
 /** The Slack event payload types the inbound path admits (the `type` gate of ingestDecision). */
-export const ADMITTED_EVENT_TYPES: readonly string[] = ["message", "app_mention"];
+export const ADMITTED_EVENT_TYPES: readonly string[] = ["message", "app_mention", "reaction_added"];
 
 /** Admitted payload type → the Slack bot event to subscribe to, and the scope Slack requires for
  *  it. A subscription name is not always the payload type: `message.channels` delivers payloads
@@ -24,4 +25,5 @@ export const ADMITTED_EVENT_TYPES: readonly string[] = ["message", "app_mention"
 export const EVENT_SUBSCRIPTIONS: Readonly<Record<string, { subscription: string; scope: string }>> = {
   message: { subscription: "message.channels", scope: "channels:history" },
   app_mention: { subscription: "app_mention", scope: "app_mentions:read" },
+  reaction_added: { subscription: "reaction_added", scope: "reactions:read" },
 };
