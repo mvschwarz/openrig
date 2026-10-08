@@ -10,6 +10,7 @@ import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 
 interface Pane { seat: string; label: string; paneCommand: string }
+interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
   status: { launch?: { socketPath: string; session?: string } };
@@ -181,6 +182,55 @@ function failure(provider: string, error: string): OpenViewResult {
   return { provider, ok: false, opened: [], absent: [], degraded: [], pages: 0, error, code: "terminal_window_failed" };
 }
 
+/** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
+async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], herdrArgs: string[], deps: WindowDeps): Promise<boolean> {
+  try {
+    const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
+    if (!path.isAbsolute(tmux)) return false;
+    const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "list", "--workspace", existing.workspace_id]));
+    const panes = listed?.result?.panes as Array<{ workspace_id: string; tab_id: string; pane_id: string }> | undefined;
+    if (!Array.isArray(panes) || !panes.every(pane => pane && pane.workspace_id === existing.workspace_id && typeof pane.tab_id === "string" && typeof pane.pane_id === "string" && pane.pane_id)) return false;
+    const clients = new Map<string, string[]>();
+    // Match view-composer's serialization (these strings are compared, never executed).
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
+    const inventory = await deps.exec(tmux, ["list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+    for (const line of inventory.trim().split("\n")) {
+      const [pid, session, readOnly] = line.split("\t");
+      if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
+      // Compare the composer's exact command, including session aliases and read-only mode.
+      // SSH/custom commands cannot be confirmed from this local client inventory.
+      clients.set(pid, ["tmux", quote(tmux)].map(binary => `${binary} attach ${readOnly === "1" ? "-r " : ""}-t ${quote(session)}`));
+    }
+    const used = new Set<string>();
+    for (const [index, page] of pages.entries()) {
+      const label = pages.length > 1 ? `${existing.label.slice(0, -2)}/${index + 1}` : existing.label;
+      const matches = tabs.filter(tab => tab.workspace_id === existing.workspace_id && tab.label === label);
+      if (matches.length !== 1) return false;
+      const remaining = page.map(pane => pane.paneCommand);
+      for (const pane of panes.filter(pane => pane.tab_id === matches[0]!.tab_id)) {
+        if (remaining.length === 0) break;
+        const result = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "process-info", "--pane", pane.pane_id]));
+        const info = result?.result?.process_info;
+        if (info?.pane_id !== pane.pane_id || (info.foreground_processes !== undefined && !Array.isArray(info.foreground_processes))) return false;
+        for (const process of info.foreground_processes ?? []) {
+          const pid = String(process?.pid);
+          if (used.has(pid)) continue;
+          const found = remaining.findIndex(command => clients.get(pid)?.includes(command));
+          if (found < 0) continue;
+          remaining.splice(found, 1);
+          used.add(pid);
+          break; // One Herdr pane can satisfy only one expected tile.
+        }
+      }
+      if (remaining.length) return false;
+    }
+    return pages.length > 0;
+  } catch {
+    // Read failures prevent reuse, not opening. Never type into or close an unverified pane.
+    return false;
+  }
+}
+
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
 export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string): Promise<OpenViewResult> {
   let provider = requestedProvider ?? "herdr";
@@ -287,7 +337,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       // Inventory is read-only: a failed read must not prevent the first open.
       // Scope each tab list to its workspace, on the daemon's exact endpoint.
       const herdrArgs = ["-u", "TMUX", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH", `HERDR_SOCKET_PATH=${endpoint.socketPath}`, herdr];
-      let tabs: Array<{ workspace_id: string; tab_id: string; label: string }> = [];
+      let tabs: HerdrTab[] = [];
       try {
         const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "workspace", "list"]));
         const workspaces = listed?.result?.workspaces as Array<{ workspace_id: string }> | undefined;
@@ -309,7 +359,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       const viewMarker = `openrig:${composed.id}`;
       const planMarker = `${viewMarker}#${planId.slice(0, 16)}`;
       const marker = (label: string) => label.includes("#") ? label.slice(0, label.lastIndexOf("#")) : "";
-      const existing = tabs.find(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
+      const candidates = tabs.filter(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
       const stale = tabs.filter(tab => {
         const value = marker(tab.label);
         return value !== planMarker && (value === viewMarker ||
@@ -317,6 +367,11 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       });
       for (const id of new Set(stale.map(tab => tab.workspace_id))) {
         windowNotes.push(`Workspace ${id} has an older or different plan for this view and was kept. After inspecting it, close it if no longer needed: herdr workspace close ${shellQuote(id)}`);
+      }
+      let existing: HerdrTab | undefined;
+      for (const candidate of candidates) {
+        if (await hasLiveAttachments(candidate, tabs, composed.pages, herdrArgs, deps)) { existing = candidate; break; }
+        windowNotes.push(`Could not confirm live attachments in workspace ${candidate.workspace_id}. Its contents were kept. After inspecting it, close it if no longer needed: herdr workspace close ${shellQuote(candidate.workspace_id)}`);
       }
       if (existing) {
         const focused = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "tab", "focus", existing.tab_id])) as {
@@ -328,7 +383,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         return {
           provider, ok: true, opened: [], absent: composed.absent, degraded: composed.degraded, pages: 0, window,
           reusedWorkspace: { id: existing.workspace_id, tabId: existing.tab_id, view: composed.id },
-          notes: [...windowNotes, "Existing workspace contents were kept; no layout refresh or new tiles were requested. Check the selected space shows the intended view."],
+          notes: [...windowNotes, "Existing local tmux attachments were confirmed and workspace contents were kept; no layout refresh or new tiles were requested. Check the selected space shows the intended view."],
         };
       }
       const result = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr", expectedPlan: planId, ...(viewportColumns !== undefined ? { viewportColumns } : {}) }, { timeoutMs: 45_000 });

@@ -13,7 +13,7 @@ const planId = "0123456789abcdef".repeat(4);
 const label = (id = "kernel", token = "l1") => `openrig:${id}#${planId.slice(0, 16)}#${token}`;
 interface Tab { workspace_id: string; tab_id: string; label: string }
 function fixture(tabs: Tab[] = [], id = "kernel") {
-  const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
+  const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach -t 'fixture-${seat}'` }));
   const composed = { id, opened: panes, pages: [panes], absent: [] as Array<{ seat: string; host: string | null; reason: string }>, degraded: [] as Array<{ seat: string; host: string; reason: string }> };
   const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("preview") ? {
     planId, composed,
@@ -26,10 +26,21 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
   const workspaces = vi.fn(async () => JSON.stringify({ result: { workspaces: [...new Set(tabs.map(tab => tab.workspace_id))].map(workspace_id => ({ workspace_id })) } }));
   const list = vi.fn(async (workspace: string) => JSON.stringify({ id: "cli:tab:list", result: { tabs: tabs.filter(tab => tab.workspace_id === workspace) } }));
   const focus = vi.fn(async (tabId: string) => JSON.stringify({ id: "cli:tab:focus", result: { tab: tabs.find(tab => tab.tab_id === tabId) } }));
+  const paneList = vi.fn(async (workspace: string) => JSON.stringify({ result: { panes: tabs
+    .filter(tab => tab.workspace_id === workspace)
+    .flatMap(tab => (composed.pages.length > 1 ? composed.pages[Number(tab.label.split("/").at(-1)) - 1] ?? [] : composed.opened)
+      .map(pane => ({ workspace_id: workspace, tab_id: tab.tab_id, pane_id: `${tab.tab_id}-${pane.seat}` }))) } }));
+  const processInfo = vi.fn(async (paneId: string) => JSON.stringify({ result: { process_info: {
+    pane_id: paneId, foreground_processes: [{ pid: 101 + panes.findIndex(pane => paneId.endsWith(`-${pane.seat}`)) }],
+  } } }));
+  const clients = vi.fn(async () => panes.map((pane, i) => `${101 + i}\tfixture-${pane.seat}\t0`).join("\n"));
   const exec = vi.fn(async (file: string, args: string[]) => {
     if (file === "/usr/bin/osascript") return "window-sized";
     if (args.includes("--version")) return "herdr 0.9.3";
-    if (file === "/bin/sh") return "/fixture/bin/herdr";
+    if (file === "/bin/sh") return args[1] === "command -v tmux" ? "/fixture/bin/tmux" : "/fixture/bin/herdr";
+    if (file === "/fixture/bin/tmux") return clients();
+    if (args.includes("process-info")) return processInfo(args.at(-1)!);
+    if (args.includes("pane")) return paneList(args.at(-1)!);
     if (file === "/usr/bin/env" && args.at(-2) === "workspace" && args.at(-1) === "list") return workspaces();
     if (file === "/usr/bin/env" && args.at(-3) === "list" && args.at(-2) === "--workspace") return list(args.at(-1)!);
     if (file === "/usr/bin/env" && args.at(-2) === "focus") return focus(args.at(-1)!);
@@ -43,7 +54,7 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
     clientFactory: () => ({ baseUrl: "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
   };
-  return { tabs, composed, workspaces, list, focus, exec, post, windowDeps, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
+  return { tabs, composed, workspaces, list, focus, paneList, processInfo, clients, exec, post, windowDeps, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
 }
 
 describe("reopening a Herdr view in a desktop window", () => {
@@ -56,6 +67,92 @@ describe("reopening a Herdr view in a desktop window", () => {
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
   });
   afterEach(() => { process.exitCode = originalExit; vi.restoreAllMocks(); });
+
+
+  it.each(["plain shells", "detached clients", "wrong session", "read-only mismatch"])("recomposes a matching saved plan with %s", async state => {
+    const old = { workspace_id: "restored", tab_id: "old-tab", label: label() };
+    const f = fixture([old]);
+    if (state === "plain shells") f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId, foreground_processes: [{ pid: 999, name: "zsh" }] } } }));
+    if (state === "detached clients") f.clients.mockResolvedValue("");
+    if (state === "wrong session") f.clients.mockResolvedValue("101\tunrelated\t0\n102\tfixture-advisor\t0\n103\tfixture-operator\t0");
+    if (state === "read-only mismatch") f.clients.mockResolvedValue("101\tfixture-tui\t1\n102\tfixture-advisor\t0\n103\tfixture-operator\t0");
+    await f.run();
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: planId }, { timeoutMs: 45_000 });
+    expect(f.tabs[0]).toEqual(old);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, notes: expect.arrayContaining([expect.stringContaining("Could not confirm live attachments in workspace restored")]) });
+  });
+
+  it.each(["missing page", "dead second page"])("checks all pages before reuse: %s", async state => {
+    const f = fixture([
+      { workspace_id: "old", tab_id: "first", label: label("kernel", "l1/1") },
+      { workspace_id: "old", tab_id: "second", label: label("kernel", "l1/2") },
+      { workspace_id: "old", tab_id: "third", label: label("kernel", "l1/3") },
+    ]);
+    f.composed.pages = f.composed.opened.map(pane => [pane]);
+    if (state === "missing page") f.tabs.splice(1, 1);
+    else f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId, foreground_processes: [{ pid: paneId.startsWith("second-") ? 999 : paneId.startsWith("first-") ? 101 : 103 }] } } }));
+    await f.run();
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.focus).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing panes", "wrong workspace", "wrong process pane", "lost process reply", "malformed process reply"])("keeps old contents and creates once when attachment inventory is unconfirmed: %s", async state => {
+    const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
+    if (state === "missing panes") f.paneList.mockResolvedValue(JSON.stringify({ result: { panes: [] } }));
+    if (state === "wrong workspace") f.paneList.mockResolvedValue(JSON.stringify({ result: { panes: [{ workspace_id: "other", tab_id: "first", pane_id: "first-tui" }] } }));
+    if (state === "wrong process pane") f.processInfo.mockResolvedValue(JSON.stringify({ result: { process_info: { pane_id: "other", foreground_processes: [{ pid: 101 }] } } }));
+    if (state === "lost process reply") f.processInfo.mockRejectedValue(new Error("reply lost"));
+    if (state === "malformed process reply") f.processInfo.mockResolvedValue("{");
+    await f.run();
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.exec.mock.calls.some(([, args]) => args.includes("close") || args.includes("send-text"))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("reuses a live matching copy after a stale one instead of creating repeatedly", async () => {
+    const f = fixture([
+      { workspace_id: "restored", tab_id: "stale", label: label("kernel", "old") },
+      { workspace_id: "live", tab_id: "fresh", label: label("kernel", "new") },
+    ]);
+    f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId,
+      foreground_processes: [{ pid: paneId.startsWith("stale-") ? 999 : 101 + ["tui", "advisor", "operator"].findIndex(seat => paneId.endsWith(seat)) }],
+    } } }));
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("fresh");
+    expect(f.post).not.toHaveBeenCalled();
+    expect(f.tabs).toHaveLength(2);
+  });
+
+  it("confirms an absolute tmux command, quoted session alias and read-only attachment", async () => {
+    const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
+    f.composed.opened[0]!.paneCommand = "'/fixture/bin/tmux' attach -r -t 'alias'\"'\"'s session'";
+    f.clients.mockResolvedValue("101\talias's session\t1\n102\tfixture-advisor\t0\n103\tfixture-operator\t0");
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("first");
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it("ignores an inert filler once the expected tiles have live attachments", async () => {
+    const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
+    f.paneList.mockResolvedValue(JSON.stringify({ result: { panes: ["blank", "tui", "advisor", "operator"].map(seat => ({ workspace_id: "old", tab_id: "first", pane_id: `first-${seat}` })) } }));
+    f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId,
+      ...(paneId.endsWith("blank") ? {} : { foreground_processes: [{ pid: 101 + ["tui", "advisor", "operator"].findIndex(seat => paneId.endsWith(seat)) }] }),
+    } } }));
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("first");
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it("creates a fresh SSH view when local attachment inventory cannot prove it", async () => {
+    const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
+    f.composed.opened[0]!.paneCommand = "ssh 'remote' 'tmux attach -t remote-seat'";
+    await f.run();
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBeUndefined();
+  });
 
   it("creates the first space, then opens another window on it without adding tabs or spaces", async () => {
     const f = fixture();
