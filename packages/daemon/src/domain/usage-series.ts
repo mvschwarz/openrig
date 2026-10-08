@@ -173,12 +173,24 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
     }
     let tokensDelta = 0;
     let resets = 0;
-    for (let i = 1; i < ctx.length; i += 1) {
-      const prev = ctx[i - 1]!.totalInputTokens + ctx[i - 1]!.totalOutputTokens;
-      const cur = ctx[i]!.totalInputTokens + ctx[i]!.totalOutputTokens;
-      const delta = cur - prev;
-      if (delta >= 0) tokensDelta += delta;
-      else resets += 1; // a restart dropped the totals — never a negative burn
+    // A seat name can be reused by a later rig. Cumulative counters only
+    // describe movement within one node; crossing node baselines invents burn.
+    const previousByNode = new Map<string | null, number>();
+    let pairs = 0;
+    for (const row of ctx) {
+      const cur = row.totalInputTokens + row.totalOutputTokens;
+      const prev = previousByNode.get(row.nodeId);
+      if (prev !== undefined) {
+        pairs += 1;
+        const delta = cur - prev;
+        if (delta >= 0) tokensDelta += delta;
+        else resets += 1; // a restart dropped the totals — never negative burn
+      }
+      previousByNode.set(row.nodeId, cur);
+    }
+    if (pairs === 0) {
+      unknown.push({ seatSession: seat, reason: "insufficient_samples" });
+      continue;
     }
     const spanHours = hoursBetween(ctx[0]!.capturedAt, ctx[ctx.length - 1]!.capturedAt);
     const tokensPerHour = spanHours > 0 ? tokensDelta / spanHours : 0;

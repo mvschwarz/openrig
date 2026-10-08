@@ -10,6 +10,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RIGS = "packages/daemon/specs/rigs";
 const SHARED_SKILLS = "packages/daemon/specs/agents/shared/skills";
 const PLUGIN_SKILLS = "packages/daemon/assets/plugins/openrig-core/skills";
+// The daemon installs these into the global skill roots; skills/ at the repository
+// root carries the same skills for skills.sh.
+const GLOBAL_SKILLS = "packages/daemon/assets/skills";
+const SKILL_ROOTS = [SHARED_SKILLS, PLUGIN_SKILLS, GLOBAL_SKILLS];
 
 // These are shipped via agent startup.files, rig/member startup.files,
 // builtin-startup-files.ts and rigspec-instantiator.ts; setup prints the function
@@ -174,7 +178,7 @@ export async function loadAuthorities(root) {
   const entries = library.list({ kind: "rig" });
   if (!entries.length) throw new Error(`empty builtin rig library: ${RIGS}`);
   const skills = new Map();
-  for (const dir of [SHARED_SKILLS, PLUGIN_SKILLS]) {
+  for (const dir of SKILL_ROOTS) {
     for (const file of walk(path.join(root, dir)).filter((p) => p.endsWith("/SKILL.md"))) {
       skills.set(path.basename(path.dirname(file)), path.relative(root, file));
     }
@@ -231,14 +235,14 @@ export async function checkReferences(root, scope, authority) {
       checked.push({ ...ref, against: found.source });
     } else if (ref.kind === "skill") {
       const found = authority.skills.get(ref.value);
-      if (!found) return fail(`${SHARED_SKILLS} and ${PLUGIN_SKILLS}`, "missing shipped skill");
+      if (!found) return fail(SKILL_ROOTS.join(", "), "missing shipped skill");
       checked.push({ ...ref, against: found });
     } else {
       let target = repositoryPath(ref.value);
       if (ref.kind === "link") target = path.join(path.dirname(ref.file), ref.value);
       if (target.startsWith("skills/")) {
         const tail = target.slice("skills/".length);
-        const candidates = [`${SHARED_SKILLS}/${tail}`, `${PLUGIN_SKILLS}/${tail}`];
+        const candidates = [target, ...SKILL_ROOTS.map((dir) => `${dir}/${tail}`)];
         target = candidates.find((p) => fs.existsSync(path.join(root, p)));
         if (!target) return fail(candidates.join(" or "), "missing repository path");
       }

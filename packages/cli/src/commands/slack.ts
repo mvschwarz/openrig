@@ -23,6 +23,10 @@ import type {
   verifyScopes as VerifyScopesFn,
   verifyChannelMembership as VerifyMembershipFn,
   buildSlackAppManifest as BuildManifestFn,
+  mappedChannels as MappedChannelsFn,
+  validateChannelMap as ValidateChannelMapFn,
+  setChannelMapEntry as SetChannelMapEntryFn,
+  removeChannelMapEntry as RemoveChannelMapEntryFn,
   FEATURE_SCOPES as FeatureScopes,
   BASELINE_REQUIRED_SCOPES as BaselineScopes,
   SlackConnectorConfig,
@@ -48,6 +52,10 @@ interface SlackSurface {
   verifyScopes: typeof VerifyScopesFn;
   verifyChannelMembership: typeof VerifyMembershipFn;
   buildSlackAppManifest: typeof BuildManifestFn;
+  mappedChannels: typeof MappedChannelsFn;
+  validateChannelMap: typeof ValidateChannelMapFn;
+  setChannelMapEntry: typeof SetChannelMapEntryFn;
+  removeChannelMapEntry: typeof RemoveChannelMapEntryFn;
   FEATURE_SCOPES: typeof FeatureScopes;
   BASELINE_REQUIRED_SCOPES: typeof BaselineScopes;
 }
@@ -69,6 +77,11 @@ const RETIRED_TEACHING =
 
 const MANIFEST_FIRST_STEP =
   "`rig slack manifest --url` prints a link that creates your own Slack app from OpenRig's manifest (see `rig slack manifest --help`)";
+
+// #192: a saved config change reaches the running connector when it next rewires.
+const CHANNEL_MAP_APPLY =
+  "Invite the app to every mapped channel, then `rig slack verify`. A running connector picks up the change " +
+  "when it next rewires (`rig slack disable` then `rig slack enable`, or a daemon restart).";
 
 function resolveSecrets(surface: SlackSurface, cfg: SlackConnectorConfig): { bot: string | null; app: string | null } {
   const envFile = cfg.secretsEnvFile ?? undefined;
@@ -133,7 +146,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       const s = resolveSecrets(surface, cfg);
       const readiness = surface.staticReadiness(cfg, s.bot !== null, s.app !== null);
       const permWarn = cfg.secretsEnvFile ? surface.checkEnvFilePermissions(cfg.secretsEnvFile) : null;
-      const unconfigured = readiness.some((r) => !r.ok);
+      // A channel-map warning (#192) is not missing setup: it must not send the operator to the manifest.
+      const unconfigured = readiness.some((r) => !r.ok && r.label !== "channel-map");
       const next = unconfigured ? `First step: ${MANIFEST_FIRST_STEP}.` : null;
       let observation: Record<string, unknown> = { state: "unknown", reason: "daemon-unavailable" };
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -229,9 +243,15 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         reason: opts.reason, action: "verify", subject: "slack", before: { digest: channelStateDigest(cfg) },
         run: async () => {
           const scope = s.bot ? await surface.verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl) : null;
-          const member = s.bot && cfg.channel ? await surface.verifyChannelMembership(s.bot, cfg.channel, deps.fetchImpl) : null;
-          const ready = scope === null || scope.error || member?.error ? null : scope.ok && (member?.isMember ?? false);
-          return { value: { scope, member }, after: { ready }, effect: "observed" };
+          // #192: membership in every channel the connector uses — the default and each mapped one.
+          const channels = [];
+          for (const c of s.bot ? surface.mappedChannels(cfg) : []) {
+            channels.push({ ...c, member: await surface.verifyChannelMembership(s.bot!, c.channel, deps.fetchImpl) });
+          }
+          const member = channels.find((c) => c.isDefault)?.member ?? null;
+          const ready = scope === null || scope.error || channels.some((c) => c.member.error) ? null
+            : scope.ok && member !== null && channels.every((c) => c.member.isMember);
+          return { value: { scope, member, channels }, after: { ready }, effect: "observed" };
         },
       }, deps.home);
       if (!s.bot) {
@@ -241,25 +261,148 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       }
       const scope = verification.value.scope!;
       const member = verification.value.member;
-      const ready = scope.ok && (member ? member.isMember : false);
+      const channels = verification.value.channels;
+      const ready = scope.ok && member !== null && channels.every((c) => c.member.isMember);
       // Failed scope requests or an absent/empty grant header cannot prove
       // which optional features are available. Baseline readiness is unchanged.
       const missingFeatures = scope.error || scope.granted.length === 0 ? null
         : surface.FEATURE_SCOPES.filter((feature) => !scope.granted.includes(feature.scope));
       if (opts.json) {
-        log(JSON.stringify({ scope, member, ready, missingFeatures, receipt: verification.receipt }));
+        log(JSON.stringify({ scope, member, ...(cfg.channelMap?.length ? { channels } : {}), ready, missingFeatures, receipt: verification.receipt }));
       } else {
         log(`granted scopes: ${scope.granted.join(", ") || "(none)"}`);
         if (!scope.ok) log(`✗ MISSING scopes (configured != granted — reinstall the app): ${scope.missing.join(", ")}${scope.error ? ` [${scope.error}]` : ""}`);
         else log("✓ all required scopes granted");
         if (member) log(member.isMember ? `✓ channel member (${member.name ?? cfg.channel})` : `✗ NOT a member of channel ${cfg.channel} — invite the app`);
         else log("… channel not configured — set --channel to verify membership");
+        for (const c of channels.filter((x) => !x.isDefault)) {
+          const forWhom = `for ${c.matches.join(", ")}`;
+          log(c.member.isMember ? `✓ channel member (${c.member.name ?? c.channel}) ${forWhom}` : `✗ NOT a member of channel ${c.channel} ${forWhom} — invite the app`);
+        }
         for (const feature of missingFeatures ?? []) {
           log(`⚠ ${feature.scope} missing: ${feature.usedBy}. Reinstall the app with this scope to use the feature.`);
         }
         log(ready ? "READY" : "NOT ready");
       }
       if (!ready) process.exitCode = 1;
+    });
+
+  // ---- channel-map (#192: per-rig / per-seat channels; local configuration, no Slack calls) ----
+  const channelMap = cmd
+    .command("channel-map")
+    .description("Post a rig's or seat's human-bound items to its own channel (list | set | remove)")
+    .addHelpText("after", [
+      "",
+      "A match is a rig name (my-rig) or a seat (lead@my-rig). The most specific match wins (seat, then",
+      "rig); anything unmapped, and aggregate digests, use the default channel (`rig slack setup --channel`).",
+      "Replies in a thread reach that thread's seat in every channel; other messages the human starts go to",
+      "the inbound destination (`rig slack setup --inbound-destination`), whichever channel they are in.",
+    ].join("\n"));
+
+  // A config the connector cannot load (a hand-edited, invalid map) must fail loudly here too; on a
+  // thrown error the shared CLI path stays silent in a human run.
+  const loadForChannelMap = (surface: SlackSurface): SlackConnectorConfig | null => {
+    try {
+      return surface.loadConfig(deps.home);
+    } catch (e) {
+      log(`✗ ${(e as Error).message}`);
+      process.exitCode = 1;
+      return null;
+    }
+  };
+
+  // One rule for every map write: the LOADED map must hold only fields this version knows, checked
+  // before set/remove transform it. Otherwise a same-entry edit would rebuild that entry from known
+  // fields and silently drop a newer version's field. Refused writes record no channel operation.
+  const refuseUnsupported = (surface: SlackSurface, cur: SlackConnectorConfig): boolean => {
+    try {
+      surface.validateChannelMap(cur);
+      return false;
+    } catch (e) {
+      log(`✗ channel map not changed: ${(e as Error).message}`);
+      process.exitCode = 1;
+      return true;
+    }
+  };
+
+  // One write path for set/remove: the same load → merge → save inside a recorded channel operation as setup.
+  const writeChannelMap = async (cur: SlackConnectorConfig, map: SlackConnectorConfig["channelMap"], opts: { reason: string; actor?: string }) => {
+    const surface = await loadSurface();
+    const { channelMap: _previous, ...rest } = cur;
+    // An emptied map is removed, so the file returns to the shape it had before any entry.
+    const next: SlackConnectorConfig = map && map.length ? { ...rest, channelMap: map } : rest;
+    const { runChannelOperation, channelStateDigest } = await import("@openrig/daemon/gateway-slack");
+    const result = await runChannelOperation({
+      actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK, provenance: "claimed:v1",
+      reason: opts.reason, action: "configure", subject: "slack", before: { digest: channelStateDigest(cur) },
+      run: async () => ({ value: surface.saveConfig(next, deps.home), after: { digest: channelStateDigest(next) },
+        effect: channelStateDigest(cur) === channelStateDigest(next) ? "no-op" : "applied" }),
+    }, deps.home);
+    log(`wrote ${result.value}; receipt ${result.receipt.id} (${result.receipt.effect})`);
+  };
+
+  channelMap
+    .command("list")
+    .description("Show the default channel and every mapped rig or seat with its channel")
+    .option("--json", "JSON output")
+    .action(async (opts) => {
+      const surface = await loadSurface();
+      const cfg = loadForChannelMap(surface);
+      if (!cfg) return;
+      const entries = cfg.channelMap ?? [];
+      if (opts.json) {
+        log(JSON.stringify({ default: cfg.channel, entries }));
+        return;
+      }
+      log(`default -> ${cfg.channel ?? "(unset: rig slack setup --channel)"}`);
+      if (entries.length === 0) log("no channel map entries: every item uses the default channel");
+      for (const e of entries) log(`${e.match} -> ${e.channel}`);
+    });
+
+  channelMap
+    .command("set <match> <channel>")
+    .description("Map a rig (my-rig) or seat (lead@my-rig) to a Slack channel id; replaces an existing entry")
+    .option("--reason <reason>", "Reason recorded with the configuration change", "configure the slack channel map")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .action(async (match: string, channel: string, opts) => {
+      const surface = await loadSurface();
+      const cur = loadForChannelMap(surface);
+      if (!cur) return;
+      if (refuseUnsupported(surface, cur)) return;
+      try {
+        await writeChannelMap(cur, surface.setChannelMapEntry(cur.channelMap, { match, channel }), opts);
+      } catch (e) {
+        log(`✗ channel map not changed: ${(e as Error).message}`);
+        process.exitCode = 1;
+        return;
+      }
+      log(`Next: ${CHANNEL_MAP_APPLY}`);
+    });
+
+  channelMap
+    .command("remove <match>")
+    .description("Remove a rig's or seat's entry; it falls back to its rig's entry or the default channel")
+    .option("--reason <reason>", "Reason recorded with the configuration change", "configure the slack channel map")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .action(async (match: string, opts) => {
+      const surface = await loadSurface();
+      const cur = loadForChannelMap(surface);
+      if (!cur) return;
+      if (refuseUnsupported(surface, cur)) return;
+      const { map, removed } = surface.removeChannelMapEntry(cur.channelMap, match);
+      if (!removed) {
+        log(`✗ no channel map entry for '${match}' (rig slack channel-map list shows the entries)`);
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        await writeChannelMap(cur, map, opts);
+      } catch (e) {
+        log(`✗ channel map not changed: ${(e as Error).message}`);
+        process.exitCode = 1;
+        return;
+      }
+      log(`Next: ${CHANNEL_MAP_APPLY}`);
     });
 
   // ---- enable / disable (daemon admin: seeding + subsystem restart happen daemon-side) ----

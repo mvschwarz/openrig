@@ -108,7 +108,10 @@ export function refreshQueueWaits(db: Database.Database, jobs: WatchdogJobsRepos
     state.blockerTransition = current;
     state.attentionRevision = revision;
     state.eventPending = true;
-    jobs.updateSchedule(job.jobId, JSON.stringify(spec), state.initialSeconds, null);
+    // Wake-now: a blocker change must wake the owner even inside the first
+    // interval (#801 gives fresh reminders a full first interval, so null no
+    // longer means due). Write the epoch, which is always due, instead.
+    jobs.updateSchedule(job.jobId, JSON.stringify(spec), state.initialSeconds, new Date(0).toISOString());
   }
 }
 
@@ -162,6 +165,7 @@ export function retargetQueueWait(db: Database.Database, jobs: WatchdogJobsRepos
   const spec = job ? readWait(job) : null;
   if (!job || !spec) return false;
   Object.assign(spec.context.queue_wait, { blocker, blockerTransition: blockerTransition(db, blocker), eventPending: true, notice: undefined });
-  jobs.updateSchedule(jobId, JSON.stringify(spec), spec.context.queue_wait.initialSeconds, null);
+  // Wake-now on custody move: epoch is always due, unlike null (#801).
+  jobs.updateSchedule(jobId, JSON.stringify(spec), spec.context.queue_wait.initialSeconds, new Date(0).toISOString());
   return true;
 }

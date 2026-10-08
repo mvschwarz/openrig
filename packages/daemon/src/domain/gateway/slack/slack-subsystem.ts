@@ -29,6 +29,7 @@ import { InboundRouter, type SlackEvent, type SlackBlockActions, type InboundFil
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
 import { makeThreadRouteResolver } from "./thread-routing.js";
+import { resolveOutboundChannel, unsupportedChannelMapFields } from "./channel-map.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import { hasLiveHumanGate, type QueueRepository } from "../../queue-repository.js";
@@ -204,6 +205,8 @@ function stateDir(home: string): string {
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const log = opts.log ?? (() => {});
   const cfg = loadConfig(opts.home);
+  const ignored = unsupportedChannelMapFields(cfg);
+  if (ignored.length) log(`slack channel map: IGNORING unsupported field(s) ${ignored.join(", ")} (written by a newer OpenRig?); \`rig slack status\` names them`);
   const envFile = cfg.secretsEnvFile ?? undefined;
   const bot = resolveSecret(SECRET_BOT, { envFile });
   const app = resolveSecret(SECRET_APP, { envFile });
@@ -257,12 +260,47 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   // S10 thread routing — the map shares the daemon DB (queue rows carry the rebuild stamps).
   const threadMap = new ThreadSeatMap(opts.queueRepo.db);
+  // #192 — the channel a payload posts to: its seat's (or rig's) mapped channel, else the
+  // default. The seat is the row's agent side (queue-access projects it into sourceSession for
+  // requests, blocked items and resolved decisions alike); an aggregate digest has none and
+  // posts to the default. Only called when outbound is ready, so the default is set.
+  const channelFor = (p: OutboundPostPayload): string => resolveOutboundChannel(cfg, p.sourceSession) ?? cfg.channel!;
 
   // OPR.0.5.6.14 — a failed post writes the transport-failed ledger transition so the
   // undelivered surface (and --verify) can name the gateway's error instead of guessing
   // from nudge telemetry. One receipt per episode.
-  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string): void => {
+  // #897 — an ask that can't be rendered fails the same way on every retry, so the person never
+  // sees it. Tell the seat that asked, once: the notice's id derives from the ask's, so a replay
+  // returns the same row instead of a second one.
+  // A retry that can't post the rest of an ask some of which may already be in Slack says so.
+  const notifySourceUndeliverable = (p: OutboundPostPayload, detail: string, partlyPosted = false): void => {
+    const seat = p.sourceSession;
+    if (!p.qitemId || !seat) return;
+    const human = p.destinationSession ?? "the person";
+    opts.queueRepo.create({
+      qitemId: `${p.qitemId}-undeliverable`,
+      sourceSession: seat,
+      destinationSession: seat,
+      summary: `Not delivered to ${human}: ${p.summary ?? p.qitemId}`,
+      body: [
+        partlyPosted
+          ? `Part of your ask ${p.qitemId} may already be in Slack, but OpenRig could not post the rest, so ${human} has not seen all of it.`
+          : `OpenRig could not post your ask ${p.qitemId} to Slack, so ${human} has not seen it.`,
+        "",
+        `Reason: ${detail}`,
+        "",
+        partlyPosted
+          ? "Check the thread in Slack and send what's missing as a new ask. The original row stays open until you close it."
+          : "Shorten it and send it as a new ask. The original row stays open until you close it.",
+      ].join("\n"),
+      evidenceRef: `rig queue show ${p.qitemId}`,
+      tags: ["slack-undeliverable"],
+    }).catch((e) => log(`undeliverable notice FAILED for ${p.qitemId}: ${(e as Error).message}`));
+  };
+
+  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string, partlyPosted?: boolean): void => {
     if (!p.qitemId) return;
+    if (failureClass === "human-message-unrenderable") notifySourceUndeliverable(p, detail, partlyPosted);
     const key = p.notificationKey ?? p.qitemId;
     const alreadyRecorded = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((transition) =>
       transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
@@ -283,14 +321,14 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // #96 — where a replyTo update posts. Walks back through earlier threaded updates (which
   // open no root of their own) to the item that owns the root.
   const MAX_REPLY_TO_CHAIN = 32;
-  const deriveReplyToChoice = (p: OutboundPostPayload): ReplyToChoice => {
+  const deriveReplyToChoice = (p: OutboundPostPayload, channel: string): ReplyToChoice => {
     let item = p.replyTo ? opts.queueRepo.getById(p.replyTo) : null;
     for (let depth = 0; item && depth < MAX_REPLY_TO_CHAIN; depth++) {
       if (hasLiveHumanGate(item)) return { kind: "fallback", reason: "reference-has-live-gate", qitemId: item.qitemId };
       const root = threadMap.resolveByConversation(item.qitemId);
       if (root) {
         if (root.state === "closed") return { kind: "fallback", reason: "root-closed", threadTs: root.threadTs };
-        if (root.channel !== cfg.channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
+        if (root.channel !== channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
         if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
         if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
         return { kind: "thread", threadTs: root.threadTs };
@@ -307,10 +345,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // reports what happened. If the record cannot be written, nothing posts: the delivery is
   // retained for replay and a transport-failed receipt names why, so --verify does not just
   // time out.
-  const chooseReplyToThread = (p: OutboundPostPayload): ReplyToChoice => {
+  // #192: with a channel map the record also names the channel the choice was made for, and every
+  // retry posts there (resolveChannel below), so a remap never pairs a new channel with an old root.
+  const chooseReplyToThread = (p: OutboundPostPayload, channel: string): ReplyToChoice => {
     const recorded = opts.queueRepo.replyToChoiceFor(p.qitemId);
     if (recorded) return recorded;
-    const choice = deriveReplyToChoice(p);
+    const derived = deriveReplyToChoice(p, channel);
+    const choice: ReplyToChoice = cfg.channelMap?.length ? { ...derived, channel } : derived;
     try {
       opts.queueRepo.update({ qitemId: p.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatReplyToChoice(choice) });
     } catch (e) {
@@ -329,6 +370,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     ? subsystemSlackDeliver({
         botToken: bot!,
         channel: cfg.channel!,
+        // #192: a reply-to update whose choice is already recorded posts in that choice's channel:
+        // the one it names, or, for a choice recorded without one (before any map existed), the
+        // default channel it was made for. Otherwise the map. (The delivery layer first reuses the
+        // channel of this post's first attempt.) With no map every branch is the default channel.
+        resolveChannel: (p) => {
+          const recorded = p.replyTo ? opts.queueRepo.replyToChoiceFor(p.qitemId) : null;
+          return recorded ? recorded.channel ?? cfg.channel! : channelFor(p);
+        },
+        pinChannel: Boolean(cfg.channelMap?.length),
         sourceLabel: cfg.sourceLabel,
         fetchImpl: opts.fetchImpl,
         delivered,
@@ -340,9 +390,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // would make an inbound reply ambiguous and could resume the wrong human gate.
         // Re-delivery/new notification episodes for one qitem still reuse its exact root.
         // #96: an update may name an earlier qitem's root; the guard lives in deriveReplyToChoice.
-        resolveThreadTs: (p) => {
+        resolveThreadTs: (p, channel) => {
           if (p.replyTo) {
-            const choice = chooseReplyToThread(p);
+            const choice = chooseReplyToThread(p, channel);
             if (choice.kind === "thread") return choice.threadTs;
           }
           const own = threadMap.resolveOpenForConversation(
@@ -353,6 +403,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           // #96: once an update shares this root, a new decision from its owner starts a fresh
           // root instead, so the decision never lands in a thread a reader took as FYI-only.
           if (own && !p.replyTo && opts.queueRepo.isReplyToThread(own.threadTs)) return undefined;
+          // #192: with a channel map, a root in another channel than this attempt's (the seat was
+          // remapped since this item's root was posted) cannot carry this post, so a fresh root
+          // opens in this attempt's channel. Without a map the root is reused as it always was,
+          // whatever channel it was posted in.
+          if (own && cfg.channelMap?.length && own.channel !== channel) return undefined;
           return own?.threadTs;
         },
         // S14: posting and interruption are separate threshold dials over one vocabulary.
@@ -381,20 +436,40 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           }
           return undefined;
         },
-        onPostedRoot: (p, ts) => {
+        onPostedRoot: (p, ts, channel) => {
           const human = p.destinationSession ?? "";
           const seat = p.sourceSession ?? "";
-          threadMap.open({ threadTs: ts, channel: cfg.channel!, human, seat, conversationId: p.qitemId });
+          threadMap.open({ threadTs: ts, channel, human, seat, conversationId: p.qitemId });
           // The REBUILD stamp: the queue row is the durable source the map re-derives from.
           try {
             opts.queueRepo.update({
               qitemId: p.qitemId,
               actorSession: "daemon@kernel",
-              transitionNote: formatPostedStamp({ threadTs: ts, messageTs: ts, channel: cfg.channel!, human, seat, conversationId: p.qitemId }),
+              transitionNote: formatPostedStamp({ threadTs: ts, messageTs: ts, channel, human, seat, conversationId: p.qitemId }),
             });
           } catch (e) {
             // Stamp failure degrades REBUILDABILITY, not routing — loud, never fatal to delivery.
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
+          }
+        },
+        // #899 — a message posted into a thread for an ask maps to that ask and its seat (the thread's root
+        // may be another ask's), so a reaction on it reaches the seat that asked. A digest speaks for many
+        // rows and has no single asking seat, so it isn't mapped.
+        // #192: a part is recorded in the channel it was posted to, so a reaction on it in a mapped
+        // channel finds its ask (thread_part_map is keyed by channel and message).
+        onPostedPart: (p, messageTs, threadTs, channel) => {
+          const seat = p.sourceSession ?? "";
+          if (!p.qitemId || !seat || (p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return;
+          const human = p.destinationSession ?? "";
+          threadMap.recordPart({ messageTs, channel, threadTs, seat, conversationId: p.qitemId });
+          try {
+            opts.queueRepo.update({
+              qitemId: p.qitemId,
+              actorSession: "daemon@kernel",
+              transitionNote: formatPostedStamp({ threadTs, messageTs, channel, human, seat, conversationId: p.qitemId }),
+            });
+          } catch (e) {
+            log(`reply stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
         onTransportFailed: recordTransportFailed,

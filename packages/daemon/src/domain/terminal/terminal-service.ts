@@ -176,7 +176,8 @@ export class TerminalService {
 
     const composed = await this.resolveComposed(req.view, provider.panesPerPage);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(providerName, composed)) {
+    const planId = this.planId(providerName, composed);
+    if (req.expectedPlan !== undefined && req.expectedPlan !== planId) {
       return errorResult(providerName, "preview_changed", "View membership or layout changed. Refresh the preview before Open; nothing was launched.");
     }
     const notes = composed.kernelLayout ? [`Default kernel view: ${composed.kernelLayout}.`] : [];
@@ -186,7 +187,7 @@ export class TerminalService {
         absent: composed.absent, degraded: composed.degraded, notes,
       };
     }
-    const result = await provider.openView(composed);
+    const result = await provider.openView({ ...composed, planId });
     if (result.opened.length === 0 && composed.opened.length > 0) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.paneCommand}`);

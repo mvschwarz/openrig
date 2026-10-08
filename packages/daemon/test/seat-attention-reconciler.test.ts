@@ -2,6 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import { decodeTime } from "ulid";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -166,7 +167,8 @@ describe("SeatAttentionReconciler", () => {
       reason: "pane_pid_gone",
       evidence: { registeredPane: "%old", observedPid: null, observedCommand: null, matchedLayer: null },
       sessionName: session.sessionName,
-      observedAt: "2026-09-01T00:00:00.000Z",
+      // The missing-pane observation belongs to this freshly registered occupant.
+      observedAt: new Date(Math.max(Date.now(), decodeTime(session.id)) + 1).toISOString(),
     });
     expect(getNodeInventory(db, rig.id)[0]!.lifecycleState).toBe("attention_required");
 
@@ -203,8 +205,10 @@ describe("SeatAttentionReconciler", () => {
       reason: "pane_pid_gone",
       evidence: { registeredPane: "%old", observedPid: null, observedCommand: null, matchedLayer: null },
       sessionName: session.sessionName,
-      observedAt: "2026-09-01T00:00:00.000Z",
+      // The missing-pane observation belongs to this freshly registered occupant.
+      observedAt: new Date(Math.max(Date.now(), decodeTime(session.id)) + 1).toISOString(),
     });
+    expect(getNodeInventory(db, rig.id)[0]!.lifecycleState).toBe("attention_required");
     const paneReconciler = new SeatAttentionReconciler({
       sessionRegistry,
       eventBus,

@@ -57,7 +57,11 @@ describe("terminal open request budget", () => {
     })), { resolveHost: () => null, panesPerPage: HERDR_PANES_PER_PAGE });
     const app = new Hono();
     app.use("*", async (c, next) => {
-      c.set("terminalService" as never, { openView: () => adapter.openView(view) } as never);
+      c.set("terminalService" as never, {
+        openView: () => adapter.openView(view),
+        previewView: () => ({ planId: "owned-plan", composed: view, status: { launch: { socketPath } } }),
+        status: () => ({ providers: [{ liveness: { alive: true } }] }),
+      } as never);
       await next();
     });
     app.route("/api/terminal", terminalRoutes());
@@ -72,6 +76,15 @@ describe("terminal open request budget", () => {
         fetch: async () => ({ ok: true }),
       } as TerminalDeps["lifecycleDeps"],
       clientFactory: baseUrl => new DaemonClient(baseUrl),
+      // Exercise default window routing without launching a native terminal in CI.
+      windowDeps: {
+        platform: "linux", env: { DISPLAY: ":fixture", TERM_PROGRAM: "ghostty" }, exists: () => false,
+        exec: async (file, args) => file === "/usr/bin/env" && args.at(-1) === "list"
+          ? JSON.stringify({ result: { workspaces: [] } })
+          : args.includes("--version") ? "herdr 0.9.3" : "/fixture/bin/herdr",
+        launch: async () => {}, sleep: async () => {}, id: () => "owned-budget",
+        herdrConfig: () => "/fixture/private herdr.toml",
+      },
     };
     const command = new Command();
     command.addCommand(terminalCommand(deps));

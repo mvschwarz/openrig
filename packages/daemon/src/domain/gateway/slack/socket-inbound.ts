@@ -30,6 +30,8 @@ export interface SocketInboundDeps {
   inboundMaxConnects?: number;
   /** Dead-letter retry cadence WHILE the socket stays connected (default 5min). */
   retryIntervalMs?: number;
+  /** How long a new socket may stay opening before it is abandoned and retried (default 30s). */
+  openTimeoutMs?: number;
   receipts?: InboundReceiptStore;
   recovery?: { run(): Promise<void>; stop(): void };
   log?: (msg: string) => void;
@@ -58,11 +60,13 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   const log = deps.log ?? (() => {});
   const wsFactory = deps.wsFactory ?? ((url: string) => new (globalThis as unknown as { WebSocket: new (u: string) => WsLike }).WebSocket(url));
   const retryIntervalMs = deps.retryIntervalMs ?? 5 * 60 * 1000;
+  const openTimeoutMs = deps.openTimeoutMs ?? 30_000;
   let connects = 0;
   let backoff = 1000;
   let stopped = false;
   let liveWs: WsLike | undefined;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  let openTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setInterval> | undefined;
   let finish: () => void = () => {};
   const status: SocketInboundStatus = { generation: 0, reconnects: 0, state: "disconnected" };
@@ -107,7 +111,36 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       }
       const ws = wsFactory(open.url);
       liveWs = ws;
+      // Until the socket opens, onclose cannot be relied on to drive the reconnect: Node's
+      // WebSocket (undici 6) fires onerror but never onclose when the handshake fails
+      // (refused, reset, or its own 300s headers timeout), and an upgrade that is never
+      // answered fires nothing at all. Either way the loop would stay "connecting" forever.
+      // So a failure or timeout before onopen detaches the socket and schedules the retry here.
+      let opened = false;
+      const abandon = (reason: "socket-open-error" | "socket-open-timeout"): void => {
+        clearTimeout(openTimer);
+        openTimer = undefined;
+        if (stopped) return;
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        liveWs = undefined;
+        log(`socket did not open (${reason}); reconnect in ${backoff}ms`);
+        status.state = "disconnected";
+        status.disconnectedAt = stamp();
+        receipt({ generation: connects, status: "connect-failed", reason });
+        if (deps.inboundMaxConnects && connects >= deps.inboundMaxConnects) return resolve();
+        pendingTimer = setTimeout(connect, backoff);
+        backoff = Math.min(backoff * 2, 60000);
+      };
+      openTimer = setTimeout(() => abandon("socket-open-timeout"), openTimeoutMs);
       ws.onopen = () => {
+        opened = true;
+        clearTimeout(openTimer);
+        openTimer = undefined;
         if (stopped) return;
         backoff = 1000;
         log("socket connected");
@@ -171,6 +204,8 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
           });
       };
       ws.onclose = () => {
+        clearTimeout(openTimer);
+        openTimer = undefined;
         if (retryTimer) clearInterval(retryTimer);
         liveWs = undefined;
         status.state = stopped ? "stopped" : "disconnected";
@@ -183,6 +218,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         backoff = Math.min(backoff * 2, 60000);
       };
       ws.onerror = () => {
+        if (!opened) return abandon("socket-open-error");
         try {
           ws.close();
         } catch {
@@ -201,6 +237,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       if (retryTimer) clearInterval(retryTimer);
       status.state = "stopped";
       if (pendingTimer) clearTimeout(pendingTimer);
+      if (openTimer) clearTimeout(openTimer);
       try { liveWs?.close(); } catch { /* best-effort */ }
       finish(); // A canceled backoff has no future connect/close callback to settle done.
     },

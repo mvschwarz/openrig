@@ -69,17 +69,22 @@ printf '{}'
 }
 
 describe("managed refocus and trace results", () => {
-  it("holds peer messages before and after the boundary until the real restore request", () => {
+  it.each([false, true])("holds peers until the actionable restore request (pasted wrapper: %s)", (wrapped) => {
+    const submit = (text: string) => wrapped ? `\n\n<pasted_content id="fixture">\n${text}\n</pasted_content id="fixture">\n` : text;
     const f = fixture();
     f.prepare(true);
     f.run("PostCompact");
     const before = f.state();
-    for (const prompt of ["From: peer@test\nThe build is done.", `  ${buildPostCompactTurnBoundaryPrompt()}\n`, "Another peer update."]) {
+    const restore = buildPostCompactRestorePrompt({ sessionName: "seat@test", openrigHome: f.root });
+    for (const prompt of [
+      "From: peer@test\nThe build is done.", submit(buildPostCompactTurnBoundaryPrompt()), "Another peer update.",
+      `A peer quotes an earlier restore:\n${submit(restore)}`,
+      `<pasted_content id="fixture">\n${restore}\n</pasted_content id="other">`,
+    ]) {
       expect(f.run("UserPromptSubmit", prompt)).toBe("");
       expect(f.state()).toEqual(before);
     }
-    const restore = buildPostCompactRestorePrompt({ sessionName: "seat@test", openrigHome: f.root });
-    expect(f.run("UserPromptSubmit", restore)).toContain("just compacted");
+    expect(f.run("UserPromptSubmit", submit(restore))).toContain("just compacted");
     expect(f.state().pendingOn).toBeUndefined();
     expect(f.run("UserPromptSubmit")).toBe("");
     expect(f.calls()).toEqual([]);
@@ -94,7 +99,7 @@ describe("managed refocus and trace results", () => {
     expect(f.state().pendingOn).toBeUndefined();
   });
 
-  it("delivers on the next ordinary prompt after ten minutes without a restore request", () => {
+  it.each([false, true])("delivers after the hold expires but never on the acknowledgement (pasted wrapper: %s)", (wrapped) => {
     const f = fixture();
     f.prepare(true);
     const armedAfter = Date.now();
@@ -103,7 +108,8 @@ describe("managed refocus and trace results", () => {
     f.setState({ ...f.state(), managedRestorePendingAt: new Date(Date.now() - 9 * 60_000).toISOString() });
     expect(f.run("UserPromptSubmit", "A peer arrived before restore.")).toBe("");
     f.setState({ ...f.state(), managedRestorePendingAt: new Date(Date.now() - 11 * 60_000).toISOString() });
-    expect(f.run("UserPromptSubmit", buildPostCompactTurnBoundaryPrompt())).toBe("");
+    const boundary = buildPostCompactTurnBoundaryPrompt();
+    expect(f.run("UserPromptSubmit", wrapped ? `<pasted_content id="fixture">\n${boundary}\n</pasted_content id="fixture">` : boundary)).toBe("");
     expect(f.run("UserPromptSubmit", "Continue after restarting the daemon.")).toContain("just compacted");
     expect(Date.parse(armedAt)).toBeGreaterThanOrEqual(armedAfter);
     expect(f.state().managedRestorePending).toBeUndefined();

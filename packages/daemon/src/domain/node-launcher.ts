@@ -210,6 +210,7 @@ export class NodeLauncher {
         if (!paneObservation.ok) {
           new SeatIdentityStore(this.db).upsert(paneObservationVerdict({
             nodeId: node.id,
+            sessionId: session.id,
             sessionName,
             observation: paneObservation,
           }));

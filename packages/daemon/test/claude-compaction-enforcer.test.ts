@@ -15,7 +15,7 @@ import { ClaudeCompactionEnforcer as ActualEnforcer } from "../src/domain/claude
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
-import { mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
@@ -29,10 +29,10 @@ class ClaudeCompactionEnforcer extends ActualEnforcer {
     transport.send = async (session, text, options) => {
       const result = options === undefined ? await send(session, text) : await send(session, text, options);
       const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
-      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
       if (result.ok && marker && target) {
         const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+        writeFileSync(file, "# Completed fixture map\n" + marker + "\n");
       }
       return result;
     };
@@ -700,8 +700,8 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
     expect(send.mock.calls[2]![1]).not.toContain("refocusing");
     expect(send.mock.calls[3]![1]).toContain("/tmp/openrig-test-home/plugins/openrig-core/skills/refocusing/SKILL.md");
-    expect(send.mock.calls[3]![1]).toContain("run its topology and work traces");
-    expect(send.mock.calls[4]![1]).toContain("if the traces did not run during restore, run them now");
+    expect(send.mock.calls[3]![1]).toContain("consume the current topology and work traces delivered with this restore request");
+    expect(send.mock.calls[4]![1]).toContain("If no current trace arrived, report that delivery gap");
   });
 
   it("post-compact restore prompt carries the configured operator restore instruction", async () => {

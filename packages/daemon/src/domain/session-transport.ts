@@ -800,6 +800,7 @@ interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
 interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
+interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
 export class SessionTransport {
   readonly db: Database.Database;
@@ -834,47 +835,36 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
   }
 
-  /**
-   * Slice-05 D5/D6 — when a live transport op (send/capture) observes that the
-   * seat's tmux session is genuinely gone (a `probeSession` result of `absent`
-   * — POSITIVE tmux evidence, never a transport failure; OPR.0.5.4.2 mini-req
-   * 5), durably record the SAME `session_missing` identity verdict the
-   * reconciler would write, so `rig ps` stops reporting the dead seat as
-   * running WITHOUT waiting for the next reconciler poll. This is the
-   * transport-side writer of the shared verdict bridge; the reconciler is the
-   * poll-side writer. Transport-absence must never reach this method: a blip
-   * against a live seat would otherwise fabricate a durable absence verdict.
-   *
-   * Only writes an APPLICABLE verdict: the join is narrowed to the node whose
-   * LATEST running session_name equals the probed session (so
-   * `verdict.sessionName === latest session_name`, the node-inventory
-   * applicability gate), and it only writes when a binding pane is registered
-   * (a null pane is the reconciler's `tmux_unavailable` case, which is
-   * non-down-ranking — never fabricate `session_missing` without a pane).
-   * Never mutates `sessions.status`.
-   */
-  private recordSessionMissingVerdict(sessionName: string): void {
-    const seat = this.db
+  /** Freeze the registration and binding before asking tmux about this name. */
+  private absenceProbeTarget(sessionName: string): AbsenceProbeTarget | undefined {
+    return this.db
       .prepare(`
-        SELECT n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
+        SELECT s.id AS session_id, n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
-        LEFT JOIN bindings b ON b.node_id = n.id
+        JOIN bindings b ON b.node_id = n.id AND b.tmux_session = s.session_name
         WHERE s.status = 'running'
           AND s.session_name = ?
         LIMIT 1
       `)
-      .get(sessionName) as { node_id: string; session_name: string; tmux_pane: string | null } | undefined;
-    if (!seat || seat.tmux_pane === null) return;
+      .get(sessionName) as AbsenceProbeTarget | undefined;
+  }
+
+  /** Positive tmux absence only; a delayed reply cannot describe a replacement. */
+  private recordSessionMissingVerdict(target: AbsenceProbeTarget | undefined, observedAt: string): void {
+    if (!target || target.tmux_pane === null) return;
+    const current = this.absenceProbeTarget(target.session_name);
+    if (!current || current.session_id !== target.session_id || current.node_id !== target.node_id
+      || current.tmux_pane !== target.tmux_pane) return;
     new SeatIdentityStore(this.db).upsert({
-      nodeId: seat.node_id,
+      nodeId: target.node_id,
       verdict: "pane_missing",
       evidenceSource: "tmux_session",
       reason: "session_missing",
-      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
-      sessionName: seat.session_name,
-      observedAt: this.now().toISOString(),
+      evidence: { registeredPane: target.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: target.session_name,
+      observedAt,
     });
   }
 
@@ -1298,9 +1288,11 @@ export class SessionTransport {
     // transport blip must never read as a dead seat, and absence is only ever
     // asserted on positive tmux evidence.
     try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
       const probe = await this.tmuxAdapter.probeSession(sessionName);
       if (probe.state === "absent") {
-        this.recordSessionMissingVerdict(sessionName);
+        this.recordSessionMissingVerdict(target, observedAt);
         return {
           ok: false,
           sessionName,
@@ -2003,9 +1995,11 @@ export class SessionTransport {
     // Classified probe (OPR.0.5.4.2) — same discipline as the send gate: a
     // transport blip is a transport answer, never a dead-seat answer.
     try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
       const probe = await this.tmuxAdapter.probeSession(sessionName);
       if (probe.state === "absent") {
-        this.recordSessionMissingVerdict(sessionName);
+        this.recordSessionMissingVerdict(target, observedAt);
         return {
           ok: false,
           sessionName,

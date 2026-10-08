@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
-import { mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createDb } from "../src/db/connection.js";
@@ -8,6 +8,7 @@ import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
+import { UsageSamplesStore } from "../src/domain/usage-samples-store.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
 import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforcer.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
@@ -155,10 +156,10 @@ describe("ContextMonitor", () => {
     settings.set("policies.claude_compaction.threshold_percent", "80");
     const send = vi.fn(async (_session: string, text: string) => {
       const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
-      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
       if (marker && target) {
         const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+        writeFileSync(file, "# Completed fixture map\n" + marker + "\n");
       }
       return { ok: true };
     });
@@ -253,6 +254,42 @@ describe("ContextMonitor", () => {
     expect(usage.availability).toBe("known");
     expect(usage.source).toBe("codex_token_count_jsonl");
     expect(usage.usedPercentage).toBe(88);
+  });
+
+  it("does not capture archived Codex nodes, but resumes reads after unarchive", async () => {
+    const { node: codexNode, sessionName, threadId } = seedCodexNode("detached");
+    writeCodexTokenCount(threadId);
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(codexNode.id) as { rig_id: string }).rig_id;
+    const samples = new UsageSamplesStore(db);
+    const nativeMonitor = new ContextMonitor(db, store, undefined, undefined, undefined, samples);
+    rigRepo.archiveRig(rigId);
+    await nativeMonitor.pollOnce();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM context_usage WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 0 });
+    rigRepo.unarchiveRig(rigId);
+    await nativeMonitor.pollOnce();
+    expect(store.getForNode(codexNode.id, sessionName).availability).toBe("known");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 1 });
+  });
+
+  it.each(["claude-code", "codex"])("still polls a running %s seat in an archived rig", async (runtime) => {
+    const { rig, node, sessionName } = runtime === "codex" ? seedCodexNode() : seedClaudeNode();
+    if (runtime === "codex") {
+      writeCodexTokenCount("thread-1");
+    } else {
+      writeSidecar(sessionName, { ...VALID_SIDECAR, sampled_at: new Date().toISOString() });
+    }
+    const samples = new UsageSamplesStore(db);
+    const maybeAutoCompact = vi.fn(async () => {});
+    const nativeMonitor = new ContextMonitor(db, store, undefined,
+      { maybeAutoCompact } as unknown as ClaudeCompactionEnforcer, undefined, samples);
+    rigRepo.archiveRig(rig.id);
+
+    await nativeMonitor.pollOnce();
+
+    expect(store.getForNode(node.id, sessionName).availability).toBe("known");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(node.id)).toEqual({ n: 1 });
+    expect(maybeAutoCompact).toHaveBeenCalledWith(expect.objectContaining({ sessionName, runtime }));
   });
 
   // STUB-A (51-01 GAP-1): running stub sessions with a context sidecar are polled and observed

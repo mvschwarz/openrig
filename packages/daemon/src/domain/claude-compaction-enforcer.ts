@@ -157,7 +157,7 @@ function buildPreCompactPrepPrompt(input: {
     pieces.push(`Operator pre-compaction instruction: ${instruction}`);
   }
   pieces.push(
-    `Write this attempt's complete restore map to ${JSON.stringify(input.preparation.mapPath + ".tmp")}, append the exact completion marker below as its LAST line, close the file, then atomically rename it to ${JSON.stringify(input.preparation.mapPath)} on the same filesystem. Create its parent directory if needed. Never write the final file incrementally.`,
+    `Write this attempt's complete restore map to ${JSON.stringify(input.preparation.mapPath + ".tmp")}, using your ordinary file-edit tool. Append the exact completion marker below as its LAST line, then finish and close the file. OpenRig will atomically publish it to ${JSON.stringify(input.preparation.mapPath)}; do not run a shell command to rename or publish it. Never write the final file incrementally.`,
     `Completion marker: ${input.preparation.marker}`,
     "The marker identifies this attempt and occupant; it does not certify the map's quality. Keep the normal ranked restore-map content.",
     "OpenRig will wait for this exact completed map before managed /compact. Normal work and messages remain available. rig compact <session> --cancel ends preparation; --skip-map explicitly skips this prerequisite once.",
@@ -282,7 +282,7 @@ export function buildPostCompactRestorePrompt(input: {
     pieces.push("A post-compaction instruction file declaring a DIFFERENT seat was present and has been IGNORED — it is not yours; do NOT read or follow it. Rely on the per-seat marker and the JSONL transcript for restore.");
   }
   pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read your newest restore map and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.");
-  pieces.push(`During this restore, read ${path.join(input.openrigHome, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and run its topology and work traces. Name any missing source, the current user outcome, and your next action from the files you actually read, not from the compact summary.`);
+  pieces.push(`During this restore, read ${path.join(input.openrigHome, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and consume the current topology and work traces delivered with this restore request, if present; do not rerun Python just to duplicate a delivered trace. Missing trace delivery is a named gap. Read required notes and full sources with the native file-read tool; a pointer, compact summary or truncated extract is not a full source read. Name any missing source, the current user outcome, and your next action from the files you actually read, not from the compact summary.`);
   return pieces.join(" ");
 }
 
@@ -297,7 +297,7 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
   pieces.push(
     "List every file, packet, marker, restore map, instruction file, and source document you were asked to read during restore.",
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
-    "Include the refocusing skill and the topology and work trace sources; if the traces did not run during restore, run them now and report any gaps.",
+    "Include the refocusing skill and the topology and work trace sources. Account for the current traces actually delivered during restore; do not rerun Python to duplicate them. If no current trace arrived, report that delivery gap. Read required notes and full sources with the native file-read tool; pointers, compact summaries and truncated extracts do not count as full source reads.",
     "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
     "Read every required item that is not FULL in full now, without skimming, then report the final read-depth table before continuing.",
   );
@@ -678,12 +678,13 @@ export class ClaudeCompactionEnforcer {
 
   private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false): PreparationAttempt {
     const attemptId = randomUUID();
+    const fallbackMapPath = path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
     const occupantGeneration = this.resolveOccupantGeneration?.(input.sessionName)
       ?? this.sessionTransport.deliveryGuard?.maybeTarget(input.sessionName)?.occupant ?? null;
     const attempt: PreparationAttempt = {
       attemptId, occupantGeneration, mode, status: "sending", delivery: "pending", sends: 0,
       deadlineAt: mode === "manual" ? this.now() + this.manualPrepWaitMs : null,
-      mapPath: path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md"),
+      mapPath: fallbackMapPath,
       marker: `<!-- openrig-compaction-complete ${JSON.stringify({ attemptId, session: input.sessionName, occupantGeneration })} -->`,
       policyWasEnabled: this.settingsStore.resolveClaudeCompactionPolicy().enabled,
       controller: new AbortController(),
@@ -720,13 +721,32 @@ export class ClaudeCompactionEnforcer {
         attempt.mapPath = path.join(parent, "RESTORE-MAP.md");
       } catch { /* Preserve the existing instance-home path for legacy or unwritable workspaces. */ }
     }
+    if (attempt.status !== "stopped" && attempt.mapPath === fallbackMapPath) {
+      // The cwd path already creates its parent. Prepare the legacy fallback too;
+      // this does not grant the agent file-edit access outside its workspace.
+      try { fs.mkdirSync(path.dirname(fallbackMapPath), { recursive: true }); }
+      catch { /* Retain the existing path and deadline if the directory cannot be prepared. */ }
+    }
     return attempt;
   }
 
-  private mapReady(attempt: PreparationAttempt): boolean {
+  private mapReady(attempt: PreparationAttempt, publish = false): boolean {
     if (attempt.occupantGeneration === null) return false;
-    try { return fs.readFileSync(attempt.mapPath, "utf8").trimEnd().endsWith(attempt.marker); }
-    catch { return false; }
+    const complete = (file: string) => {
+      try { return fs.readFileSync(file, "utf8").trimEnd().endsWith(attempt.marker); }
+      catch { return false; }
+    };
+    // Preserve maps already published by agents using the older protocol.
+    if (complete(attempt.mapPath)) return true;
+    const temporary = attempt.mapPath + ".tmp";
+    if (!complete(temporary)) return false;
+    // Polls only observe. Publication runs inside the existing final send checks,
+    // after attempt reconciliation, without an await between validation and rename.
+    if (publish) {
+      try { fs.renameSync(temporary, attempt.mapPath); }
+      catch { return false; }
+    }
+    return true;
   }
 
   private async deliverPreparation(input: EnforcerInput, attempt: PreparationAttempt): Promise<void> {
@@ -763,7 +783,7 @@ export class ClaudeCompactionEnforcer {
       this.reconcilePreparations();
       if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.status !== "waiting" || attempt.controller.signal.aborted)
         throw new DeliveryGuardError(attempt.reason ?? "preparation_stopped", "Compaction preparation ended; no further input is authorized.");
-      if (!skipMap && !this.mapReady(attempt)) throw new DeliveryGuardError("preparation_incomplete", "This attempt's restore map is incomplete; /compact was not submitted.");
+      if (!skipMap && !this.mapReady(attempt, true)) throw new DeliveryGuardError("preparation_incomplete", "This attempt's restore map is incomplete; /compact was not submitted.");
     };
     const send = async () => {
       check();

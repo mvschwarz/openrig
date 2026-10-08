@@ -102,14 +102,14 @@ or **"Not tested by OpenRig"**, which means exactly that. You're welcome to run 
 
 ## 6. Submit it to openrig.dev/rigs
 
-Open a pull request to [mvschwarz/openrig-world](https://github.com/mvschwarz/openrig-world) that adds one file,
+Open a pull request to [mvschwarz/openrig-registry](https://github.com/mvschwarz/openrig-registry) that adds one file,
 `registry/submissions/<your-team>.yaml`, with three fields: `repository` (your GitHub repository URL), `folder` (the
 folder holding `rig.yaml`, or `.` for the repository root) and `ref` (a branch, tag or commit). No pull requests? Open
 an issue there with the same three things. A maintainer then writes the full entry, in the `registry-entry.v1` format
 defined in the [bundle formats reference](bundle-formats.md), with the parts only a review can produce, such as the
 pinned commit and each configuration's package digest.
 
-Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, openrig-world's registry check says the name is taken;
+Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, openrig-registry's registry check says the name is taken;
 choose a distinct one, for example `<taken-name>-<your-name>`.
 
 What happens next:

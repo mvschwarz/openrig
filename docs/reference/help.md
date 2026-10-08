@@ -47,7 +47,9 @@ rather than treating a newer command as installed.
 
 ### Installation or platform problems
 
-Supported platforms are macOS and Linux. Native Windows is not supported yet, and WSL2 has not been tested. OpenRig needs
+Supported platforms are macOS and Linux, and WSL2 on Windows; native Windows isn't supported. OpenRig's automated tests
+don't run on WSL2 yet; one user's [reported working setup](getting-started.md#wsl2-a-reported-working-setup) lists what
+mattered. OpenRig needs
 Node.js 22 or 24 and tmux. A Linux distribution's own Node.js can be older; check `node --version`. With npm 11 or
 later, an `npm warn install-scripts` line for `@openrig/cli` means only the postinstall Node.js and SQLite check was
 skipped; `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. A WSL error needs its actual versions,
@@ -61,19 +63,31 @@ in a report; otherwise follow the accompanying diagnostic. If the only remaining
 
 ### Installation finished, but there is nobody to talk to
 
-Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
-(`rig context get reference/getting-started.md#open-the-kernel-conversations`). The default
-`rig terminal open saved:kernel --provider herdr` needs no saved-view YAML or starter team. After the selected login
-works, start the daemon if stopped, then read `rig status` and `rig ps --nodes --rig kernel`. Started is not ready;
-the view can open while the agents finish starting, with that state reported honestly.
-Ask **“Open the OpenRig view now?”** Yes opens a new space using installed herdr, else cmux, else the guide's exact
-new-terminal command. No gives the command to open it later. Over SSH or without a display, give the exact
-connection/attach command. Keep your own terminal and existing user spaces intact; no new view provider is needed.
-No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check the
-visible view; a created workspace or a CLI running in a new OS window is not visual proof.
-Show TUI | advisor | operator for Claude-only, Codex-only and mixed kernels; the queue worker stays accessible through
-the TUI. Talk to the operator about your goal before choosing and launching a first project team.
-Use the existing recovery routes for unavailable seats; opening a view does not create another kernel or new accounts.
+Load the `rigs` skill and follow its step 2: it opens the welcome screen (`rig terminal open saved:kernel --window`),
+gives the attach commands when the window can't open or over SSH, and hands the person's goal to the operator.
+[Install and sign in](getting-started.md#install-and-sign-in) says how to load it. The reference for the view, manual
+attachment and the table of what can interrupt it is
+[Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
+(`rig context get reference/getting-started.md#open-the-kernel-conversations`). Started is not ready: the view can
+open while the kernel's agents finish starting, and opening it creates no other kernel or account.
+
+### A step interrupted setup or the welcome screen
+
+Name the exact command and result, the reason it stopped and the next useful step. A harness's permission rules,
+sandbox or automatic permission decision can refuse an installing agent's tool call before OpenRig runs.
+Claude Code's [auto mode can deny calls](https://code.claude.com/docs/en/auto-mode-config); explain the reported
+refusal and let the person review that step in their harness controls or run it themselves, within their chosen
+permissions. Do not silently claim installation failed or completed from a refused call.
+
+For missing tools, downloads or selected logins, use the specific setup hint. A Herdr install warning leaves plain
+tmux available. A requested Ghostty install can fail setup; resolve it or decline with `--no-ghostty` and keep the
+earlier choices. Terminal.app remains available; required tools and logins still matter. macOS may ask for
+Automation permission; a missing display or remote daemon needs the documented headless/manual route.
+Herdr may show an intro (Return to continue) and an agent-integration panel (Esc to close); the view does not
+require installing those integrations. Enlarge a cramped 80×24 window. Use authorized desktop tools to inspect the
+window contents, or state that visibility is unconfirmed and ask the person to check. A successful command or
+window listing alone is not visual proof. The [welcome-screen guide and friction table](getting-started.md#open-the-kernel-conversations)
+connects each observation to its next step. Preserve existing conversations while resolving it.
 
 ### The team did not start, or a terminal is missing
 

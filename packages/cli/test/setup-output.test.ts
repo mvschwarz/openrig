@@ -37,9 +37,14 @@ function fixture(failed: boolean): SetupDeps {
 
 function expectConversationRoute(text: string): void {
   expect(text).toContain("Open the OpenRig view now?");
+  expect(text).toContain("On a Mac, offer Ghostty once");
+  expect(text).toContain("rig setup --ghostty");
+  expect(text).toContain("--no-ghostty");
+  expect(text).toContain("preserve earlier choices such as --no-herdr");
   expect(text).toContain("rig terminal open saved:kernel");
-  expect(text).toContain("relay the printed operator.agent attach command unchanged, in full");
-  expect(text).toContain("env -u TMUX tmux attach-session");
+  expect(text).toContain("rig terminal open saved:kernel --window --json");
+  expect(text).toContain("On a desktop, no copying or typing for the person; confirm three visible columns, not just CLI success");
+  expect(text).toContain("Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command");
   expect(text).toContain("then hand them to the ready operator");
   expect(text).toContain("Do not implement the person's project yourself");
   expect(text).toContain("Started is not ready");
@@ -93,4 +98,18 @@ describe("setup conversation handoff output", () => {
       });
     }
   }
+});
+
+
+it.each([
+  [[], "offers Ghostty once"],
+  [["--ghostty"], "installation would be attempted"],
+  [["--no-ghostty"], "declined"],
+] as const)("keeps the Ghostty choice in dry-run JSON: %j", async (flags, expected) => {
+  const logs: string[] = [];
+  vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.map(String).join(" ")));
+  const program = new Command().exitOverride().addCommand(setupCommand(fixture(false)));
+  await program.parseAsync(["node", "rig", "setup", "--dry-run", "--json", ...flags]);
+  const result = JSON.parse(logs[0]!) as SetupResult;
+  expect(result.steps.find(step => step.id === "ghostty_install")?.message).toContain(expected);
 });

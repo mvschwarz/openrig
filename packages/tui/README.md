@@ -11,8 +11,10 @@ runtime dependency (`yaml`); it reads the daemon's EXISTING projections (two ren
 ## Run — one herdr tile, daemon-direct
 
 From an installed CLI, `rig tui` opens mission control in the current terminal.
-`rig tui --shared` joins the kernel's shared terminal instead (detach with
-Ctrl-b d). The package's own bin is `openrig-tui` (`dist/main.js`).
+For “show me my agents” or the welcome screen, use
+`rig terminal open saved:kernel --window` to open the dashboard and conversations
+together. Only if that window cannot open, `rig tui --shared` is the dashboard-only
+fallback (detach with Ctrl-b d). The package's own bin is `openrig-tui` (`dist/main.js`).
 
 The TUI runs as ONE pane/tile inside herdr's wall (any tmux pane works the
 same way — the tile IS a tmux pane; no extra multiplexer, no integration
@@ -28,10 +30,17 @@ layer):
     #   --demo            labeled demo fixture instead of live reads (never mixes with live)
     #   --no-color        plain text, no color
 
-`rig terminal open <view>` opens every live agent in a view as terminal tiles
-(herdr by default, or `--provider cmux`). The view is a rig name,
-`mission:<id>`, `slice:<id>` or a saved-view id, not a command;
-`rig terminal open kernel --provider herdr|cmux` opens the kernel's terminal.
+Inside an existing herdr or cmux workspace, `rig terminal open <view> --provider herdr`
+(or `--provider cmux`) adds terminal tiles without opening a desktop window. The view
+is a rig name, `mission:<id>`, `slice:<id>` or a saved-view id. For the first desktop
+view, use `rig terminal open saved:kernel --window` as above.
+
+In the TUI, choose **Open terminals** above a rig's grid or in an agent's detail.
+The Terminals section also offers it after a passive view preview. It uses the
+same desktop opener: herdr if installed, otherwise the composed layout in plain
+tmux. Run the TUI on the selected daemon's desktop for this action. Headless or
+remote sessions retain per-seat attach commands in the preview. A launch result
+does not confirm visibility; check the new terminal shows the intended view.
 
 ## Driving it (human or agent — same grammar, same state)
 
@@ -67,6 +76,11 @@ reply per line, plus two read-only queries, `state` and `commands` (the command
 registry with live availability):
 
     printf 'agent dev.impl\n' | nc -U ~/.openrig/run/tui-tui-1.sock
+
+Terminals, Needs, System, Scopes, Config, Specs and file pages read no rigs. A
+`host`, `rig`, `pod` or `agent` address sent from one switches to Topology and
+resolves once that page's read settles. Until then the reply carries `resolving` and a `notice`; send `state`
+for the result (the drill, or the error).
 
 Socket rules (arch standing constraint): every socket command goes through the
 one resolver/mutation path, and verbs stay OBSERVE/NAVIGATE/DRIVE-STRUCTURE

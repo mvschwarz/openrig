@@ -14,7 +14,7 @@ without spelunking through `packages/daemon/specs/`.
 | Path | Contents |
 |---|---|
 | `_canonical/` | The mirrored skills, organized by category (`core/`, `pm/`, `pods/`, `process/`) plus a few uncategorized at the root. Do not edit files here directly — see "Authoring" below. |
-| `rigs/` | The `rigs` skill: a route into OpenRig for an ordinary Claude Code or Codex session. It isn't mirrored or packaged; see "Using these skills". |
+| `rigs/` | The `rigs` skill: a route into OpenRig for an ordinary Claude Code or Codex session. It isn't mirrored; see "Using these skills". |
 | `CHANGELOG.md` | Append-only log of skill changes per curation cycle close. Hand-authored. |
 | `LICENSE` | Apache-2.0, matching the parent project. |
 
@@ -39,8 +39,12 @@ these skills ship in the package, and each seat gets the ones its profile
 selects. You don't have to do anything.
 
 The `rigs` skill is the exception: it's for a Claude Code or Codex session
-that isn't part of a team yet, and it isn't in the package. Add it with
-`npx skills add mvschwarz/openrig --skill rigs`.
+that isn't part of a team yet, so no seat's profile selects it. Add it with
+`npx skills add mvschwarz/openrig --skill rigs`. Once OpenRig is installed, its
+daemon also installs `rigs` into `~/.claude/skills` and `~/.agents/skills`, and
+refreshes it on each upgrade. A copy you added with skills.sh stays as it is.
+The package carries `rigs` at `packages/daemon/assets/skills/rigs`, kept
+identical to `skills/rigs` by a test; edit `skills/rigs` and copy it there.
 
 If you're reading this folder for reference (without OpenRig installed),
 the SKILL.md files are pure markdown with YAML frontmatter; they're

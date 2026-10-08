@@ -59,6 +59,8 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
   const configuration = cfg ? {
     enabled: cfg.enabled, channel: text(cfg.channel), inboundDestination: text(cfg.inboundDestination),
     outboundDestinations: cfg.outboundDestinations.map(text),
+    // #192: the channel map, read-only.
+    channelMap: (cfg.channelMap ?? []).map((e) => ({ match: text(e.match), channel: text(e.channel) })),
     postLevel: cfg.minimumLevelThatPosts, interruptLevel: cfg.minimumLevelThatInterrupts,
     botToken: secretsAvailable ? (bot ? "resolved" : "missing") : "unavailable",
     appToken: secretsAvailable ? (app ? "resolved" : "missing") : "unavailable",

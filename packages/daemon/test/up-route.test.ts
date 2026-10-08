@@ -34,6 +34,7 @@ describe("Up API route", () => {
   let sessionRegistry: SessionRegistry;
   let snapshotCapture: SnapshotCapture;
   let restoreOrchestrator: RestoreOrchestrator;
+  let tmuxAdapter: ReturnType<typeof createTestApp>["tmuxAdapter"];
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -45,6 +46,7 @@ describe("Up API route", () => {
     sessionRegistry = setup.sessionRegistry;
     snapshotCapture = setup.snapshotCapture;
     restoreOrchestrator = setup.restoreOrchestrator;
+    tmuxAdapter = setup.tmuxAdapter;
   });
 
   afterEach(() => {
@@ -162,6 +164,44 @@ describe("Up API route", () => {
     expect(body.status).toBe("restored");
     expect(body.rigResult).toBe("partially_restored");
     expect(body.nodes[0].status).toBe("fresh-primed");
+  });
+
+  it.each(["cli", "explorer"])("%s up selects the pre-down snapshot for plan and apply after a fresh occupant stops", async (entryPoint) => {
+    const rig = rigRepo.createRig("fresh-down-up");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@fresh-down-up", "fresh");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_name", "fresh-native-session", "hook");
+    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify({
+      nodeId: node.id, sessionId: session.id, newGeneration: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid,
+    }));
+    const down = await app.request("/api/down", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rigId: rig.id, force: true }),
+    });
+    expect(down.status).toBe(200);
+    const { snapshotId, errors } = await down.json();
+    expect(errors).toEqual([]);
+    expect(sessionRegistry.getSessionsForRig(rig.id)[0]!.status).toBe("exited");
+    const beforePlan = db.prepare("SELECT total_changes() AS count").get();
+    const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
+    const up = (plan: boolean) => app.request(entryPoint === "cli" ? "/api/up" : `/api/rigs/${rig.id}/up`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: rig.name, plan }),
+    });
+
+    const plan = await up(true);
+    expect(plan.status).toBe(200);
+    expect(await plan.json()).toMatchObject({
+      snapshot: { id: snapshotId }, wouldCaptureCurrentState: false,
+      nodes: [{ occupantSessionId: session.id, intendedAction: "resume-original" }],
+    });
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(beforePlan);
+
+    const restored = await up(false);
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({ status: "restored", snapshotKind: "auto-pre-down" });
+    expect(restoreSpy).toHaveBeenCalledWith(snapshotId, expect.any(Object));
+    expect(tmuxAdapter.sendText).toHaveBeenCalledWith("r00-fresh-down-up-worker", expect.stringContaining("--resume 'fresh-native-session'"));
   });
 
   it.each([[false, true, true], [true, undefined, true], [true, false, false], [false, undefined, false]] as const)("non-interruptive stored %s / option %s restores as %s; plan does not write", async (stored, option, expected) => {

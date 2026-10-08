@@ -38,6 +38,21 @@ export function makeThreadRouteResolver(opts: {
       // #899 — a reaction names its message by channel and timestamp, and a timestamp is unique only
       // within a channel, so a reaction on another channel's message is not on this ask.
       const sameMessage = ev.type !== "reaction_added" || mapping?.channel === ev.channel;
+      if (ev.type === "reaction_added" && !(mapping && sameMessage)) {
+        // #899 — a reaction on a message OpenRig posted into a thread for an ask (a long ask's reply
+        // part, a later notification, an ask posted into another thread) reaches that ask's own seat.
+        // A person's reply in the thread was not posted by OpenRig, so a reaction on it stays ignored.
+        const part = opts.map.partOf(threadTs, ev.channel ?? "");
+        if (part) {
+          log(`inbound reaction on ts=${threadTs} (posted for ${part.conversationId}) -> ${part.seat}`);
+          return {
+            destination: part.seat,
+            tags: [...BASE_TAGS, "thread", `reply-to:${part.conversationId}`],
+            correlationQitemId: part.conversationId,
+            routeClass: "existing-thread",
+          };
+        }
+      }
       if (mapping && sameMessage) {
         // FOUNDER ROOT INVARIANT (2026-08-27): the map stores the bare local seat because the
         // queue row's source_session is bare inside one instance — the seat routes as stored.

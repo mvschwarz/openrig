@@ -226,12 +226,35 @@ Claude keeps `acceptEdits` and receives inline session settings allowing ordinar
 `rig` commands, project reads and common project test commands (for example,
 `npm test`, `pnpm test`, `pytest`, `go test` and `cargo test`). Lifecycle commands
 such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
-handover are listed as **ask** rules. Native deny and ask rules take precedence
-over allow rules. These are native command-matching rules, not filesystem
-containment: a project's test command can execute code. Flags before the verb
-(for example, `rig --host vps up`) or wrapper commands may not match the lifecycle
-prefixes. OpenRig does not write these settings into a personal or project
-permission file.
+handover ask through a session `PreToolUse` hook. Their literal help forms, such
+as `rig down --help`, `rig bundle install -h` and `rig help down`, run without
+that lifecycle prompt. Native personal, project and managed deny/ask rules still
+apply; OpenRig does not remove or override them.
+
+For allowances, the hook recognizes literal command words (including quoted or absolute paths),
+leading environment assignments that do not change executable lookup or startup,
+and `env`, `command` and `exec` wrappers without options other than `--`.
+Relative executable paths and assignments such as `PATH` or `NODE_OPTIONS` stay
+with native checks. The same existing team allowances apply after spelling
+normalization; project `node_modules/.bin/vitest` and `jest` paths match their
+existing `npx` allowances. It does not automatically allow pipelines, command
+substitutions, redirects, heredocs, shell functions or other unrecognized syntax.
+Lifecycle prefixes are checked at every word position, including after wrappers,
+control-flow words and CLI argument separators. A `--` separator before or after
+the subcommand ends option parsing, so a later `--help` is an operand and still
+asks. Ask detection also scans with comment text retained, so a `#` inside a
+substitution does not hide a later lifecycle command. Unquoted prose or comments
+containing a lifecycle command may also ask; ordinary trailing comments do not
+change allowance matching. Quoted messages and quoted heredoc bodies remain data.
+Arithmetic shifts are not treated as heredoc operators. These are command
+allowances, not containment: a project's test command can execute code. The
+hook and allowances are passed with `--settings` at launch, including resume
+and fork; nothing is written to personal or project permission files.
+
+If the helper asset is missing at launch, OpenRig falls back to the native lifecycle
+ask rules; help can prompt in that fallback. A helper that disappears or times out
+after launch cannot supply a decision, leaving Claude's remaining native rules
+in effect. The hook is a convenience policy, not a containment boundary.
 
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as

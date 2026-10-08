@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
@@ -79,6 +80,20 @@ describe("NodeLauncher", () => {
     });
     return { rig, node };
   }
+
+  it("a missing pane at registration immediately projects attention", async () => {
+    const { rig } = seedRigWithNode();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // SQLite keeps its real clock; freeze registration safely after that floor.
+      vi.setSystemTime(Date.now() + 60_000);
+      const result = await createLauncher().launchNode(rig.id, "dev1-impl");
+      expect(result.ok).toBe(true);
+      expect(getNodeInventory(db, rig.id)[0]).toMatchObject({
+        startupStatus: "attention_required", identityVerdict: { verdict: "pane_missing", reason: "pane_pid_gone" },
+      });
+    } finally { vi.useRealTimers(); }
+  });
 
   it("happy path: derives name, creates tmux, persists session+binding+event in one txn, notifies", async () => {
     const { rig, node } = seedRigWithNode();
