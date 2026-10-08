@@ -563,12 +563,41 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
+| Kernel seats fail within a second of the first start, and tmux reports "server exited unexpectedly" | Check that your tmux can capture a pane, then start the failed seats again; see the tmux check below this table. |
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
 | Host reboot lost tmux sessions | Open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
+
+**When the kernel's seats all fail at the first start.** A report on Oracle Linux 10
+([#980](https://github.com/mvschwarz/openrig/issues/980)) traced this to the distribution's packaged tmux, whose
+`tmux -V` prints `next-3.4`: its server exited on every `capture-pane -p`, also outside OpenRig. To check your tmux on
+a throwaway socket, without touching your own sessions:
+
+```sh
+tmux -L openrig-check -f /dev/null new-session -d -s check
+tmux -L openrig-check capture-pane -p -t check >/dev/null && echo "capture-pane works"
+tmux -L openrig-check kill-server
+```
+
+If the second command fails because the server exited, put a tmux that passes this check first on your `PATH`; the
+reporter built tmux 3.5a into `/usr/local/bin`. Then, from a shell where `tmux -V` shows that tmux, restart the daemon
+and start the failed seats again, as the reporter did:
+
+```sh
+rig daemon stop
+rig start --last
+rig ps --nodes --rig kernel   # the failed seats show startup status "failed"
+rig up kernel --existing --fresh <failed seats> --yes
+```
+
+Name the failed seats by their logical IDs, for example `advisor.lead operator.agent operator.human queue.worker`
+when all four failed. `--fresh` starts a new conversation for each seat you name, so name only the failed ones; seats
+you don't name keep their conversations. A later `rig daemon start` doesn't retry them by itself: once a kernel
+exists, startup skips the built-in kernel boot, and `rig status` then reads `Kernel: skipped` whatever its seats'
+state, so check `rig ps --nodes --rig kernel`.
 
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a
