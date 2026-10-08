@@ -45,7 +45,9 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
     one. No new window and no macOS prompt; their own spaces stay in the sidebar.
   - **In Terminal or Ghostty:** a new tab or window the size of theirs.
   - **From Claude Desktop, iTerm or VS Code on a Mac:** a new Ghostty window when supported, otherwise Terminal. Only
-    here, tell the person before running it that **Allow is fine** if macOS asks to control that app.
+    here, tell the person before running it that **Allow is fine** if macOS asks to control that app. `echo
+    $TERM_PROGRAM` tells you where you run: `herdr`, `Apple_Terminal`, `ghostty` or `tmux` mean no macOS prompt, so
+    don't mention one.
   - **Layout:** under 120 columns the operator fills the first page; from 120, the dashboard and operator share it. The
     advisor has its own tab or tmux window.
 
