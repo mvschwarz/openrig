@@ -37,20 +37,24 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
 - **Open the switchboard:** for “show me my agents”, “show me the terminals”, “see my agents” or “switchboard”, run
-  `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig view now?”
-  first. It opens a new terminal tab/window itself, using herdr when installed or plain tmux otherwise.
-  Below 120 measured columns (or unknown width), the operator fills the first page; from 120, dashboard and operator
-  share it equally. The advisor always has a separate tab or tmux window; select one to switch.
-  Inside Herdr, it switches the person's Herdr to a `switchboard` space, reusing a live one, without another window;
-  their own spaces stay in the sidebar.
-  On a Mac, Claude Desktop, iTerm and VS Code callers get a new supported Ghostty window, otherwise Terminal.
-  Before running it, tell the person **Allow is fine** if macOS asks to control that app: it opens the switchboard they requested.
-  Preserve the current terminal. Check the result and visible content, or report what cannot be
-  verified. If the view is already open, point them to it rather than opening another. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
-  cannot open, `rig tui --shared` is the dashboard-only fallback; explain the failure and help with the chosen
-  fallback. Herdr is visible only in a terminal the person can see; switching the shared TUI to `:terminals`
-  does not open one. No and headless/SSH use are valid background outcomes. Provider-only `--provider herdr` or
-  `--provider cmux` is for an existing provider workspace, not the first desktop window.
+  `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig switchboard now?”
+  first. It opens the switchboard itself, using herdr when installed or plain tmux otherwise:
+  - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to a `switchboard` space, reusing a live
+    one. No new window and no macOS prompt; their own spaces stay in the sidebar.
+  - **In Terminal or Ghostty:** a new tab or window the size of theirs.
+  - **From Claude Desktop, iTerm or VS Code on a Mac:** a new Ghostty window when supported, otherwise Terminal. Only
+    here, tell the person before running it that **Allow is fine** if macOS asks to control that app.
+  - **Layout:** under 120 columns the operator fills the first page; from 120, the dashboard and operator share it. The
+    advisor has its own tab or tmux window.
+
+  Then tell the person in a sentence or two where it opened and that the operator is ready for what they want to
+  build. Don't list agents or statuses (the switchboard shows them), and don't suggest a command for them to type.
+  Preserve the current terminal. If OpenRig's notes say it couldn't confirm the view, say so plainly. If it's already
+  open, point them to it rather than opening another. Only if the window cannot open, `rig tui --shared` is the
+  dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
+  the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
+  background outcomes. Provider-only `--provider herdr` or `--provider cmux` is for an existing provider workspace,
+  not the first desktop window.
 - **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
   person to open a new terminal window or tab on the daemon's host. Over SSH, that's a new SSH session to it with the
   known account. If you only know an HTTP daemon address, ask for the SSH details rather than inventing them. Then

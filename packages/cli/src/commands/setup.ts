@@ -561,7 +561,7 @@ export function goldenPathNextSteps(): string[] {
     "  3. rig status                       Read the kernel boot state; rig ps --nodes --rig kernel checks its seats",
     "     Started is not ready. The view may open while agents finish starting; report their actual state",
     "     For an existing kernel or blocked startup: rig context get reference/getting-started.md#incomplete-setup-and-restart",
-    "  4. For 'show me my agents', 'show me the terminals' or 'switchboard', run the command below; otherwise ask 'Open the OpenRig view now?'",
+    "  4. For 'show me my agents', 'show me the terminals' or 'switchboard', run the command below; otherwise ask 'Open the OpenRig switchboard now?'",
     "     Yes: run the command below; it opens a NEW terminal tab/window and preserves this terminal",
     "     rig terminal open saved:kernel --window --json (TUI | advisor | operator; herdr, otherwise plain tmux)",
     "     rig context get reference/getting-started.md#open-the-kernel-conversations",

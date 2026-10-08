@@ -304,7 +304,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       if (!herdr) return failed("The Herdr executable is unavailable; no space was opened.");
       // Set only once a space may open, so the refusals above read as "nothing was opened".
       currentHerdr = true;
-      windowNotes.push("Using the current Herdr session; no terminal window or personal config was changed. Check the selected space is visible.");
+      windowNotes.push("Using the current Herdr session; no terminal window or personal config was changed.");
     }
     let configEnv = "";
     let configPrefix = "";
@@ -370,6 +370,17 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         tabs = [];
         windowNotes.push(`Could not check existing Herdr workspaces: ${(err as Error).message} Creating a fresh workspace; existing workspaces are kept.`);
       }
+      // In the person's own Herdr, its focused space is what they are looking at.
+      const shownNote = async (workspaceId?: string) => {
+        if (currentHerdr) try {
+          const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "workspace", "list"]));
+          const focused = (listed?.result?.workspaces as Array<{ workspace_id?: string; label?: string; focused?: boolean }> | undefined)?.find(ws => ws?.focused);
+          if (focused && (workspaceId ? focused.workspace_id === workspaceId : !!composed.spaceLabel && focused.label === composed.spaceLabel)) {
+            return `Herdr shows the ${focused.label ?? "view's"} space in the person's current session.`;
+          }
+        } catch { /* Unconfirmed: say so below. */ }
+        return currentHerdr ? "Herdr did not confirm the view's space is focused; ask the person whether they see it." : "Check the new terminal shows the intended view; window creation alone is not visual confirmation.";
+      };
       const viewMarker = `openrig:${composed.id}`;
       const planMarker = `${viewMarker}#${planId.slice(0, 16)}`;
       const marker = (label: string) => label.includes("#") ? label.slice(0, label.lastIndexOf("#")) : "";
@@ -403,13 +414,13 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         return {
           provider, ok: true, opened: [], absent: composed.absent, degraded: composed.degraded, pages: 0, window,
           reusedWorkspace: { id: existing.workspace_id, tabId: existing.tab_id, view: composed.id },
-          notes: [...windowNotes, "Existing local tmux attachments were confirmed and workspace contents were kept; no layout refresh or new tiles were requested. Check the selected space shows the intended view."],
+          notes: [...windowNotes, "Existing local tmux attachments were confirmed and workspace contents were kept; no layout refresh or new tiles were requested.", await shownNote(existing.workspace_id)],
         };
       }
       const result = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr", expectedPlan: planId, ...(viewportColumns !== undefined ? { viewportColumns } : {}) }, { timeoutMs: 45_000 });
       if (result.status >= 400) return { ...failed(result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, notes: windowNotes, absent: composed.absent, degraded: composed.degraded };
       if (!Array.isArray(result.data?.opened)) throw new Error("The terminal opened, but the daemon returned no view result. Inspect it before retrying.");
-      return { ...result.data, window, notes: [...(result.data.notes ?? []), ...windowNotes, currentHerdr ? "Check the selected space shows the intended view." : "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+      return { ...result.data, window, notes: [...(result.data.notes ?? []), ...windowNotes, await shownNote()] };
     }
 
     if (typeof launchWindow !== "function") throw new Error("No terminal window launcher is available.");

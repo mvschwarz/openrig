@@ -52,7 +52,7 @@ Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The v
 while agents finish starting; report their actual state and use the guide's existing recovery routes when needed.
 For “show me my agents”, “show me the terminals”, “see my agents” or “switchboard”, run
 `rig terminal open saved:kernel --window --json` on the daemon's desktop. The request is already permission to
-open it; otherwise ask **“Open the OpenRig view now?”** first. The command opens a new terminal tab/window using
+open it; otherwise ask **“Open the OpenRig switchboard now?”** first. The command opens a new terminal tab/window using
 installed herdr, otherwise plain tmux; inside Herdr it opens a space there. It preserves existing conversations. The default view
 needs no YAML edit. Below 120 measured columns (or unknown width), show the operator alone first; from 120,
 show dashboard and operator equally side by side. The advisor always has a separate tab or tmux window.
