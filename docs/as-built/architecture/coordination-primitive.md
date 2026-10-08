@@ -104,8 +104,8 @@ Routes import these; services are Hono-free:
 - **`hot-potato-enforcer.ts`** — pure validator for the load-bearing API
   contract (see §3).
 - **`inbox-handler.ts`** — mailbox handler: drop (idempotent on `inbox_id`,
-  `:99`), absorb (promotes a pending entry to a `queue_item`, idempotent,
-  `:154`), deny (records reason, `:214`). The handler has no auth hook
+  `:100`), absorb (promotes a pending entry to a `queue_item`, idempotent,
+  `:155`), deny (records reason, `:215`). The handler has no auth hook
   (`inbox-handler.ts:71`); identity comes from the route. `POST /inbox/drop`
   takes the sender only from the `X-OpenRig-Session` header through
   `requireSenderIdentity` (`routes/queue.ts:1094`) and answers 400
@@ -122,7 +122,7 @@ Routes import these; services are Hono-free:
 Create, handoff and handoff-and-complete return the committed row without
 waiting for terminal delivery. Each stages a deterministic
 `wake-intent-<qitem>` outbox row in its transaction and delivers it after
-commit (`queue-repository.ts:1412`–`1416`, `:1467`–`1475`). The returned
+commit (`queue-repository.ts:1412`–`1424`, `:1475`–`1483`). The returned
 `lastNudgeResult` is therefore normally null; `rig queue show <id>` reads the
 wake result later. If create cannot retain the intent, the task is still saved
 and the row records `failed:wake not retained: <reason>`. Startup reconciles
@@ -170,7 +170,7 @@ canceled, no-follow-on, escalation, superseded}`. The reasons
   (`queue-repository.ts:2629`).
 
 Tier→SLA mapping for `closure_required_at` also lives in
-`hot-potato-enforcer.ts` (`TIER_SLA_SECONDS`, `:114`). This validator is
+`hot-potato-enforcer.ts` (`TIER_SLA_SECONDS`, `:115`). This validator is
 invoked by `QueueRepository.update()` (and `updateWithinTransaction()`), both
 through the call at `queue-repository.ts:2531`, so closure is enforced at the
 daemon transaction boundary — the workflow runtime *projects* on closure but
@@ -190,11 +190,11 @@ note without a state change as an append-only transition; moving it to
 another state requires an explicit reopen with a note. A `qitem-` blocker must
 exist and be live on this daemon; when a blocker leaves the active states,
 each row parked on it follows the blocker's handoff successor or returns to
-`pending` with a durable wake (`queue-repository.ts:2407`–`2519`,
-`:2602`–`2646`, `:2921`–`2998`). Claiming a parked row clears its
+`pending` with a durable wake (`queue-repository.ts:2407`–`2529`,
+`:2612`–`2656`, `:2931`–`3008`). Claiming a parked row clears its
 `blocked_on`; the claim transition keeps the former gate as a `closure_target`
 audit pointer with no closure reason, which a re-park without `--blocked-on`
-reuses (`queue-repository.ts:2233`–`2244`, `:2561`–`2567`).
+reuses (`queue-repository.ts:2233`–`2254`, `:2571`–`2577`).
 `human-route-enforcer.ts` is a second pure validator at the same boundary: a
 `human-gate` row, a row addressed to a human seat, or a park on one must carry
 `summary` and `evidence_ref`.
@@ -243,10 +243,10 @@ message-passing closure (never 2PC).**
   conflict the origin returns the stored row when destination and source
   match (idempotent absorb) and a structured `qitem_id_reuse` error (409) when
   they differ (`QueueRepository.create()` catch path,
-  `queue-repository.ts:1431`–`1464`, with `isQitemPrimaryKeyConflict`,
-  `:455`). When destination and source match but the body differs, the stored
+  `queue-repository.ts:1431`–`1472`, with `isQitemPrimaryKeyConflict`,
+  `:461`). When destination and source match but the body differs, the stored
   row is returned unchanged with `createWarning: qitem_body_not_saved`; the
-  supplied body is not saved (`:1442`–`1446`).
+  supplied body is not saved (`:1450`–`1454`).
 - **Cross-host handoff choreography.** The local atomic close+create cannot
   span two DBs, so the route-layer choreography (`crossHostHandoff`,
   `routes/queue.ts:316`) runs: successor-create on the target host FIRST (via

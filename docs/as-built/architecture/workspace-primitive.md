@@ -209,8 +209,8 @@ match; the filter is skipped when the column is absent.
 > `/create` `:490` and the self-forward create `:436`; handoff calls `:679`,
 > `:758` in handlers `:650`, `:732` (`/create` handler `:450`); ordering note
 > `:482–489`; inherited value `:676–677`, `domain/queue-repository.ts:1691`,
-> `:1858`; list filter `routes/queue.ts:906`,
-> `domain/queue-repository.ts:3236–3228`, CLI
+> `:1868`; list filter `routes/queue.ts:906`,
+> `domain/queue-repository.ts:3236–3238`, CLI
 > `packages/cli/src/commands/queue.ts:1143`; mounted `server.ts:784`.
 
 ## 2. Workspace HTTP route — frontmatter validator and doctor

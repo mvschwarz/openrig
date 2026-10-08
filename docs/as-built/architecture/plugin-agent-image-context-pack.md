@@ -131,12 +131,12 @@ composed projection and reconciles it only with `--apply`; `rig skill audit` is 
 read-only provenance and freshness audit. Launch applies the selected loadout per seat.
 
 For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to
-that loadout (`packages/daemon/src/domain/profile-resolver.ts:309–308`, with
+that loadout (`packages/daemon/src/domain/profile-resolver.ts:309–330`, with
 `resolvePluginSkills()` at `skill-catalog.ts:460`). Neither runtime reads skills from the plugin
 folder projected into the working directory. The skills are projected under their plain names,
 and a skill the profile already selects keeps its source. A kept plugin copy (an edited or
 user-owned one, or OpenRig's own copy whose plugin source changed or moved after the loadout
-was resolved, `skill-catalog.ts:1060–945`) gives a `plugin_skill_kept` warning, and an unreadable one gives
+was resolved, `skill-catalog.ts:1060–1068`) gives a `plugin_skill_kept` warning, and an unreadable one gives
 `plugin_skill_skipped`. If plugin skills can't be projected at all, the seat starts without them
 and gets a `plugin_skills_not_projected` warning (`rigspec-instantiator.ts:2045`).
 

@@ -61,7 +61,7 @@ system-level invariants.
     `monotonicFactory()`. Restore does not pick the newest session by max
     ULID; it resolves the active occupant recorded in the snapshot
     (`resolveActiveSnapshotSession`, `active-occupant.ts:74`, called at
-    `restore-orchestrator.ts:774` and `:964`).
+    `restore-orchestrator.ts:774` and `:971`).
 13. Readiness checking is a retry loop with exponential backoff and
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
@@ -136,7 +136,7 @@ comments:
   caller's opt-in to wait, and a failed wait returns without sending. Otherwise
   only positive evidence of an open
   picker or approval prompt refuses a send; a busy or unknown seat gets the
-  message with an advisory warning (`session-transport.ts:1427`–`1408`). The
+  message with an advisory warning (`session-transport.ts:1427`–`1433`). The
   audited `--dangerously-interact` override is the only way past an open prompt.
 - **Non-interruptive mode is per-launch flags only.** It never changes
   permissions or native settings files, applies only to full-bypass Claude Code
@@ -268,7 +268,7 @@ Intentional limits that still describe the shipped system:
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
 7. `--verify` on `rig send` checks pane content for message visibility, not
    agent acknowledgement: it compares occurrences of the message's first 40
-   characters before and after the send (`session-transport.ts:1605`–`1583`).
+   characters before and after the send (`session-transport.ts:1605`–`1608`).
 8. Terminal node readiness is shell-ready only — no service health probes.
 9. Managed-app service surfaces are descriptive only — OpenRig does not
    auto-inject service URLs/tokens into agent prompts beyond authored

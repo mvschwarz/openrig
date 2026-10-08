@@ -37,9 +37,9 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 
 | Metric | Count | Directory or command |
 |---|---|---|
-| All packages | **1203** | `packages/*/src` |
-| Daemon | **659** (**430** under `domain/`, **29** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
-| CLI | **173** | `packages/cli/src` |
+| All packages | **1205** | `packages/*/src` |
+| Daemon | **660** (**431** under `domain/`, **29** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
+| CLI | **174** | `packages/cli/src` |
 | Web UI | **304** | `packages/ui/src` |
 | TUI | **67** | `packages/tui/src` |
 | Database migrations | **96** (`001_core_schema.ts` … `097_thread_part_map.ts`; no `093`) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
@@ -73,7 +73,7 @@ Hono daemon routes (69 app.route() mounts + direct handlers for /healthz,
       +-- coordination routes (stream / queue / workflow / mission control)
       |
       v
-Framework-free domain services (430 files under packages/daemon/src/domain)
+Framework-free domain services (431 files under packages/daemon/src/domain)
       |
       +-- SQLite state (96 migrations)
       +-- tmux / cmux / resume adapters
@@ -227,8 +227,8 @@ The daemon entrypoint `packages/daemon/src/index.ts:306` calls
 ## 5. Test files
 
 A static count of tracked test files at `e8f0ab340db773392ec8be75b072d1c0f3068a50` (no pass counts are claimed
-here; CI runs the suites in `.github/workflows/tests.yml`): daemon **923**,
-CLI **260**, web UI **198**, TUI **103**
+here; CI runs the suites in `.github/workflows/tests.yml`): daemon **927**,
+CLI **261**, web UI **198**, TUI **105**
 (`git ls-files 'packages/<package>/**/*.test.ts' 'packages/<package>/**/*.test.tsx' | wc -l`).
 
 ## See also

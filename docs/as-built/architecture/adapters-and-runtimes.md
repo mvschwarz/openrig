@@ -386,8 +386,8 @@ module.
 
 - **Rule 1** — §2: **0** files in `adapters/` import Hono.
 - **Rule 5** — restore picks a node's adapter by that node's own runtime: the
-  saved startup context's runtime, else the node's (`restore-orchestrator.ts:1115–1109`),
-  used to choose the replay adapter (`:1131`).
+  saved startup context's runtime, else the node's (`restore-orchestrator.ts:1115–1116`),
+  used to choose the replay adapter (`:1138`).
 - **Rule 13** — the readiness loop is `StartupOrchestrator.waitForReady`
   (`startup-orchestrator.ts:562`; 1 s doubling to a 16 s cap), which calls each
   adapter's `checkReady` (§2). The timeout comes from the
@@ -402,7 +402,7 @@ module.
   restore passes `allowFreshFallback: false` for pod-aware resume
   (`restore-orchestrator.ts:1224`), and a resume that concludes failed rolls
   back to zero sessions as `awaiting-decision` (`restore-orchestrator.ts:1055`,
-  `:1236`).
+  `:1243`).
 
 ## See also
 

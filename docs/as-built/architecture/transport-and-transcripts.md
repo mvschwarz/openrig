@@ -87,12 +87,12 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
 1. Resolve the session name (`resolveBySessionName`,
    `session-transport.ts:963`): not found → 404; the same name in more than
    one rig → 409. A tmux probe of the session can also refuse it as missing or
-   tmux as unavailable (`:1293`–`1310`). Pod, rig, global and `--to` list
+   tmux as unavailable (`:1317`–`1334`). Pod, rig, global and `--to` list
    targets go through `POST /api/transport/broadcast`, which resolves them
    with `resolveSessions` and sends to each recipient in turn.
 2. Take the seat's delivery lease. Every write runs under a per-seat,
    serialized lease from the seat delivery guard, installed at daemon start
-   (`send`, `:1131`). With the seat's typing guard on, the message is held
+   (`send`, `:1155`). With the seat's typing guard on, the message is held
    instead of typed: the result is `outcome: "retained"` with HTTP 200
    (`routes/transport.ts:115`); operators use `rig seat set-typing-guard` and
    `rig seat held-messages`.
@@ -101,32 +101,32 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    (`session-transport.ts:1482`), unless the caller passes
    `--dangerously-interact --reason`; that override persists an audit record
    before sending and refuses the send if it can't
-   (`prompt_override_audit_unavailable`, `:1446`). A pane that reads `unknown` while the seat's
-   latest runtime hook says it waits on a person reads as `needs_input` (`:1842`). A mid-work reading (`running`, from a
+   (`prompt_override_audit_unavailable`, `:1471`). A pane that reads `unknown` while the seat's
+   latest runtime hook says it waits on a person reads as `needs_input` (`session-transport.ts:1878–1889`). A mid-work reading (`running`, from a
    fresh runtime hook or the pane's mid-work patterns,
    `findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN])`,
-   `:298`) or an `unknown` one proceeds with an advisory `warning` (`:1470`,
-   `:1478`). `--force` has no effect on this path, and combining it with
+   `:311–315`) or an `unknown` one proceeds with an advisory `warning` (`:1495`,
+   `:1503`). `--force` has no effect on this path, and combining it with
    `--wait-for-idle` is refused with 400 (`routes/transport.ts:66`–`73`).
 4. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
    (`packages/daemon/src/adapters/tmux.ts:625`) → ~200ms delay
-   (`session-transport.ts:1558`) → separate named `Enter` (`:1551`). The paste
+   (`session-transport.ts:1558`) → separate named `Enter` (`session-transport.ts:1573–1578`). The paste
    targets the seat's registered pane ID, not the session name, and is refused
    with no input written if the session no longer holds exactly that pane.
    Bracketed paste preserves multiline input in supporting TUIs; the payload
    never enters a shell argument. A `--dangerously-interact` answer is pasted
    without `-p` (`session-transport.ts:1541`) and Enter is pressed only if the
-   whole answer is still staged (`:1537`–`1545`). A successful paste proves
+   whole answer is still staged (`:1562`–`1570`). A successful paste proves
    transport execution, not runtime consumption.
 5. Optional `--verify`: capture the last 30 pane lines before and after the
-   send (after a 500 ms wait, `:1572`) and count the message's first 40
+   send (after a 500 ms wait, `:1597`) and count the message's first 40
    characters in each. A higher count after the send reports
    `outcome: "delivered"`; otherwise the outcome is `rendered-unconfirmed` —
    text and Enter landed but the capture could not re-confirm the render,
    which is not a failure at the daemon (`session-transport.ts:700`
-   `verify?`; `:1571` `if (opts?.verify)`; `:1583`
+   `verify?`; `:1596` `if (opts?.verify)`; `:1608`
    `verified = postCount > preCount`). The outcome values are `delivered`,
-   `rendered-unconfirmed`, `failed` and `retained` (`:748`).
+   `rendered-unconfirmed`, `failed` and `retained` (`:772`).
 6. CLI `--verify` goes further (`packages/cli/src/commands/send.ts:596`): it
    looks for the text still unsubmitted at the prompt, makes one guarded
    Enter-only retry through the daemon's `submitOnly` path
