@@ -832,11 +832,11 @@ describe("Daemon Lifecycle", () => {
 
     tailLogs(deps, { follow: true });
 
-    // Should spawn tail -f on the log file
+    // The installed Node runtime follows logs without a Unix tail dependency.
     expect(spawnFn).toHaveBeenCalledOnce();
     const [cmd, args] = spawnFn.mock.calls[0]!;
-    expect(cmd).toBe("tail");
-    expect(args).toContain("-f");
+    expect(cmd).toBe(process.execPath);
+    expect(args).toContain("--follow");
     expect(args).toContain(LOG_FILE);
   });
 

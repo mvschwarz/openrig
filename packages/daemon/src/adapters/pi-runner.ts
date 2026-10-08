@@ -961,10 +961,15 @@ export function resolveRuntimeExecutable(
   name: string,
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
+  platform: NodeJS.Platform = process.platform,
 ): { ok: true; path: string } | { ok: false; error: string } {
-  const onPath = (env.PATH ?? "").split(nodePath.delimiter)
-    .filter((dir) => nodePath.isAbsolute(dir))
-    .map((dir) => nodePath.join(dir, name))
+  const paths = platform === "win32" ? nodePath.win32 : nodePath.posix;
+  // Native spawn does not execute npm .cmd/.ps1 shims. OMP ships an .exe;
+  // resolve that file before the isolated seat HOME is applied.
+  const names = platform === "win32" && !paths.extname(name) ? [name + ".exe", name + ".com"] : [name];
+  const onPath = (env.PATH ?? "").split(paths.delimiter)
+    .filter((dir) => paths.isAbsolute(dir))
+    .flatMap((dir) => names.map(filename => paths.join(dir, filename)))
     .find((candidate) => ops.isExecutable(candidate));
   if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${env.PATH ?? ""})` };
   let real: string;
@@ -973,7 +978,8 @@ export function resolveRuntimeExecutable(
   } catch (err) {
     return { ok: false, error: `could not resolve ${onPath}: ${(err as Error).message}` };
   }
-  if (nodePath.basename(real) !== "mise") return { ok: true, path: real };
+  const binaryName = paths.basename(real);
+  if (platform === "win32" ? !/^mise(?:\.exe)?$/i.test(binaryName) : binaryName !== "mise") return { ok: true, path: real };
   // A mise shim is a symlink to mise itself; ask mise for the tool it maps to.
   let target: string;
   try {
@@ -981,7 +987,7 @@ export function resolveRuntimeExecutable(
   } catch (err) {
     return { ok: false, error: `${onPath} is a mise shim and 'mise which ${name}' failed: ${(err as Error).message}` };
   }
-  if (!nodePath.isAbsolute(target) || !ops.isExecutable(target)) {
+  if (!paths.isAbsolute(target) || !ops.isExecutable(target)) {
     return { ok: false, error: `${onPath} is a mise shim but 'mise which ${name}' returned no executable (${target || "empty"})` };
   }
   try {

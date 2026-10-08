@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWindowsProcesses, verifyCodexPaneProcess, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const born = "2026-10-08T01:00:00Z";
 function rows(): NativeProcessRow[] {
@@ -10,6 +10,15 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("verifies native Claude against the selected executable and exact session identity", async () => {
+    const values = rows();
+    Object.assign(values[1]!, { executableName: "claude.exe", executablePath: "C:\\program space\\claude.exe", command: '"C:\\program space\\claude.exe" --session-id exact-id' });
+    const input = { target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => "claude" }, listProcesses: () => values, expectedToken: "exact-id", selectedExecutable: "C:\\program space\\claude.exe" };
+    expect((await verifyClaudePaneProcess(input))?.process.pid).toBe(101);
+    expect(await verifyClaudePaneProcess({ ...input, selectedExecutable: "C:\\other\\claude.exe" })).toBeNull();
+    expect(await verifyClaudePaneProcess({ ...input, expectedToken: "wrong" })).toBeNull();
+    expect(await verifyClaudePaneProcess({ ...input, tmux: { ...input.tmux, getPaneCommand: async () => "pwsh" } })).toBeNull();
+  });
   it("requires the OS executable, unique lineage and exact resume identity", async () => {
     expect((await verify(rows()))?.process.pid).toBe(101);
     expect(await verify(rows(), "wrong-id")).toBeNull();

@@ -162,6 +162,14 @@ export class SeatLaunchEnvironment {
       if (this.launchPlatform === "win32") {
         if (!searchPath) throw new Error("Launch PATH unavailable");
         env.PATH = `${binDir}${path.delimiter}${searchPath}`;
+        // The classic Claude builder emits this one fixed assignment for native
+        // scrollback. Move it into the child environment before literal argv
+        // parsing; arbitrary shell assignments remain unsupported.
+        const rendererPrefix = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
+        if (target.runtime === "claude-code" && command.startsWith(rendererPrefix)) {
+          env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
+          command = command.slice(rendererPrefix.length);
+        }
         return renderWindowsLaunch(command, env);
       }
       // Classic Claude may be an rc alias or function, not a PATH executable.

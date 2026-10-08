@@ -111,7 +111,7 @@ files:
     lib.scan();
     const entry = lib.getByRef("collision")!;
     expect(entry.sourceType).toBe("workspace");
-    expect(entry.sourcePath).toContain("/workspace/");
+    expect(entry.sourcePath).toBe(join(workspaceRoot, "collision"));
   });
 
   // Slice-03 Atom 5 (colon-id strip, ruled contract §4) — the id is now

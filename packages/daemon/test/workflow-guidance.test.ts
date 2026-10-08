@@ -11,7 +11,7 @@ import { ContextPackLibraryService } from "../src/domain/context-packs/context-p
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, {recursive:true, force:true}); });
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "workflow-guidance-")); roots.push(root);
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "workflow-guidance-"))); roots.push(root);
   const project = join(root,"project.yaml"), mission = join(root,"missions/trial/mission.yaml"), slice = join(root,"missions/trial/slices/one/slice.yaml");
   const write = (path: string, value: unknown) => {mkdirSync(join(path,".."),{recursive:true});writeFileSync(path,typeof value === "string" ? value : stringify(value));};
   const catalog = join(root,"method.md");

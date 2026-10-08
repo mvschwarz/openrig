@@ -11,6 +11,7 @@ import { renderScreen } from "../src/render.js";
 import { resolveEscapeAction } from "../src/input.js";
 import { fileLines, referenceAction } from "../src/reading.js";
 import type { Action, FleetSnapshot, ViewStateStore } from "../src/types.js";
+import { fileSymlinksSupported } from "./file-symlink-capability.js";
 
 let home: string, root: string, snap: FleetSnapshot, view: ViewStateStore, client: DaemonClient;
 let requests: string[], failRead: boolean;
@@ -21,8 +22,10 @@ beforeEach(() => {
   writeFileSync(join(root, "docs/chapter.md"), "# First act\nOriginal disk sentence.\n" + "A manuscript paragraph.\n".repeat(35) + "## Second act\nThe second act is current.\n[Back to outline](../outline.md)\n[External](https://example.org/reading)\n");
   writeFileSync(join(root, "outline.md"), "# Outline\nCurrent outline.\n");
   writeFileSync(join(home, "outside.md"), "not readable through project root\n");
-  symlinkSync(join(home, "outside.md"), join(root, "escape.md"));
-  symlinkSync(join(root, "docs/chapter.md"), join(root, "alias.md"));
+  if (fileSymlinksSupported) {
+    symlinkSync(join(home, "outside.md"), join(root, "escape.md"), "file");
+    symlinkSync(join(root, "docs/chapter.md"), join(root, "alias.md"), "file");
+  }
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("filesAllowlist" as never, [{ name: "project", canonicalPath: root }]); await next(); });
   app.route("/api/files", filesRoutes());
@@ -89,16 +92,21 @@ describe("current-file reading through real routes and TUI state", () => {
     expect(draw().lines.join("\n")).toContain("read_unavailable");
     expect(draw().lines.join("\n")).not.toContain("CHANGED ON DISK");
   });
-  it("resolves links from an internal symlink's actual source, never an unrelated root", async () => {
+  it.runIf(fileSymlinksSupported)("resolves links from an internal symlink's actual source, never an unrelated root", async () => {
     open({ root: "project", path: "alias.md", anchor: "second-act" }); await refresh();
     const result = snap.fileRead!.result;
     expect(result).toHaveProperty("resolvedPath", "docs/chapter.md");
     const link = fileLines(result, view.get().file!, 100).find((line) => line.text.includes("Back to outline") && line.action)?.action;
     expect(link).toEqual({ type: "file-open", target: { root: "project", path: "outline.md" } });
   });
-  it.each([['missing.md', 'stat_failed'], ['escape.md', 'path_escape'], ['../outside.md', 'path_escape']])("shows the actual reader refusal for %s", async (path, error) => {
+  it.each([['missing.md', 'stat_failed'], ['../outside.md', 'path_escape']])("shows the actual reader refusal for %s", async (path, error) => {
     open({ root: "project", path }); await refresh();
     expect(draw().lines.join("\n")).toContain(error);
+    expect(draw().lines.join("\n")).not.toContain("not readable through project root");
+  });
+  it.runIf(fileSymlinksSupported)("refuses a file symlink outside the served root", async () => {
+    open({ root: "project", path: "escape.md" }); await refresh();
+    expect(draw().lines.join("\n")).toContain("path_escape");
     expect(draw().lines.join("\n")).not.toContain("not readable through project root");
   });
   it("labels binary and truncated content without presenting them as complete text", async () => {

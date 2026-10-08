@@ -47,7 +47,7 @@ function fixture() {
     ANTHROPIC_API_KEY: "synthetic-secret-never-in-command", OPENRIG_HOME: path.join(root, "instance") };
   const renderer = { TERM: "dumb", COLORTERM: "daemon-value", LANG: "C",
     LC_CTYPE: "C", LC_MESSAGES: "C", UNAPPROVED_RENDERER_VALUE: "must-not-forward" };
-  const managed = new ClaudeManagedLaunch(db, env, renderer);
+  const managed = new ClaudeManagedLaunch(db, env, renderer, "linux");
   const calls: string[] = [];
   const tmux = { sendShellCommand: vi.fn(async (_target: string, command: string, check: () => void) => { check(); calls.push(command); return { ok: true as const }; }),
     sendText: vi.fn(async (_target: string, command: string) => { calls.push(command); return { ok: true as const }; }),
@@ -98,7 +98,7 @@ describe("S03 production managed capability selection", () => {
     });
     expect(JSON.parse(child)).toEqual(names);
   });
-  it.each([
+  it.skipIf(process.platform === "win32").each([
     ["unset", undefined, "present"], ["relative", "./config", "present"],
     ["absolute", "/inert/explicit-config", "present"], ["empty", "", "present"],
     ["absent terminal", undefined, "absent"], ["empty terminal", undefined, "empty"],

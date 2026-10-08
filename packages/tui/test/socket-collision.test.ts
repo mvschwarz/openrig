@@ -31,7 +31,7 @@ it("refuses a second launcher without taking over the first live control socket"
     await expect((async () => {
       second = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "second" }) });
     })()).rejects.toMatchObject({ code: "EADDRINUSE" });
-    expect(await query(path)).toMatchObject({ instanceId: "first" });
+    expect(await query(first.path)).toMatchObject({ instanceId: "first" });
   } finally {
     await second?.close();
     await first.close();
@@ -43,12 +43,13 @@ it("keeps an ordinary file at the configured socket path intact", async () => {
   fs.writeFileSync(path, "owner data");
   let control: ControlSocket | undefined;
   try {
-    await expect((async () => { control = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "new" }) }); })()).rejects.toBeDefined();
+    if (process.platform === "win32") control = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "new" }) });
+    else await expect((async () => { control = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "new" }) }); })()).rejects.toBeDefined();
     expect(fs.readFileSync(path, "utf8")).toBe("owner data");
   } finally { await control?.close(); fs.rmSync(path, { force: true }); }
 });
 
-it("recovers the owned stale socket of a killed launcher", async () => {
+it.skipIf(process.platform === "win32")("recovers the owned stale Unix socket of a killed launcher", async () => {
   const path = socketPath("stale");
   const child = spawn(process.execPath, ["-e", `require("node:net").createServer().listen(${JSON.stringify(path)}, () => console.log("ready"))`], { stdio: ["ignore", "pipe", "pipe"] });
   let control: ControlSocket | undefined;
@@ -76,7 +77,7 @@ it("recovers the owned stale socket of a killed launcher", async () => {
 });
 
 
-it.each(["existing reservation", `${process.pid}\n`])("reports an active or unidentifiable recovery reservation without changing its live socket (%j)", async (metadata) => {
+it.skipIf(process.platform === "win32").each(["existing reservation", `${process.pid}\n`])("reports an active or unidentifiable Unix recovery reservation without changing its live socket (%j)", async (metadata) => {
   const path = socketPath("reserved");
   const reservation = `${path}.recovery.lock`;
   const first = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "reserved-owner" }) });
@@ -95,7 +96,7 @@ it.each(["existing reservation", `${process.pid}\n`])("reports an active or unid
 });
 
 
-it("binds an independent endpoint within the byte cap in a long runtime directory", async () => {
+it.skipIf(process.platform === "win32")("binds an independent Unix endpoint within the byte cap in a long runtime directory", async () => {
   const suffixBytes = Buffer.byteLength(`-${process.pid}-12345678.sock`);
   const directoryBytes = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(socketRoot + path.sep) - suffixBytes - 2;
   expect(directoryBytes).toBeGreaterThan(0);
@@ -117,7 +118,7 @@ it("binds an independent endpoint within the byte cap in a long runtime director
   } finally { await second?.close(); await first.close(); }
 });
 
-it("names a runtime directory that cannot fit an independent endpoint", async () => {
+it.skipIf(process.platform === "win32")("names a Unix runtime directory that cannot fit an independent endpoint", async () => {
   const directory = path.join(socketRoot, "x".repeat(MAX_SOCKET_PATH_BYTES - Buffer.byteLength(socketRoot + path.sep) - 7));
   const configured = path.join(directory, "a.sock");
   const first = await createControlSocket({ socketPath: configured, view: createViewState({ instanceId: "tight-owner" }) });

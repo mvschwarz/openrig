@@ -1,5 +1,5 @@
 // One passive text/navigation contract for connected and selected local reading.
-import { posix as path } from "node:path";
+import { posix as path, win32 } from "node:path";
 import { fieldLine, listItem, wrapDetailLines, type ContentLine } from "./detail.js";
 import type { Action } from "./types.js";
 
@@ -15,9 +15,16 @@ export type FileReadResult = FileRead | { error: string; message?: string };
 
 /** Map only against explicitly served roots, never search another installation. */
 export function fileTargetForPath(source: string, roots: FileRoot[]): FileTarget | null {
-  const root = [...roots].sort((a, b) => b.path.length - a.path.length)
-    .find((r) => source.startsWith(r.path.replace(/\/$/, "") + "/"));
-  return root ? { root: root.name, path: source.slice(root.path.replace(/\/$/, "").length + 1) } : null;
+  for (const root of [...roots].sort((a, b) => b.path.length - a.path.length)) {
+    // The daemon may be on another OS: select its path syntax from its served
+    // root, rather than from the TUI host. Reader containment remains authoritative.
+    const api = /^(?:[a-z]:[\\/]|\\\\)/i.test(root.path) ? win32 : path;
+    if (!api.isAbsolute(root.path) || !api.isAbsolute(source)) continue;
+    const relative = api.relative(root.path, source);
+    if (!relative || api.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${api.sep}`)) continue;
+    return { root: root.name, path: relative.split(api.sep).join("/") };
+  }
+  return null;
 }
 
 export function referenceAction(origin: FileTarget, href: string): Action {

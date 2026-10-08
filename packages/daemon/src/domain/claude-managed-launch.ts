@@ -9,6 +9,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
 import { validateNativePermissionSelection } from "./native-permission-selection.js";
+import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 
 export interface ClaudeLaunchTarget {
   nodeId: string;
@@ -38,7 +39,8 @@ export class ClaudeManagedLaunch {
     /** Reads one variable from a seat's tmux session environment (the daemon's tmux adapter). */
     private readonly readSessionEnv?: (session: string, key: string) => Promise<string | undefined>,
     /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
-    private readonly pluginsDir?: string) {}
+    private readonly pluginsDir?: string,
+    private readonly platform: NodeJS.Platform = process.platform) {}
 
   /** Names the seat's rig and member declare in `env:`, plus any one-off `rig up --env` names the
    *  launch recorded on the tmux session. Their values are already in the pane shell, which is
@@ -107,13 +109,21 @@ export class ClaudeManagedLaunch {
     const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
     const { configDir } = this.configPaths(cwd);
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
+    if (this.platform === "win32") {
+      // Native loaders and Git Bash require Windows OS paths. Keep USERPROFILE
+      // independent of the seat's selected HOME, as in the native Codex/Pi channel.
+      for (const key of ["SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA"]) {
+        const entry = Object.entries(process.env).find(([name]) => name.toUpperCase() === key);
+        if (entry?.[1]) env[key] = entry[1];
+      }
+    }
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
     for (const dir of search) {
-      const candidate = path.join(dir, "claude");
+      const candidate = path.join(dir, this.platform === "win32" ? "claude.exe" : "claude");
       try { accessSync(candidate, constants.X_OK); if (!statSync(candidate).isFile()) continue; }
       catch { continue; }
       executable = realpathSync(candidate); break;
@@ -187,6 +197,12 @@ export class ClaudeManagedLaunch {
       .map(key => `\${${key}:+"${key}=$${key}"}`);
     return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
+      if (this.platform === "win32") {
+        const forwardedNames = [...inherited, ...seatKeys.filter(key => !inherited.includes(key))]
+          .filter(key => !(key in identity) && !(key in publicEnv));
+        const terminalNames = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"];
+        return renderWindowsManagedLaunch(context.executable, args, cwd, { ...context.env, ...publicEnv, ...identity, ...launchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV] : [])]);
+      }
       const launch = Object.entries(launchEnv).map(([key, value]) => shellQuote(`${key}=${value}`));
       return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });
