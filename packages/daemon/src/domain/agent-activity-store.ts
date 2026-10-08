@@ -319,6 +319,15 @@ export class AgentActivityStore {
   }
 }
 
+/** A runtime hook that leaves the agent waiting on a person: an approval, a picker or an elicitation.
+ *  `seatRuntime` is the managed seat's runtime: runtime_error is an OMP runner signal, and a hook
+ *  claiming OMP on another runtime's seat must not escalate it. */
+export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): boolean {
+  if (rawEvent === "PermissionRequest") return true;
+  return rawEvent === "Notification" && (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" ||
+    (seatRuntime === "omp" && rawSubtype === "runtime_error"));
+}
+
 function normalizeHookActivity(input: {
   runtime: string | null;
   /** The managed seat's runtime, never a hook's claim. */
@@ -349,9 +358,7 @@ function normalizeHookActivity(input: {
     state = "needs_input";
     normalizedReason = "permission_request";
   } else if (rawEvent === "Notification") {
-    // runtime_error is an OMP runner signal; a hook claiming OMP on another
-    // runtime's seat must not escalate it.
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (input.seatRuntime === "omp" && rawSubtype === "runtime_error")) {
+    if (hookMeansNeedsInput(rawEvent, rawSubtype, input.seatRuntime)) {
       state = "needs_input";
     } else if (rawSubtype === "idle_prompt") {
       state = "idle";

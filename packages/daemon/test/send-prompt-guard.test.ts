@@ -360,6 +360,72 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalled();
   });
 
+  // A latest hook that says the seat waits on a person stays authoritative past the send window when
+  // the pane cannot be read. 2026-10-08: a Claude AskUserQuestion with option previews read unknown,
+  // its permission_prompt hook was 36 s old, and a watchdog wake's Enter chose the first option.
+  // No capture of that render exists, so these use a pane the classifier cannot parse.
+  const UNRECOGNIZED_PANE = "xyzzy no prompt here";
+  function seedPersonWaitingHook(fixedNow: Date, ageMs: number) {
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt",
+      occurredAt: new Date(fixedNow.getTime() - ageMs).toISOString(),
+    });
+  }
+
+  it.each([
+    ["36 s old (past the send window)", 36_000],
+    ["10 min old (past the store's freshness window)", 600_000],
+  ])("a latest permission_prompt hook %s + an unrecognized pane refuses, nothing typed", async (_label, ageMs) => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, ageMs);
+    expect(classifyPaneActivity(UNRECOGNIZED_PANE).state).toBe("unknown");
+    const { sendText, sendKeys } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText, sendKeys }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "You are parked while holding 1 open obligation");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("target_needs_input");
+    expect(r.activity).toMatchObject({ state: "needs_input", evidenceSource: "runtime_hook" });
+    // The watchdog's parked-owner policy records this exact shape as an interactive refusal.
+    expect(r.error).toMatch(/^Refused: .* is at an interactive prompt \(permission_prompt; latest hook, pane unrecognized\)/);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a recognized empty composer sends (no new refusal at an idle prompt)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a pane showing live work sends (an approved tool is running)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const pane = "⏺ Bash(npm test)\n✻ Running… (1m 2s · esc to interrupt)";
+    expect(classifyPaneActivity(pane).state).toBe("agent_active");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale RUNNING hook + an unrecognized pane still sends (only a person-waiting hook holds)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      occurredAt: new Date(fixedNow.getTime() - 36_000).toISOString(),
+    });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
   // Codex 0.157: the empty-composer placeholder is on screen idle AND while Codex streams with its
   // Working row hidden. It may unlock a --wait-for-idle send once the hooks have aged out, never
   // while a display-fresh running hook says the turn is still in progress.

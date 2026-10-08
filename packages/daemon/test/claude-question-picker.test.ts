@@ -153,8 +153,11 @@ describe("ordinary transport under current and historical questions", () => {
           agentActivityStore: store, now: () => now, sleep: async () => undefined, activityEndpointFile: () => null });
         const result = await transport.send(name, "Ordinary synthetic peer message");
 
+        // A latest person-waiting hook keeps an UNREADABLE pane held past the send window (a watchdog
+        // wake answered an unrecognized question menu, 2026-10-08); recognized idle or work still sends.
+        const staleWaiting = hook.name === "send_stale_permission" || hook.name === "display_stale_permission";
         const sent = hook.name === "fresh_permission" ? false
-          : hook.name.startsWith("fresh_") ? true : state !== "attention";
+          : hook.name.startsWith("fresh_") ? true : state !== "attention" && !(staleWaiting && state === "unknown");
         expect(result.ok).toBe(sent);
         expect(paste).toHaveBeenCalledTimes(sent ? 1 : 0);
         expect(enter).toHaveBeenCalledTimes(sent ? 1 : 0);
