@@ -16,10 +16,16 @@ export function prepareWorkspaceBuild(root, workspace, platform = process.platfo
   ]) {
     const destination = path.join(dir, target);
     mkdirSync(destination, { recursive: true });
+    let copied = 0;
     for (const item of readdirSync(path.join(dir, source), { withFileTypes: true })) {
-      if (item.isFile() && item.name.endsWith(extension))
-        copyFileSync(path.join(dir, source, item.name), path.join(destination, item.name));
+      if (item.name.startsWith(".") || !item.name.endsWith(extension)) continue;
+      const file = path.join(dir, source, item.name);
+      if (item.isFile() || (item.isSymbolicLink() && statSync(file).isFile())) {
+        copyFileSync(file, path.join(destination, item.name));
+        copied++;
+      }
     }
+    if (!copied) throw new Error(`No ${extension} files matched in ${source}`);
   }
   for (const name of ["LICENSE", "README.md"]) copyFileSync(path.join(root, name), path.join(dir, name));
 }
