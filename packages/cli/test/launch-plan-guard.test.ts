@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DAEMON_HEALTH_PATH, DAEMON_VERSION_PATH, isPlanAnswer, planSupportRefusal } from "../src/launch-plan-guard.js";
+import { DAEMON_HEALTH_PATH, DAEMON_VERSION_PATH, answerShowsAction, isPlanAnswer, notAPlanMessage, planSupportRefusal } from "../src/launch-plan-guard.js";
 
 // A daemon as two read-only paths: /healthz (stamped semver on packaged builds) and the version route.
 const daemon = (paths: Record<string, unknown>) => async (path: string) => paths[path];
@@ -33,6 +33,19 @@ describe("launch --plan guard", () => {
 
   it("refuses when every read throws", async () => {
     expect(await planSupportRefusal(async () => { throw new Error("connection refused"); })).toContain("did not report its version");
+  });
+
+  it("treats a 2xx or a body reporting seats as action, and a plan error as no action", () => {
+    expect(answerShowsAction(true, { ok: true })).toBe(true);
+    expect(answerShowsAction(false, { ok: false, launched: [{ logicalId: "dev.driver", status: "attention_required" }] })).toBe(true);
+    expect(answerShowsAction(false, { ok: false, held: [] })).toBe(true);
+    expect(answerShowsAction(false, { ok: false, code: "no_matching_nodes", error: "no seats match" })).toBe(false);
+    expect(answerShowsAction(false, undefined)).toBe(false);
+  });
+
+  it("names a rig ps form that runs outside a managed session and over --host", () => {
+    expect(notAPlanMessage()).toContain("`rig ps --nodes -A`");
+    expect(notAPlanMessage("host-b")).toContain("`rig ps --host host-b --nodes -A`");
   });
 
   it("accepts only an answer that says planOnly: true", () => {

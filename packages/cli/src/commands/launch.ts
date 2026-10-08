@@ -6,7 +6,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { isPlanAnswer, notAPlanMessage, planSupportRefusal } from "../launch-plan-guard.js";
+import { answerShowsAction, isPlanAnswer, notAPlanMessage, planSupportRefusal } from "../launch-plan-guard.js";
 
 type LaunchResponse = {
   ok: boolean;
@@ -134,7 +134,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           }
         }
         const result = await runRemoteHttpOp(opts.host, "POST", apiPath, body, deps, opts);
-        const notAPlan = Boolean(opts.plan && !isPlanAnswer(result.data));
+        const notAPlan = Boolean(opts.plan && !isPlanAnswer(result.data) && answerShowsAction(result.ok, result.data));
         if (notAPlan) {
           console.error(`Host ${opts.host}: ${notAPlanMessage(opts.host)}`);
           process.exitCode = 1;
@@ -185,7 +185,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           body.plan = true;
         }
         const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body);
-        const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data));
+        const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data) && answerShowsAction(res.status >= 200 && res.status < 300, res.data));
         if (notAPlan) {
           console.error(notAPlanMessage());
           process.exitCode = 1;

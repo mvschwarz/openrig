@@ -55,8 +55,22 @@ export function isPlanAnswer(data: unknown): boolean {
   return Boolean(data && typeof data === "object" && (data as { planOnly?: unknown }).planOnly === true);
 }
 
-/** After a plan request whose answer isn't a plan, whatever its HTTP status. */
+/**
+ * After a plan request whose answer isn't a plan: true when the answer shows the daemon acted, meaning a 2xx, or
+ * a body reporting seats (an older daemon's 409 `attention_required` launch carries `launched`). A plan error from
+ * a daemon that honours `plan` (unknown rig, unmatched seat, no usable snapshot) shows neither and keeps its own
+ * error output.
+ */
+export function answerShowsAction(succeeded: boolean, data: unknown): boolean {
+  if (succeeded) return true;
+  if (!data || typeof data !== "object") return false;
+  const body = data as Record<string, unknown>;
+  return ["launched", "held", "alreadyRunning"].some((key) => body[key] !== undefined);
+}
+
+/** The warning for an answer that isn't a plan but shows the daemon acted. `-A` because `rig ps --nodes` refuses
+ *  an implicit scope outside a managed session and over `--host`, and `--rig` takes a name where launch takes an id. */
 export function notAPlanMessage(host?: string): string {
-  const check = host ? `rig ps --nodes --host ${host}` : "rig ps --nodes";
+  const check = host ? `rig ps --host ${host} --nodes -A` : "rig ps --nodes -A";
   return `The daemon did not return a plan, so it may have acted on this request. Check \`${check}\` before retrying.`;
 }

@@ -195,6 +195,17 @@ describe("rig launch --seats", () => {
     expect(errors.join("\n")).toContain("did not return a plan");
   });
 
+  it("keeps a plan error's own message when the answer shows no action (unmatched seat)", async () => {
+    const deps = makeDeps({ "launch-subset": { status: 404, data: { ok: false, code: "no_matching_nodes", error: "no seats match dev.typo" } } });
+    deps._client.get.mockResolvedValue({ status: 200, data: { status: "ok", semver: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.typo", "--plan"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("no seats match dev.typo");
+    expect(errors.join("\n")).not.toContain("may have acted");
+  });
+
   it.each([[["--json"]], [[]]])("exits non-zero when a --plan answer has no planOnly (%j)", async (extra) => {
     // A daemon that reports a new version but launches anyway: the answer must not read as a plan.
     const launched = { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }], held: [], alreadyRunning: [] };

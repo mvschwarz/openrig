@@ -517,7 +517,20 @@ describe("rig launch --host HTTP", () => {
     });
     expect(exitCode).toBe(1);
     expect(stderr.join("\n")).toContain("did not return a plan");
-    expect(stderr.join("\n")).toContain("rig ps --nodes --host host-b");
+    expect(stderr.join("\n")).toContain("rig ps --host host-b --nodes -A");
+  });
+
+  it("--plan on a remote daemon that refuses an unmatched seat keeps its own error, not may-have-acted", async () => {
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 404, data: { ok: false, code: "no_matching_nodes", error: "no seats match dev.typo" } },
+    });
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.typo", "--plan", "--host", "host-b"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).not.toContain("may have acted");
+    expect(stderr.join("\n")).toContain("Error on host host-b");
   });
 
   it("missing bearer exits nonzero with no HTTP request", async () => {
