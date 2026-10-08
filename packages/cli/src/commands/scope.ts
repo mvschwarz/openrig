@@ -1139,7 +1139,7 @@ function buildAuditCommand(): Command {
                 : null,
             });
 
-            if (!/^\d{2}-/.test(entry)) {
+            if (!/^\d{2,}-/.test(entry)) {
               sliceResult.findings.push({
                 kind: "id_convention_violation",
                 severity: "high",

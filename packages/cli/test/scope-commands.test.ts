@@ -1060,6 +1060,72 @@ describe("--help is present on every command (HG-12)", () => {
   });
 });
 
+describe("rig scope audit ordinal naming", () => {
+  let root: string;
+  let mission: string;
+  const missionReadme = "---\nid: OPR.99.0.1\n---\n# Owned legacy mission\n";
+  beforeEach(() => {
+    root = mktemp();
+    mission = path.join(root, "workspace", "missions", "backlog");
+    writeFile(path.join(mission, "README.md"), missionReadme);
+    writeFile(path.join(mission, "PROGRESS.md"), "# Progress\n");
+    writeFile(path.join(mission, "NOTES.md"), "# Notes\n");
+  });
+  afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  async function publicScope(args: string[]): Promise<CaptureResult> {
+    const home = path.join(root, "owned-cli-home");
+    fs.mkdirSync(home, { recursive: true });
+    const command = [fileURLToPath(new URL("../dist/index.js", import.meta.url)), "scope", ...args,
+      "--workspace", path.join(root, "workspace"), "--json"];
+    const options = { encoding: "utf8" as const, timeout: 15000, env: {
+      PATH: process.env.PATH, HOME: home, TMPDIR: root,
+      OPENRIG_HOME: path.join(home, ".openrig"), CODEX_HOME: path.join(home, "codex"),
+      CLAUDE_CONFIG_DIR: path.join(home, "claude"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
+    } };
+    try {
+      const result = await promisify(execFile)(process.execPath, command, options);
+      return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+    } catch (error) {
+      const failure = error as Error & { code: unknown; stdout: string; stderr: string };
+      if (typeof failure.code !== "number") throw error;
+      return { exitCode: failure.code, stdout: failure.stdout, stderr: failure.stderr };
+    }
+  }
+
+  it.each([1, 98, 99, 999])("accepts the generated slice ordinal after %i in public audit", async (previous) => {
+    writeFile(path.join(mission, "closed", `${String(previous).padStart(2, "0")}-existing`, "README.md"),
+      `---\nid: OPR.99.0.1.${previous}\nstatus: closed-wontfix\n---\n# Closed prior slice\n`);
+    const created = await publicScope(["slice", "create", "backlog", "next"]);
+    expect(created.exitCode).toBe(0);
+    const payload = JSON.parse(created.stdout);
+    expect(payload.slice.name).toBe(`${String(previous + 1).padStart(2, "0")}-next`);
+    expect(payload.slice.id).toBe(`OPR.99.0.1.${previous + 1}`);
+    const audited = await publicScope(["audit", "--mission", "backlog"]);
+    expect(audited.exitCode).toBe(0);
+    const audit = JSON.parse(audited.stdout);
+    expect(audit.ok).toBe(true);
+    expect(audit.slices).toHaveLength(1);
+    expect(audit.slices[0].name).toBe(payload.slice.name);
+    expect(audit.slices[0].findings.some((f: { kind: string }) => f.kind === "id_convention_violation")).toBe(false);
+    expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(missionReadme);
+  });
+
+  it.each(["9-single", "bad-name"])("still flags a malformed slice directory %s in public audit", async (name) => {
+    writeFile(path.join(mission, "slices", name, "README.md"),
+      "---\nid: OPR.99.0.1.9\nprogress_rail: readme-only\n---\n# Owned malformed dirname\n");
+    const audited = await publicScope(["audit", "--mission", "backlog"]);
+    expect(audited.exitCode).toBe(1);
+    const audit = JSON.parse(audited.stdout);
+    expect(audit.ok).toBe(false);
+    const slice = audit.slices.find((s: { name: string }) => s.name === name);
+    expect(slice).toBeDefined();
+    expect(slice.findings.some((f: { kind: string; message: string }) =>
+      f.kind === "id_convention_violation" && f.message.startsWith("Directory "))).toBe(true);
+    expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(missionReadme);
+  });
+});
+
 // ---------------------------------------------------------------------
 // Guard BLOCKING: audit edge cases
 // ---------------------------------------------------------------------
