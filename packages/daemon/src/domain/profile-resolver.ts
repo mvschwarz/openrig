@@ -227,7 +227,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   if (!catalogResult.ok) {
     return { ok: false, errors: catalogResult.errors.map((error) => `${error.code}: ${error.message}`) };
   }
-  const skillWarnings: string[] = [];
+  const skillWarnings: string[] = (catalogResult.loadout.skipped ?? []).map((skip) => skip.message);
   for (const managed of catalogResult.loadout.entries) {
     const qualified: QualifiedResource = {
       effectiveId: managed.id,

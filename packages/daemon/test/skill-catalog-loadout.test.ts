@@ -90,18 +90,124 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(result.loadout.entries.every((entry) => entry.sourceRoot === f.catalog)).toBe(true);
   });
 
-  it("refuses a dirty catalog revision and a missing selected identity without projecting", () => {
+  it("skips a skill with uncommitted content by itself, names it, and still projects its clean sibling", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "edited");
+    const revision = commit(f.root);
+    writeFileSync(join(f.catalog, "edited", "SKILL.md"), "---\nname: edited\ndescription: Use when testing edited.\n---\n\n# work in progress\n");
+
+    const result = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.loadout.catalogRevision).toBe(revision);
+    expect(result.loadout.entries.map((entry) => entry.id)).toEqual(["known"]);
+    expect(result.loadout.skipped).toEqual([{
+      id: "edited",
+      sourceDir: join(f.catalog, "edited"),
+      selectedBy: [],
+      message: `catalog_skill_skipped: 'edited' has uncommitted content at ${join(f.catalog, "edited")}; commit or restore it`,
+    }]);
+  });
+
+  it("fails only a selected dirty skill, naming who selected it, while the other selected skills resolve", () => {
+    const f = fixture(["known"]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "edited");
+    commit(f.root);
+    writeFileSync(join(f.catalog, "edited", "notes.md"), "untracked work in progress\n");
+
+    const result = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["edited"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.loadout.entries.map((entry) => [entry.id, entry.selectedBy])).toEqual([["known", ["system"]]]);
+    expect(result.loadout.skipped).toHaveLength(1);
+    expect(result.loadout.skipped![0]).toMatchObject({ id: "edited", selectedBy: ["project"] });
+    expect(result.loadout.skipped![0]!.message).toMatch(/^selected_skill_skipped: 'edited' \(selected by project\) has uncommitted content at .*edited; it is not projected/);
+  });
+
+  it("keeps a clean catalog unchanged and still reports a missing selected identity", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    const revision = commit(f.root);
+    const clean = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known"] });
+    expect(clean.ok).toBe(true);
+    if (!clean.ok) return;
+    expect(clean.loadout.catalogRevision).toBe(revision);
+    expect(clean.loadout.skipped).toBeUndefined();
+
+    const missing = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["absent"] });
+    expect(missing).toMatchObject({ ok: false, errors: [{ code: "selected_skill_missing" }] });
+  });
+
+  it("keeps uncommitted content in the catalog root catalog-wide, because catalog.yaml changes every selection", () => {
     const f = fixture([]);
     writeSkill(f.catalog, "known");
     commit(f.root);
-    writeFileSync(join(f.catalog, "known", "SKILL.md"), "dirty\n");
+    writeFileSync(join(f.catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: [known]\n");
     const dirty = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known"] });
     expect(dirty).toMatchObject({ ok: false, errors: [{ code: "catalog_unavailable" }] });
-    if (!dirty.ok) expect(dirty.errors[0]!.message).toMatch(/uncommitted/);
+    if (!dirty.ok) expect(dirty.errors[0]!.message).toContain(join(f.catalog, "catalog.yaml"));
+  });
 
-    git(f.root, "restore", "skills/known/SKILL.md");
-    const missing = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["absent"] });
-    expect(missing).toMatchObject({ ok: false, errors: [{ code: "selected_skill_missing" }] });
+  it("ignores a dirty folder that is not a skill, and names a committed skill whose folder was deleted", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "removed");
+    commit(f.root);
+    mkdirSync(join(f.catalog, "scratch"));
+    writeFileSync(join(f.catalog, "scratch", "draft.md"), "not a skill\n");
+    rmSync(join(f.catalog, "removed"), { recursive: true });
+
+    const result = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "removed"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.loadout.entries.map((entry) => entry.id)).toEqual(["known"]);
+    expect(result.loadout.skipped!.map((skip) => [skip.id, skip.selectedBy])).toEqual([["removed", ["project"]]]);
+  });
+
+  it("keeps a selected skill's projected copy while its catalog content is uncommitted, and refreshes it after commit", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "edited");
+    commit(f.root);
+    const first = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "edited"] });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(reconcileSkillLoadout({ loadout: first.loadout, runtime: "codex", cwd: f.project, apply: true }).ok).toBe(true);
+    const target = join(f.project, ".agents", "skills", "edited");
+    const projected = readFileSync(join(target, "SKILL.md"), "utf8");
+
+    writeFileSync(join(f.catalog, "edited", "SKILL.md"), "---\nname: edited\ndescription: Use when testing edited.\n---\n\n# draft\n");
+    const dirty = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "edited"] });
+    expect(dirty.ok).toBe(true);
+    if (!dirty.ok) return;
+    const kept = reconcileSkillLoadout({ loadout: dirty.loadout, runtime: "codex", cwd: f.project, apply: true });
+    expect(kept).toMatchObject({ ok: true, removed: [] });
+    expect(kept.receipts.find((receipt) => receipt.id === "edited")?.status).toBe("current");
+    expect(readFileSync(join(target, "SKILL.md"), "utf8")).toBe(projected);
+
+    commit(f.root);
+    const committed = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "edited"] });
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) return;
+    expect(reconcileSkillLoadout({ loadout: committed.loadout, runtime: "codex", cwd: f.project, apply: true }).ok).toBe(true);
+    expect(readFileSync(join(target, "SKILL.md"), "utf8")).toContain("# draft");
+  });
+
+  it("projects the rest when a selected skill was never projected and is now uncommitted", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "edited");
+    commit(f.root);
+    writeFileSync(join(f.catalog, "edited", "extra.md"), "untracked\n");
+    const dirty = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "edited"] });
+    expect(dirty.ok).toBe(true);
+    if (!dirty.ok) return;
+    const projection = reconcileSkillLoadout({ loadout: dirty.loadout, runtime: "codex", cwd: f.project, apply: true });
+    expect(projection.ok).toBe(true);
+    expect(existsSync(join(f.project, ".agents", "skills", "known", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(f.project, ".agents", "skills", "edited"))).toBe(false);
   });
 
   it("reports duplicate catalog identities explicitly", () => {

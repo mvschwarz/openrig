@@ -327,6 +327,11 @@ Examples:
           return;
         }
         skillLoadout = resolvedSkills.loadout;
+        // A skill with uncommitted catalog content blocks only itself: name it, project the rest, and exit non-zero
+        // when something selected it.
+        const skippedSkills = skillLoadout.skipped ?? [];
+        if (!opts.json) for (const skip of skippedSkills) console.error(`Warning: ${skip.message}`);
+        if (skippedSkills.some((skip) => skip.selectedBy.length > 0)) process.exitCode = 1;
         skillProjection = reconcileSkillLoadout({
           loadout: skillLoadout,
           runtime: opts.runtime === "codex" ? "codex" : "claude-code",
