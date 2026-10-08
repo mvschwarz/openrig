@@ -74,16 +74,16 @@ it.each([
   }
 }, 40_000);
 
-it("opens three real viewer panes while original sessions keep the same pane and process", async () => {
+it.each([false, true])("opens real viewer panes and preserves source processes (one role per window=%s)", async paged => {
   // Short names also fit macOS Unix sockets under CI's existing TMPDIR.
   const source = `ws-${randomUUID().slice(0, 12)}`;
   const viewer = `wv-${randomUUID().slice(0, 12)}`;
   sockets.push(source, viewer);
-  const names = ["tui", "advisor", "operator"];
+  const names = paged ? ["operator", "tui", "advisor"] : ["tui", "advisor", "operator"];
   for (const name of names) tmux(source, ["new-session", "-d", "-s", name, "sleep 60"]);
   const original = tmux(source, ["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"]);
   const panes = names.map(seat => ({ seat, label: seat, paneCommand: `tmux -L ${source} attach-session -t '=${seat}'` }));
-  const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: [panes], columns: 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
+  const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: paged ? panes.map(pane => [pane]) : [panes], columns: paged ? 1 : 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
   const desktop = vi.fn(async () => "window");
   const deps: WindowDeps = {
     platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HOME: "/fixture" }, exists: () => false,
@@ -96,12 +96,15 @@ it("opens three real viewer panes while original sessions keep the same pane and
     launch: vi.fn(async () => {}), sleep: async () => {}, id: () => "owned-view",
   };
   const result = await openTerminalWindow(client, "saved:kernel", "tmux", deps);
-  expect(result).toMatchObject({ ok: true, opened: names });
+  expect(result).toMatchObject({ ok: true, opened: names, pages: paged ? 3 : 1 });
   expect(desktop).toHaveBeenCalledTimes(1);
-  const actual = tmux(viewer, ["list-panes", "-t", "openrig-view-owned-view:view-1", "-F", "#{pane_title}|#{pane_top}|#{pane_left}|#{pane_dead}"]).trim().split("\n").map(line => line.split("|"));
-  expect(actual.map(row => row[0])).toEqual(names);
-  expect(actual.map(row => row[1])).toEqual(["0", "0", "0"]);
-  expect(actual.map(row => Number(row[2]))).toEqual([...actual.map(row => Number(row[2]))].sort((a, b) => a - b));
-  expect(actual.every(row => row[3] === "0")).toBe(true);
+  expect(tmux(viewer, ["display-message", "-p", "-t", "=openrig-view-owned-view", "#{window_name}"]).trim()).toBe("view-1");
+  for (const [index, expected] of (paged ? names.map(name => [name]) : [names]).entries()) {
+    const actual = tmux(viewer, ["list-panes", "-t", `openrig-view-owned-view:view-${index + 1}`, "-F", "#{pane_title}|#{pane_top}|#{pane_left}|#{pane_dead}"]).trim().split("\n").map(line => line.split("|"));
+    expect(actual.map(row => row[0])).toEqual(expected);
+    expect(actual.map(row => row[1])).toEqual(expected.map(() => "0"));
+    expect(actual.map(row => Number(row[2]))).toEqual([...actual.map(row => Number(row[2]))].sort((a, b) => a - b));
+    expect(actual.every(row => row[3] === "0")).toBe(true);
+  }
   expect(tmux(source, ["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"])).toBe(original);
 });
