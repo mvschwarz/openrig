@@ -711,6 +711,59 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(parsed.mission.template).toBe("release");
   });
 
+  it("creates the first mission under an explicit workspace before its missions folder exists", async () => {
+    const workspace = path.join(env.root, "project-workspace");
+    const globalHome = path.join(env.root, "global-home");
+    const globalMissions = path.join(env.root, "global-workspace", "missions");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(globalMissions, { recursive: true });
+    writeFile(path.join(globalHome, "config.json"), JSON.stringify({
+      workspace: { root: path.dirname(globalMissions), slicesRoot: globalMissions },
+    }));
+
+    const priorHome = process.env.OPENRIG_HOME;
+    const priorSlicesRoot = process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+    process.env.OPENRIG_HOME = globalHome;
+    delete process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+    try {
+      const r = await run(["mission", "create", "first-project-mission", "--json"], path.join(workspace, "missions"));
+      expect(r.exitCode).toBe(0);
+      const parsed = JSON.parse(r.stdout);
+      expect(parsed.mission.path).toBe(path.join(workspace, "missions", "first-project-mission"));
+      expect(fs.existsSync(path.join(globalMissions, "first-project-mission"))).toBe(false);
+    } finally {
+      if (priorHome === undefined) delete process.env.OPENRIG_HOME;
+      else process.env.OPENRIG_HOME = priorHome;
+      if (priorSlicesRoot === undefined) delete process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+      else process.env.OPENRIG_WORKSPACE_SLICES_ROOT = priorSlicesRoot;
+    }
+  });
+
+  it("prefers an existing missions child for a workspace named missions", async () => {
+    const workspace = path.join(env.root, "missions");
+    const childMissionsRoot = path.join(workspace, "missions");
+    fs.mkdirSync(childMissionsRoot, { recursive: true });
+
+    const r = await run(
+      ["mission", "create", "nested-workspace-mission", "--json"],
+      childMissionsRoot,
+    );
+
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.mission.path).toBe(path.join(childMissionsRoot, "nested-workspace-mission"));
+    expect(fs.existsSync(path.join(workspace, "nested-workspace-mission"))).toBe(false);
+
+    const shown = await run(
+      ["mission", "show", "nested-workspace-mission", "--json"],
+      childMissionsRoot,
+    );
+    expect(shown.exitCode).toBe(0);
+    expect(JSON.parse(shown.stdout).mission.path).toBe(
+      path.join(childMissionsRoot, "nested-workspace-mission"),
+    );
+  });
+
   it("HG-15: created mission frontmatter has a conformant dot-ID per §1", async () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
