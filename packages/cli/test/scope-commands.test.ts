@@ -2,7 +2,7 @@
 // tests. Drives the commander tree end-to-end with a tmp substrate
 // fixture so every HG-N gate has direct coverage.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -472,6 +472,48 @@ describe("rig scope slice ship (HG-5)", () => {
 // ---------------------------------------------------------------------
 
 describe("rig scope slice close (HG-6)", () => {
+
+  it.each(["status", "'status'", '\"status\"', "status ", '\"sta\\u0074us\"', "? status\n", "flow", "flow-trailing"])("retains a slice identity after updating the YAML key %j", async (key) => {
+    const source = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo", "README.md");
+    const custom = key.startsWith("flow") ? "custom: 'retain: exactly', folded: 'keep this spelling'" : "# retain this comment\ncustom: 'retain: exactly'\nfolded: >-\n  keep this\n  spelling\n";
+    const body = "\n# debt\n\nOwned fixture bytes.\n";
+    const mapping = key.startsWith("flow") ? `{id: OPR.99.0.1.1, status: active, ${custom}${key === "flow-trailing" ? ", " : ""}}` : `id: OPR.99.0.1.1\n${key}: active # field comment\n${custom}`;
+    const content = `---\n${mapping}\n---\n${body}`;
+    fs.writeFileSync(source, content, "utf8");
+    expect(readFrontmatter(source)).toMatchObject({ id: "OPR.99.0.1.1", status: "active" });
+    commitFixture(env.root);
+    const result = await run(["slice", "close", "01-debt-foo", "--mission", "backlog", "--reason", "wontfix", "--json"], env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const destination = path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo", "README.md");
+    expect(readFrontmatter(destination)).toMatchObject({ id: "OPR.99.0.1.1", status: "closed-wontfix", custom: "retain: exactly", folded: "keep this spelling" });
+    expect(fs.readFileSync(destination, "utf8")).toContain(custom);
+    expect(fs.readFileSync(destination, "utf8").endsWith(body)).toBe(true);
+    const listed = await run(["slice", "ls", "--mission", "backlog", "--state", "closed", "--json"], env.missionsRoot);
+    expect(JSON.parse(listed.stdout).slices).toEqual([expect.objectContaining({ id: "OPR.99.0.1.1", status: "closed-wontfix" })]);
+  });
+
+  it.each([
+    "title: Fix: the parser\nstatus: active",
+    "status: &state active\nrelated: *state",
+  ])("closes with a named warning and writes the field when YAML cannot be spliced: %j", async (block) => {
+    const source = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo", "README.md");
+    fs.writeFileSync(source, `---\nid: OPR.99.0.1.1\n${block}\n---\n\n# owned body\n`, "utf8");
+    commitFixture(env.root);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await run(["slice", "close", "01-debt-foo", "--mission", "backlog", "--reason", "wontfix", "--json"], env.missionsRoot);
+      const destination = path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo", "README.md");
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout).ok).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(destination));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+      expect(fs.existsSync(source)).toBe(false);
+      const updated = fs.readFileSync(destination, "utf8");
+      expect(updated).toContain("status: closed-wontfix");
+      expect(updated.endsWith("---\n\n# owned body\n")).toBe(true);
+    } finally { warn.mockRestore(); }
+  });
+
   let env: { root: string; missionsRoot: string };
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });

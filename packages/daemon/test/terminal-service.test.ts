@@ -324,7 +324,7 @@ describe("default saved kernel conversations", () => {
     });
   }
 
-  it("changes the Herdr reuse label when the kernel operator becomes available", async () => {
+  it("names the first Herdr tab for the operator once it becomes available", async () => {
     const { deps, herdr } = makeKernel(kernel());
     let operatorReady = false;
     deps.hasSession = session => session !== "operator-bound" || operatorReady;
@@ -337,8 +337,9 @@ describe("default saved kernel conversations", () => {
     if (!("composed" in preview)) throw new Error("expected preview");
     expect((await service.openView({ view: "saved:kernel", expectedPlan: preview.planId })).opened).toEqual(["operator-bound", "tui-bound", "advisor-bound"]);
     const newLabel = planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.tabLabel;
-    expect(newLabel).toBe(`openrig:kernel#${preview.planId.slice(0, 16)}#fixed/1`);
-    expect(newLabel).not.toBe(oldLabel);
+    expect(oldLabel).toBe("dashboard");
+    expect(newLabel).toBe("operator");
+    expect(planHerdrLayout(herdr.lastView!, "fixed").workspaceLabel).toBe("openrig kernel");
   });
 
   it.each([false, true])("keeps the default kernel handoff distinct from a team (provider unavailable=%s)", async unavailable => {
@@ -352,7 +353,7 @@ describe("default saved kernel conversations", () => {
     expect(result.opened).toEqual(unavailable ? [] : ["operator-bound", "tui-bound", "advisor-bound"]);
     expect(result.notes?.join("\n")).toContain("Default kernel view:");
     expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
-    if (unavailable) expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
+    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
   });
 
   it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
@@ -367,8 +368,8 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
     expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
     expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
-    expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
-    expect(result.notes).toContain("operator.human: env -u TMUX tmux attach -t 'actual-tui'");
+    expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -t 'actual-tui'");
     expect(result.notes).toContain("Original provider detail");
     expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
     expect(result.notes!.join("\n")).not.toContain("queue-bound");
@@ -387,9 +388,9 @@ describe("default saved kernel conversations", () => {
       Array(3).fill({ columns: 1, rows: 1, blanks: 0 }),
     );
     expect(preview.grids.map(grid => grid.root)).toMatchObject([
-      { type: "pane", label: "operator.agent" },
-      { type: "pane", label: "operator.human" },
-      { type: "pane", label: "advisor.lead" },
+      { type: "pane", label: "operator" },
+      { type: "pane", label: "dashboard" },
+      { type: "pane", label: "advisor" },
     ]);
     expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
       provider: "herdr", composed: preview.composed, grids: preview.grids,
@@ -400,15 +401,67 @@ describe("default saved kernel conversations", () => {
     expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
   });
 
+  it.each([
+    [119, "claude-code", "codex"], [120, "claude-code", "codex"], [174, "claude-code", "codex"],
+    [119, "claude-code", "claude-code"], [120, "claude-code", "claude-code"],
+    [119, "codex", "codex"], [160, "codex", "codex"],
+  ] as const)("uses the measured %i-column welcome layout for %s/%s", async (viewportColumns, advisor, operator) => {
+    const { deps, herdr } = makeKernel(kernel(operator, advisor));
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:kernel", viewportColumns });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    const wide = viewportColumns >= 120;
+    expect(preview.composed.pages.map(page => page.map(pane => pane.seat))).toEqual(wide
+      ? [["tui-bound", "operator-bound"], ["advisor-bound"]]
+      : [["operator-bound"], ["tui-bound"], ["advisor-bound"]]);
+    if (wide) expect(preview.grids[0]!.root).toMatchObject({
+      type: "split", direction: "right", ratio: 0.5,
+      first: { type: "pane", label: "dashboard" }, second: { type: "pane", label: "operator" },
+    });
+    expect(planHerdrLayout({ ...preview.composed, planId: preview.planId }, "fixed").pages.map(page => page.tabLabel)).toEqual(wide
+      ? ["dashboard · operator", "advisor"] : ["operator", "dashboard", "advisor"]);
+    expect(preview.grids.every(grid => grid.blanks === 0)).toBe(true);
+    expect((await service.openView({ view: "saved:kernel", viewportColumns, expectedPlan: preview.planId })).ok).toBe(true);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
+  });
+
+  it.each(["operator.agent", "operator.human"])("keeps the advisor separate at 160 columns when %s is absent", async missing => {
+    const { deps } = makeKernel(kernel().filter(row => row.logicalId !== missing));
+    const preview = await new TerminalService(deps).previewView({ view: "saved:kernel", viewportColumns: 160 });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.pages.map(page => page.map(pane => pane.seat))).toEqual([
+      [missing === "operator.agent" ? "tui-bound" : "operator-bound"], ["advisor-bound"],
+    ]);
+    expect(preview.composed.absent.map(pane => pane.seat)).toContain(missing);
+    expect(preview.grids.every(grid => grid.blanks === 0)).toBe(true);
+  });
+
+  it("binds preview fingerprints to the width-selected composition", async () => {
+    const { deps, herdr } = makeKernel(kernel());
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:kernel", viewportColumns: 119 });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    const result = await service.openView({ view: "saved:kernel", viewportColumns: 120, expectedPlan: preview.planId });
+    expect(result).toMatchObject({ ok: false, code: "preview_changed" });
+    expect(herdr.lastView).toBeNull();
+  });
+
+  it.each([undefined, 0, -1, NaN, Infinity, 120.5])("uses the narrow layout for an unknown or invalid width %s", async viewportColumns => {
+    const { deps } = makeKernel(kernel());
+    const preview = await new TerminalService(deps).previewView({ view: "saved:kernel", viewportColumns });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.pages.map(page => page.map(pane => pane.seat))).toEqual([["operator-bound"], ["tui-bound"], ["advisor-bound"]]);
+  });
+
   it.each(["saved:kernel", "saved:custom", "rig:kernel"])("kernel geometry preserves auto-grid for %s outside the default", async view => {
     const custom: SavedView = { id: view.slice(6), name: "Custom", members: ["a", "b", "c"].map(seat => ({ seat })) };
     const { deps, herdr } = makeKernel(kernel().filter(row => row.logicalId !== "queue.worker"), [custom]);
     const service = new TerminalService(deps);
-    const preview = await service.previewView({ view });
+    const preview = await service.previewView({ view, viewportColumns: 174 });
     if (!("composed" in preview)) throw new Error("expected preview");
     expect(preview.composed.columns).toBeUndefined();
     expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 2, blanks: 1 });
-    expect((await service.openView({ view, expectedPlan: preview.planId })).ok).toBe(true);
+    expect((await service.openView({ view, viewportColumns: 174, expectedPlan: preview.planId })).ok).toBe(true);
     expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
   });
 

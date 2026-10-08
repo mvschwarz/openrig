@@ -226,7 +226,7 @@ describe("rig setup", () => {
     const loginIdx = out.indexOf("claude auth status");
     const daemonIdx = out.indexOf("rig daemon start");
     const statusIdx = out.indexOf("rig status");
-    const offerIdx = out.indexOf("Open the OpenRig view now?");
+    const offerIdx = out.indexOf("Show the person OpenRig");
     const viewIdx = out.indexOf("rig terminal open saved:kernel");
     const wsIdx = out.indexOf("rig workspace doctor");
     const wfIdx = out.indexOf("rig workflow specs");
@@ -247,9 +247,9 @@ describe("rig setup", () => {
     expect(out).not.toContain("first-project-mixed");
     expect(out).toContain("Check only selected logins");
     expect(out).toContain("Started is not ready");
-    expect(out).toContain("No: give the command to open it later");
+    expect(out).toContain("If they said not now: give the command to open it later");
     expect(out).toContain("Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command");
-    expect(out).toContain("On a desktop, no copying or typing for the person; confirm three visible columns, not just CLI success");
+    expect(out).toContain("On a desktop, no copying or typing for the person; check the result notes, not just CLI success");
     expect(out).toContain("rig send dev-build@starter");
     expect(out).toContain("rig queue list --destination dev-build@starter");
     expect(out).not.toContain("rig queue list --rig");

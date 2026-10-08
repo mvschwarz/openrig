@@ -11,10 +11,11 @@ directly. Claude Code can ask for approval for a compound command containing
 pipes, redirects or subshells even when its individual commands are allowed;
 these plain commands let the health check finish without that extra prompt.
 
-For “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
+When the person wants to see their agents or OpenRig in a terminal, in any words, run
 `rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
-operator in one full-width pane in a new terminal tab/window. The dashboard and advisor
-each have their own tab or tmux window. Inspect its result and visible content, or state what you cannot confirm. On a desktop, do
+OpenRig TUI and operator in a new terminal tab/window, or a space in the current Herdr session:
+below 120 measured columns, operator alone first;
+from 120, dashboard and operator equally side by side. The advisor has a separate tab or tmux window. Inspect its result and visible content, or state what you cannot confirm. On a desktop, do
 not end by showing a table or suggesting a command for the person to type. Herdr is visible
 only inside a terminal the person can see; changing the shared TUI to `:terminals`
 does not open one. Over headless SSH, explain that limitation, ask the person to
