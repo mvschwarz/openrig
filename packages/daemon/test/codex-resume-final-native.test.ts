@@ -26,7 +26,9 @@ async function finalObservation(output: string) {
     `const tick = setInterval(() => { if (fs.existsSync(${JSON.stringify(gate)})) {\n` +
     `process.stdout.write(fs.readFileSync(${JSON.stringify(gate)}, "utf8") + "\\n"); clearInterval(tick);\n` +
     `setInterval(() => {}, 1000); } }, 5);\n`, { mode: 0o755 });
-  const env = { ...process.env, HOME: home, TERM: "xterm-256color" };
+  // The pane's interactive bash saves history into HOME as kill-server hangs it
+  // up, racing the teardown's rmSync (ENOTEMPTY); keep that file out of home.
+  const env = { ...process.env, HOME: home, TERM: "xterm-256color", HISTFILE: "/dev/null" };
   delete env.TMUX;
   delete env.TMUX_TMPDIR;
   const tmux = async (args: string[]) => (await runFile("tmux", ["-S", socket, ...args], { env })).stdout;

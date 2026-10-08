@@ -69,6 +69,13 @@ After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
 
+For a team's `/rigs` listing page, use `WebFetch` when available. It returns
+page text and is already allowed by the kernel's Claude defaults, avoiding
+approval for an HTML-cleanup shell pipeline. If it is unavailable or fails,
+use a plain `curl -fsSL <listing-url>` call and read the response directly.
+Fetch the raw registry YAML separately for the installation commit and
+configurations, as below; do not take the pin from a cached page summary.
+
 1. **Goal first.** Use a goal and folder already supplied, including a handoff
    from the installing agent; do not ask for them again. If the goal is missing,
    ask once: "What would you like to build or change?" If they already named a
