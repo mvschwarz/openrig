@@ -11,8 +11,8 @@ applies-when: |
   vs tmux-metadata-key naming distinction.
 siblings: [daemon-core.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Transport, Transcripts, Chat, Ask
@@ -22,7 +22,7 @@ capture/broadcast wrap tmux with honest errors; transcripts are bounded
 `tmux capture-pane` snapshots written to files; chat is daemon-backed SQLite;
 the daemon's `rig ask` service gathers evidence and never calls an LLM.
 
-> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -85,7 +85,7 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
 `SessionTransport.send()`:
 
 1. Resolve the session name (`resolveBySessionName`,
-   `session-transport.ts:939`): not found → 404; the same name in more than
+   `session-transport.ts:963`): not found → 404; the same name in more than
    one rig → 409. A tmux probe of the session can also refuse it as missing or
    tmux as unavailable (`:1293`–`1310`). Pod, rig, global and `--to` list
    targets go through `POST /api/transport/broadcast`, which resolves them
@@ -98,7 +98,7 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    `rig seat held-messages`.
 3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
-   (`session-transport.ts:1457`), unless the caller passes
+   (`session-transport.ts:1482`), unless the caller passes
    `--dangerously-interact --reason`; that override persists an audit record
    before sending and refuses the send if it can't
    (`prompt_override_audit_unavailable`, `:1446`). A pane that reads `unknown` while the seat's
@@ -110,12 +110,12 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    `--wait-for-idle` is refused with 400 (`routes/transport.ts:66`–`73`).
 4. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
    (`packages/daemon/src/adapters/tmux.ts:625`) → ~200ms delay
-   (`session-transport.ts:1533`) → separate named `Enter` (`:1551`). The paste
+   (`session-transport.ts:1558`) → separate named `Enter` (`:1551`). The paste
    targets the seat's registered pane ID, not the session name, and is refused
    with no input written if the session no longer holds exactly that pane.
    Bracketed paste preserves multiline input in supporting TUIs; the payload
    never enters a shell argument. A `--dangerously-interact` answer is pasted
-   without `-p` (`session-transport.ts:1516`) and Enter is pressed only if the
+   without `-p` (`session-transport.ts:1541`) and Enter is pressed only if the
    whole answer is still staged (`:1537`–`1545`). A successful paste proves
    transport execution, not runtime consumption.
 5. Optional `--verify`: capture the last 30 pane lines before and after the
@@ -123,14 +123,14 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    characters in each. A higher count after the send reports
    `outcome: "delivered"`; otherwise the outcome is `rendered-unconfirmed` —
    text and Enter landed but the capture could not re-confirm the render,
-   which is not a failure at the daemon (`session-transport.ts:681`
+   which is not a failure at the daemon (`session-transport.ts:700`
    `verify?`; `:1571` `if (opts?.verify)`; `:1583`
    `verified = postCount > preCount`). The outcome values are `delivered`,
    `rendered-unconfirmed`, `failed` and `retained` (`:748`).
 6. CLI `--verify` goes further (`packages/cli/src/commands/send.ts:596`): it
    looks for the text still unsubmitted at the prompt, makes one guarded
    Enter-only retry through the daemon's `submitOnly` path
-   (`session-transport.ts:1320`, which refuses with `staged_mismatch` unless the
+   (`session-transport.ts:1344`, which refuses with `staged_mismatch` unless the
    pane shows the expected staged text), and ends `staged-not-consumed` with
    exit code 1 if it is still there.
 7. Honest result with reason on failure. Reasons missing from the send
@@ -233,7 +233,7 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
    agent-facing access.
 5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
-   re-launch (`restore-orchestrator.ts:893`); each rotation tick keeps each
+   re-launch (`restore-orchestrator.ts:900`); each rotation tick keeps each
    distinct boundary line once, as a header above the fresh capture
    (`transcript-rotation.ts:254`–`257`). (Restore-side detail in
    `lifecycle-snapshot-restore.md`.)

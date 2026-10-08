@@ -6,13 +6,13 @@ topics: [knowledge-and-context, frontmatter]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Writing or refreshing a source-grounded document under docs/as-built/.
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # As-Built Frontmatter
 
-Source snapshot: `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. This describes the source at that commit;
+Source snapshot: `e8f0ab340db773392ec8be75b072d1c0f3068a50`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 Frontmatter makes an as-built page discoverable and records the source it
@@ -44,8 +44,8 @@ that an installed package or a running system uses that source. Keep runtime
 observations separately qualified.
 
 ```yaml
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ```
 
 Check that the commit resolves with `git cat-file -t <commit>` in a checkout

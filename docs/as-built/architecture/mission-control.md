@@ -11,8 +11,8 @@ applies-when: |
   coordination primitive's sources.
 siblings: [coordination-primitive.md, workflow-runtime.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, coordination-primitive.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Mission Control — Queue Observability + Verb Contract
@@ -25,7 +25,7 @@ seven views, eight verbs, a recent-ships cap of 10
 table. In the web UI the old `/mission-control` page now redirects to
 `/for-you`, and the For You feed carries the verb actions (§6).
 
-> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. A bare file name such as
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. A bare file name such as
 > `mission-control-read-layer.ts:31` is in
 > `packages/daemon/src/domain/mission-control/`; `domain/…`, `routes/…`,
 > `middleware/…`, `db/…`, `index.ts`, `server.ts` and `startup.ts` are under
@@ -118,7 +118,7 @@ a human seat. An unknown item returns 404 `qitem_not_found`
 (`routes/mission-control.ts:240–251`, `:330–341`).
 
 Each verb is one atomic daemon transaction: the queue mutation via
-`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2361`,
+`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2371`,
 which keeps the hot-potato closure validation — see
 `coordination-primitive.md` §3), an audit row in `mission_control_actions`
 (`mission-control-write-contract.ts:207`), and a persisted
@@ -134,7 +134,7 @@ created in the same transaction (`createWithinTransaction`, `:173`), along
 with the successor's wake intent (`stageWakeIntent`, `:195`, checked by
 `assertTerminalClosureHasIntent`, `:242`). The wake itself runs after commit
 (`deliverWakeForSuccessor`, `:264`). It is on unless the caller passes
-`notify: false` (`domain/queue-repository.ts:1174`), and a notify failure
+`notify: false` (`domain/queue-repository.ts:1182`), and a notify failure
 does NOT roll back durable mutations (`mission-control-write-contract.ts:272–275`).
 A failed destination create rolls back the source closure, the audit row and
 the new item together

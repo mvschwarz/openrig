@@ -1,7 +1,7 @@
 # Agent Startup Guide
 
 Last validated: 2026-10-05, against main `9b88b118`
-Applies to: OpenRig 0.6.7
+Applies to: OpenRig 0.6.8
 
 This guide teaches you how to think about what goes into an agent's startup experience — what files to write, where to put them, and how the layering model delivers them. It is an authoring guide, not a schema reference. For field-level details, see `rig-spec.md` and `agent-spec.md`.
 

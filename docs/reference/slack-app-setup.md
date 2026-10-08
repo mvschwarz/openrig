@@ -140,8 +140,12 @@ rig slack channel-map remove pr@my-rig
   Without a map, OpenRig records nothing about a post's channel, so if the default channel
   changes while a post is being retried, the retry goes to the new default channel (as it always
   has); that also applies to a post first tried before the map was added.
+- **Rate limits on posts.** When Slack rate-limits a post and asks for a pause of 10 seconds or
+  less, OpenRig waits that long and retries the post once. A longer pause, or a second refusal,
+  is left to the retry of retained posts.
 - **Replies and new messages.** A reply in an item's thread reaches that item's seat, in any
-  channel. A message the human starts (or a reply in a thread OpenRig does not know) goes to
+  channel. To answer it in the same thread, the seat sends `rig queue create --human-intent update
+  --reply-to <the inbound reply's row>`. A message the human starts (or a reply in a thread OpenRig does not know) goes to
   the connector's inbound destination, whichever channel it is in. Missed-message recovery
   (below) covers the default channel only.
 

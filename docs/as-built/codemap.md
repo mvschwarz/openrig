@@ -9,14 +9,14 @@ applies-when: |
   Follow the module and source entry points below, then read the implementation.
 siblings: [README.md, arteries.md, test-layers.md, cli-reference.md]
 prerequisite-reads: [README.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # OpenRig codemap
 
 The paths and named entry points below were checked at main
-`2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. This is a navigation map, not a replacement for
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`. This is a navigation map, not a replacement for
 reading the implementation. Linked documents retain their individual verification stamps.
 [README.md](README.md) lists the complete document tree and commands to derive its inventory.
 

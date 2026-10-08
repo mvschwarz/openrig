@@ -9,8 +9,8 @@ applies-when: |
   graph, the SQLite schema/migration set, or the route-mount surface.
 siblings: [coordination-primitive.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Daemon Core — Wiring, DB, Migrations, Startup
@@ -20,7 +20,7 @@ OpenRig is a local control plane for multi-agent coding topologies. The daemon
 (`@openrig/cli`), the terminal UI (`@openrig/tui`), the web UI (`@openrig/ui`)
 and the MCP server all sit on top of.
 
-> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -29,7 +29,7 @@ and the MCP server all sit on top of.
 For what OpenRig is and how its packages fit together, read `ARCHITECTURE.md` at
 the repository root. This module covers the daemon's own wiring.
 
-### Source footprint at `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`
+### Source footprint at `e8f0ab340db773392ec8be75b072d1c0f3068a50`
 
 The footprint counts use non-test TypeScript files under each package's `src/`
 (tests live in separate `packages/*/test/` directories):
@@ -226,7 +226,7 @@ The daemon entrypoint `packages/daemon/src/index.ts:306` calls
 
 ## 5. Test files
 
-A static count of tracked test files at `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7` (no pass counts are claimed
+A static count of tracked test files at `e8f0ab340db773392ec8be75b072d1c0f3068a50` (no pass counts are claimed
 here; CI runs the suites in `.github/workflows/tests.yml`): daemon **923**,
 CLI **260**, web UI **198**, TUI **103**
 (`git ls-files 'packages/<package>/**/*.test.ts' 'packages/<package>/**/*.test.tsx' | wc -l`).

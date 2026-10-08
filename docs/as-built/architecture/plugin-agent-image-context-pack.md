@@ -9,14 +9,14 @@ applies-when: |
   agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Content libraries and compaction
 
 This module describes source at main commit
-`2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Source paths below are repository-relative.
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`. Source paths below are repository-relative.
 Context packs, plugins and agent images have filesystem-backed content and daemon-side
 discovery. Their consumers can read database identity, mutate files, deliver messages or
 launch sessions; the whole layer is not a read-only catalog.
@@ -131,12 +131,12 @@ composed projection and reconciles it only with `--apply`; `rig skill audit` is 
 read-only provenance and freshness audit. Launch applies the selected loadout per seat.
 
 For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to
-that loadout (`packages/daemon/src/domain/profile-resolver.ts:287–308`, with
-`resolvePluginSkills()` at `skill-catalog.ts:368`). Neither runtime reads skills from the plugin
+that loadout (`packages/daemon/src/domain/profile-resolver.ts:309–308`, with
+`resolvePluginSkills()` at `skill-catalog.ts:460`). Neither runtime reads skills from the plugin
 folder projected into the working directory. The skills are projected under their plain names,
 and a skill the profile already selects keeps its source. A kept plugin copy (an edited or
 user-owned one, or OpenRig's own copy whose plugin source changed or moved after the loadout
-was resolved, `skill-catalog.ts:937–945`) gives a `plugin_skill_kept` warning, and an unreadable one gives
+was resolved, `skill-catalog.ts:1060–945`) gives a `plugin_skill_kept` warning, and an unreadable one gives
 `plugin_skill_skipped`. If plugin skills can't be projected at all, the seat starts without them
 and gets a `plugin_skills_not_projected` warning (`rigspec-instantiator.ts:2045`).
 
@@ -277,7 +277,14 @@ already-triggered latch; an active manual attempt also blocks it.
    remains compatible. Only then is `/compact` sent, with the final map path appended to the
    compact instruction. Publication failure cannot authorize `/compact`.
 4. The continuation then runs below the threshold: turn boundary, restore prompt, then a
-   read-depth audit prompt (each item marked `FULL`, `PARTIAL` or `NOT_READ`).
+   read-depth audit prompt (each item marked `FULL`, `PARTIAL` or `NOT_READ`), one stage per
+   poll tick. A seat refreshes its usage sample only when it takes a turn, so when the sample is
+   stale, unknown or has no percentage and a stage is pending, the monitor drains that stage
+   without one (`context-monitor.ts:175`, `claude-compaction-enforcer.ts:436`). Only a fresh,
+   known sample can start a compaction. The sample-less drain reads readiness from the pane alone
+   and counts a timer-less live status row, such as `✻ Compacting conversation…`, as work
+   (`session-transport.ts:153-161`); a recent hook showing work or a waiting person still
+   refuses. It records no width receipt, because the only figure would be the pre-compact one.
 
 An automatic attempt has a 25-minute ceiling that starts once the prep is delivered. A stale
 occupant generation, the policy becoming disabled, or the deadline passing stops it. A prep

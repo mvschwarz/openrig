@@ -9,14 +9,14 @@ applies-when: |
   overview or the current as-built module index linked here.
 siblings: [README.md, codemap.md, arteries.md, test-layers.md, ui.md]
 prerequisite-reads: []
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Architecture module navigation
 
 This compatibility page points to the modular documentation. Its links were checked against main
-`2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`; the linked pages retain their own source stamps.
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`; the linked pages retain their own source stamps.
 
 - [Repository architecture](../../ARCHITECTURE.md): package boundaries, request flow, derived
   source counts and contributor recipes.

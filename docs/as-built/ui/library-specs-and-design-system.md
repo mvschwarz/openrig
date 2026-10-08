@@ -11,8 +11,8 @@ applies-when: |
   lives.
 siblings: [shell-and-routing.md]
 prerequisite-reads: [../README.md, shell-and-routing.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # UI Library/Specs Surfaces + Design-System Pointer
@@ -21,7 +21,7 @@ The Library destination keeps `/specs` as the route and presents the product
 label "Library": specs, applications, context packs, agent specs, agent
 images, plugins, and skills.
 
-> Verified against source at `2caac7dd`; package version 0.6.7. Component and
+> Verified against source at `e8f0ab34`; package version 0.6.7. Component and
 > primitive names below are reconciled against `packages/ui/src/components/`,
 > not taken on trust from `DESIGN.md`'s lists. The web UI is in maintenance
 > mode (`docs/reference/developing.md`).

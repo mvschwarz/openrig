@@ -12,8 +12,8 @@ applies-when: |
   Project UI.
 siblings: [content-surfaces.md, daemon-core.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Workspace Primitive — RigSpec.workspace, Migrations 038/039, Missions/Projects/Slices
@@ -26,7 +26,7 @@ through `whoami` / node-inventory and gate per-item repo scope. Alongside it, a
 the Project UI's mission / slice surfaces.
 
 > Paths are relative to `packages/daemon/src/` unless prefixed `packages/` or
-> `docs/`. Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count sits beside
+> `docs/`. Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count sits beside
 > the command that produces it; run the commands from the repository root.
 > The files / markdown / progress / steering surfaces are in the sibling
 > `content-surfaces.md`.
@@ -208,9 +208,9 @@ match; the filter is skipped when the column is absent.
 > `:114–120`); `createInputRefusal` `:128–141` (call `:136`), used by
 > `/create` `:490` and the self-forward create `:436`; handoff calls `:679`,
 > `:758` in handlers `:650`, `:732` (`/create` handler `:450`); ordering note
-> `:482–489`; inherited value `:676–677`, `domain/queue-repository.ts:1681`,
+> `:482–489`; inherited value `:676–677`, `domain/queue-repository.ts:1691`,
 > `:1858`; list filter `routes/queue.ts:906`,
-> `domain/queue-repository.ts:3226–3228`, CLI
+> `domain/queue-repository.ts:3236–3228`, CLI
 > `packages/cli/src/commands/queue.ts:1143`; mounted `server.ts:784`.
 
 ## 2. Workspace HTTP route — frontmatter validator and doctor
@@ -576,7 +576,7 @@ through the `/project*` destinations; it does not call `/api/projects`
 - **Defensive column access:** `RigRepository` probes for `workspace_json`
   (`rig-repository.ts:185`, `:193`), node-inventory's own reads fall back to
   null on error (`node-inventory.ts:724`, `:796–798`), and the queue
-  repository detects `target_repo` (`queue-repository.ts:752`), so partial
+  repository detects `target_repo` (`queue-repository.ts:758`), so partial
   test fixtures don't crash. Migrations 038/039 ship separately so a fixture
   can apply only the half it needs (`038_workspace_primitive.ts:12–14`).
 - **Read-only projection, no new state for the tree:** SliceIndexer /

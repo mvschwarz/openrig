@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Tracing slice, mission, rig, or fleet review data back to scope documents,
   proof artifacts, judgments, queue state, or frozen exports.
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Living Notes — Composed Review and Frozen Exports
 
-Source snapshot: `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. This describes the source at that commit;
+Source snapshot: `e8f0ab340db773392ec8be75b072d1c0f3068a50`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 Living Notes builds review payloads from existing documents and recorded

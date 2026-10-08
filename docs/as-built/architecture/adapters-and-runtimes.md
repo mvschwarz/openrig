@@ -12,8 +12,8 @@ applies-when: |
   layer).
 siblings: [daemon-core.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Adapters and Runtimes
@@ -27,7 +27,7 @@ adapters (`ClaudeResumeAdapter`, `CodexResumeAdapter`, `PiResumeAdapter` and
 this harness *actually* resume, or did it silently fresh-launch?" truthfully
 rather than optimistically.
 
-> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -345,7 +345,7 @@ never relaunches itself. Acting on that hint is the caller's choice:
 `StartupOrchestrator` retries once fresh on `retry_fresh` unless the caller
 passes `allowFreshFallback: false` (`startup-orchestrator.ts:319–330`), and the
 restore orchestrator passes `false` when a pod-aware node requested resume
-(`restore-orchestrator.ts:1217`).
+(`restore-orchestrator.ts:1224`).
 
 ### `resume-metadata-refresher.ts`
 
@@ -386,7 +386,7 @@ module.
 
 - **Rule 1** — §2: **0** files in `adapters/` import Hono.
 - **Rule 5** — restore picks a node's adapter by that node's own runtime: the
-  saved startup context's runtime, else the node's (`restore-orchestrator.ts:1108–1109`),
+  saved startup context's runtime, else the node's (`restore-orchestrator.ts:1115–1109`),
   used to choose the replay adapter (`:1131`).
 - **Rule 13** — the readiness loop is `StartupOrchestrator.waitForReady`
   (`startup-orchestrator.ts:562`; 1 s doubling to a 16 s cap), which calls each
@@ -400,8 +400,8 @@ module.
   separate field that also allows `forked` (`startup-orchestrator.ts:101`).
 - **Rule 15** — adapters return `ok:false` and never relaunch (§2, §3);
   restore passes `allowFreshFallback: false` for pod-aware resume
-  (`restore-orchestrator.ts:1217`), and a resume that concludes failed rolls
-  back to zero sessions as `awaiting-decision` (`restore-orchestrator.ts:1048`,
+  (`restore-orchestrator.ts:1224`), and a resume that concludes failed rolls
+  back to zero sessions as `awaiting-decision` (`restore-orchestrator.ts:1055`,
   `:1236`).
 
 ## See also

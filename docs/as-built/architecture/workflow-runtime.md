@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Following workflow validation, instantiation, projection, routing, failure
   recovery, lifecycle graph revisions, or the corresponding CLI/API.
-last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Workflow Runtime — Specs, Packets, and Lifecycle Graphs
 
-Source snapshot: `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. This describes the source at that commit;
+Source snapshot: `e8f0ab340db773392ec8be75b072d1c0f3068a50`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 A workflow binds a specification to durable queue packets. The daemon
@@ -55,6 +55,12 @@ harness grammar. Nonlocal host pins can validate as registered names but
 `instantiate` still rejects execution with `host_pin_remote_unsupported`.
 This is a workflow-step restriction, not a claim that all queue traffic is
 local-only.
+
+A step whose `allowed_exits` can neither finish it nor route it on is refused as
+`step_cannot_finish` (`workflow-validator.ts:223-236`): its exits leave out `done`, none is
+mapped in `next_hop.on`, and it allows no `handoff` that routes on. In a dependency graph,
+allowing `handoff` is enough, because handoff completes a sink. `instantiate` refuses any spec
+with a validation error.
 
 `allowed_exits` and `max_hops` affect validation/projection. In contrast,
 `continuation_required`, `preserve_lineage`, `closure_required`, closure
