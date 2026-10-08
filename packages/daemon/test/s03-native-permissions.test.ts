@@ -204,7 +204,7 @@ describe("S03 selected arguments and unchanged defaults", () => {
   });
   it("Codex legacy resume uses the same explicit selection", async () => {
     const t = refusedTransport(); await new CodexResumeAdapter(t.tmux).resume("seat", "codex_id", "original", "/inert", null, "full_bypass");
-    expect(t.send.mock.calls[0]?.[1]).toContain("codex -s danger-full-access -a never resume");
+    expect(t.send.mock.calls[0]?.[1]).toContain("codex -s danger-full-access -a never '-c' 'check_for_update_on_startup=false' resume");
   });
   it("does not widen unset, floor, named-profile or environment-only behavior", () => {
     expect(codexPostureArg("", {})).toBe(" -s workspace-write");

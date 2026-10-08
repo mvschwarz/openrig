@@ -54,6 +54,12 @@ function claudeCommandSettings(allow: string[], ask: string[] = []): string[] {
 
 /** Session flags only; never writes a personal/project permission file. */
 export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): string[] {
+  if (runtime === "codex") {
+    // Managed seats leave Codex upgrades to the operator. This is launch-local;
+    // it does not write config or accept a rate-limit model switch.
+    return ["-c", "check_for_update_on_startup=false", ...nonInterruptiveArgs(runtime,
+      choice.kernelAuthority ? { launchPosture: "full_bypass", nonInterruptive: true } : choice)];
+  }
   if (!choice.kernelAuthority) {
     if (runtime === "claude-code" && choice.teamPermissionDefault && !choice.permissionMode
       && (!choice.launchPosture || choice.launchPosture === "floor")) {
@@ -64,11 +70,7 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
   if (runtime === "claude-code") {
     return claudeCommandSettings(KERNEL_CLAUDE_ALLOW);
   }
-  // Kernel host operations include signaling the daemon and upgrading outside cwd.
-  // Codex's full-access/never posture is coarse; acknowledge its warning for this launch only.
-  return runtime === "codex"
-    ? nonInterruptiveArgs(runtime, { launchPosture: "full_bypass", nonInterruptive: true })
-    : [];
+  return [];
 }
 
 export function operationalLaunchArg(runtime: string, choice: LaunchChoice): string {
