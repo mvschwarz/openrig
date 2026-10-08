@@ -10,6 +10,7 @@ import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
+import { claudeSeatMaterialPaths } from "../domain/claude-seat-material.js";
 
 function getDeps(c: { get(key: never): unknown }): {
   rigRepo: RigRepository;
@@ -172,6 +173,8 @@ export function createRestoreCheckService(
       { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") },
       resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/claude.json"),
     ).map(({ event }) => event),
+    claudeSeatSettingsPath: (seat) => rigRepo.getClaudeSeatMaterialForSeat(seat) === "seat"
+      ? claudeSeatMaterialPaths(OPENRIG_HOME, seat.sessionName).settingsPath : null,
     listRigs: () => {
       const rigs = rigRepo.listRigs();
       return rigs.map((r) => ({ rigId: r.id, name: r.name }));

@@ -971,6 +971,31 @@ describe("RestoreCheckService", () => {
     expect(hook?.evidence).toContain(relayPath);
   });
 
+  it("#875: reads a seat_material: seat seat's hooks from its seat directory, not its cwd", () => {
+    const seatSettings = path.join(os.tmpdir(), "openrig-home", "state", "claude-seats", "dev-impl@test-rig", "settings.json");
+    const events = ["SessionStart", "Stop"];
+    const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ hooks: [
+      { type: "command", command: `node '${RELAY_PATH}'` },
+    ] }]])) });
+    const seen: Array<{ nodeId?: string | null; sessionName: string }> = [];
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd: null })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{
+        absolutePath: "/source/openrig-core", effectiveId: "shared:openrig-core",
+        category: "runtime_resource", resourceType: "claude_activity_hooks",
+      }] }),
+      getClaudeActivityHookEvents: () => events,
+      claudeSeatSettingsPath: (seat) => { seen.push(seat); return seatSettings; },
+      exists: (candidate) => candidate === seatSettings || candidate === RELAY_PATH || candidate.endsWith("host-infra.json"),
+      readFile: (candidate) => candidate === seatSettings ? settings : VALID_HOST_INFRA_DECLARATION,
+    }));
+
+    const hook = service.check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("green");
+    expect(hook?.evidence).toContain(seatSettings);
+    expect(seen.map((seat) => seat.sessionName)).toContain("dev-impl@test-rig");
+  });
+
   it.each(["disabled", "compact-only", "prompt-handler", "invalid-matcher", "substring-matcher"])("keeps %s selected activity hooks as a caveat", (kind) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-unusable");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");

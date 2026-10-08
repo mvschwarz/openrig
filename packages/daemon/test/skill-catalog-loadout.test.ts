@@ -844,3 +844,43 @@ describe("plugin skills in the managed loadout", () => {
     expect(result.warnings).toEqual([expect.stringMatching(/^plugin_skill_skipped: plugin core skills at .*skills\.md/)]);
   });
 });
+
+// #875 — a seat_material: seat Claude seat keeps its loadout in its OpenRig seat directory.
+describe("skill loadout kept outside the cwd", () => {
+  it("projects into the given location, records plugin-qualified names and leaves the checkout clean", () => {
+    const f = fixture();
+    writeSkill(f.catalog, "review");
+    writeSkill(f.catalog, "kickoff");
+    commit(f.root);
+    const seatRoot = join(f.root, "openrig-home", "state", "claude-seats", "dev-impl@rig");
+    const location = {
+      targetRoot: join(seatRoot, "plugin", "skills"),
+      manifestPath: join(seatRoot, "skill-loadout.json"),
+      qualifiedName: (id: string) => `openrig:${id}`,
+    };
+    const resolved = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills: ["review", "kickoff"] });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+
+    const applied = reconcileSkillLoadout({ loadout: resolved.loadout, runtime: "claude-code", cwd: f.project, apply: true, topologyOwner: "dev-impl@rig", location });
+    expect(applied.ok).toBe(true);
+    expect(applied.targetRoot).toBe(location.targetRoot);
+    expect(readFileSync(join(location.targetRoot, "review", "SKILL.md"), "utf8")).toContain("name: review");
+    const manifest = JSON.parse(readFileSync(location.manifestPath, "utf8")) as { skills: Array<{ id: string; qualifiedName?: string }> };
+    expect(manifest.skills.map((skill) => [skill.id, skill.qualifiedName])).toEqual([
+      ["kickoff", "openrig:kickoff"],
+      ["review", "openrig:review"],
+    ]);
+    expect(readdirSync(f.project)).toEqual([]);
+    expect(git(f.root, "status", "--porcelain", "--", "project")).toBe("");
+
+    const again = reconcileSkillLoadout({ loadout: resolved.loadout, runtime: "claude-code", cwd: f.project, apply: true, topologyOwner: "dev-impl@rig", location });
+    expect(again).toMatchObject({ ok: true, applied: false });
+
+    const narrowed = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills: ["review"] });
+    if (!narrowed.ok) throw new Error("narrowed loadout did not resolve");
+    const removed = reconcileSkillLoadout({ loadout: narrowed.loadout, runtime: "claude-code", cwd: f.project, apply: true, topologyOwner: "dev-impl@rig", location });
+    expect(removed.removed).toEqual(["kickoff"]);
+    expect(existsSync(join(location.targetRoot, "kickoff"))).toBe(false);
+  });
+});

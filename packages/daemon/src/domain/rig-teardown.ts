@@ -280,6 +280,8 @@ export class RigTeardownOrchestrator {
     if (!runtime || !cwd) {
       return null;
     }
+    // #875: a seat-material rig never wrote guidance into the cwd, so it has none to clean there.
+    if (runtime === "claude-code" && this.deps.rigRepo.getRigClaudeSeatMaterial(rigId) === "seat") return null;
     // #25: clean only the rig's selected Claude file; the other file is never touched.
     return runtime === "claude-code"
       ? nodePath.join(cwd, this.deps.rigRepo.getRigClaudeManagedBlockFile(rigId) ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)

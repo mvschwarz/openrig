@@ -321,7 +321,7 @@ import type {
   CompactionStrategy,
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
-import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
+import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillLoadoutLocation, type SkillRuntime } from "./skill-catalog.js";
 import type { SystemWorldResolution } from "./system-world.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
@@ -377,7 +377,11 @@ interface PodInstantiatorDeps {
     cwd: string;
     apply: true;
     topologyOwner?: string;
+    location?: SkillLoadoutLocation;
   }) => ReconcileSkillLoadoutResult;
+  /** #875 — where a `seat_material: seat` Claude seat keeps its loadout. Production derives it
+   *  from the OpenRig home; without it such a seat cannot be launched. */
+  claudeSeatLoadoutLocation?: (sessionName: string) => SkillLoadoutLocation;
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
   continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
@@ -658,6 +662,10 @@ export class PodRigInstantiator {
         // #25: the Claude managed-block destination is rig-row state (both persist sites).
         if (rigSpec.managedBlocks?.["claude-code"]) {
           this.deps.rigRepo.setRigClaudeManagedBlockFile(materializedRigId, rigSpec.managedBlocks["claude-code"]);
+        }
+        // #875: so is the Claude seat-material mode (both persist sites).
+        if (rigSpec.seatMaterial?.["claude-code"]) {
+          this.deps.rigRepo.setRigClaudeSeatMaterial(materializedRigId, rigSpec.seatMaterial["claude-code"]);
         }
 
         // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
@@ -1353,6 +1361,9 @@ export class PodRigInstantiator {
       if (rigSpec.managedBlocks?.["claude-code"]) {
         this.deps.rigRepo.setRigClaudeManagedBlockFile(rigId, rigSpec.managedBlocks["claude-code"]);
       }
+      if (rigSpec.seatMaterial?.["claude-code"]) {
+        this.deps.rigRepo.setRigClaudeSeatMaterial(rigId, rigSpec.seatMaterial["claude-code"]);
+      }
       // OPR.0.4.8.3 Seam B: the SECOND rig-persist site (bootstrap instantiate path) —
       // both sites must write or the rig ref silently drops on one instantiate path.
       // Guard-F1: resolved rig attachment persists here too (declaringDir = rigRoot).
@@ -2028,12 +2039,19 @@ export class PodRigInstantiator {
       && this.deps.skillReconciler
       && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex")
     ) {
+      const seatMaterial = configResult.config.runtime === "claude-code"
+        && this.deps.rigRepo.getRigClaudeSeatMaterial(input.rigId) === "seat";
+      if (seatMaterial && !this.deps.claudeSeatLoadoutLocation) {
+        return { status: "failed", error: "seat_material: seat is not available in this daemon (no seat loadout location)", sessionName: canonicalSessionName };
+      }
+      const location = seatMaterial ? this.deps.claudeSeatLoadoutLocation!(canonicalSessionName) : undefined;
       const reconcile = (selected: SkillLoadout) => this.deps.skillReconciler!({
         loadout: selected,
         runtime: configResult.config.runtime as SkillRuntime,
         cwd: configResult.config.cwd,
         apply: true,
         topologyOwner: canonicalSessionName,
+        ...(location ? { location } : {}),
       });
       const loadout = configResult.config.skillLoadout;
       let projection = reconcile(loadout);

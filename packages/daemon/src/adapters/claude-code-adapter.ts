@@ -1,4 +1,4 @@
-import { operationalLaunchArgs, operationalLaunchArg } from "./kernel-authority.js";
+import { operationalLaunchArgs } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -21,6 +21,11 @@ import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
+import {
+  claudeSeatLaunchArgs, claudeSeatMaterialPaths, ensureClaudeSeatPlugin,
+  type ClaudeSeatMaterialMode, type ClaudeSeatMaterialPaths,
+} from "../domain/claude-seat-material.js";
+const MANAGED_BLOCK_MARKER = /<!-- BEGIN (?:OpenRig|RIGGED) MANAGED BLOCK: /;
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -70,6 +75,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /** P20 — called after a projected file is written to a target, so the manifest
    *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
   private recordProjection: (targetPath: string, content: string) => void;
+  private resolveSeatMaterial?: (seat: { nodeId?: string | null; sessionName?: string | null }) => ClaudeSeatMaterialMode;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -90,6 +96,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
      *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
     recordProjection?: (targetPath: string, content: string) => void;
+    /** #875 — the rig's `seat_material.claude-code` mode for a seat. Absent → always cwd. */
+    resolveSeatMaterial?: (seat: { nodeId?: string | null; sessionName?: string | null }) => ClaudeSeatMaterialMode;
   }) {
     this.tmux = deps.tmux;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
@@ -104,11 +112,28 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
+    this.resolveSeatMaterial = deps.resolveSeatMaterial;
+  }
+
+  /** #875 — the seat directory when this seat's material lives outside its cwd, else null. */
+  seatMaterial(seat: { nodeId?: string | null; tmuxSession?: string | null }): ClaudeSeatMaterialPaths | null {
+    if (this.resolveSeatMaterial?.({ nodeId: seat.nodeId, sessionName: seat.tmuxSession }) !== "seat") return null;
+    if (!this.stateDir || !seat.tmuxSession) {
+      throw new Error("seat_material: seat needs the OpenRig home and the seat's session name");
+    }
+    return claudeSeatMaterialPaths(this.stateDir, seat.tmuxSession);
+  }
+
+  /** Session flags for a Claude launch: the operational defaults, plus the seat's material
+   *  when it lives outside the cwd. Shared by launch (fresh/fork/resume) and claude-resume.ts. */
+  launchMaterialArgs(seat: { nodeId?: string | null; tmuxSession?: string | null }, operationalArgs: string[]): string[] {
+    const paths = this.seatMaterial(seat);
+    return paths ? claudeSeatLaunchArgs(this.fs, paths, operationalArgs) : operationalArgs;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
     const results: InstalledResource[] = [];
-    const skillsDir = nodePath.join(binding.cwd, ".claude", "skills");
+    const skillsDir = this.seatMaterial(binding)?.skillsRoot ?? nodePath.join(binding.cwd, ".claude", "skills");
     if (this.fs.exists(skillsDir) && this.fs.listFiles) {
       for (const file of this.fs.listFiles(skillsDir)) {
         results.push({ effectiveId: file, category: "skill", installedPath: nodePath.join(skillsDir, file) });
@@ -123,6 +148,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
+    let seat: ClaudeSeatMaterialPaths | null;
+    try {
+      seat = this.seatMaterial(binding);
+      if (seat) {
+        ensureClaudeSeatPlugin(this.fs, seat);
+        const legacy = this.legacyCwdMaterialWarning(binding.cwd);
+        if (legacy) warnings.push(legacy);
+      }
+    } catch (err) {
+      return { projected, skipped, failed: plan.entries.map((e) => ({ effectiveId: e.effectiveId, error: (err as Error).message })) };
+    }
+
     for (const entry of plan.entries) {
       if (entry.classification === "no_op") {
         skipped.push(entry.effectiveId);
@@ -130,7 +167,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
 
       try {
-        const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, warnings);
+        const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, warnings, seat);
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -150,7 +187,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     );
     let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
     try {
-      activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
+      activityOutcome = this.reconcileClaudeActivityHooks(seat?.settingsPath ?? nodePath.join(binding.cwd, ".claude", "settings.local.json"), activityEntries.length > 0);
     } catch (err) {
       console.error(`[openrig] claude activity-hook reconcile warning: ${(err as Error).message}`);
       activityOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
@@ -183,6 +220,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const warnings: string[] = [];
     let delivered = 0;
     const failed: Array<{ path: string; error: string }> = [];
+    let seat: ClaudeSeatMaterialPaths | null;
+    try { seat = this.seatMaterial(binding); } catch (err) {
+      return { delivered, failed: files.filter((f) => f.required).map((f) => ({ path: f.path, error: (err as Error).message })) };
+    }
 
     for (const file of files) {
       try {
@@ -191,13 +232,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
         switch (hint) {
           case "guidance_merge": {
-            const targetPath = nodePath.join(binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE);
+            const targetPath = seat?.guidancePath ?? nodePath.join(binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE);
             const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
           }
           case "skill_install": {
-            const targetDir = nodePath.join(binding.cwd, ".claude", "skills", nodePath.basename(nodePath.dirname(file.absolutePath)));
+            const targetDir = nodePath.join(seat?.skillsRoot ?? nodePath.join(binding.cwd, ".claude", "skills"), nodePath.basename(nodePath.dirname(file.absolutePath)));
             this.fs.mkdirp(targetDir);
             const skillTarget = nodePath.join(targetDir, nodePath.basename(file.path));
             this.fs.writeFile(skillTarget, content);
@@ -260,7 +301,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(posture);
-    const permissionMode = posture + operationalLaunchArg(this.runtime, binding);
+    let operational: string[];
+    try { operational = this.launchMaterialArgs(binding, operationalLaunchArgs(this.runtime, binding)); }
+    catch (error) { return { ok: false, error: (error as Error).message }; }
+    const permissionMode = posture + operational.map((arg) => ` ${shellQuote(arg)}`).join("");
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
     // managed launch path (fresh/resume/fork). "" when overridden off → byte-identical command.
     const rendererPrefix = claudeClassicRendererEnvPrefix(process.env);
@@ -290,7 +334,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operational, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
         "--resume", parentId, "--fork-session", "--name", opts.name])
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
@@ -323,7 +367,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operational, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
       ? `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
@@ -372,7 +416,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for tmux-bound Claude sessions adopted outside the launch path. */
-  ensureContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  ensureContextCollector(binding: { nodeId?: string | null; cwd?: string | null; tmuxSession?: string | null }): void {
     this.provisionContextCollector(binding);
   }
 
@@ -492,16 +536,21 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active" };
   }
 
-  private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[]): boolean {
-    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, cwd)) {
+  private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[], seat: ClaudeSeatMaterialPaths | null = null): boolean {
+    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, cwd, seat)) {
       return true;
     }
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = nodePath.join(cwd, managedBlockFile);
+      const targetPath = seat?.guidancePath ?? nodePath.join(cwd, managedBlockFile);
       const content = this.fs.readFile(entry.absolutePath);
       return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings);
     }
+
+    // Claude Code does not load plugin folders copied under the project, so in cwd mode a plugin
+    // reaches the seat only through the skills the loadout takes from it. A seat directory keeps
+    // that behaviour and does not carry an unread copy of the plugin.
+    if (entry.category === "plugin" && seat) return false;
 
     // HG-1.3 plugin runtime applicability filter (per DESIGN.md §5.1):
     // explicit pluginType="codex" → skip Claude projection;
@@ -511,7 +560,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return false;
     }
 
-    const targetDir = this.resolveTargetDir(entry, cwd);
+    const targetDir = this.resolveTargetDir(entry, cwd, seat);
     if (!targetDir) return true;
 
     this.fs.mkdirp(targetDir);
@@ -577,7 +626,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return this.fs.exists(nodePath.join(entry.absolutePath, ".claude-plugin", "plugin.json"));
   }
 
-  private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
+  private resolveTargetDir(entry: ProjectionEntry, cwd: string, seat: ClaudeSeatMaterialPaths | null): string | null {
+    if (seat) {
+      switch (entry.category) {
+        case "skill": return nodePath.join(seat.skillsRoot, entry.effectiveId);
+        case "subagent": return seat.agentsDir;
+        case "runtime_resource": return nodePath.join(seat.extensionsDir, entry.effectiveId);
+        default: return null;
+      }
+    }
     switch (entry.category) {
       case "skill": return nodePath.join(cwd, ".claude", "skills", entry.effectiveId);
       case "guidance": return null; // handled via merge
@@ -588,13 +645,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  private applyRuntimeResource(entry: ProjectionEntry, cwd: string): boolean {
+  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, seat: ClaudeSeatMaterialPaths | null): boolean {
     switch (entry.resourceType) {
       case "claude_settings_fragment":
-        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"));
+        this.mergeJsonFragment(entry.absolutePath, seat?.settingsPath ?? nodePath.join(cwd, ".claude", "settings.local.json"));
         return true;
       case "claude_mcp_fragment":
-        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"));
+        this.mergeJsonFragment(entry.absolutePath, seat?.mcpPath ?? nodePath.join(cwd, ".mcp.json"));
         return true;
       case "claude_activity_hooks":
         // Handled (no generic .claude/extensions copy): the relay asset is
@@ -823,20 +880,22 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *   cache for that seat is retained.
    * The read-modify-write below is not safe against a concurrent writer of the same file.
    */
-  private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
-    if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
+  private provisionContextCollector(binding: { nodeId?: string | null; cwd?: string | null; tmuxSession?: string | null }): void {
+    if (!this.stateDir || !this.collectorAssetPath) return;
+    const seat = this.seatMaterial(binding);
+    if (!seat && !binding.cwd) return;
     const contextDir = contextUsageDirectory(this.stateDir);
     const providerUsageDir = providerUsageDirectory(this.stateDir);
     this.fs.mkdirp(contextDir);
     this.fs.mkdirp(providerUsageDir);
 
-    // 1. Copy collector script to project
-    const collectorDest = nodePath.join(binding.cwd, ".openrig", "context-collector.cjs");
+    // 1. Copy collector script to project (or to the seat directory)
+    const collectorDest = seat?.collectorPath ?? nodePath.join(binding.cwd!, ".openrig", "context-collector.cjs");
     this.fs.mkdirp(nodePath.dirname(collectorDest));
     this.fs.copyFile(this.collectorAssetPath, collectorDest);
 
-    // 2. Merge status line config into .claude/settings.local.json
-    const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
+    // 2. Merge status line config into .claude/settings.local.json (or the seat's settings.json)
+    const settingsPath = seat?.settingsPath ?? nodePath.join(binding.cwd!, ".claude", "settings.local.json");
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
     // The seat cwd can be a shared repo whose project-local settings other sessions read (#421).
@@ -867,6 +926,34 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /**
+   * #875 — material a cwd-mode projection left in this checkout. A seat-mode seat does not read
+   * or remove it, but Claude Code still loads it from the cwd, so it is reported once per projection.
+   */
+  private legacyCwdMaterialWarning(cwd: string): string | null {
+    const found: string[] = [];
+    const exists = (relative: string) => this.fs.exists(nodePath.join(cwd, relative));
+    for (const relative of [".openrig/skill-loadouts/claude-code.json", ".openrig/context-collector.cjs"]) {
+      if (exists(relative)) found.push(relative);
+    }
+    for (const relative of ["CLAUDE.md", "CLAUDE.local.md"]) {
+      if (!exists(relative)) continue;
+      // A marker test, not stripManagedBlocks(text) !== text: stripping also trims and collapses blank lines.
+      if (MANAGED_BLOCK_MARKER.test(this.fs.readFile(nodePath.join(cwd, relative)))) found.push(`${relative} (OpenRig managed blocks)`);
+    }
+    const settings = this.readJsonObject(nodePath.join(cwd, ".claude", "settings.local.json"));
+    const statusCommand = this.readJsonObjectField(settings, "statusLine")["command"];
+    const hooks = this.readJsonObjectField(settings, "hooks");
+    const ownsHook = Object.values(hooks).some((groups) => Array.isArray(groups) && groups.some((group) =>
+      isPlainObject(group) && Array.isArray(group["hooks"]) && (group["hooks"] as unknown[]).some((h) => isOwnedRelayCommand(hookCommand(h)))));
+    if ((typeof statusCommand === "string" && isOwnedCollectorCommand(statusCommand)) || ownsHook) {
+      found.push(".claude/settings.local.json (OpenRig status line or activity hooks)");
+    }
+    if (found.length === 0) return null;
+    return `seat_material: seat — ${cwd} still holds material from an earlier cwd-mode projection: ${found.join(", ")}. `
+      + "It is left in place and Claude Code still loads it there; remove it once no cwd-mode seat uses this directory.";
+  }
+
+  /**
    * Reconcile the OpenRig-managed activity-relay hooks in `.claude/settings.local.json`
    * to the desired `enabled` state, driven ONCE from the always-run `project()` seam.
    *
@@ -882,10 +969,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * the path is preserved. Fail-closed: a settings file we cannot parse is left byte-for-byte
    * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
-  private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
+  private reconcileClaudeActivityHooks(settingsPath: string, enabled: boolean): ActivityHookOutcome {
     const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
     const ownedCmd = `node ${shellQuote(relayDest)}`;
-    const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
     // PREVALIDATE BEFORE ANY MUTATION using the SHARED delivery validation (same gate
     // preflight uses — one parser, no drift). Enable is deliverable ONLY when BOTH the relay
@@ -993,6 +1079,8 @@ function hookCommand(hook: unknown): string | undefined {
 // three/four-token commands too, but preserve commands composed with shell operators or
 // extra arguments. Old unquoted paths containing spaces cannot be identified unambiguously.
 const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
+// #875: a seat directory's collector, so a moved OpenRig home is still refreshed.
+const OWNED_SEAT_COLLECTOR = /\/state\/claude-seats\/[^/]+\/context-collector\.cjs$/;
 
 function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
@@ -1001,7 +1089,7 @@ function isOwnedCollectorCommand(cmd: string): boolean {
     const tokens = quoted.slice(1).filter((token): token is string => token !== undefined);
     const decoded = tokens.map(unquoteSingleShellToken);
     if (decoded.some((value, index) => value === null || shellQuote(value) !== tokens[index])) return false;
-    return decoded[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+    return decoded[0]!.endsWith(OWNED_COLLECTOR_SUFFIX) || OWNED_SEAT_COLLECTOR.test(decoded[0]!);
   }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;

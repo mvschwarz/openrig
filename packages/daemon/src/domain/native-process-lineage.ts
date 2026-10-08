@@ -131,6 +131,10 @@ function codexResumeToken(args: string[]): string | null | undefined {
   return null;
 }
 
+// #875: seat material (claude-seat-material.ts) arrives as launch-only path options.
+const CLAUDE_SEAT_MATERIAL_OPTIONS = ["--plugin-dir", "--mcp-config", "--append-system-prompt-file"];
+const CLAUDE_INLINE_LAUNCH_OPTION = /^--(?:permission-mode|model|name|settings|effort|plugin-dir|mcp-config|append-system-prompt-file)=/;
+
 // Managed fresh/resume launches name the current Claude identity explicitly.
 // A fork's --resume names its parent, so it cannot prove the new occupant.
 function claudeSessionToken(args: string[]): string | null {
@@ -138,13 +142,13 @@ function claudeSessionToken(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (arg === "--settings") {
+    if (arg === "--settings" || CLAUDE_SEAT_MATERIAL_OPTIONS.includes(arg)) {
       const value = args[++index];
       if (!value || value.startsWith("-")) return null;
       continue;
     }
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
-    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (CLAUDE_INLINE_LAUNCH_OPTION.test(arg) || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
@@ -163,12 +167,12 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name", "--settings", "--effort"].includes(arg)) {
+    if (["--permission-mode", "--model", "--name", "--settings", "--effort", ...CLAUDE_SEAT_MATERIAL_OPTIONS].includes(arg)) {
       const value = args[++index];
       if (!value || value.startsWith("-")) return unparsed;
       continue;
     }
-    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (CLAUDE_INLINE_LAUNCH_OPTION.test(arg) || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];

@@ -218,8 +218,11 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         view.posture.push({ seat, shellAccess: "Can run shell commands as the launching user, subject to runtime and host policy.", selection, basis, ...(permissionPrompts ? { permissionPrompts } : {}), ...(posture === "full_bypass" && nativePermissionSurface ? { nonInterruptive: "available" as const, ...(typeof rig.non_interruptive === "boolean" ? { nonInterruptiveDefault: rig.non_interruptive } : {}) } : {}),
           ...(posture === "full_bypass" && runtime === "claude-code" && rig.non_interruptive !== true ? { firstRunWarnings: { claudeBypass: "harness_asks_once" as const } } : {}),
           nativeEffect: "unknown", sourceRefs });
+        // #875: a seat_material: seat Claude seat writes into its OpenRig seat directory instead.
+        const seatDir = runtime === "claude-code" && text(object(rig.seat_material)["claude-code"]) === "seat";
         const managed = runtime === "claude-code" ? text(object(rig.managed_blocks)["claude-code"]) ?? "CLAUDE.md" : runtime === "codex" ? "AGENTS.md" : undefined;
-        if (managed) write(seat, "managed_guidance", "seat_cwd", managed, sourceRefs, "merge managed blocks");
+        if (seatDir) write(seat, "managed_guidance", "openrig_seat_dir", "guidance.md", sourceRefs, "merge managed blocks");
+        else if (managed) write(seat, "managed_guidance", "seat_cwd", managed, sourceRefs, "merge managed blocks");
         const startup = (block: StartupBlock | undefined, base: string, refs: SourceRef[]) => {
           for (const f of block?.files ?? []) {
             const fact = fileFact(seat, "startup", f.path, base, refs);
@@ -228,7 +231,9 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
             view.toldFiles.push(fact);
             if (fact.delivery === "skill_install" && (runtime === "claude-code" || runtime === "codex")) {
               const root = runtime === "claude-code" ? ".claude" : ".agents";
-              write(seat, "startup_skill", "seat_cwd", `${root}/skills/${path.basename(path.dirname(f.path))}/${path.basename(f.path)}`, refs);
+              const skillFile = `skills/${path.basename(path.dirname(f.path))}/${path.basename(f.path)}`;
+              if (seatDir) write(seat, "startup_skill", "openrig_seat_dir", `plugin/${skillFile}`, refs);
+              else write(seat, "startup_skill", "seat_cwd", `${root}/${skillFile}`, refs);
             }
           }
           for (const [index, action] of (block?.actions ?? []).entries()) view.alsoRuns.push({ seat, kind: `startup_${action.type}`,
@@ -278,7 +283,19 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
               else view.toldFiles.push(fact);
               if (category === "guidance") continue; // the managed destination is listed once per seat
               const root = runtime === "claude-code" ? ".claude" : runtime === "codex" ? ".agents" : undefined;
-              if (root && category === "skills") write(seat, category, "seat_cwd", `${root}/skills/${selected}`, fact.sourceRefs);
+              if (seatDir) {
+                // Plugins are not copied into a seat directory; their skills arrive through the loadout.
+                if (category === "skills") write(seat, category, "openrig_seat_dir", `plugin/skills/${selected}`, fact.sourceRefs);
+                else if (category === "subagents") write(seat, category, "openrig_seat_dir", `plugin/agents/${path.basename(ref)}`, fact.sourceRefs);
+                else if (category === "runtimeResources" && "type" in resource) {
+                  if (["claude_settings_fragment", "claude_activity_hooks"].includes(resource.type)) {
+                    write(seat, category, "openrig_seat_dir", "settings.json", fact.sourceRefs, "merge settings or managed hooks");
+                  } else if (resource.type === "claude_mcp_fragment") {
+                    write(seat, category, "openrig_seat_dir", "mcp.json", fact.sourceRefs, "merge MCP configuration fragment");
+                  } else write(seat, category, "openrig_seat_dir", `extensions/${selected}`, fact.sourceRefs);
+                }
+              }
+              else if (root && category === "skills") write(seat, category, "seat_cwd", `${root}/skills/${selected}`, fact.sourceRefs);
               else if (root && category === "plugins") write(seat, category, "seat_cwd", `${runtime === "codex" ? ".codex" : root}/plugins/${selected}`, fact.sourceRefs);
               else if (root && category === "subagents") write(seat, category, "seat_cwd", `${runtime === "claude-code" ? ".claude/agents" : ".agents"}/${path.basename(ref)}`, fact.sourceRefs);
               else if (root && category === "runtimeResources" && "type" in resource) {

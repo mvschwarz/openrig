@@ -197,6 +197,19 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
   resources → `.claude/extensions/<id>` (`:584–586`); settings fragments
   merged into `.claude/settings.local.json` (`:594`) and MCP fragments into
   `<cwd>/.mcp.json` (`:597`).
+- **Seat directory** (#875). With `seat_material: { claude-code: seat }` the
+  same material goes to `<OpenRig home>/state/claude-seats/<session>/`
+  (`domain/claude-seat-material.ts`) and nothing is written into the cwd.
+  `resolveSeatMaterial` (wired to `RigRepository.getClaudeSeatMaterialForSeat`)
+  decides per seat by node id or session name, so launch, resume, fork,
+  restore, handover and the context monitor agree. `launchMaterialArgs` adds
+  `--plugin-dir`, `--mcp-config` and `--append-system-prompt-file` and replaces
+  the operational `--settings` with one merged `launch-settings.json`, because
+  Claude Code keeps only the last `--settings`; `claude-resume.ts` calls the
+  same method. Plugins are not copied; the skill loadout writes into the seat
+  plugin with `openrig:<id>` names (`SkillLoadoutLocation` in
+  `skill-catalog.ts`). `native-process-lineage.ts` accepts the three path
+  options as identity-neutral.
 - **Launches**: fresh = `claude <posture> --session-id <generatedId> --name
   <name>` (`:329`); resume = `claude <posture> --resume <token> --name <name>`
   (`:328`); fork = `claude <posture> --resume <parentId> --fork-session --name

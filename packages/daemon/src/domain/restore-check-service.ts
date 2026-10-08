@@ -222,6 +222,8 @@ export interface RestoreCheckDeps {
   stateDir?: string;
   /** Relay-backed Claude hook events derived from the shipped hook manifest. */
   getClaudeActivityHookEvents?: () => string[];
+  /** #875 — the seat directory's settings file for a `seat_material: seat` seat, else null. */
+  claudeSeatSettingsPath?: (seat: { nodeId?: string | null; sessionName: string }) => string | null;
 }
 
 interface RigRollupInput {
@@ -1060,7 +1062,8 @@ export class RestoreCheckService {
       };
     }
     if (startup?.status === "ok") {
-      if (!node.cwd) {
+      const seatSettingsPath = this.deps.claudeSeatSettingsPath?.({ nodeId: node.nodeId, sessionName: session }) ?? null;
+      if (!seatSettingsPath && !node.cwd) {
         return {
           check: `seat.${session}.hooks`, status: "yellow",
           evidence: "Claude activity hooks are selected, but seat cwd is unavailable for delivery inspection",
@@ -1068,7 +1071,7 @@ export class RestoreCheckService {
           remediationSafe: false,
         };
       }
-      const settingsPath = join(node.cwd, ".claude", "settings.local.json");
+      const settingsPath = seatSettingsPath ?? join(node.cwd!, ".claude", "settings.local.json");
       const relayPath = claudeActivityRelayPath(this.deps.stateDir);
       const events = this.deps.getClaudeActivityHookEvents?.() ?? [];
       if (events.length === 0) {

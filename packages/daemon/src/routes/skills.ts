@@ -162,7 +162,10 @@ export function skillsRoutes(): Hono {
     const pluginsDir = c.get("pluginsDir" as never) as string | undefined ?? getDefaultOpenRigPath("plugins");
     const mirrorRepoRoot = c.get("mirrorRepoRoot" as never) as string | undefined;
 
-    const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd });
+    const { listClaudeSeatSkillRoots } = await import("../domain/claude-seat-material.js");
+    const { getOpenRigHome } = await import("../openrig-compat.js");
+    const seatSkillRoots = listClaudeSeatSkillRoots(getOpenRigHome(), (dir) => fs.readdirSync(dir));
+    const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd, seatSkillRoots });
     const codexResult = discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
 
     const seenPaths = new Set<string>();

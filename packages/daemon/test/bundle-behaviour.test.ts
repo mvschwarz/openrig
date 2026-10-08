@@ -32,6 +32,19 @@ describe("archive-only bundle behaviour", () => {
     expect(view.identity.generator).toEqual(generator);
   });
 
+  it("#875: reports a seat_material: seat Claude seat's writes in its OpenRig seat directory, none in its cwd", () => {
+    const files = fixture();
+    files.set("rig.yaml", files.get("rig.yaml")!.replace("managed_blocks: {claude-code: CLAUDE.local.md}", "seat_material: {claude-code: seat}"));
+    const view = inspect(files);
+    if (view.state !== "generated") throw new Error(view.reason);
+    const seatWrites = view.writes.filter((write) => write.seat === "build.worker");
+    expect(seatWrites.filter((write) => write.destinationBase === "seat_cwd")).toEqual([]);
+    expect(seatWrites).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "guidance.md", destinationBase: "openrig_seat_dir" }),
+      expect.objectContaining({ path: "extensions/hooks", destinationBase: "openrig_seat_dir" }),
+    ]));
+  });
+
   it("reports literal URL domains without credentials or inferred traffic", () => {
     const view = inspect();
     expect(view.state === "generated" && view.outsideAddresses).toEqual([
