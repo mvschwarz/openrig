@@ -154,8 +154,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   channel, run `rig slack verify`, and rewire the connector (`rig slack disable` then `enable`, or
   restart the daemon). An emoji reaction on any message posted for an ask reaches the asking seat
   as a task tagged `human-reaction`: a signal to interpret, not an answer, and the ask stays open.
-  It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app), and
-  `rig slack verify` warns without them. A long ask is posted in numbered thread parts; one that
+  It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
+  `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
   sent with “Also send to #channel” reach the seat like any other thread reply.
 
@@ -378,9 +378,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
 - **`rig doctor`** — is the *installation* wired up correctly, or are you chasing a bug that is
-  really a broken install. It checks Claude and Codex installs and logins the way setup does, and
-  it fails for a harness the person doesn't use, which they can ignore. A pass is not "ready": a
-  login is not proof that a provider accepts the credential or that an agent can work.
+  really a broken install. It checks Claude and Codex installs, and a login or configured provider
+  credential, the way setup does; it fails for a harness the person doesn't use, which they can
+  ignore. A pass is not "ready": local credential availability is not proof that a provider accepts
+  the credential or that an agent can work.
   **`rig preflight`** asks whether this machine can run OpenRig at all.
 - **Bare `rig`** — the same TUI for first setup, daemon-down startup and ordinary work.
   After a successful daemon read it opens the ordinary work views, even when no rig is running;
@@ -556,7 +557,8 @@ scheme, and nothing downstream can see it.
   pack created after the daemon started; a daemon restart is no longer needed.
 - **`rig context add <repository-path-or-URL> --git`** — select a pack while retaining its Git
   source and checkout; `--pack <path>` chooses a repository-relative pack. It starts a stopped
-  local daemon itself, and the checkout holds one commit, not the whole history. Inspect that relationship
+  local daemon itself. Initial retrieval is shallow by default; a server that refuses shallow
+  retrieval falls back to a full clone with a warning. Inspect that relationship
   with **`rig context source inspect <ref>`**; it does not fetch or prove agent consumption.
   **`rig context source update <ref>`** explicitly fetches and merges, preserving committed local
   authorship before selecting clean content. Dirty work, conflicts, unavailable upstreams and
