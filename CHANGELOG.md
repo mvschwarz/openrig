@@ -59,7 +59,7 @@ could never finish is caught at validate. It is built from the commit tagged
 - Finish the CLI and TUI build output with `scripts/prepare-workspace-build.mjs`
   instead of `chmod`, `mkdir` and `cp`, so building from source no longer needs
   POSIX shell tools; not yet run on Windows. Originally contributed by
-  @dajiaohuang in [#956](https://github.com/mvschwarz/openrig/pull/956) ([#1033](https://github.com/mvschwarz/openrig/pull/1033)).
+  @dajiaohuang in #956 ([#1033](https://github.com/mvschwarz/openrig/pull/1033)).
 
 ### Launch, seats, queue and scope
 
