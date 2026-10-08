@@ -194,8 +194,26 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     }
   }
 
+  // S04 — compose independently-selected managed skills around the existing
+  // topology selector (profile.uses.skills). System comes from catalog.yaml;
+  // project comes from project.yaml install.skills. Topology resources that
+  // are not catalog-managed retain the established AgentSpec/local behavior.
+  const catalogRoot = ctx.skillsRoot ?? nodePath.join(ctx.homedir ?? osHomedir(), ".openrig", "skills");
+  const catalogResult = resolveSkillLoadout({
+    catalogRoot,
+    ...(ctx.systemSkills !== undefined ? { systemSkills: ctx.systemSkills } : {}),
+    topologySkills: profile.uses.skills,
+    projectRoot: cwd,
+    allowMissingTopology: true,
+  });
+  // Discovery reads only the working tree, so it can't find a catalog skill whose folder or SKILL.md was deleted or
+  // whose name was edited. A profile skill the catalog skipped for uncommitted content is named below, not missing.
+  const skippedTopology = new Set(catalogResult.ok
+    ? (catalogResult.loadout.skipped ?? []).filter((skip) => skip.selectedBy.includes("topology")).map((skip) => skip.id)
+    : []);
+
   // 3. Resolve profile uses against the augmented pool
-  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
+  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors, skippedTopology);
   if (errors.length > 0) {
     // Augment "skills: \"<id>\" not found in resource pool" errors
     // with the structural-rejection reason when the basename matches
@@ -212,31 +230,25 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     return { ok: false, errors: enhanced };
   }
 
-  // S04 — compose independently-selected managed skills around the existing
-  // topology selector (profile.uses.skills). System comes from catalog.yaml;
-  // project comes from project.yaml install.skills. Topology resources that
-  // are not catalog-managed retain the established AgentSpec/local behavior.
-  const catalogRoot = ctx.skillsRoot ?? nodePath.join(ctx.homedir ?? osHomedir(), ".openrig", "skills");
-  const catalogResult = resolveSkillLoadout({
-    catalogRoot,
-    ...(ctx.systemSkills !== undefined ? { systemSkills: ctx.systemSkills } : {}),
-    topologySkills: profile.uses.skills,
-    projectRoot: cwd,
-    allowMissingTopology: true,
-  });
   if (!catalogResult.ok) {
     return { ok: false, errors: catalogResult.errors.map((error) => `${error.code}: ${error.message}`) };
   }
-  const skillWarnings: string[] = (catalogResult.loadout.skipped ?? []).map((skip) => skip.message);
-  // Filesystem discovery scans the catalog's working tree too, so a skipped skill would still reach the adapter
-  // through the profile's selection. Drop a selection that resolves into a skipped folder; one from another source,
-  // such as a rig bundle, keeps that source.
-  const skippedDirs = new Set((catalogResult.loadout.skipped ?? []).map((skip) => realDir(skip.sourceDir)));
-  for (let i = selectedResult!.skills.length - 1; i >= 0 && skippedDirs.size > 0; i--) {
+  const skips = catalogResult.loadout.skipped ?? [];
+  const skillWarnings: string[] = skips.map((skip) => skip.message);
+  // Filesystem discovery scans the catalog's working tree too, and a profile may declare a source inside a catalog
+  // folder, so a skipped folder's bytes could still reach the adapter through the profile's selection. Drop a
+  // selection whose source is a skipped folder or inside one; a source elsewhere, such as a rig bundle, keeps it.
+  const skippedDirs = skips.map((skip) => ({ real: realDir(skip.sourceDir), dir: skip.sourceDir }));
+  for (let i = selectedResult!.skills.length - 1; i >= 0 && skippedDirs.length > 0; i--) {
     const entry = selectedResult!.skills[i]!;
     const resource = entry.resource as SkillResource;
-    const source = nodePath.isAbsolute(resource.path) ? resource.path : nodePath.resolve(entry.sourcePath, resource.path);
-    if (skippedDirs.has(realDir(source))) selectedResult!.skills.splice(i, 1);
+    const source = realDir(nodePath.isAbsolute(resource.path) ? resource.path : nodePath.resolve(entry.sourcePath, resource.path));
+    const skipped = skippedDirs.find(({ real }) => source === real || isWithin(real, source));
+    if (!skipped) continue;
+    selectedResult!.skills.splice(i, 1);
+    if (!skips.some((skip) => skip.id === entry.effectiveId && skip.selectedBy.length > 0)) {
+      skillWarnings.push(`selected_skill_skipped: '${entry.effectiveId}' (selected by topology) is inside ${skipped.dir}, which has uncommitted content; a copy already projected is kept as it was, and the new content is not projected until it is committed or restored`);
+    }
   }
   for (const managed of catalogResult.loadout.entries) {
     const qualified: QualifiedResource = {
@@ -381,6 +393,12 @@ function realDir(path: string): string {
   }
 }
 
+/** True when `child` is strictly inside `root`; `root-other` beside `root` is not. */
+function isWithin(root: string, child: string): boolean {
+  const rel = nodePath.relative(root, child);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(rel);
+}
+
 /** Only profile-selected resources reach this check. Ambient cwd/home discovery
  * does not gain precedence merely because a profile mentions its identity. */
 function selectedBundleRoot(ctx: ResolutionContext, entry: QualifiedResource, source: string): string | null {
@@ -468,6 +486,8 @@ function resolveProfileUses(
   pool: ResourcePool,
   baseSpecName: string,
   errors: string[],
+  /** Skill references the managed catalog skipped for uncommitted content: reported there, never missing here. */
+  skippedSkills: ReadonlySet<string> = new Set(),
 ): ResolvedResources | null {
   const result: ResolvedResources = {
     skills: [],
@@ -490,6 +510,7 @@ function resolveProfileUses(
     for (const ref of refs) {
       const entries = pool[cat].get(ref);
       if (!entries || entries.length === 0) {
+        if (cat === "skills" && skippedSkills.has(ref)) continue;
         errors.push(`Profile uses ${cat}: "${ref}" not found in resource pool`);
         continue;
       }
