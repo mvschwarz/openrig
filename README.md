@@ -326,7 +326,7 @@ With herdr installed and connected, open the starter's terminals together:
 rig terminal open starter --provider herdr
 ```
 
-For cmux, use `--provider cmux`. In the TUI, a rig's detail view has an `Open terminals ▸ rig <name>` link that opens the running seats of that rig in a new terminal window, using herdr when installed, otherwise plain tmux; with herdr that is up to 16 seats per tab, in a workspace named after the rig. A seat it can't attach is reported as absent or degraded. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
+For cmux, use `--provider cmux`. In the TUI, a rig's detail view has an `Open terminals ▸ rig <name>` link that opens a terminal view of the running seats of that rig (in a new window or tab, or the current Herdr session), laid out with herdr when installed, otherwise plain tmux; with herdr that is up to 16 seats per tab, in a workspace named after the rig. A seat it can't attach is reported as absent or degraded. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
 
 ## Key Concepts
 
