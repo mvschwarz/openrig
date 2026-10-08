@@ -517,7 +517,12 @@ export function withSliceCreationGuard<T>(missionAbsPath: string, create: () => 
   try {
     return create();
   } finally {
-    fs.rmdirSync(guard);
+    try {
+      fs.rmdirSync(guard);
+    } catch (releaseError) {
+      const detail = releaseError instanceof Error ? releaseError.message : String(releaseError);
+      process.stderr.write(`Warning: could not remove slice creation guard ${guard}: ${detail}. Inspect the guard before retrying.\n`);
+    }
   }
 }
 

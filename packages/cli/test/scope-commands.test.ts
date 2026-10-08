@@ -13,7 +13,7 @@ import { Command } from "commander";
 import YAML from "yaml";
 
 import { scopeCommand } from "../src/commands/scope.js";
-import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
+import { readFrontmatter, withSliceCreationGuard } from "../src/lib/scope/scope-fs.js";
 
 function mktemp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "rig-scope-cmd-"));
@@ -237,6 +237,60 @@ describe("rig scope slice create", () => {
       return { exitCode: failure.code, stdout: failure.stdout, stderr: failure.stderr };
     }
   }
+
+  it("preserves a successful result when the creation guard cannot be removed", () => {
+    const mission = path.join(env.missionsRoot, "release-0.3.2");
+    const guard = path.join(mission, ".openrig-slice-create-lock");
+    const retained = path.join(guard, "inspection-required");
+    const result = { id: "successful-result" };
+    const warning = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(withSliceCreationGuard(mission, () => {
+        fs.writeFileSync(retained, "inspect these bytes\n");
+        return result;
+      })).toBe(result);
+      expect(fs.readFileSync(retained, "utf8")).toBe("inspect these bytes\n");
+      const stderr = warning.mock.calls.map(([chunk]) => String(chunk)).join("");
+      expect(stderr).toContain(guard);
+      expect(stderr).toContain("ENOTEMPTY");
+      expect(stderr).toMatch(/inspect/i);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("preserves the original filesystem error when guard removal also fails", () => {
+    const mission = path.join(env.missionsRoot, "release-0.3.2");
+    const guard = path.join(mission, ".openrig-slice-create-lock");
+    const retained = path.join(guard, "inspection-required");
+    let originalError: unknown;
+    let caught: unknown;
+    const warning = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      try {
+        withSliceCreationGuard(mission, () => {
+          fs.writeFileSync(retained, "inspect these bytes\n");
+          try {
+            fs.readFileSync(path.join(mission, "missing-input"));
+          } catch (error) {
+            originalError = error;
+            throw error;
+          }
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(originalError).toMatchObject({ code: "ENOENT" });
+      expect(caught).toBe(originalError);
+      expect(fs.readFileSync(retained, "utf8")).toBe("inspect these bytes\n");
+      const stderr = warning.mock.calls.map(([chunk]) => String(chunk)).join("");
+      expect(stderr).toContain(guard);
+      expect(stderr).toContain("ENOTEMPTY");
+      expect(stderr).toMatch(/inspect/i);
+    } finally {
+      warning.mockRestore();
+    }
+  });
 
   it("refuses an overlapping create without changing its guard or mission", async () => {
     const mission = path.join(env.missionsRoot, "release-0.3.2");
