@@ -26,22 +26,27 @@ could never finish is caught at validate. It is built from the commit tagged
   ([#1020](https://github.com/mvschwarz/openrig/pull/1020)). Move the selection down and up with `j` and `k` on an empty
   line ([#1019](https://github.com/mvschwarz/openrig/pull/1019)).
 - Report `step_cannot_finish` from `rig workflow validate`, and refuse to
-  instantiate, for a step whose allowed exits leave out `done` and whose handoff
-  has no next step. A spec that validated on 0.6.7 can be refused now ([#1012](https://github.com/mvschwarz/openrig/pull/1012)).
-- Exit 1 from `rig context work-install` and `rig skill loadout` when a
-  selected skill was skipped for uncommitted catalog content, after projecting
-  the rest ([#1031](https://github.com/mvschwarz/openrig/pull/1031)).
+  instantiate, when no allowed exit can finish a step or route onward. An
+  allowed mapped exit is valid; in a dependency graph, `handoff` can finish a
+  sink without a next step. A spec that validated on 0.6.7 can be refused now
+  ([#1012](https://github.com/mvschwarz/openrig/pull/1012)).
+- Report a selected skill skipped for uncommitted catalog content with exit 1
+  from `rig context work-install --runtime <runtime>` and `rig skill loadout
+  --runtime <runtime>`. Inspection is the default; applying with
+  `--apply-skills` or `--apply`, respectively, still reconciles the remaining
+  clean skills ([#1031](https://github.com/mvschwarz/openrig/pull/1031)).
 - Refuse `rig launch --plan` against a daemon older than 0.5.9, which would
   ignore the plan and launch ([#1024](https://github.com/mvschwarz/openrig/pull/1024)).
 
 ### Highlights
 
 - Skip a managed catalog skill with uncommitted or untracked content by itself,
-  with a named warning, instead of making the whole catalog unavailable for
-  `rig context work-install`, `rig up`, launch and restore preflight. A seat
-  keeps the copy it already has until the change is committed, no runtime gets
-  the uncommitted files, and launch only warns. Uncommitted `catalog.yaml`
-  still makes the catalog unavailable ([#1031](https://github.com/mvschwarz/openrig/pull/1031)).
+  with a named warning, instead of making the whole catalog unavailable for `rig
+  context work-install`, `rig up`, launch and restore preflight. A seat keeps
+  the copy it already has until the catalog change is committed or restored and
+  a later applied projection refreshes it, no runtime gets the uncommitted
+  files, and launch only warns. Uncommitted `catalog.yaml` still makes the
+  catalog unavailable ([#1031](https://github.com/mvschwarz/openrig/pull/1031)).
 - Preview a single seat's launch with `rig launch <rig> <seat> --plan`, locally
   or over `--host` ([#1023](https://github.com/mvschwarz/openrig/pull/1023)). Read the daemon's version before any plan, and
   exit non-zero, naming `rig ps --nodes -A`, when an answer isn't a plan but

@@ -226,9 +226,10 @@ relay is a reason to inspect the available routing, not to surrender judgment to
 
 - **`rig workflow specs`** — what can be started here, and which are shipped versus authored by
   this rig.
-- **`rig workflow validate`** — will this spec instantiate at all, before a run finds out for you.
-  A step that can never finish (its allowed exits leave out `done` and its handoff has no next
-  step) is reported as `step_cannot_finish`, and such a spec can't be instantiated.
+- **`rig workflow validate`** — will this spec instantiate at all, before a run finds out for you. A
+  step with no allowed exit that can finish it or route onward is reported as `step_cannot_finish`.
+  An allowed mapped exit is valid; in a dependency graph, `handoff` can finish a sink without a next
+  step.
 - **`rig workflow compile <mission>`** / **`instantiate-lifecycle`** — derive one executable graph
   from `project.yaml` → `mission.yaml` → `slice.yaml`, inspect it without writing, then start an
   eligible graph with an opaque replay key. Typed acceptance candidate, verdict, and evidence
@@ -559,11 +560,12 @@ scheme, and nothing downstream can see it.
   require `--project`. World packs named in `project.yaml`'s `install.worlds`
   are listed after the System World; read each with `rig context get <ref>`.
   `context profile` and `context work-install` both accept `--runtime claude-code` (alias
-  `claude`) or `codex`; explicit invalid values refuse before projection. This does not rename
-  every other command's runtime vocabulary. A catalog skill with uncommitted content blocks only
-  itself: it is skipped and named (`catalog_skill_skipped`, or `selected_skill_skipped` with its
-  selector), every other skill projects, a seat keeps the copy it already has, and the command
-  exits 1 when a selected skill was skipped. Commit or restore that skill's folder, then rerun.
+  `claude`) or `codex`; explicit invalid values refuse before projection. This does not rename every
+  other command's runtime vocabulary. A catalog skill with uncommitted content blocks only itself:
+  it is skipped and named (`catalog_skill_skipped`, or `selected_skill_skipped` with its selector).
+  With `--runtime`, work-install reports selected skips with exit 1. It inspects by default;
+  `--apply-skills` projects the remaining clean skills while keeping any previously projected copy
+  of the skipped skill. Commit or restore that skill's folder, then apply the projection again.
 - **`rig context show` / `sync` / `rm`** — what is inside a context pack before you prime a seat
   with it, and how to make the library catch up when you edit one. `sync` also finds a workspace
   pack created after the daemon started; a daemon restart is no longer needed.

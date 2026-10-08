@@ -10,16 +10,19 @@ after an upgrade it can still hold the previous version's note.
 ## Skills from the managed catalog
 
 - **A skill with uncommitted changes in the catalog now blocks only itself.** Before, one edited skill made the whole
-  catalog unavailable, so `rig context work-install`, `rig up`, launch and restore preflight failed for every seat. Now
-  that skill is skipped and named, and every other skill projects as before.
+  catalog unavailable to work-install, launch and restore preflight. Now that skill is skipped and named, and the
+  remaining clean skills stay available for projection.
 - **Read the warning, don't retry.** `catalog_skill_skipped` names a skill nobody selected; `selected_skill_skipped`
   names the selector and the folder. The fix is to commit or restore that folder's content in the catalog, then run the
   projection again.
-- **`rig context work-install` and `rig skill loadout` exit 1 when a selected skill was skipped,** after projecting the
-  rest. A non-zero exit there isn't a total failure: read the warnings. With `--json`, the skipped skills are in
-  `skillLoadout.skipped` (or `loadout.skipped`).
-- **A seat keeps the copy it already has** of a skipped skill, unchanged, and gets the new version once the change is
-  committed. No seat receives a skipped skill's uncommitted files, and a launch only warns.
+- **A selected skipped skill makes the inspection commands exit 1.** `rig context work-install --runtime <runtime>`
+  and `rig skill loadout --runtime <runtime>` inspect by default. Use `--apply-skills` with work-install or `--apply`
+  with skill loadout to project the remaining clean skills. Read the warnings and projection result; exit 1 alone does
+  not say whether files were changed. With `--json`, skipped skills are in `skillLoadout.skipped` or
+  `loadout.skipped`, respectively.
+- **A seat keeps the copy it already has** of a skipped skill, unchanged. After the catalog change is committed or
+  restored, the next applied projection can refresh it. No seat receives the skipped skill's uncommitted files, and
+  launch only warns about the skip.
 - **An uncommitted `catalog.yaml` still makes the whole catalog unavailable,** because it changes every selection.
 
 ## Launch plans
@@ -46,9 +49,10 @@ after an upgrade it can still hold the previous version's note.
 
 ## Workflows
 
-- **Validate before you run.** `rig workflow validate` now reports `step_cannot_finish` for a step whose allowed exits
-  leave out `done` and whose handoff has no next step, and such a workflow can't be instantiated. Add `done` to the
-  step's exits, or give it a next step. A spec that validated on 0.6.7 may need that fix.
+- **Validate before you run.** `rig workflow validate` reports `step_cannot_finish` when no allowed exit can finish a
+  step or route onward, and such a workflow cannot be instantiated. Allow `done` or an exit with a route onward. In a
+  dependency graph, `handoff` can also finish a sink without a next step. A spec that validated on 0.6.7 may need a
+  correction.
 
 ## The TUI
 
@@ -72,8 +76,9 @@ after an upgrade it can still hold the previous version's note.
 
 ## What to stop doing
 
-- **Stop treating every non-zero exit from `rig context work-install` as a failed install.** Read the skipped-skill
-  warnings; the clean skills were projected.
+- **Stop treating a non-zero work-install exit as proof that nothing changed.** Read the skipped-skill warnings and
+  projection result. Inspection alone changes no skill files; an applied projection can update clean skills while
+  reporting a skipped one.
 - **Stop scripting around the TUI's single-letter keys.** Type the command whole.
 - **Stop assuming a workflow that validated on 0.6.7 can finish.** Validate it again on 0.6.8.
 
