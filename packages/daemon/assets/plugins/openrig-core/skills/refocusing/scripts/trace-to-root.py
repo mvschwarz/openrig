@@ -294,7 +294,7 @@ def main():
         else:
             start = Path(args.topology_start) if args.topology_start else derive_topology_start(root)
             sections.append(render_topology(start, root, args.depth, failures) if start else
-                            gap("## TOPOLOGY TRACE\nTRACE GAP — current topology node is unresolved; set OPENRIG_REFOCUS_TOPOLOGY_NODE"))
+                            gap("## TOPOLOGY TRACE\nTRACE GAP — current topology node is unresolved; pass --topology-start with a literal absolute path (or configure OPENRIG_REFOCUS_TOPOLOGY_NODE separately)"))
 
     if args.trees in {"work", "both"}:
         root = configured_root("workspace.root", "OPENRIG_WORKSPACE_ROOT")
@@ -317,7 +317,7 @@ def main():
             else:
                 start = derive_work_start(root)
                 sections.append(render_work(start, root, args.depth, failures) if start else
-                                gap("## WORK TRACE\nTRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE"))
+                                gap("## WORK TRACE\nTRACE GAP — current work node is unresolved; pass --work-start with a literal absolute path (or configure OPENRIG_REFOCUS_WORK_NODE separately)"))
 
     print("\n\n".join(sections))
     return 1 if args.check and failures else 0

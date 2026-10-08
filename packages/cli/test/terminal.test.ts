@@ -68,16 +68,24 @@ describe("rig terminal CLI", () => {
   });
 
   it("--window uses local desktop handling and reports a headless refusal without a provider POST", async () => {
-    const { deps, calls } = makeDeps();
+    const previewPath = "/api/terminal/preview?view=saved%3Akernel&provider=herdr";
+    const pane = { seat: "operator", label: "operator", paneCommand: "tmux attach-session -t '=operator'" };
+    const { deps, calls } = makeDeps({ routes: { [`GET ${previewPath}`]: { status: 200, data: {
+      planId: "headless-plan", status: {}, composed: { opened: [pane], pages: [[pane]], absent: [], degraded: [] },
+    } } } });
     const factory = deps.clientFactory;
     deps.clientFactory = url => Object.assign(factory(url), { baseUrl: "http://localhost:7433" });
-    deps.windowDeps = { platform: "linux", env: {}, exists: () => false, exec: vi.fn(), launch: vi.fn(), sleep: vi.fn(), id: () => "unused" };
+    deps.windowDeps = { platform: "linux", env: {}, exists: () => false, exec: vi.fn(async () => { throw new Error("not installed"); }), launch: vi.fn(), sleep: vi.fn(), id: () => "unused" };
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
     await program.parseAsync(["node", "rig", "terminal", "open", "saved:kernel", "--window", "--json"]);
     expect(process.exitCode).toBe(1);
-    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, opened: [], code: "terminal_window_failed" });
-    expect(calls).toHaveLength(0);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, opened: [], code: "terminal_window_failed", windowAttempted: false });
+    expect(JSON.parse(logs[0]!).error).toContain("run: env -u TMUX tmux attach-session -t '=operator'");
+    expect(calls).toEqual([{ method: "GET", path: previewPath }]);
+    expect(calls.some(call => call.method === "POST")).toBe(false);
+    expect(deps.windowDeps.launch).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.windowDeps.exec).mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/usr/bin/open")).toBe(false);
   });
 
   it("open POSTs /api/terminal/open with view + provider", async () => {

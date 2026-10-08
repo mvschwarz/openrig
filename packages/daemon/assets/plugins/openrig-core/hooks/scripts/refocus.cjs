@@ -239,7 +239,12 @@ function renderTrace() {
 
   // The acknowledgement is never an actionable restore turn. The managed
   // marker below also holds earlier/later peer messages, not just this prompt.
-  const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  const rawPrompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  // Claude can wrap a complete submitted message as pasted content. Unwrap only
+  // that envelope; a peer quoting a restore request is still an ordinary prompt.
+  const prompt = harness === "claude"
+    ? (rawPrompt.match(/^<pasted_content id="([^"]+)">\s*([\s\S]*)\s*<\/pasted_content id="\1">$/)?.[2]?.trim() ?? rawPrompt)
+    : rawPrompt;
   if (event === "UserPromptSubmit" && prompt.startsWith("OpenRig post-compaction turn boundary.")) process.exit(0);
 
   // Fresh-session orientation is the default onboarding pack's job. Even a manually invoked hook must

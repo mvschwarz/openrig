@@ -74,5 +74,5 @@ export class PageRead {
 export function pageReadKey(s: ViewState): string {
   return JSON.stringify([s.section, s.viewTab, s.drill, s.project, s.scopesMission,
     s.scopesSelected, s.executionOpen, s.file && [s.file.root, s.file.path],
-    s.externalUrl, s.terminalView, s.attentionOpen]);
+    s.externalUrl, s.terminalView, s.attentionOpen, s.pendingDrill]);
 }

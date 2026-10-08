@@ -700,8 +700,8 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
     expect(send.mock.calls[2]![1]).not.toContain("refocusing");
     expect(send.mock.calls[3]![1]).toContain("/tmp/openrig-test-home/plugins/openrig-core/skills/refocusing/SKILL.md");
-    expect(send.mock.calls[3]![1]).toContain("run its topology and work traces");
-    expect(send.mock.calls[4]![1]).toContain("if the traces did not run during restore, run them now");
+    expect(send.mock.calls[3]![1]).toContain("consume the current topology and work traces delivered with this restore request");
+    expect(send.mock.calls[4]![1]).toContain("If no current trace arrived, report that delivery gap");
   });
 
   it("post-compact restore prompt carries the configured operator restore instruction", async () => {

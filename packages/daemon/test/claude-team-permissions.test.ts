@@ -5,7 +5,7 @@ import { mkdtempSync, copyFileSync, rmSync, readFileSync, existsSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
+import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK, operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 
 const asset = fileURLToPath(new URL("../assets/claude-team-permissions.cjs", import.meta.url));
@@ -14,6 +14,48 @@ const policy = { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
 vi.mock("node:fs", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs")>();
   return { ...original, existsSync: vi.fn(original.existsSync) };
+});
+
+describe("Claude kernel inspection permissions", () => {
+  // Exercise the actual session hook emitted by the launcher. These are inert
+  // hook inputs: no command, network request, provider or rig is executed.
+  it.each([
+    "curl -fsSL https://example.com/rigs/demo -o /tmp/page.html",
+    "/usr/bin/grep -o title /tmp/page.html", "sort -u /tmp/links", "wc -c /tmp/page.html",
+    "python3 -I -c 'import sys; print(open(sys.argv[1]).read())' /tmp/page.html",
+    "'/opt/my tools/python3' -I -c 'print(1)'", "command -v codex", "/usr/bin/command -v claude",
+    "claude auth status", "'/opt/my tools/claude' auth status", "/opt/tools/codex login status",
+    "cd /project", "echo ---", "printf '%s\\n' ready",
+    "git -C /project status --porcelain", "rig up demo --cwd /project --target /rigs/demo --plan",
+    "'/opt/my tools/rig' up demo --plan", "env OPENRIG_PORT=7434 /opt/tools/rig ps --json",
+  ])("allows a routine inspection command: %s", command => {
+    const settings = JSON.parse(operationalLaunchArgs("claude-code", { kernelAuthority: true })[1]);
+    const hook = settings.hooks.PreToolUse[0].hooks[0];
+    const result = spawnSync("/bin/sh", ["-c", hook.command], {
+      input: JSON.stringify({ tool_name: "Bash", tool_input: { command }, permission_mode: "acceptEdits" }), encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ hookSpecificOutput: {
+      hookEventName: "PreToolUse", permissionDecision: "allow",
+    } });
+  });
+
+  it("keeps kernel lifecycle authority distinct from team asks, with no blanket shell grant", () => {
+    const kernel = { allow: KERNEL_CLAUDE_ALLOW, ask: [] };
+    expect(decide("rig down demo", kernel)).toBe("allow");
+    expect(decide("rig down demo", policy)).toBe("ask");
+    for (const command of ["claude auth login", "codex login", "command -v codex", "python3 -I -c 'print(1)'"])
+      expect(decide(command, policy)).toBeUndefined();
+    for (const command of ["claude auth login", "codex login", "sudo rig status", "./rig status",
+      "PATH=/tmp rig status", "curl https://example.com | unknown-command", "rig status > /tmp/result"])
+      expect(decide(command, kernel)).toBeUndefined();
+  });
+
+  it("keeps native kernel allowances when the optional hook is absent", () => {
+    vi.mocked(existsSync).mockReturnValueOnce(false);
+    expect(JSON.parse(operationalLaunchArgs("claude-code", { kernelAuthority: true })[1]))
+      .toEqual({ permissions: { allow: KERNEL_CLAUDE_ALLOW } });
+  });
 });
 
 describe("Claude team command permissions", () => {

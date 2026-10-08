@@ -243,6 +243,14 @@ export function bundleIdentityLines(data: Record<string, unknown>): string[] {
   return lines;
 }
 
+/** The rig's own name from rig.yaml, which names a bundle unless --name says otherwise. */
+export function rigSpecName(specPath: string): string | undefined {
+  try {
+    const name = (parseYaml(readFileSync(specPath, "utf8")) as { name?: unknown } | null)?.name;
+    return typeof name === "string" && name ? name : undefined;
+  } catch { return undefined; }
+}
+
 export interface BundleLinkOptions {
   host?: string;
   output?: string;
@@ -266,6 +274,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
   const prepared = await prepare(input);
   let folder = prepared.folder;
   let specPath = path.join(folder, "rig.yaml");
+  const bundleName = opts.name ?? rigSpecName(specPath) ?? "github-bundle";
   let configuration: { id: string; preset?: string } | undefined;
   let configurationStaging: string | undefined;
   let compatibility: Record<string, string>;
@@ -299,7 +308,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
   try {
     res = await client.post<Record<string, unknown>>("/api/bundles/create", {
       specPath, rigRoot: folder, outputPath: bundlePath,
-      bundleName: opts.name ?? "github-bundle", bundleVersion: opts.bundleVersion ?? "0.1.0",
+      bundleName, bundleVersion: opts.bundleVersion ?? "0.1.0",
       includePackages: opts.includePackages,
       ...(opts.projectDir ? { projectDir: path.resolve(opts.projectDir) } : {}),
       ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map(dir => path.resolve(dir)) } : {}),

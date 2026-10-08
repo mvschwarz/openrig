@@ -338,6 +338,11 @@ function agentDetailLines(
   ];
 }
 
+function pendingTag(state: ViewState): string {
+  const pending = state.pendingDrill;
+  return pending ? `  ▸ resolving ${pending.resource} "${pending.name}"…` : "";
+}
+
 function tabsLine(state: ViewState, suffix: string): ContentLine[] {
   // Each topology tab is its own click zone (the first zone starts at
   // content col 0, preserving the focus-marker floor); `tab graph` = the
@@ -1467,7 +1472,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   const loadTag = loading ? `  ${frame} loading` : "";
   lines.push(
     pad(
-      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}${loadTag}${state.timeZoneWarning ? " · ⚠ timezone; run timezone" : ""}`,
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${pendingTag(state)}${readWarn}${loadTag}${state.timeZoneWarning ? " · ⚠ timezone; run timezone" : ""}`,
       cols,
     ),
   );
@@ -1823,7 +1828,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   lines.push(pad(fullReading ? "↑↓ scroll / links · → links · Enter open · Esc Back · refresh · v copy" : keybindHints(state), cols));
   lines.push(
     pad(
-      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${noticeDetail ? "  ▸ action result above" : state.notice ? "  ▸ " + state.notice : ""}${readWarn}${state.timeZoneWarning ? " · ⚠ timezone; run timezone" : ""}`,
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${noticeDetail ? "  ▸ action result above" : state.notice ? "  ▸ " + state.notice : ""}${pendingTag(state)}${readWarn}${state.timeZoneWarning ? " · ⚠ timezone; run timezone" : ""}`,
       cols,
     ),
   );

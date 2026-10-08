@@ -67,7 +67,7 @@ describe("CodexResumeAdapter", () => {
 
       expect(sendText).toHaveBeenCalledOnce();
       expect(sendText.mock.calls[0]![0]).toBe("r99-demo1-impl");
-      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write resume 'uuid-123'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
       expect(sendKeys).toHaveBeenCalledOnce();
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
       expect(sendText.mock.invocationCallOrder[0]).toBeLessThan(sendKeys.mock.invocationCallOrder[0]!);
@@ -81,7 +81,7 @@ describe("CodexResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", null, undefined, "gpt-5.4-cheap");
 
-      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write -m 'gpt-5.4-cheap' resume 'uuid-123'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.4-cheap' resume 'uuid-123'");
     });
 
     it("#75: reasoning effort threads -c model_reasoning_effort onto the legacy codex resume command", async () => {
@@ -92,7 +92,7 @@ describe("CodexResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", null, undefined, "gpt-5.4-cheap", "high");
 
-      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'uuid-123'");
     });
 
     it("codex_last: sendText posture-preserving codex -s workspace-write resume --last", async () => {
@@ -104,7 +104,7 @@ describe("CodexResumeAdapter", () => {
       await adapter.resume("r99-demo1-impl", "codex_last", null, "/repo");
 
       expect(sendText).toHaveBeenCalledOnce();
-      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write resume --last");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume --last");
       expect(sendKeys).toHaveBeenCalledOnce();
     });
 
@@ -143,7 +143,7 @@ describe("CodexResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid; rm -rf /", "/repo");
 
-      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write resume 'uuid; rm -rf /'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid; rm -rf /'");
     });
 
     it("profile-bearing resume uses -p flag after preflight passes", async () => {
@@ -155,7 +155,7 @@ describe("CodexResumeAdapter", () => {
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", "my-profile");
 
       expect(exec).toHaveBeenCalled();
-      expect(sendText.mock.calls[0]![1]).toBe("codex -p 'my-profile' resume 'uuid-123'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -p 'my-profile' '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
     });
 
     it("profile preflight failure blocks resume before sendText", async () => {

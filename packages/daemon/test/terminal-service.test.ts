@@ -335,9 +335,9 @@ describe("default saved kernel conversations", () => {
     operatorReady = true;
     const preview = await service.previewView({ view: "saved:kernel" });
     if (!("composed" in preview)) throw new Error("expected preview");
-    expect((await service.openView({ view: "saved:kernel", expectedPlan: preview.planId })).opened).toEqual(["tui-bound", "advisor-bound", "operator-bound"]);
+    expect((await service.openView({ view: "saved:kernel", expectedPlan: preview.planId })).opened).toEqual(["operator-bound", "tui-bound", "advisor-bound"]);
     const newLabel = planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.tabLabel;
-    expect(newLabel).toBe(`openrig:kernel#${preview.planId.slice(0, 16)}#fixed`);
+    expect(newLabel).toBe(`openrig:kernel#${preview.planId.slice(0, 16)}#fixed/1`);
     expect(newLabel).not.toBe(oldLabel);
   });
 
@@ -349,7 +349,7 @@ describe("default saved kernel conversations", () => {
     });
     const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
     expect(result.ok).toBe(!unavailable);
-    expect(result.opened).toEqual(unavailable ? [] : ["tui-bound", "advisor-bound", "operator-bound"]);
+    expect(result.opened).toEqual(unavailable ? [] : ["operator-bound", "tui-bound", "advisor-bound"]);
     expect(result.notes?.join("\n")).toContain("Default kernel view:");
     expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
     if (unavailable) expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
@@ -374,28 +374,30 @@ describe("default saved kernel conversations", () => {
     expect(result.notes!.join("\n")).not.toContain("queue-bound");
   });
 
-  it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("kernel geometry keeps three columns in preview, fingerprint and open for %s/%s", async (advisorRuntime, operatorRuntime) => {
+  it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("opens the operator first with dashboard and advisor on their own pages for %s/%s", async (advisorRuntime, operatorRuntime) => {
     const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime));
     const service = new TerminalService(deps);
     const preview = await service.previewView({ view: "saved:kernel" });
     if (!("composed" in preview)) throw new Error("expected preview");
-    expect(preview.composed.columns).toBe(3);
-    expect(preview.grids).toHaveLength(1);
-    expect(preview.grids[0]).toMatchObject({ columns: 3, rows: 1, blanks: 0 });
-    expect(preview.grids[0]!.root).toMatchObject({
-      type: "split", direction: "right", ratio: 1 / 3,
-      first: { type: "pane", label: "operator.human" },
-      second: { type: "split", direction: "right", ratio: 1 / 2,
-        first: { type: "pane", label: "advisor.lead" },
-        second: { type: "pane", label: "operator.agent" } },
-    });
+    expect(preview.composed.columns).toBe(1);
+    expect(preview.composed.pages.map(page => page.map(pane => pane.seat))).toEqual([
+      ["operator-bound"], ["tui-bound"], ["advisor-bound"],
+    ]);
+    expect(preview.grids.map(({ columns, rows, blanks }) => ({ columns, rows, blanks }))).toEqual(
+      Array(3).fill({ columns: 1, rows: 1, blanks: 0 }),
+    );
+    expect(preview.grids.map(grid => grid.root)).toMatchObject([
+      { type: "pane", label: "operator.agent" },
+      { type: "pane", label: "operator.human" },
+      { type: "pane", label: "advisor.lead" },
+    ]);
     expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
       provider: "herdr", composed: preview.composed, grids: preview.grids,
     })).digest("hex"));
     const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
     expect(result.ok).toBe(true);
     expect(herdr.lastView).toEqual({ ...preview.composed, planId: preview.planId });
-    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
   });
 
   it.each(["saved:kernel", "saved:custom", "rig:kernel"])("kernel geometry preserves auto-grid for %s outside the default", async view => {
@@ -407,7 +409,7 @@ describe("default saved kernel conversations", () => {
     expect(preview.composed.columns).toBeUndefined();
     expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 2, blanks: 1 });
     expect((await service.openView({ view, expectedPlan: preview.planId })).ok).toBe(true);
-    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
   });
 
   it("kernel geometry caps partial views to available panes while retaining named absences", async () => {
@@ -417,12 +419,15 @@ describe("default saved kernel conversations", () => {
     const service = new TerminalService(deps);
     const preview = await service.previewView({ view: "saved:kernel" });
     if (!("composed" in preview)) throw new Error("expected preview");
-    expect(preview.composed.columns).toBe(3);
-    expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 1, blanks: 0 });
+    expect(preview.composed.columns).toBe(1);
+    expect(preview.composed.pages.map(page => page.map(pane => pane.seat))).toEqual([["tui-bound"], ["advisor-bound"]]);
+    expect(preview.grids.map(({ columns, rows, blanks }) => ({ columns, rows, blanks }))).toEqual(
+      Array(2).fill({ columns: 1, rows: 1, blanks: 0 }),
+    );
     const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
     expect(result.opened).toEqual(["tui-bound", "advisor-bound"]);
     expect(result.absent.map(member => member.seat)).toEqual(["operator.agent"]);
-    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
   });
 
   it("kernel geometry keeps auto-grid on each page without treating map indexes as columns", async () => {
@@ -448,15 +453,15 @@ describe("default saved kernel conversations", () => {
     const saved: SavedView[] = [];
     const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime), saved);
     const service = new TerminalService(deps);
-    const expected = ["tui-bound", "advisor-bound", "operator-bound"];
+    const expected = ["operator-bound", "tui-bound", "advisor-bound"];
     expect((await service.listViews()).saved[0]?.members.map(member => member.seat)).toEqual(expected);
     expect(herdr.lastView).toBeNull();
     const preview = await service.previewView({ view: "saved:kernel" });
     expect("composed" in preview && preview.composed.opened.map(member => member.seat)).toEqual(expected);
     expect(herdr.lastView).toBeNull();
     expect((await service.openView({ view: "saved:kernel" })).opened).toEqual(expected);
-    expect(herdr.lastView?.opened[0]?.paneCommand).toContain("'actual-tui'");
-    expect(herdr.lastView?.opened[1]?.runtime).toBe(advisorRuntime);
+    expect(herdr.lastView?.opened[1]?.paneCommand).toContain("'actual-tui'");
+    expect(herdr.lastView?.opened[2]?.runtime).toBe(advisorRuntime);
     expect(saved).toEqual([]);
   });
 
@@ -509,7 +514,7 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
     expect(result.ok).toBe(true);
     expect(result.opened).toEqual(["tui-bound"]);
-    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead", "operator.agent"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.agent", "advisor.lead"]);
     expect(result.notes?.join(" ")).toContain("runtime layout unverified");
   });
 
@@ -517,7 +522,7 @@ describe("default saved kernel conversations", () => {
     const { deps } = makeKernel(kernel().filter(row => row.logicalId !== "advisor.lead"));
     const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
     expect(result.ok).toBe(true);
-    expect(result.opened).toEqual(["tui-bound", "operator-bound"]);
+    expect(result.opened).toEqual(["operator-bound", "tui-bound"]);
     expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead"]);
     expect(result.notes?.join(" ")).toContain("runtime layout unverified");
   });
@@ -532,7 +537,7 @@ describe("default saved kernel conversations", () => {
     const result = await service.openView({ view: "saved:kernel" });
     expect(result.code).toBe("kernel_seats_unavailable");
     expect(result.opened).toEqual([]);
-    expect(result.absent.map(member => member.seat)).toEqual(["operator.human", "advisor.lead", "operator.agent"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.agent", "operator.human", "advisor.lead"]);
     for (const member of result.absent) expect(result.error).toContain(member.seat);
     expect(herdr.lastView).toBeNull();
   });

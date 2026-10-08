@@ -194,7 +194,8 @@ identical files, and refuses differing files or incompatible destination types.
 When an unarchived or running team already has the bundle's rig name (`bundleInstallContext()`
 in `packages/daemon/src/domain/bundle-install-context.ts`), pod-bundle apply refuses before
 writing if any of them is running. If the target is that team's own install folder (its
-`bundle.yaml` names the offered schema-2 bundle, `isExistingBundleTarget()`), bootstrap first
+`bundle.yaml` names the offered schema-2 bundle, or `my-bundle` or `github-bundle`, the default
+names before 0.6.7; `isExistingBundleTarget()`), bootstrap first
 confirms the old sessions are stopped; materialization then copies each conflicting path to a
 `bundle-backups/reinstall-*` folder under the OpenRig home, with a `RESTORE.json`, before
 replacing it, and leaves unrelated files in place. Any other target keeps the conflict refusal.

@@ -151,6 +151,15 @@ already leaves you. The edges are the point.
 
 You have facts without connections. Rebuild the connections before you act on anything.
 
+Use the native read tool for file reads throughout restoration. Load `refocusing`
+and consume the current topology and work trace that actually arrived with the
+restore request; do not rerun Python merely to duplicate it. If no current trace
+arrived, name that delivery gap. A packet pointer, compact summary or truncated
+extract is not a full source read. Read required notes and full sources separately
+and complete the restore steps and read-depth audit below; partial reading does
+not establish completed restoration. The earlier acknowledgement-only boundary
+is not a restore request.
+
 1. **Check for a hold first.** Read the restore request, the per-seat instruction file
    (`<OPENRIG_HOME>/compaction/post-compact-extra/<session>.md`, named by your full session such as
    `dev-impl@my-rig.md`) when it exists, the newest row or message from whoever routes your work, and any hold

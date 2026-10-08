@@ -126,6 +126,15 @@ export class ChatRepository {
     return rows.map((r) => this.rowToMessage(r));
   }
 
+  /** True when SQLite's date functions parse the value as a timestamp — the
+   *  same parse the julianday() comparison in history() applies. An
+   *  unparseable value silently matches no rows, so callers can refuse it
+   *  up front instead of reporting an empty history. */
+  timestampParses(value: string): boolean {
+    const row = this.db.prepare("SELECT julianday(?) AS j").get(value) as { j: number | null };
+    return row.j != null;
+  }
+
   latest(rigId: string, count: number): ChatMessage[] {
     const rows = this.db
       .prepare(

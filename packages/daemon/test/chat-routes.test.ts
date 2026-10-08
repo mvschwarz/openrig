@@ -297,6 +297,72 @@ describe("chat routes", () => {
     expect(data2).toHaveLength(2);
   });
 
+  it("GET /history?since refuses an unparseable cutoff instead of silently returning no rows", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+
+    // julianday('garbage') is NULL, so this used to report success with zero
+    // rows — indistinguishable from a genuinely empty room.
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("garbage")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(String(data.error)).toContain("since");
+
+    const res2 = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("not a timestamp")}`);
+    expect(res2.status).toBe(400);
+  });
+
+  it("GET /history?since keeps an empty value as no filter and refuses whitespace", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+    chatRepo.send(rigId, "bob", "msg2");
+
+    // An empty value never filtered (the repository skips a falsy since), so it
+    // must keep returning the whole history rather than becoming a 400.
+    const empty = await app.request(`/api/rigs/${rigId}/chat/history?since=`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toHaveLength(2);
+
+    // Whitespace is not empty: it was unparseable before and matched no rows.
+    const blank = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("   ")}`);
+    expect(blank.status).toBe(400);
+  });
+
+  it("GET /history?since escapes control characters in the rejected value", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\nb\x1bc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // The CLI prints this message verbatim, so a raw newline or ESC would reach
+    // the terminal; they must appear as visible escapes instead.
+    expect(String(data.error)).toContain("a\\x0ab\\x1bc");
+    expect(String(data.error)).not.toContain("\n");
+  });
+
+  it("GET /history?since escapes C1 control characters and keeps other non-ASCII text", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\u009bbéc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // U+009B is a single-byte CSI that some terminals act on; an accented letter is ordinary text.
+    expect(String(data.error)).toContain("a\\x9bbéc");
+    expect(String(data.error)).not.toContain("\u009b");
+  });
+
+  it("GET /history?since still accepts the cutoff formats SQLite parses", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+
+    // A past cutoff deterministically includes the just-sent row.
+    for (const since of ["2020-01-01", "2020-01-01 00:00:00"]) {
+      const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent(since)}`);
+      expect(res.status, `since=${since}`).toBe(200);
+      const data = await res.json();
+      expect(data.length, `since=${since}`).toBeGreaterThanOrEqual(1);
+    }
+
+    // 'now' parses, so the guard must keep accepting it; row visibility at a
+    // subsecond cutoff depends on the second-precision created_at stamp, so
+    // only the status is asserted here.
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=now`);
+    expect(res.status).toBe(200);
+  });
+
   it("POST /clear removes messages and returns count", async () => {
     chatRepo.send(rigId, "alice", "msg1");
     chatRepo.send(rigId, "bob", "msg2");

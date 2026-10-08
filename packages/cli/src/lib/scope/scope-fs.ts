@@ -601,7 +601,7 @@ export function moveSlice(srcAbs: string, destAbs: string, opts: {
   const realDestAbs = path.join(realDestParent, path.basename(destAbs));
   const destRel = path.relative(repoRoot, realDestAbs);
   try {
-    execFileSync("git", ["-C", repoRoot, "mv", srcRel, destRel], {
+    execFileSync("git", ["-C", repoRoot, "mv", "--", srcRel, destRel], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -632,7 +632,7 @@ export function rollbackMovedSlice(
   }
   const srcRel = path.relative(move.repoRoot, fs.realpathSync(path.dirname(srcAbs)) + path.sep + path.basename(srcAbs));
   const destRel = path.relative(move.repoRoot, fs.realpathSync(destAbs));
-  execFileSync("git", ["-C", move.repoRoot, "mv", destRel, srcRel], {
+  execFileSync("git", ["-C", move.repoRoot, "mv", "--", destRel, srcRel], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });

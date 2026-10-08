@@ -36,8 +36,8 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
     throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
   });
   const windowDeps: WindowDeps = {
-    platform: "darwin", env: { HERDR_SESSION: "wrong", HERDR_SOCKET_PATH: "/wrong.sock" },
-    exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "fixture",
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HERDR_SESSION: "wrong", HERDR_SOCKET_PATH: "/wrong.sock" },
+    exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), herdrConfig: vi.fn(() => "/fixture/private herdr.toml"), id: () => "fixture",
   };
   const deps: TerminalDeps = {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
@@ -89,6 +89,22 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(logs[0]).toContain('Reused herdr workspace renamed for view "kernel"');
     expect(logs[0]).not.toMatch(/Prepared|No tiles opened/);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("reopens the first page even when the dashboard or advisor is listed first", async () => {
+    const tabs = [
+      { workspace_id: "kernel", tab_id: "advisor", label: label("kernel", "l1/3") },
+      { workspace_id: "kernel", tab_id: "dashboard", label: label("kernel", "l1/2") },
+      { workspace_id: "kernel", tab_id: "operator", label: label("kernel", "l1/1") },
+    ];
+    const f = fixture(structuredClone(tabs));
+    f.composed.opened = [f.composed.opened[2]!, f.composed.opened[0]!, f.composed.opened[1]!];
+    f.composed.pages = f.composed.opened.map(pane => [pane]);
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("operator");
+    expect(f.tabs).toEqual(tabs);
+    expect(f.post).not.toHaveBeenCalled();
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, reusedWorkspace: { tabId: "operator" } });
   });
 
   it.each(["kernel-other", "kernel#other", "rig:kernel"])("does not reuse the different view %s", async other => {
