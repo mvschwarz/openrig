@@ -32,6 +32,9 @@ export interface SkillDiscoveryPaths {
   /** Config-resolved managed catalog root. Defaults to the legacy
    *  <homedir>/.openrig/skills path when omitted for compatibility. */
   skillsRoot?: string;
+  /** #875 — skill folders of `seat_material: seat` Claude seats. Audited only
+   *  (discoverSkillsWithProvenance); they are projection output, never a source. */
+  seatSkillRoots?: string[];
 }
 
 export interface SkillFrontmatter {
@@ -57,7 +60,7 @@ export interface SkillDiscoveryResult {
   rejected: SkillRejection[];
 }
 
-export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user";
+export type SourceKind = "rig_bundled" | "spec_install" | "runtime_user" | "shared_user" | "seat_material";
 
 export interface SkillProvenanceEntry {
   id: string;
@@ -228,12 +231,18 @@ function rootToSourceKind(root: string, paths: SkillDiscoveryPaths): SourceKind 
 }
 
 export function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): SkillProvenanceResult {
-  const scanRoots = listScanRoots(paths);
+  const scanRoots = [
+    ...listScanRoots(paths).map((root) => ({ root, sourceKind: rootToSourceKind(root, paths), seat: false })),
+    ...(paths.seatSkillRoots ?? []).map((root) => ({ root, sourceKind: "seat_material" as const, seat: true })),
+  ];
   const skills: SkillProvenanceEntry[] = [];
   const rejected: SkillRejection[] = [];
-  const seenIds = new Set<string>();
+  const sharedSeenIds = new Set<string>();
 
-  for (const root of scanRoots) {
+  for (const { root, sourceKind, seat } of scanRoots) {
+    // Each seat directory is a separate Claude session's loadout: its skills shadow nothing
+    // and are shadowed by nothing, so a stale copy in one seat is still audited.
+    const seenIds = seat ? new Set<string>() : sharedSeenIds;
     if (!existsSync(root)) continue;
     let entries: string[];
     try { entries = readdirSync(root); } catch { continue; }
@@ -260,7 +269,6 @@ export function discoverSkillsWithProvenance(paths: SkillDiscoveryPaths): SkillP
       }
 
       const id = parsed.frontmatter.name;
-      const sourceKind = rootToSourceKind(root, paths);
       skills.push({
         id,
         path: skillDir,

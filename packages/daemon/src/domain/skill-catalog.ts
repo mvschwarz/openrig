@@ -82,6 +82,16 @@ interface OwnedSkill {
   digest: string;
   files: Record<string, string>;
   selectedBy: SkillSelectionSource[];
+  /** #875 — the name the runtime shows when the skill arrives through a plugin (`openrig:<id>`). */
+  qualifiedName?: string;
+}
+
+/** #875 — a loadout kept outside the cwd (a seat directory). Its skills reach the runtime through
+ *  a plugin, so each is recorded with the plugin-qualified name the runtime shows. */
+export interface SkillLoadoutLocation {
+  targetRoot: string;
+  manifestPath: string;
+  qualifiedName: (skillId: string) => string;
 }
 
 interface OwnershipManifest {
@@ -483,6 +493,7 @@ function readOwnershipManifest(path: string, runtime: SkillRuntime, targetRoot: 
       || !Object.entries(entry["files"]).every(([file, digest]) => isSafeRelativePath(file) && typeof digest === "string" && SHA256.test(digest))
       || !Array.isArray(entry["selectedBy"])
       || !entry["selectedBy"].every((source) => source === "system" || source === "topology" || source === "project")
+      || (entry["qualifiedName"] !== undefined && typeof entry["qualifiedName"] !== "string")
     ) return false;
     const sourceDir = entry["sourceDir"] ?? nodePath.join(entry["sourceRoot"], entry["id"]);
     return nodePath.isAbsolute(sourceDir) && isWithin(entry["sourceRoot"], sourceDir);
@@ -752,10 +763,13 @@ export function reconcileSkillLoadout(input: {
    *  union instead of deleting one another. CLI-only reconciliation uses the
    *  workspace owner. */
   topologyOwner?: string;
+  /** #875 — keep the loadout here instead of under the cwd. */
+  location?: SkillLoadoutLocation;
 }): ReconcileSkillLoadoutResult {
   const cwd = nodePath.resolve(input.cwd);
-  const targetRoot = targetRootFor(input.runtime, cwd);
-  const manifestPath = ownershipManifestPath(cwd, input.runtime);
+  const targetRoot = input.location ? nodePath.resolve(input.location.targetRoot) : targetRootFor(input.runtime, cwd);
+  const manifestPath = input.location ? nodePath.resolve(input.location.manifestPath) : ownershipManifestPath(cwd, input.runtime);
+  const qualify = (skill: OwnedSkill): OwnedSkill => input.location ? { ...skill, qualifiedName: input.location.qualifiedName(skill.id) } : skill;
   const receipts: SkillProjectionReceipt[] = [];
   const errors: SkillCatalogFailure[] = [];
   let manifest: OwnershipManifest;
@@ -1002,10 +1016,12 @@ export function reconcileSkillLoadout(input: {
       files: skill.files,
       selectedBy: skill.selectedBy,
     }))
+    .map(qualify)
     .sort((a, b) => compareBytes(a.id, b.id));
   let gitIgnorePlans: GitIgnorePlan[];
   try {
-    gitIgnorePlans = planGitIgnores({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
+    // A loadout outside the cwd adds nothing to the checkout, so it has nothing to hide from Git.
+    gitIgnorePlans = input.location ? [] : planGitIgnores({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
   } catch (err) {
     return {
       ok: false,

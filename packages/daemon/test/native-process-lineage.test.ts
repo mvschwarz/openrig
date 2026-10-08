@@ -185,3 +185,32 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess({ ...actualIdentity, expectedToken: "different" })).toBeNull();
   });
 });
+
+// #875: a seat_material: seat launch adds path options. Before the parser knew them, any of these
+// made the argv "unparsed" and the seat lost its identity proof.
+describe("Claude identity with seat-material launch options", () => {
+  const seat = "/home/op/.openrig/state/claude-seats/dev-impl@rig";
+  const material = `--settings ${seat}/launch-settings.json --plugin-dir ${seat}/plugin `
+    + `--mcp-config ${seat}/mcp.json --append-system-prompt-file ${seat}/guidance.md`;
+  function input(args: string, expectedToken = token) {
+    const list = [
+      { pid: 30, ppid: 1, pgid: 30, tpgid: 31, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 31, ppid: 30, pgid: 31, tpgid: 31, executableName: "claude",
+        command: `claude --permission-mode acceptEdits ${args} --name seat@rig`, startedAt },
+    ];
+    return { target: "%1", tmux: { getPanePid: async () => 30 }, listProcesses: async () => list, expectedToken };
+  }
+  it.each([
+    `${material} --session-id ${token}`,
+    `${material} --resume ${token}`,
+    `--session-id ${token} ${material}`,
+    `--plugin-dir=${seat}/plugin --append-system-prompt-file=${seat}/guidance.md --session-id=${token}`,
+  ])("keeps exact identity: %s", async (args) => {
+    expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(31);
+    expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
+    expect(await verifyClaudePaneProcess(input(args, "different"))).toBeNull();
+  });
+  it("still refuses a seat option without its value", async () => {
+    expect(await verifyClaudePaneProcess(input(`--plugin-dir --session-id ${token}`))).toBeNull();
+  });
+});

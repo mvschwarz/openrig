@@ -15,6 +15,7 @@ import type {
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
 import { CLAUDE_MANAGED_BLOCK_FILES } from "./managed-blocks.js";
+import { CLAUDE_SEAT_MATERIAL_MODES } from "./claude-seat-material.js";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
@@ -45,7 +46,7 @@ const VALID_WAIT_TARGET_CONDITIONS = new Set(["healthy"]);
 const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string[]);
 
 const RIG_KEYS = new Set([
-  "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
+  "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "seat_material", "docs",
   "startup", "services", "workspace", "pods", "edges", "non_interruptive",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
@@ -70,6 +71,21 @@ function validateManagedBlocks(raw: unknown): string[] {
       errors.push(`managed_blocks.${key}: unsupported runtime "${key}"; only "claude-code" is configurable`);
     } else if (!(CLAUDE_MANAGED_BLOCK_FILES as readonly unknown[]).includes(value)) {
       errors.push(`managed_blocks.claude-code: must be one of ${CLAUDE_MANAGED_BLOCK_FILES.join(", ")} (got ${JSON.stringify(value)})`);
+    }
+  }
+  return errors;
+}
+
+function validateSeatMaterial(raw: unknown): string[] {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return ['seat_material: must be a mapping such as { claude-code: seat }'];
+  }
+  const errors: string[] = [];
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key !== "claude-code") {
+      errors.push(`seat_material.${key}: unsupported runtime "${key}"; only "claude-code" is configurable`);
+    } else if (!(CLAUDE_SEAT_MATERIAL_MODES as readonly unknown[]).includes(value)) {
+      errors.push(`seat_material.claude-code: must be one of ${CLAUDE_SEAT_MATERIAL_MODES.join(", ")} (got ${JSON.stringify(value)})`);
     }
   }
   return errors;
@@ -186,6 +202,11 @@ export class RigSpecSchema {
       errors.push(...validateManagedBlocks(obj["managed_blocks"]));
     }
 
+    // #875: optional per-runtime location of a seat's projected material.
+    if (obj["seat_material"] !== undefined) {
+      errors.push(...validateSeatMaterial(obj["seat_material"]));
+    }
+
     // pods: required array
     if (!obj["pods"] || !Array.isArray(obj["pods"])) {
       errors.push("pods: required non-empty array");
@@ -257,6 +278,7 @@ export class RigSpecSchema {
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
+      seatMaterial: raw["seat_material"] as RigSpec["seatMaterial"],
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,

@@ -228,3 +228,24 @@ describe("discoverSkillsForRuntime — SkillResource shape", () => {
     expect(result.rejected).toEqual([]);
   });
 });
+
+// #875 — seat_material: seat seats keep their loadout under the OpenRig home. The audit sees each
+// seat's copy on its own (a stale copy in one seat is not hidden by a user-library skill), while
+// the resolver never treats a seat copy as a source.
+describe("seat-material skill roots", () => {
+  it("audits every seat copy as seat_material, unshadowed, and keeps it out of the resolver's sources", async () => {
+    const { discoverSkillsWithProvenance } = await import("../src/domain/skill-discovery.js");
+    writeSkill(join(homedir, ".claude", "skills", "review"), { name: "review", description: "User copy." });
+    const seatA = join(tmpRoot, "openrig-home", "state", "claude-seats", "a@rig", "plugin", "skills");
+    const seatB = join(tmpRoot, "openrig-home", "state", "claude-seats", "b@rig", "plugin", "skills");
+    writeSkill(join(seatA, "review"), { name: "review", description: "Seat A copy." });
+    writeSkill(join(seatB, "review"), { name: "review", description: "Seat B copy." });
+
+    const audited = discoverSkillsWithProvenance({ ...pathsFor("claude-code"), seatSkillRoots: [seatA, seatB] });
+    expect(audited.skills.filter((s) => s.sourceKind === "seat_material").map((s) => [s.sourceRoot, s.shadowed]))
+      .toEqual([[seatA, false], [seatB, false]]);
+
+    const sources = discoverSkillsForRuntime({ ...pathsFor("claude-code"), seatSkillRoots: [seatA, seatB] });
+    expect(sources.skills.map((s) => s.path)).toEqual([join(homedir, ".claude", "skills", "review")]);
+  });
+});

@@ -177,6 +177,7 @@ edges:
 | `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
+| `seat_material` | map | no | `cwd` | Where a Claude Code member's projected skills, subagents, settings, MCP servers and managed blocks live. Only the `claude-code` key is accepted, with `cwd` or `seat`. With `seat` nothing is written into the member's working directory. See "Keeping seat material out of the working directory" below. |
 | `workspace` | object | no | — | The rig's workspace: `workspace_root` (required), `repos[]` of `{name, path, kind}` with `kind` one of `user`, `project`, `knowledge`, `lab` or `delivery` and unique names, an optional `default_repo` naming one of them, and an optional `knowledge_root`. Relative repo paths resolve against `workspace_root`. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
 | `startup` | StartupBlock | no | — | Rig-level startup files and actions. Applied to all members via the startup layering model. |
@@ -360,6 +361,49 @@ instead run `git restore CLAUDE.md`; that command discards every unstaged change
 to the file, not only OpenRig's blocks. Running `rig down` on a rig that still uses
 the default is not a substitute: it strips every OpenRig block from that
 directory's `CLAUDE.md`, including blocks written by other rigs.
+
+### Keeping seat material out of the working directory
+
+By default a Claude Code member's projected material is written into its working
+directory: skills into `.claude/skills/`, subagents into `.claude/agents/`,
+settings, the status line and activity hooks into `.claude/settings.local.json`,
+MCP servers into `.mcp.json`, and managed blocks into the `managed_blocks` file.
+When that directory is a repository other people use without OpenRig, every
+ordinary Claude Code session there loads that material too. Keep it in a
+per-seat directory instead:
+
+```yaml
+seat_material:
+  claude-code: seat
+```
+
+Each seat then gets `<OpenRig home>/state/claude-seats/<session>/`, and Claude
+Code receives it as launch options:
+
+| Material | In the seat directory | Launch option |
+|----------|-----------------------|---------------|
+| Skills and subagents | `plugin/skills/`, `plugin/agents/` of a generated plugin named `openrig` | `--plugin-dir` |
+| Settings fragments, status line, activity hooks | `settings.json`, merged with the launch's permission settings into `launch-settings.json` | `--settings` |
+| MCP servers | `mcp.json` | `--mcp-config` |
+| Managed blocks | `guidance.md` | `--append-system-prompt-file` |
+
+- Skills from the generated plugin appear in Claude Code as `openrig:<name>`.
+  The skill loadout records that name for each skill in `skill-loadout.json`.
+- The options are passed on every launch path: fresh start, resume, fork,
+  restore and handover. An ordinary `claude` started in the same directory
+  receives none of them.
+- Plugins selected by a profile are not copied into the seat directory. Claude
+  Code doesn't load plugin folders copied under a project either, so as today
+  their skills reach the seat through the skill loadout.
+- The OpenRig home must not contain whitespace: OpenRig verifies a seat's
+  identity from its process arguments, which can't be split reliably around
+  such a path. A launch with such a home fails instead of falling back to the
+  working directory.
+- Material an earlier `cwd` run left in the working directory is not moved or
+  removed. Projection reports it as a warning, and Claude Code keeps loading it
+  until you remove it, as described above for `CLAUDE.md`.
+- Accepted values are `cwd` and `seat`. Any other value or runtime key is
+  rejected before a member launches. Codex members are not affected.
 
 ---
 

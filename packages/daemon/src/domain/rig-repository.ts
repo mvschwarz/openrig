@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
+import { DEFAULT_CLAUDE_SEAT_MATERIAL_MODE, isClaudeSeatMaterialMode, type ClaudeSeatMaterialMode } from "./claude-seat-material.js";
 import type {
   Rig,
   Node,
@@ -244,6 +245,34 @@ export class RigRepository {
     const row = this.db.prepare("SELECT claude_managed_block_file FROM rigs WHERE id = ?")
       .get(rigId) as { claude_managed_block_file: ClaudeManagedBlockFile | null } | undefined;
     return row?.claude_managed_block_file ?? null;
+  }
+
+  /** #875 — persist the rig's Claude seat-material mode (migration 098), or null for the cwd default. */
+  setRigClaudeSeatMaterial(rigId: string, mode: ClaudeSeatMaterialMode | null): void {
+    if (!this.hasRigColumn("claude_seat_material")) return;
+    this.db.prepare("UPDATE rigs SET claude_seat_material = ?, updated_at = ? WHERE id = ?")
+      .run(mode ?? null, new Date().toISOString(), rigId);
+  }
+
+  /** #875 — the rig's Claude seat-material mode, or null when it uses the cwd default. */
+  getRigClaudeSeatMaterial(rigId: string): ClaudeSeatMaterialMode | null {
+    if (!this.hasRigColumn("claude_seat_material")) return null;
+    const row = this.db.prepare("SELECT claude_seat_material FROM rigs WHERE id = ?")
+      .get(rigId) as { claude_seat_material: string | null } | undefined;
+    return isClaudeSeatMaterialMode(row?.claude_seat_material) ? row.claude_seat_material : null;
+  }
+
+  /** #875 — the seat-material mode for a seat named by node id or session name. Launch, resume,
+   *  handover and the context monitor reach a seat through different handles; all resolve here. */
+  getClaudeSeatMaterialForSeat(seat: { nodeId?: string | null; sessionName?: string | null }): ClaudeSeatMaterialMode {
+    if (!this.hasRigColumn("claude_seat_material")) return DEFAULT_CLAUDE_SEAT_MATERIAL_MODE;
+    const row = (seat.nodeId
+      ? this.db.prepare("SELECT r.claude_seat_material AS mode FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?").get(seat.nodeId)
+      : seat.sessionName
+        ? this.db.prepare(`SELECT r.claude_seat_material AS mode FROM sessions s JOIN nodes n ON n.id = s.node_id
+            JOIN rigs r ON r.id = n.rig_id WHERE s.session_name = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1`).get(seat.sessionName)
+        : undefined) as { mode: string | null } | undefined;
+    return isClaudeSeatMaterialMode(row?.mode) ? row.mode : DEFAULT_CLAUDE_SEAT_MATERIAL_MODE;
   }
 
   /** Seam B Guard-F1 — persist the RIG-level resolved attachment provenance (migration 058).
