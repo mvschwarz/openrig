@@ -5,10 +5,7 @@ import type { AgentActivity, PersistedEvent } from "./types.js";
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
 export interface HookActivityInput {
-  reviewer?: string | null;
-  decision?: string | null;
   turnId?: string | null;
-  toolUseId?: string | null;
 
   runtime: string | null;
   sessionName?: string | null;
@@ -113,7 +110,7 @@ export class AgentActivityStore {
       eventAt,
       generation,
     });
-    Object.assign(activity, { reviewer: input.reviewer ?? null, decision: input.decision ?? null, turnId: input.turnId ?? null, toolUseId: input.toolUseId ?? null });
+    activity.turnId = input.turnId ?? null;
 
     const event = this.eventBus.emit({
       type: "agent.activity",

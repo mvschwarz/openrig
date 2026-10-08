@@ -122,7 +122,7 @@ export interface ActivityEvidence {
   observedAt: string;
   activity?: ActivityValue;
   needsInput?: NeedsInput;
-  permissionRequest?: { id: string; resolved: boolean };
+  permissionRequest?: { id: string };
 }
 
 /** A visible rung-health transition (AM-1): arbitration can never make a silently-dead

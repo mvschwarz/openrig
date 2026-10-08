@@ -73,10 +73,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     generation,
     hookEvent,
     subtype,
-    reviewer: firstString(providerPayload.reviewer, providerPayload.approvals_reviewer, providerPayload.approvalsReviewer),
-    decision: firstString(providerPayload.decision, providerPayload.approval_decision, providerPayload.approvalDecision),
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
-    toolUseId: firstString(providerPayload.tool_use_id, providerPayload.toolUseId, providerPayload.tool_call_id, providerPayload.toolCallId),
     occurredAt: now().toISOString(),
   };
 }
@@ -168,10 +165,6 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     runtime,
     hookEvent,
     sessionId,
-    reviewer: firstString(providerPayload.reviewer, providerPayload.approvals_reviewer, providerPayload.approvalsReviewer),
-    decision: firstString(providerPayload.decision, providerPayload.approval_decision, providerPayload.approvalDecision),
-    turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
-    toolUseId: firstString(providerPayload.tool_use_id, providerPayload.toolUseId, providerPayload.tool_call_id, providerPayload.toolCallId),
     occurredAt: now().toISOString(),
   };
 }

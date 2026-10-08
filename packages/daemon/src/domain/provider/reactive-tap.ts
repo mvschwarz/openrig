@@ -179,6 +179,7 @@ function discard(
 // an unproven producer yields no row (fail-visible, never fabricated).
 function eventKind(activity: AgentActivity): ReactiveEventKind | null {
   const eventClass = activity.rawEvent;
+  if (eventClass === "PermissionRequest") return null;
   if (typeof eventClass !== "string") return null;
   return EVENT_KINDS[eventClass] ?? null;
 }

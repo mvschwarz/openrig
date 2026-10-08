@@ -107,29 +107,7 @@ export class SeatActivityService {
         lastActivityEpochSeconds = null;
       }
     }
-    const boundId = this.sessionToSeat.get(paneId);
-    const boundSeat = boundId ? this.ladder.get(boundId) : undefined;
-    if (boundSeat && this.permissionPromptReader && [...boundSeat.permissions.values()].some(p => this.now().getTime() - p.sinceMs >= PERMISSION_REQUEST_GRACE_MS)) {
-      const snapshot = new Map(boundSeat.permissions);
-      const visible = await this.permissionPromptReader(paneId).catch(() => null);
-      if (!boundSeat.retired && boundSeat.sessionName === paneId && visible !== null) {
-        for (const [id, request] of snapshot) {
-          if (boundSeat.permissions.get(id) !== request || this.now().getTime() - request.sinceMs < PERMISSION_REQUEST_GRACE_MS) continue;
-          request.confirmed = visible;
-          // Keep unresolved observations until a decision or turn end: a human
-          // prompt can appear later than the first post-grace capture.
-        }
-        boundSeat.permissionObservedAt = this.now().toISOString();
-        const count = [...boundSeat.permissions.values()].filter(p => p.confirmed).length;
-        const sourceId = "codex:permission-prompt";
-        this.reportEvidence({
-          seatNodeId: boundId!, sessionName: paneId, rung: "needs-input-chrome", sourceId,
-          seq: (boundSeat.sources.get(sourceId)?.latest.seq ?? 0) + 1,
-          observedAt: boundSeat.permissionObservedAt,
-          needsInput: { count, reason: count ? "permission_prompt" : null },
-        });
-      }
-    }
+    await this.pollPermissionPrompt(paneId);
     if (lastActivityEpochSeconds === null) return null;
 
     const observedAt = this.now();
@@ -175,6 +153,38 @@ export class SeatActivityService {
       }
     }
     return record;
+  }
+
+  private async pollPermissionPrompt(sessionName: string, canCapture = true): Promise<void> {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired) return;
+    const nowMs = this.now().getTime();
+    const snapshot = [...seat.permissions].filter(([, request]) =>
+      nowMs - request.sinceMs >= PERMISSION_REQUEST_GRACE_MS && nowMs >= request.nextCheckMs);
+    if (snapshot.length === 0) return;
+    const visible = canCapture && this.permissionPromptReader
+      ? await this.permissionPromptReader(sessionName).catch(() => null)
+      : null;
+    if (seat.retired || seat.sessionName !== sessionName) return;
+    let updated = false;
+    for (const [id, request] of snapshot) {
+      if (seat.permissions.get(id) !== request) continue;
+      request.confirmed = visible !== false;
+      request.nextCheckMs = this.now().getTime()
+        + (visible === false && this.now().getTime() - request.sinceMs >= 10_000 ? 5_000 : DEFAULT_POLL_INTERVAL_MS);
+      updated = true;
+    }
+    if (!updated) return;
+    seat.permissionObservedAt = this.now().toISOString();
+    const count = [...seat.permissions.values()].filter(request => request.confirmed).length;
+    const sourceId = "codex:permission-prompt";
+    this.reportEvidence({
+      seatNodeId: seatNodeId!, sessionName, rung: "needs-input-chrome", sourceId,
+      seq: (seat.sources.get(sourceId)?.latest.seq ?? 0) + 1,
+      observedAt: seat.permissionObservedAt,
+      needsInput: { count, reason: count ? (visible === null ? "permission_request_unverified" : "permission_prompt") : null },
+    });
   }
 
   /**
@@ -267,8 +277,11 @@ export class SeatActivityService {
         try { batch = await this.tmux.readAllSessionWindowActivity(); } catch { batch = null; }
       }
       // Best-effort: a single seat's failure does not crash the loop.
-      await Promise.all(tmuxRows.map(async (r) => {
-        try { await this.observeSeat(r.session_name, undefined, batch); } catch { /* swallow */ }
+      await Promise.all(rows.map(async (r) => {
+        try {
+          if (r.attachment_type === "tmux") await this.observeSeat(r.session_name, undefined, batch);
+          else await this.pollPermissionPrompt(r.session_name, false);
+        } catch { /* swallow */ }
       }));
     } finally {
       this.sweeping = false;
@@ -339,10 +352,13 @@ export class SeatActivityService {
     if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
     if (evidence.permissionRequest) {
       const request = evidence.permissionRequest;
-      if (request.resolved) seat.permissions.delete(request.id);
-      else if (!seat.permissions.has(request.id)) seat.permissions.set(request.id, { sinceMs: this.now().getTime(), confirmed: false });
+      if (!seat.permissions.has(request.id)) {
+        seat.permissions.set(request.id, { sinceMs: this.now().getTime(), confirmed: false, nextCheckMs: 0 });
+      }
     } else if (evidence.rung === "lifecycle-hooks" && evidence.activity === "idle-at-prompt") {
       seat.permissions.clear();
+      seat.permissionObservedAt = null;
+      seat.sources.delete("codex:permission-prompt");
     }
     seat.sources.set(evidence.sourceId, {
       latest: evidence,
@@ -350,7 +366,7 @@ export class SeatActivityService {
     });
     this.measureTrialAgreement(seat, evidence);
     this.arbitrate(seat);
-    // Recording another pending/resolved request must not hide an already confirmed
+    // Recording another pending request must not hide an already confirmed
     // outstanding prompt in the persisted activity consumer.
     if (evidence.permissionRequest && seat.arbitrated.needsInput.count > 0) {
       this.permissionPromptChanged?.(seat.sessionName, true);
@@ -650,7 +666,7 @@ export class SeatActivityService {
     }
 
     // Codex permission hooks are pending observations. Only the visible prompt probe,
-    // after grace, can turn them into attention; correlated decisions clear one request.
+    // after grace, can turn them into attention; unavailable capture fails safe.
     // Other runtime prompts retain their existing rung arbitration.
     const chrome = this.latestByRung(seat, "needs-input-chrome");
     const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
@@ -667,7 +683,7 @@ export class SeatActivityService {
     const permissionTracked = seat.inventory?.runtime === "codex"
       && (seat.permissions.size > 0 || seat.permissionObservedAt !== null);
     const needsInput: NeedsInputShape = permissionTracked
-      ? { count: confirmedCount, reason: confirmedCount ? "permission_prompt" : null }
+      ? { count: confirmedCount, reason: confirmedCount ? chrome?.needsInput?.reason ?? "permission_prompt" : null }
       : decider?.needsInput ?? { count: 0, reason: null };
     if (permissionTracked && Boolean(confirmedCount) !== Boolean(seat.arbitrated.needsInput.count)) {
       this.permissionPromptChanged?.(seat.sessionName, Boolean(confirmedCount));
@@ -731,7 +747,7 @@ interface NeedsInputShape {
 }
 
 interface SeatLadderState {
-  permissions: Map<string, { sinceMs: number; confirmed: boolean }>;
+  permissions: Map<string, { sinceMs: number; confirmed: boolean; nextCheckMs: number }>;
   permissionObservedAt: string | null;
   sessionName: string;
   retired: boolean;

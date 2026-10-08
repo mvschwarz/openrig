@@ -1775,6 +1775,9 @@ export class SessionTransport {
       sessionName: input.sessionName,
       now,
     });
+    if (hookActivity?.reason === "permission_request_pending" && hookActivity.stale !== true) {
+      return { ...hookActivity, state: "needs_input" };
+    }
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).

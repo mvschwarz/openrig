@@ -36,11 +36,8 @@ export function evidenceFromHookActivity(input: {
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
   };
-  if (input.activity.runtime === "codex" && (input.activity.reason === "permission_request_pending" || input.activity.decision)) {
-    return { ...base, ...(input.activity.state === "running" ? { activity: "working" as const } : {}), permissionRequest: {
-      id: input.activity.toolUseId ?? input.activity.turnId ?? "uncorrelated",
-      resolved: Boolean(input.activity.decision),
-    } };
+  if (input.activity.reason === "permission_request_pending") {
+    return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
   }
   switch (input.activity.state) {
     case "running":
@@ -274,10 +271,7 @@ activityRoutes.post("/hooks", async (c) => {
     // Legacy, excluded, or no-tenure emitting paths may omit it ⇒ stamped null ⇒ unresolved at read
     // (sound per-path absence; never false-fresh).
     generation: stringOrNull(body.generation),
-    reviewer: stringOrNull(body.reviewer),
-    decision: stringOrNull(body.decision),
     turnId: stringOrNull(body.turnId),
-    toolUseId: stringOrNull(body.toolUseId),
   });
 
   if (!result.ok) {
