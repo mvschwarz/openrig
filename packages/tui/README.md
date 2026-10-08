@@ -49,9 +49,10 @@ through ONE path. Safe-core grammar: `:<section>` (any of the eight, e.g.
 `:topology` `:needs`) · `/<filter>` · `host|rig|pod|agent|spec <name>` ·
 `tab table|recent|overview|graph|health|topology|configuration|yaml|pulse` ·
 `spec-of <agent>` · `running <spec>`. Keys: arrows + Enter navigate the
-explorer, `f` toggles the footer, `q` quits.
+explorer, `F` toggles the footer, `q` quits.
 
-In Scopes, select a mission or use `mission <name>`. Its workflow rows open the
+In Scopes, select a mission or use `mission <name>`; with a mission selected, `M`
+collapses its mini-requirements and `N` shows its narrative. Its workflow rows open the
 current work, owner, recorded waiting reason, wake mechanism, next action and
 bound sources. `workflow <instance-id>` and `packet <qitem-id>` address those
 pages within the selected mission. Release ceremony, post-release housekeeping
