@@ -40,7 +40,7 @@ Every member's `pod.member=runtime`, sorted by `pod.member` in UTF-16 code-unit 
 whitespace, and runtimes are spelled as in `rig.yaml`. For example:
 
 ```text
-build.impl=claude-code,build.lead=claude-code,check.qa=codex,check.review=codex
+dev.build=claude-code,dev.qa=claude-code,dev.review=codex,orch.lead=codex
 ```
 
 Preset names such as `recommended` or `all-claude` are aliases shown beside the ID, never part of it.

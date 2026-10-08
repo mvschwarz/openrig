@@ -39,6 +39,9 @@ the format you will author. Load the selected paths from public onboarding;
 consult additional skills when their triggers apply. A design task does not
 require reading the whole command library.
 
+- Read `topology-naming.md` before choosing new identities: rig = purpose, pod =
+  domain, member = role. Keep names stable across runtime choices and match every
+  edge, preset and workflow target to the declared IDs.
 - Read the relevant sections of `rig-spec.md` and `agent-spec.md` before writing
   those declarations. Consult `agent-startup-guide.md` for startup/loadout work
   and `edge-types.md` when selecting relationships. Resolve the installed

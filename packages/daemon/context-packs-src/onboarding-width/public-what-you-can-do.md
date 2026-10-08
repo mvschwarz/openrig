@@ -314,7 +314,9 @@ fresh, since a web tool's cached copy can be older. The built-in shelf also hold
 `research`, `pm`, `secrets-manager` and `kernel`. Older names are gone: `adversarial-review`,
 `research-team` and `pm-team` became `code-review`, `research` and `pm` with no alias, and
 `first-project-claude`, `first-project-mixed`, `conveyor`, `demo`, `implementation-pair` and
-`product-team` were removed. Verify prerequisites (Node 22 or 24) and actual runtime readiness
+`product-team` were removed. When authoring a new team, read
+`docs/reference/topology-naming.md`: name the rig for its purpose, pods for domains,
+and members for their roles. Verify prerequisites (Node 22 or 24) and actual runtime readiness
 before work. The starter's Codex model `gpt-6-astra` needs a Codex newer than 0.145; when a Codex
 seat reports that, the operator offers to update Codex and restart that seat. Existing Herdr/cmux
 terminals can present the managed team through `rig terminal open`.

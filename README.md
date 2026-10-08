@@ -107,7 +107,9 @@ recommends one of three, and fits it to the providers you have.
 
 As shipped, `starter` uses both Claude Code and Codex. With only one of them, ask
 the kernel operator to adapt it: it writes a copy of the team for your providers
-under the same name. `first-project` is starter's old name and still starts it,
+under the same name. [The naming guide](docs/reference/topology-naming.md) explains
+how their pods and roles grow and how to name your own team. `first-project` is
+starter's old name and still starts it,
 unless you already have a rig named `first-project` or `starter`: then it refuses
 and names the `rig up <name> --existing` command that brings that rig back.
 Show the selected runtime, configured model and command before launch; confirm the

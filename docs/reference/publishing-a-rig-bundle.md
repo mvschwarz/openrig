@@ -11,7 +11,9 @@ For every flag, see the [rig bundle reference](rig-bundle.md); for the file form
 ## 1. Lay out the folder
 
 A shareable bundle is one folder, kept on GitHub: in its own repository, or as a subfolder of one you already have.
-The folder holds the rig spec (`rig.yaml`), the agents it uses, and a README. The rules are the bundle standard
+The folder holds the rig spec (`rig.yaml`), the agents it uses, and a README. Choose
+[names that describe the team, domains and roles](topology-naming.md) before wiring its references.
+The rules are the bundle standard
 (`openrig.bundle-standard/v1`), summarized under "Advisory author check" in the
 [rig bundle reference](rig-bundle.md#advisory-author-check).
 
@@ -91,7 +93,7 @@ backed up first under `~/.openrig/bundle-backups/`. A running team of the same n
 
 ```sh
 rig up <link> --preset all-claude
-rig up <link> --seat build.lead=pi --seat check.qa=codex
+rig up <link> --seat orch.lead=pi --seat dev.qa=codex
 ```
 
 On openrig.dev/rigs, pick a configuration and the page gives you one command to paste, which fetches exactly that
