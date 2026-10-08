@@ -384,7 +384,8 @@ Before it plans or applies, install runs two checks on the archive, both also un
   failed". The error names the installed and the offered team and lists three choices: use the existing team, stop it
   with `rig down` and retry to replace it, or cancel. This check does not refuse a stopped team with that name.
 
-Each error lists its fixes; the compatibility error also names `--skip-version-check`.
+Each error lists its fixes; the compatibility error also names `--skip-version-check`. `--skip-version-check` and
+`--force` skip only these two checks: the manifest safety check of its `rig_spec` and `project` entries always runs.
 
 For a pod-aware (schema version 2) bundle, installing a team whose rig name matches a stopped team replaces it: the
 earlier team is archived when the new one is created, and the result gives the `rig unarchive <id>` command that

@@ -35,9 +35,9 @@ Two optional files sit beside `rig.yaml`:
 rig bundle check ./my-team                     # checks the folder against the standard; launches nothing
 ```
 
-Fix what it reports, or say in your README why a finding doesn't apply. Any finding exits 1, and `--json` names the file
-each finding is about. It checks the folder on disk, including files you haven't committed, so check again at the
-commit you share. README completeness and embedded secrets always read `not_checked`: those are yours to review.
+Fix what it reports, or say in your README why a finding doesn't apply. Any finding exits 1, and the output names the
+file a finding is about when there is one. It checks the folder on disk, including files you haven't committed, so
+check again at the commit you share. README completeness and embedded secrets always read `not_checked`: those are yours to review.
 
 You can also build and look inside the archive:
 

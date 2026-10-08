@@ -25,10 +25,11 @@ redundant double-fire around Codex's own compaction cadence. Set
 `OPENRIG_REFOCUS_NOW=1` for an on-demand refocus and
 `OPENRIG_REFOCUS_ENABLED=0` to disable the feature. Fresh `SessionStart` is
 always a no-op: the default onboarding pack owns fresh orientation. Both
-runtimes retain `PostCompact` due-state for the next prompt. The managed Claude
-acknowledgement-only boundary is skipped without consuming that state; the restore
-request explicitly asks the seat to read the refocusing skill and run both traces,
-and the read-depth audit checks that work. Otherwise the hook
+runtimes retain `PostCompact` due-state for the next prompt. After a managed Claude
+compaction, the acknowledgement-only boundary and other prompts (for up to 10 minutes)
+are skipped without consuming that state, so the hook delivers on the restore request;
+that request asks the seat to read the refocusing skill and consume the delivered
+traces rather than rerun them, and the read-depth audit accounts for them. Otherwise the hook
 is a no-op (it writes a stderr advisory when the transcript shrinks or the
 session has no identity), and it degrades to silence on unrelated hook errors.
 Both runtimes stop the hook after 5 seconds, and the content REF lookup gets 2;

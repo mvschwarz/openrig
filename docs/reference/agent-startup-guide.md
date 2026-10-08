@@ -1,7 +1,7 @@
 # Agent Startup Guide
 
 Last validated: 2026-10-05, against main `9b88b118`
-Applies to: OpenRig 0.6.6
+Applies to: OpenRig 0.6.7
 
 This guide teaches you how to think about what goes into an agent's startup experience — what files to write, where to put them, and how the layering model delivers them. It is an authoring guide, not a schema reference. For field-level details, see `rig-spec.md` and `agent-spec.md`.
 
@@ -325,6 +325,9 @@ OpenRig performs best-effort deterministic runtime configuration for managed ses
   Purpose: apply selected `claude_mcp_fragment` resources for Claude in that project.
 - Codex global config: `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when unset
   Purpose: pre-trust managed workspaces and apply selected `codex_config_fragment` resources. Codex currently has no equivalent project-local MCP config path for global profile settings.
+- Global skill folders: `~/.claude/skills` and `~/.agents/skills`
+  Purpose: daemon startup seeds the `openrig-skills` and `refocusing` skills and the person-facing `rigs` skill. Each
+  upgrade refreshes the `rigs` skill; a copy installed another way is left as it is.
 
 Two important caveats:
 - these writes are best-effort and should still be paired with startup guidance so the local agent can verify and repair them if needed
@@ -393,6 +396,8 @@ remain shared.
   timeout, error or unrecognized answer adds nothing. Named profiles and full
   bypass are not read. The read may write Codex's own state files in
   `CODEX_HOME`, read its login and fetch managed policy, as a Codex start does.
+- Managed launches pass `-c check_for_update_on_startup=false`, so Codex skips its startup update check; your Codex
+  config is not changed.
 - Can self-install dependencies from instructions but timer/recurring behavior is not reliably available
 
 **Pi and OMP:**

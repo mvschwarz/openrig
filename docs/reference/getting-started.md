@@ -105,11 +105,11 @@ OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenR
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.7/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.7/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -555,7 +555,9 @@ This guide remains the short first-use path.
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
-Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop.
+Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop;
+`rig down` also prints the rig's recorded agent sessions and their activity
+before stopping them.
 For example, to stop starter:
 
 ```sh

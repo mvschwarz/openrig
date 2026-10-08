@@ -22,11 +22,11 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 
 Requires Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
-**One command.** This runs OpenRig's install script from the `v0.6.6` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+**One command.** This runs OpenRig's install script from the `v0.6.7` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.7/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.7/scripts/install.sh | sh
 ```
 
 If a provider isn't signed in yet, the last step reports `FAILED [4/4]`, and `rig setup` lists the sign-in under "Some steps need attention". If the only remaining failures are provider sign-ins, the install steps finished; sign in to each selected provider as below and continue.
@@ -158,7 +158,7 @@ using a published package, since repository guidance can be ahead of npm.
 | --- | --- |
 | **npm installation** | Installs the CLI (`rig` and `openrig-tui`), bundled components and dependencies under your npm prefix (with Bun, under Bun's global directory). OpenRig's postinstall checks the Node.js version and that the SQLite module loads; Bun may block this script. It does not run daemon or provider setup. |
 | **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. Installs herdr by default on macOS and Linux unless declined with `--no-herdr`; an unavailable herdr install is a warning. On macOS the installing agent offers Ghostty, and `--ghostty` attempts it after acceptance. Existing cmux settings are left unchanged. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
-| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
+| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill, the `refocusing` skill and the person-facing `rigs` skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
 | **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. In a Git repository, newly created files under `.codex/plugins/shared:openrig-core/` (or the unqualified `.codex/plugins/openrig-core/`) are added to the repository's Git `info/exclude` inside an `# BEGIN OpenRig generated files` block; new `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` files stay visible with a warning. |
 | **Bundle install** (`rig bundle install`, or `rig up` with a `.rigbundle` or GitHub link) | Writes the bundle's files into the install target: `--target`, or the current directory for `rig up` and for a GitHub link. `rig bundle install` with a local archive needs `--target`. Routes its declared skills, plugins and context packs into your libraries. A GitHub link's archive is kept under `OPENRIG_HOME/bundle-imports/`, and installs are recorded in `OPENRIG_HOME/bundle-audit.jsonl`. A bundle that carries a project creates it under `workspace.projects_root` and records it, with the rig's association, in the workspace catalog. |
 | **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules to your settings files; a team seat with no permission policy, per-seat choice or (for Codex) named profile gets the per-launch [team default](docs/reference/rig-spec.md#team-launch-defaults) instead. Agent-guided setup recommends keeping it and requires your actual answer before the agent [adds remembered rules at your chosen scope](docs/reference/getting-started.md#have-your-agent-configure-permissions). No/no answer keeps the team default and preserves settings; existing choices and stricter rules remain relevant. Broader access is separate. |
@@ -172,7 +172,8 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   writes `HOME/.claude.json`, and also `<CLAUDE_CONFIG_DIR>/.claude.json` when the
   daemon has that variable set. In the workspace, `.claude/settings.local.json` receives
   the context collector's `statusLine` command and selected activity hooks;
-  helper scripts live under `.openrig/`. Selected settings/MCP resources can also
+  the collector script lives under `.openrig/`, and the activity-hook relay under
+  the instance's `state/claude-activity-hooks/`. Selected settings/MCP resources can also
   change that settings file and `.mcp.json`. The shared settings resource sets
   `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
   selected MCP resources configure those external services. Built-in bootstrap
@@ -182,8 +183,9 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
   commands and pre-writes trust hashes for those commands. Seat startup adds
   `trust_level = "trusted"` for the workspace; selected config resources can
-  add MCP settings. Recognized update notices can be skipped during launch,
-  recording the skipped version in Codex's cache; this is not an update install.
+  add MCP settings. Managed launches pass `-c check_for_update_on_startup=false`,
+  which writes no config; a recognized update notice that still appears can be
+  skipped, recording the skipped version in Codex's cache; this is not an update install.
 
 Activity relays send event type/subtype, seat/runtime identity, timestamps and
 native session identity to the configured OpenRig daemon's `/api/activity/hooks`
@@ -208,14 +210,14 @@ pod's shared queue-state directory with `--add-dir`; the shared root comes from
 `OPENRIG_SHARED_DOCS_ROOT` or `~/.openrig/shared-docs`.
 A team seat with no permission policy, per-seat choice or (for Codex) named
 profile also gets the per-launch team default: Claude gets `--settings` allowing
-ordinary `rig` commands, project reads and common tests, with lifecycle commands
-as ask rules, and Codex also gets the OpenRig workspace root as a writable
-directory. Neither writes a permission file.
+ordinary `rig` commands, project reads and common tests, with a session-only
+PreToolUse hook that asks before lifecycle commands, and Codex also gets the
+OpenRig workspace root as a writable directory. Neither writes a permission file.
 Seats of the rig named `kernel` launch with an operational default instead,
 unless a permission policy, a per-seat choice or (for Codex) a named profile
-applies: Claude in `acceptEdits` with a per-launch allow list for its file tools
-and operational commands (including reads under your home folder), and Codex with
-`-s danger-full-access -a never`. Neither writes a permission file.
+applies: Claude in `acceptEdits` with a per-launch allow list for its file tools,
+web fetches and operational commands (including reads under your home folder),
+and Codex with `-s danger-full-access -a never`. Neither writes a permission file.
 YOLO is **off by default**. An explicitly selected full-bypass policy selects
 Claude's `--dangerously-skip-permissions` or Codex's
 `-s danger-full-access -a never`. The legacy environment-only `OPENRIG_YOLO=1`
@@ -324,7 +326,7 @@ With herdr installed and connected, open the starter's terminals together:
 rig terminal open starter --provider herdr
 ```
 
-For cmux, use `--provider cmux`. In the TUI, a rig's detail view has a `term ▸ rig <name>` link that opens every running seat of that rig in the default terminal provider; with herdr that is up to 16 seats per tab, in a workspace named after the rig. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
+For cmux, use `--provider cmux`. In the TUI, a rig's detail view has an `Open terminals ▸ rig <name>` link that opens every running seat of that rig in a new terminal window, using herdr when installed, otherwise plain tmux; with herdr that is up to 16 seats per tab, in a workspace named after the rig. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
 
 ## Key Concepts
 
