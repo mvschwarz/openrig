@@ -55,5 +55,8 @@ export function isPlanAnswer(data: unknown): boolean {
   return Boolean(data && typeof data === "object" && (data as { planOnly?: unknown }).planOnly === true);
 }
 
-export const NOT_A_PLAN_MESSAGE =
-  "The daemon did not return a plan, so it may have acted on this request. Check `rig ps --nodes` before retrying.";
+/** After a plan request whose answer isn't a plan, whatever its HTTP status. */
+export function notAPlanMessage(host?: string): string {
+  const check = host ? `rig ps --nodes --host ${host}` : "rig ps --nodes";
+  return `The daemon did not return a plan, so it may have acted on this request. Check \`${check}\` before retrying.`;
+}

@@ -465,6 +465,7 @@ describe("rig launch --host HTTP", () => {
   it.each([
     ["an older stamped remote daemon", { [HEALTH]: { status: 200, data: { status: "ok", semver: "0.5.8" } } }],
     ["an older unstamped remote daemon", { [HEALTH]: { status: 200, data: { status: "ok" } }, [VERSION]: { status: 200, data: { version: "0.5.8" } } }],
+    ["an unstamped remote daemon whose version route says unknown", { [HEALTH]: { status: 200, data: { status: "ok" } }, [VERSION]: { status: 200, data: { version: "unknown" } } }],
     ["a remote daemon that reports no version", {}],
   ])("--plan refuses %s before posting", async (_label, responses) => {
     const { prog, client } = await remoteLaunch(responses);
@@ -504,6 +505,19 @@ describe("rig launch --host HTTP", () => {
     });
     expect(exitCode).toBe(1);
     expect(stderr.join("\n")).toContain("did not return a plan");
+  });
+
+  it("--plan on a remote daemon that answers 409 without planOnly says it may have acted", async () => {
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 409, data: { ok: false, launched: [{ nodeId: "n1", logicalId: "dev.impl", status: "attention_required" }] } },
+    });
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("did not return a plan");
+    expect(stderr.join("\n")).toContain("rig ps --nodes --host host-b");
   });
 
   it("missing bearer exits nonzero with no HTTP request", async () => {

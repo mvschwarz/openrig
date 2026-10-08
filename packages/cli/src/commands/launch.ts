@@ -6,7 +6,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { NOT_A_PLAN_MESSAGE, isPlanAnswer, planSupportRefusal } from "../launch-plan-guard.js";
+import { isPlanAnswer, notAPlanMessage, planSupportRefusal } from "../launch-plan-guard.js";
 
 type LaunchResponse = {
   ok: boolean;
@@ -136,7 +136,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         const result = await runRemoteHttpOp(opts.host, "POST", apiPath, body, deps, opts);
         const notAPlan = Boolean(opts.plan && !isPlanAnswer(result.data));
         if (notAPlan) {
-          console.error(`Host ${opts.host}: ${NOT_A_PLAN_MESSAGE}`);
+          console.error(`Host ${opts.host}: ${notAPlanMessage(opts.host)}`);
           process.exitCode = 1;
         }
         if (opts.json) {
@@ -187,7 +187,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body);
         const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data));
         if (notAPlan) {
-          console.error(NOT_A_PLAN_MESSAGE);
+          console.error(notAPlanMessage());
           process.exitCode = 1;
         }
         if (opts.json) {
