@@ -125,6 +125,20 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(f.tabs).toHaveLength(2);
   });
 
+  it.each([["live", true], ["plain shells", false]] as const)("finds a named view's space by its tab names and reuses it only when attached: %s", async (state, reused) => {
+    const f = fixture([{ workspace_id: "openrig", tab_id: "named", label: "tui · advisor · operator" }]);
+    (f.composed as typeof f.composed & { spaceLabel?: string }).spaceLabel = "openrig";
+    if (state === "plain shells") f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId, foreground_processes: [{ pid: 999, name: "zsh" }] } } }));
+    await f.run();
+    if (reused) {
+      expect(f.focus).toHaveBeenCalledExactlyOnceWith("named");
+      expect(f.post).not.toHaveBeenCalled();
+    } else {
+      expect(f.focus).not.toHaveBeenCalled();
+      expect(f.post).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("confirms an absolute tmux command, quoted session alias and read-only attachment", async () => {
     const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }]);
     f.composed.opened[0]!.paneCommand = "'/fixture/bin/tmux' attach -r -t 'alias'\"'\"'s session'";

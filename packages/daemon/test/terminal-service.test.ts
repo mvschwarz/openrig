@@ -324,7 +324,7 @@ describe("default saved kernel conversations", () => {
     });
   }
 
-  it("changes the Herdr reuse label when the kernel operator becomes available", async () => {
+  it("names the first Herdr tab for the operator once it becomes available", async () => {
     const { deps, herdr } = makeKernel(kernel());
     let operatorReady = false;
     deps.hasSession = session => session !== "operator-bound" || operatorReady;
@@ -337,8 +337,9 @@ describe("default saved kernel conversations", () => {
     if (!("composed" in preview)) throw new Error("expected preview");
     expect((await service.openView({ view: "saved:kernel", expectedPlan: preview.planId })).opened).toEqual(["operator-bound", "tui-bound", "advisor-bound"]);
     const newLabel = planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.tabLabel;
-    expect(newLabel).toBe(`openrig:kernel#${preview.planId.slice(0, 16)}#fixed/1`);
-    expect(newLabel).not.toBe(oldLabel);
+    expect(oldLabel).toBe("dashboard");
+    expect(newLabel).toBe("operator");
+    expect(planHerdrLayout(herdr.lastView!, "fixed").workspaceLabel).toBe("openrig");
   });
 
   it.each([false, true])("keeps the default kernel handoff distinct from a team (provider unavailable=%s)", async unavailable => {
@@ -352,7 +353,7 @@ describe("default saved kernel conversations", () => {
     expect(result.opened).toEqual(unavailable ? [] : ["operator-bound", "tui-bound", "advisor-bound"]);
     expect(result.notes?.join("\n")).toContain("Default kernel view:");
     expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
-    if (unavailable) expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
+    if (unavailable) expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
   });
 
   it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
@@ -367,8 +368,8 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
     expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
     expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
-    expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
-    expect(result.notes).toContain("operator.human: env -u TMUX tmux attach -t 'actual-tui'");
+    expect(result.notes).toContain("operator: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("dashboard: env -u TMUX tmux attach -t 'actual-tui'");
     expect(result.notes).toContain("Original provider detail");
     expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
     expect(result.notes!.join("\n")).not.toContain("queue-bound");
@@ -387,9 +388,9 @@ describe("default saved kernel conversations", () => {
       Array(3).fill({ columns: 1, rows: 1, blanks: 0 }),
     );
     expect(preview.grids.map(grid => grid.root)).toMatchObject([
-      { type: "pane", label: "operator.agent" },
-      { type: "pane", label: "operator.human" },
-      { type: "pane", label: "advisor.lead" },
+      { type: "pane", label: "operator" },
+      { type: "pane", label: "dashboard" },
+      { type: "pane", label: "advisor" },
     ]);
     expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
       provider: "herdr", composed: preview.composed, grids: preview.grids,
@@ -415,8 +416,10 @@ describe("default saved kernel conversations", () => {
       : [["operator-bound"], ["tui-bound"], ["advisor-bound"]]);
     if (wide) expect(preview.grids[0]!.root).toMatchObject({
       type: "split", direction: "right", ratio: 0.5,
-      first: { type: "pane", label: "operator.human" }, second: { type: "pane", label: "operator.agent" },
+      first: { type: "pane", label: "dashboard" }, second: { type: "pane", label: "operator" },
     });
+    expect(planHerdrLayout({ ...preview.composed, planId: preview.planId }, "fixed").pages.map(page => page.tabLabel)).toEqual(wide
+      ? ["dashboard · operator", "advisor"] : ["operator", "dashboard", "advisor"]);
     expect(preview.grids.every(grid => grid.blanks === 0)).toBe(true);
     expect((await service.openView({ view: "saved:kernel", viewportColumns, expectedPlan: preview.planId })).ok).toBe(true);
     expect(planHerdrLayout(herdr.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
