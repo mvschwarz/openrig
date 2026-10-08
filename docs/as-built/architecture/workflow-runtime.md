@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Following workflow validation, instantiation, projection, routing, failure
   recovery, lifecycle graph revisions, or the corresponding CLI/API.
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
 # Workflow Runtime — Specs, Packets, and Lifecycle Graphs
 
-Source snapshot: `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. This describes the source at that commit;
+Source snapshot: `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 A workflow binds a specification to durable queue packets. The daemon
@@ -121,7 +121,7 @@ for a human-seat target, the packet goes to the gated step's own owner and is
 parked `blocked_on` that human seat in the same transaction (summary and
 `evidence_ref` required), and the instance waits until the park is resolved;
 for a declared role, an ordinary packet goes to that handler role's seat
-(`workflow-projector.ts:1650`–`1769`).
+(`workflow-projector.ts:1659`–`1778`).
 
 Instantiation also emits advisories for missing members in otherwise
 registered target rigs. That member check is advisory and does not imply
@@ -144,7 +144,7 @@ Each exit closes the packet through the queue's own closure path
 `handed-off` with `handed_off_to` the next owner; `waiting` records `blocked`
 with `blocked_on` the supplied blocker, or `external-gate` when none is given;
 `done` records `done` with `no-follow-on`; and `failed` records `done` with
-`denied` and the result note as target (`workflow-projector.ts:1562`–`1622`).
+`denied` and the result note as target (`workflow-projector.ts:1571`–`1631`).
 A dependency-graph handoff that fans out to more than one successor, or to
 none, closes the packet `done` with `no-follow-on`.
 
@@ -165,8 +165,11 @@ rather than erasing history.
 
 Presence of `depends_on` selects `projectDependencyGraph`. It uses durable
 packet bindings to advance eligible successors and record per-occurrence
-failures without treating an unrelated live branch as completed. Inspection
-reports unknown bindings rather than inventing a step from trail order.
+failures without treating an unrelated live branch as completed. A step's
+completion counts only while it is later, in trail append order, than its
+prerequisites' latest completions, so a prerequisite re-run through a routed
+exit sends its dependents round again (`workflow-projector.ts:1004`–`1019`).
+Inspection reports unknown bindings rather than inventing a step from trail order.
 
 The injected [`createWorkflowFrontierPredicate`](../../../packages/daemon/src/domain/workflow-frontier-guard.ts)
 lets the queue refuse ordinary terminal closure of live workflow packets.

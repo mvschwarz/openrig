@@ -9,7 +9,7 @@ applies-when: |
   graph, the SQLite schema/migration set, or the route-mount surface.
 siblings: [coordination-primitive.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
@@ -20,7 +20,7 @@ OpenRig is a local control plane for multi-agent coding topologies. The daemon
 (`@openrig/cli`), the terminal UI (`@openrig/tui`), the web UI (`@openrig/ui`)
 and the MCP server all sit on top of.
 
-> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
+> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -29,7 +29,7 @@ and the MCP server all sit on top of.
 For what OpenRig is and how its packages fit together, read `ARCHITECTURE.md` at
 the repository root. This module covers the daemon's own wiring.
 
-### Source footprint at `2620dea84efad75e3c5fff9fcf816a78c8e8155f`
+### Source footprint at `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`
 
 The footprint counts use non-test TypeScript files under each package's `src/`
 (tests live in separate `packages/*/test/` directories):
@@ -37,13 +37,13 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 
 | Metric | Count | Directory or command |
 |---|---|---|
-| All packages | **1192** | `packages/*/src` |
-| Daemon | **653** (**428** under `domain/`, **28** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
-| CLI | **170** | `packages/cli/src` |
+| All packages | **1203** | `packages/*/src` |
+| Daemon | **659** (**430** under `domain/`, **29** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
+| CLI | **173** | `packages/cli/src` |
 | Web UI | **304** | `packages/ui/src` |
-| TUI | **65** | `packages/tui/src` |
-| Database migrations | **94** (`001_core_schema.ts` … `095_rig_non_interruptive.ts`; no `093`) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
-| Files in `routes/` | **67**, of which **65** create a Hono router | `git ls-files packages/daemon/src/routes \| wc -l`; `git grep -l 'new Hono' -- packages/daemon/src/routes \| wc -l` |
+| TUI | **67** | `packages/tui/src` |
+| Database migrations | **96** (`001_core_schema.ts` … `097_thread_part_map.ts`; no `093`) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
+| Files in `routes/` | **68**, of which **65** create a Hono router | `git ls-files packages/daemon/src/routes \| wc -l`; `git grep -l 'new Hono' -- packages/daemon/src/routes \| wc -l` |
 | `app.route(...)` mounts in `server.ts` | **69** | `grep -c 'app.route(' packages/daemon/src/server.ts` |
 | Top-level `rig` commands | **87** | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
 | MCP tools | **18**, all named `rig_*` | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
@@ -51,7 +51,7 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 
 `OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
 six runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
-(`startup.ts:968`).
+(`startup.ts:989`).
 
 ### The stack
 
@@ -73,9 +73,9 @@ Hono daemon routes (69 app.route() mounts + direct handlers for /healthz,
       +-- coordination routes (stream / queue / workflow / mission control)
       |
       v
-Framework-free domain services (428 files under packages/daemon/src/domain)
+Framework-free domain services (430 files under packages/daemon/src/domain)
       |
-      +-- SQLite state (94 migrations)
+      +-- SQLite state (96 migrations)
       +-- tmux / cmux / resume adapters
       +-- runtime adapters (Claude Code / Codex / Pi / Oh My Pi / Stub / Terminal)
       +-- rig environment services (compose adapter, service readiness, orchestrator)
@@ -88,10 +88,10 @@ handoff → inspect/attach → work → repeat`.
 
 ## 2. Database schema
 
-The migrations live in `packages/daemon/src/db/migrations/` (94 files,
-`001_core_schema.ts` … `095_rig_non_interruptive.ts`, with no `093`).
-`ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:105`) lists all 94, and `createDaemon`
-applies them with `migrate(db, ALL_MIGRATIONS)` (`startup.ts:296`). `migrate.ts`
+The migrations live in `packages/daemon/src/db/migrations/` (96 files,
+`001_core_schema.ts` … `097_thread_part_map.ts`, with no `093`).
+`ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:107`) lists all 96, and `createDaemon`
+applies them with `migrate(db, ALL_MIGRATIONS)` (`startup.ts:298`). `migrate.ts`
 sorts them by name (`:29`) and records each applied name in `schema_migrations`
 (`:15`).
 
@@ -138,10 +138,13 @@ in `003_events.ts`, `snapshots` (serialized rig state) in `004_snapshots.ts`, an
 - `040_workflow_specs_diagnostic.ts` — `ALTER TABLE workflow_specs ADD COLUMN`
   for parser/validator diagnostics (no new table).
 
-Migrations `041`–`092`, `094` and `095` continue in the same directory; list them with
-`git ls-files packages/daemon/src/db/migrations`. The newest,
-`095_rig_non_interruptive.ts`, adds `rigs.non_interruptive` (0 or 1, default 0), the
-saved per-rig choice behind `rig up --non-interruptive`.
+Migrations `041`–`092` and `094`–`097` continue in the same directory; list them with
+`git ls-files packages/daemon/src/db/migrations`. `095_rig_non_interruptive.ts` adds
+`rigs.non_interruptive` (0 or 1, default 0), the saved per-rig choice behind
+`rig up --non-interruptive`; `096_rig_install_root.ts` adds `rigs.install_root`, the rig's
+bundle materialization folder (`rig-repository.ts:169`). The newest, `097_thread_part_map.ts`,
+adds `thread_part_map`, which maps each message OpenRig posts into an ask's Slack thread to
+that ask and its seat.
 
 The package, bootstrap and discovery tables remain: `packages`
 (`008_packages.ts`), `package_installs` and `install_journal`
@@ -159,7 +162,7 @@ The package, bootstrap and discovery tables remain: `packages`
 `app.get("*")` catch-all (`:853`).
 
 The 69 is the count of `app.route(` lines in `server.ts`; `packages/daemon/src/routes/`
-has 67 files, 65 of which create a Hono router.
+has 68 files, 65 of which create a Hono router.
 
 Mount families include the rig, session and spec routes plus the coordination
 routes (`/api/stream` `server.ts:783`, `/api/queue` `:784`, `/api/workflow`
@@ -183,35 +186,35 @@ registered (`registerTerminalAuthOnly`, `:762`).
 
 ## 4. Startup sequence (`createDaemon`)
 
-`createDaemon(opts?)` is `packages/daemon/src/startup.ts:285` (async, returns
+`createDaemon(opts?)` is `packages/daemon/src/startup.ts:287` (async, returns
 `DaemonResult`). It returns `{ app, db, deps, contextMonitor, eventLoopMonitor,
-injectWebSocket }` (`startup.ts:2483`). In source order, it:
+injectWebSocket }` (`startup.ts:2506`). In source order, it:
 
-1. Opens SQLite and applies all 94 migrations (`migrate(db, ALL_MIGRATIONS)`,
-   `startup.ts:296`).
-2. Constructs the coordination stores early: `StreamStore` (`:328`),
-   `QueueRepository` (`:426`) and `OutboxHandler` (`:441`).
-3. Constructs `TranscriptStore` (`:553`) and the rig environment services
-   `ComposeServicesAdapter` and `ServiceOrchestrator` (`:642`–`643`).
-4. Constructs `StartupOrchestrator` (`:774`) and the runtime adapters:
-   `ClaudeCodeAdapter` (`:776`), `CodexRuntimeAdapter` (`:777`),
-   `PiRuntimeAdapter` (`:780`), `OmpRuntimeAdapter` (`:781`) and
-   `StubRuntimeAdapter` (`:786`); the terminal adapter is created inline in the
-   runtime adapter maps (`:968`, `:1238`).
-5. Constructs `PodRigInstantiator` (`:964`), `PodBundleSourceResolver` (`:993`)
-   and `BootstrapOrchestrator` (`:995`).
-6. Constructs `ContextUsageStore` (`:1074`), `ResumeMetadataRefresher`
-   (`:1108`), `SpecReviewService` (`:1133`) and `WhoamiService` (`:1136`).
-7. Builds `AppDeps` (`const deps: AppDeps`, `:1170`). `SessionTransport`
-   (`:1241`), `ChatRepository` (`:1275`), `InboxHandler` (`:1279`), `AskService`
-   (`:1328`) and `SpecLibraryService` (`:1366`) are constructed inside that
+1. Opens SQLite and applies all 96 migrations (`migrate(db, ALL_MIGRATIONS)`,
+   `startup.ts:298`).
+2. Constructs the coordination stores early: `StreamStore` (`:330`),
+   `QueueRepository` (`:428`) and `OutboxHandler` (`:443`).
+3. Constructs `TranscriptStore` (`:555`) and the rig environment services
+   `ComposeServicesAdapter` and `ServiceOrchestrator` (`:644`–`645`).
+4. Constructs `StartupOrchestrator` (`:776`) and the runtime adapters:
+   `ClaudeCodeAdapter` (`:778`), `CodexRuntimeAdapter` (`:779`),
+   `PiRuntimeAdapter` (`:782`), `OmpRuntimeAdapter` (`:783`) and
+   `StubRuntimeAdapter` (`:788`); the terminal adapter is created inline in the
+   runtime adapter maps (`:989`, `:1259`).
+5. Constructs `PodRigInstantiator` (`:985`), `PodBundleSourceResolver` (`:1014`)
+   and `BootstrapOrchestrator` (`:1016`).
+6. Constructs `ContextUsageStore` (`:1095`), `ResumeMetadataRefresher`
+   (`:1129`), `SpecReviewService` (`:1154`) and `WhoamiService` (`:1157`).
+7. Builds `AppDeps` (`const deps: AppDeps`, `:1191`). `SessionTransport`
+   (`:1262`), `ChatRepository` (`:1296`), `InboxHandler` (`:1300`), `AskService`
+   (`:1349`) and `SpecLibraryService` (`:1387`) are constructed inside that
    object literal. `InboxHandler` receives the same queue repository instance
    (`queueRepoInstance`) that serves `/api/queue`, so absorbed inbox items and the
    queue route write to one store.
-8. Constructs `ContextMonitor` (`:2384`), then assigns later fields onto `deps`
+8. Constructs `ContextMonitor` (`:2407`), then assigns later fields onto `deps`
    (among them the terminal service, the request-phase observer and the gateway
    subsystem).
-9. Calls `createAppWithWebSocket(deps)` (`startup.ts:2481`) to mount the full
+9. Calls `createAppWithWebSocket(deps)` (`startup.ts:2504`) to mount the full
    route tree.
 
 Node inventory is a set of functions (`getNodeInventory` and friends in
@@ -223,9 +226,9 @@ The daemon entrypoint `packages/daemon/src/index.ts:306` calls
 
 ## 5. Test files
 
-A static count of tracked test files at `2620dea84efad75e3c5fff9fcf816a78c8e8155f` (no pass counts are claimed
-here; CI runs the suites in `.github/workflows/tests.yml`): daemon **897**,
-CLI **245**, web UI **198**, TUI **100**
+A static count of tracked test files at `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7` (no pass counts are claimed
+here; CI runs the suites in `.github/workflows/tests.yml`): daemon **923**,
+CLI **260**, web UI **198**, TUI **103**
 (`git ls-files 'packages/<package>/**/*.test.ts' 'packages/<package>/**/*.test.tsx' | wc -l`).
 
 ## See also

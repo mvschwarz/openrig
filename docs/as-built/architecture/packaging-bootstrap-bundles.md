@@ -9,14 +9,14 @@ applies-when: |
   source routing, bootstrap plan/apply, or the retained package install engine.
 siblings: [agent-spec-and-startup.md, plugin-agent-image-context-pack.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
 # Packaging, bootstrap and bundles
 
 This module describes source at main commit
-`2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Source paths below are repository-relative.
+`2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Source paths below are repository-relative.
 An npm CLI artifact and a `.rigbundle` have different builders and consumers; neither
 source verification nor archive integrity establishes that a daemon has adopted an artifact.
 
@@ -195,11 +195,13 @@ When an unarchived or running team already has the bundle's rig name (`bundleIns
 in `packages/daemon/src/domain/bundle-install-context.ts`), pod-bundle apply refuses before
 writing if any of them is running. If the target is that team's own install folder (its
 `bundle.yaml` names the offered schema-2 bundle, or `my-bundle` or `github-bundle`, the default
-names before 0.6.7; `isExistingBundleTarget()`), bootstrap first
+names before 0.6.7, and it is the folder recorded in `rigs.install_root` when any of those teams
+recorded one; `isExistingBundleTarget()`), bootstrap first
 confirms the old sessions are stopped; materialization then copies each conflicting path to a
 `bundle-backups/reinstall-*` folder under the OpenRig home, with a `RESTORE.json`, before
 replacing it, and leaves unrelated files in place. Any other target keeps the conflict refusal.
-The instantiator archives the stopped earlier generation.
+The instantiator archives the stopped earlier generation. Pod-bundle apply records the
+target's real path as the new rig's `install_root` (migration `096`).
 
 Pod bundles containing service definitions are refused by bootstrap; their service path
 requires a stable spec directory. Direct spec bootstrap has separate service prelaunch
@@ -237,7 +239,8 @@ against same-name rigs with running sessions before bootstrap; a stopped team of
 doesn't block it. A conflict returns a 400 with `status: "not_attempted"`, the installed team
 and the offered bundle, and three choices: use the existing team, stop it and retry to replace
 it, or cancel. The compatibility override `skipVersionCheck` and name-conflict override `force`
-are explicit request fields.
+are explicit request fields; neither skips the metadata pass, which always validates the
+manifest.
 
 `packages/daemon/src/domain/bundle-conflict-detector.ts` implements the rig-name check.
 It is not a complete agent, port or filesystem collision audit; a missing rig name supplies

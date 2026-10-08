@@ -11,7 +11,7 @@ applies-when: |
   and the CLI restore-packet command work.
 siblings: [daemon-core.md, agent-spec-and-startup.md, transport-and-transcripts.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
@@ -22,7 +22,7 @@ The durable-state half of the core product loop:
 captures serialized rig state; restore replays it honestly (no silent
 fresh-fallback); restore-check is a separate read-only readiness probe.
 
-> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
+> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -94,7 +94,7 @@ All under `packages/daemon/src/domain/`:
   and the env receipt (`:116–123`).
 - `snapshot-repository.ts` — snapshot CRUD and restore-source selection:
   `findLatestRestoreUsable` (`:72`) and `selectRestoreUsable` (`:94`), which
-  accept only snapshots that pass `isRestoreUsableSnapshotData` (`:283`).
+  accept only snapshots that pass `isRestoreUsableSnapshotData` (`:250`).
 - `restore-orchestrator.ts` — resume, checkpoint delivery, startup replay,
   live continuity consultation, topology ordering (`computeRestorePlan`,
   `:669`, ordering only `delegates_to` and `spawned_by` edges, `:71`, among
@@ -107,7 +107,7 @@ All under `packages/daemon/src/domain/`:
 - `restore-attempt-receipt.ts` — `deriveRestoreAttemptReceipt` (`:42`), the
   read-only per-attempt receipt (§4).
 - `rehydrate-eligibility.ts` — `snapshotMatchesCurrentOccupants` (`:20`) and
-  `assessCurrentStateRehydrateEligibility` (`:66`), shared by `routes/up.ts`
+  `assessCurrentStateRehydrateEligibility` (`:69`), shared by `routes/up.ts`
   and `routes/restore-check.ts`.
 - `active-occupant.ts` — the shared rule for which snapshot session row is a
   node's occupant (`resolveActiveSnapshotSession`, `:73`).
@@ -155,7 +155,7 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   `startup_owner_root_missing` (`:139`), `service_rig_root_missing` (`:187`)
   and `service_compose_file_missing` (`:197`). The `/api/up` route returns
   that outcome as HTTP 409 with `status: "not_attempted"`
-  (`routes/up.ts:161`). A node that resumes its exact native session replays
+  (`routes/up.ts:162`). A node that resumes its exact native session replays
   no startup files, actions, guidance or skills (`replayContained`,
   `restore-orchestrator.ts:1107`); its saved Claude activity-hook selection
   is reapplied before native resume. A skipped hook reapply adds a warning
@@ -204,7 +204,7 @@ cited here by number with the code that carries them):
   yes or no for each `awaiting-decision` seat and re-posts with the accepted
   seats as fresh (`up.ts:589`).
 - Rule 16 — `rig down` prints the snapshot id and a restore command
-  (`packages/cli/src/commands/down.ts:242–252`); `rig up` on an existing rig
+  (`packages/cli/src/commands/down.ts:293–303`); `rig up` on an existing rig
   prints per-node statuses and the attach command
   (`packages/cli/src/commands/up.ts:554–587`).
 
@@ -212,7 +212,9 @@ cited here by number with the code that carries them):
 
 ## 4. Auto-snapshot and existing-rig power-on
 
-- `rig down <rig>` (name or id, `packages/cli/src/commands/down.ts:110`)
+- `rig down <rig>` (name or id, `packages/cli/src/commands/down.ts:144`)
+  first prints the rig's recorded agent sessions and their activity, best
+  effort and only without `--json` (`showAgentsBeforeDown`, `down.ts:28`), then
   auto-captures an `auto-pre-down` snapshot before teardown when the rig has
   live sessions (`packages/daemon/src/domain/rig-teardown.ts:117`, capture
   at `:128`, after refreshing resume metadata at `:119`; an already-stopped
@@ -226,18 +228,18 @@ cited here by number with the code that carries them):
   (`up.ts:306–325`); when `first-project` resolves to the built-in `starter`
   spec, the archived and existing-rig checks also apply to `starter`
   (`up.ts:314–317`). The daemon finds the rig by name, preferring unarchived
-  rigs (`packages/daemon/src/routes/up.ts:222–225`), and restores from
-  `selectRestoreUsable` (`routes/up.ts:105`), which prefers the newest
+  rigs (`packages/daemon/src/routes/up.ts:223–226`), and restores from
+  `selectRestoreUsable` (`routes/up.ts:106`), which prefers the newest
   `auto-pre-down` or `auto-periodic` snapshot, then the newest other usable
   one (`snapshot-repository.ts:75`).
 - `rig up <rig-name> --plan` is a read-only restore preview that never
-  captures a snapshot (`routes/up.ts:126`).
+  captures a snapshot (`routes/up.ts:127`).
 - If no usable snapshot exists, or the chosen one names an older occupant
-  (`snapshotMatchesCurrentOccupants`, `routes/up.ts:109`), `rig up` captures
+  (`snapshotMatchesCurrentOccupants`, `routes/up.ts:110`), `rig up` captures
   an `auto-rehydrate` snapshot of current DB state when that state is
-  eligible (`routes/up.ts:136–145`). Otherwise it errors with code
+  eligible (`routes/up.ts:137–146`). Otherwise it errors with code
   `no_snapshot` and guidance ("… current DB state is insufficient for
-  rehydrate. Start fresh with: rig up <spec-path>", `routes/up.ts:117–122`).
+  rehydrate. Start fresh with: rig up <spec-path>", `routes/up.ts:118–123`).
 - Post-command handoff: `down` output includes the snapshot ID and
   `To restore: rig up <name>` (or `rig restore <snapshotId> --rig <rigId>`
   when the name is not unique); `up` output includes node statuses and an
@@ -276,7 +278,7 @@ cited here by number with the code that carries them):
   `SuccessorSessionLauncher` (`successor-session-launcher.ts:92`) respawns
   the same pane in place, so the session name stays the same. The fresh
   source delivers a daemon-built restore packet (`buildRestorePacket`,
-  `seat-handover-service.ts:1143`), which is separate from the CLI
+  `seat-handover-service.ts:1151`), which is separate from the CLI
   `rig restore-packet` below. The rebuild source primes from the seat's
   durable chain (`buildRebuildPrimingChain`, `rebuild-priming-chain.ts:22`).
 
@@ -285,75 +287,76 @@ cited here by number with the code that carries them):
 ### 5.1 `rig restore-check` — readiness probe
 
 `GET /api/restore-check?rig=<name>&noQueue=true&noHooks=true&compact=1&ready=1`
-(`routes/restore-check.ts:218–219`). The route calls
-`createRestoreCheckService` (`:150`), which assembles a framework-free
-`RestoreCheckDeps` (`:154–214`) over existing daemon projections —
-`listRigs` from `rigRepo` (`:173–176`), `getNodeInventory` (joining
-`node_id` by `logical_id`, `:25–30`, `:177–183`), `getStartupContext` (reads
+(`routes/restore-check.ts:220–221`). The route calls
+`createRestoreCheckService` (`:151`), which assembles a framework-free
+`RestoreCheckDeps` (`:155–216`) over existing daemon projections —
+`listRigs` from `rigRepo` (`:175–178`), `getNodeInventory` (joining
+`node_id` by `logical_id`, `:26–31`, `:179–185`), `getStartupContext` (reads
 `node_startup_context`, parses `projection_entries_json` /
-`resolved_files_json` / `startup_actions_json`, `:48–142`), `hasSnapshot`
-/ `getLatestSnapshot` from `snapshotRepo` (`:187–193`), `getRestoreInputs`
-(`:194–205`), `probeQueueStore` (`:156–168`), `getClaudeActivityHookEvents`
-(`:169–172`), and `probeDaemonHealth` (self-evident: "We're inside the
-daemon — if this route is responding, daemon is healthy", `:206–209`). It
-then runs `service.check(...)` (`:229–230`).
+`resolved_files_json` / `startup_actions_json`, `:49–143`), `hasSnapshot`
+/ `getLatestSnapshot` from `snapshotRepo` (`:189–195`), `getRestoreInputs`
+(`:196–207`), `probeQueueStore` (`:158–170`), `getClaudeActivityHookEvents`
+(`:171–174`), and `probeDaemonHealth` (self-evident: "We're inside the
+daemon — if this route is responding, daemon is healthy", `:208–211`). It
+then runs `service.check(...)` (`:231–232`).
 
-`RestoreCheckService.check()` (`restore-check-service.ts:254`) layers:
+`RestoreCheckService.check()` (`restore-check-service.ts:259`) layers:
 
 1. **Host checks** — `checkDaemonReachable` (probe-throw → `verdict:
-   unknown`, NOT `not_restorable`, `:265–275`), `checkStateDirWritable`
-   (`:277`, impl `:493`), `checkHostInfraDeclaration` (`:278`, impl `:510`).
-2. **Rig enumeration** — `listRigs()` throw → `buildUnknown` (`:281–290`);
-   `--rig` filter; unknown rig → red `rig.<name>.exists` (`:292–300`).
-3. **Per-rig checks** — `checkSnapshot` (`:306`, impl `:779`),
-   `checkSpecPresent` (`:311`, impl `:1142`), and
-   `rig.<name>.restore-preconditions` (`checkRestorePreconditions`, `:333`,
-   impl `:417`). The last runs the same `validatePreRestore` that restore
-   runs (`:441`) on the inputs from `getRestoreInputs`: red on a blocker,
+   unknown`, NOT `not_restorable`, `:270–280`), `checkStateDirWritable`
+   (`:282`, impl `:498`), `checkHostInfraDeclaration` (`:283`, impl `:515`).
+2. **Rig enumeration** — `listRigs()` throw → `buildUnknown` (`:286–295`);
+   `--rig` filter; unknown rig → red `rig.<name>.exists` (`:297–305`).
+3. **Per-rig checks** — `checkSnapshot` (`:311`, impl `:784`),
+   `checkSpecPresent` (`:316`, impl `:1161`), and
+   `rig.<name>.restore-preconditions` (`checkRestorePreconditions`, `:338`,
+   impl `:422`). The last runs the same `validatePreRestore` that restore
+   runs (`:446`) on the inputs from `getRestoreInputs`: red on a blocker,
    yellow on a warning, green otherwise. Without a usable snapshot it is
    yellow when current-state rehydrate is eligible and red when it isn't;
    when the inputs can't be read it is yellow and the rig's rollup becomes
    `unknown` (see Verdict). The rig-status route sets
    `recoveryOnly` (`routes/rigs.ts:272`), which skips this check when every
-   seat is ready (`restore-check-service.ts:332`).
-4. **Per-seat checks** — `checkSeatReadiness` (`:341`), `checkStartupContext`
-   (`:355`, impl `:867`; `unknownChecks` → `buildUnknown`, `:356–361`),
-   `checkTranscript` (`:377`), `checkResumePath` (`:381`), and unless opted
+   seat is ready (`restore-check-service.ts:337`).
+4. **Per-seat checks** — `checkSeatReadiness` (`:346`), `checkStartupContext`
+   (`:360`, impl `:886`; `unknownChecks` → `buildUnknown`, `:361–366`),
+   `checkTranscript` (`:382`), `checkResumePath` (`:386`), and unless opted
    out: the daemon SQLite `queue_items` availability probe `checkQueueStore`
-   (`:385–389`, gated by `--no-queue`; impl `:988`) and `checkHooks`
-   (`:390–394`, gated by `--no-hooks`; impl `:1011`). Queue continuity is
+   (`:390–394`, gated by `--no-queue`; impl `:1007`) and `checkHooks`
+   (`:395–399`, gated by `--no-hooks`; impl `:1030`). Queue continuity is
    represented by the shared daemon store; an empty queue is valid
-   (`routes/restore-check.ts:158–161`). Claude hook readiness follows the
+   (`routes/restore-check.ts:160–163`). Claude hook readiness follows the
    persisted `claude_activity_hooks` runtime-resource selection
-   (`restore-check-service.ts:1034–1041`) and the adapter's activity-relay
-   projection in the seat CWD (`restore-check-service.ts:1052–1053`). A seat
+   (`restore-check-service.ts:1053–1060`) and the adapter's projection: the
+   hook settings in the seat CWD and the activity relay under the OpenRig
+   home's `state/claude-activity-hooks/` (`restore-check-service.ts:1071–1072`). A seat
    that deliberately omits that resource is not applicable. In compact mode
    without `ready=1`, a seat whose readiness check is green gets only the
-   startup-context check (`restore-check-service.ts:353`, `:363–375`); that
+   startup-context check (`restore-check-service.ts:358`, `:368–380`); that
    check still counts toward the verdict.
-5. **Verdict** — `buildResult` (`:1186`) aggregates: any red →
+5. **Verdict** — `buildResult` (`:1205`) aggregates: any red →
    `not_restorable`; else any rig rollup with status `unknown` → `unknown`
-   (`:1204–1205`); else any yellow → `restorable_with_caveats`; else
-   `restorable` (`:1201–1210`). A rig rollup is `unknown` when its restore
-   inputs could not be read (`:1530–1532`). A probe that can't be inspected
-   at all also gives `unknown` (`buildUnknown`, `:1219`). Plus a
-   `RecoveryPlan` (`buildRecovery`, `:1323`) and a `RepairStep[]` packet
-   (`buildRepairPacket`, `:1562`; `null` when fully restorable, `:1563`).
+   (`:1223–1224`); else any yellow → `restorable_with_caveats`; else
+   `restorable` (`:1220–1229`). A rig rollup is `unknown` when its restore
+   inputs could not be read (`:1549–1551`). A probe that can't be inspected
+   at all also gives `unknown` (`buildUnknown`, `:1238`). Plus a
+   `RecoveryPlan` (`buildRecovery`, `:1342`) and a `RepairStep[]` packet
+   (`buildRepairPacket`, `:1581`; `null` when fully restorable, `:1582`).
 
-The result shape is `RestoreCheckResult` (`restore-check-service.ts:147–159`):
+The result shape is `RestoreCheckResult` (`restore-check-service.ts:148–160`):
 `verdict`, `readiness`, `continuity`, `rigs[]`, `hostInfra`, `recovery`,
 `counts {red,yellow,green}`, `classCounts`, `checks[]`, `repairPacket`. With
-`compact=1` the route returns a reduced body (`routes/restore-check.ts:232–259`).
+`compact=1` the route returns a reduced body (`routes/restore-check.ts:234–261`).
 
 **Honest-error design:** a daemon-probe *exception* produces
 `verdict: unknown` (uninspectable state), distinct from a daemon
 definitely-down state which is `red` / `not_restorable`
-(`restore-check-service.ts:265–275`, `checkDaemonReachable` `:471–491`). The
+(`restore-check-service.ts:270–280`, `checkDaemonReachable` `:476–496`). The
 route's catch-all returns the same `unknown`-shaped body with HTTP 500 + a
-`probe.error` red check (`routes/restore-check.ts:262–310`).
+`probe.error` red check (`routes/restore-check.ts:264–312`).
 `CheckEntry.remediationSafe` defaults to `false` (conservative —
 unclassified remediations are NOT auto-execution-safe,
-`restore-check-service.ts:22–27`, applied at `:1577`).
+`restore-check-service.ts:23–28`, applied at `:1596`).
 
 CLI surface (`../cli-reference.md` `### restore-check`; options in
 `packages/cli/src/commands/restore-check.ts:222–227`):
@@ -366,15 +369,15 @@ with caveats), `1` not restorable (red), `2` unknown / probe error
 ### 5.2 `rig restore-packet` — cross-runtime restore packet
 
 CLI-side, no restore-packet daemon route. `commands/restore-packet.ts`
-(**539** lines, `wc -l < packages/cli/src/commands/restore-packet.ts`)
+(**541** lines, `wc -l < packages/cli/src/commands/restore-packet.ts`)
 implements **3** subcommands
 (`grep -c 'cmd.command(' packages/cli/src/commands/restore-packet.ts`;
-`../cli-reference.md` `### restore-packet`): `write [options]` (`:216`;
+`../cli-reference.md` `### restore-packet`): `write [options]` (`:218`;
 generate a packet directory from a source session or JSONL file, with
 `omitted-records` accounting; `--source-session` reads the transcript from the
 daemon's `/api/transcripts/<session>/full`, `:156`), `read <packet-dir> [--json]`
-(`:371`; render contents; non-mutating), `validate <packet-dir> [--json]`
-(`:450`; validate against the v0 schema; non-mutating). Packet shape is the
+(`:373`; render contents; non-mutating), `validate <packet-dir> [--json]`
+(`:452`; validate against the v0 schema; non-mutating). Packet shape is the
 cross-runtime v0 standard — Claude Code and Codex transcripts both supported
 via runtime parsers + redaction (`packages/cli/src/restore-packet/`).
 

@@ -13,7 +13,7 @@ applies-when: |
   stamped commit.
 siblings: [shell-and-routing.md, ../architecture/mission-control.md]
 prerequisite-reads: [../README.md, shell-and-routing.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
@@ -29,7 +29,7 @@ and the maintenance-notice dismissal (see
 [`shell-and-routing.md`](shell-and-routing.md)).
 
 > Paths are relative to `packages/ui/src/` unless prefixed `docs/` or
-> `packages/`. Verified at `2620dea8` (package version 0.6.6). The web UI
+> `packages/`. Verified at `2caac7dd` (package version 0.6.7). The web UI
 > is in maintenance mode (`docs/reference/developing.md`); this page
 > records what ships, not a roadmap.
 

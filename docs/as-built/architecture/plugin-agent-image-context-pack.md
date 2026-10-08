@@ -9,14 +9,14 @@ applies-when: |
   agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
 # Content libraries and compaction
 
 This module describes source at main commit
-`2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Source paths below are repository-relative.
+`2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Source paths below are repository-relative.
 Context packs, plugins and agent images have filesystem-backed content and daemon-side
 discovery. Their consumers can read database identity, mutate files, deliver messages or
 launch sessions; the whole layer is not a read-only catalog.
@@ -135,7 +135,8 @@ that loadout (`packages/daemon/src/domain/profile-resolver.ts:287–308`, with
 `resolvePluginSkills()` at `skill-catalog.ts:368`). Neither runtime reads skills from the plugin
 folder projected into the working directory. The skills are projected under their plain names,
 and a skill the profile already selects keeps its source. A kept plugin copy (an edited or
-user-owned one) gives a `plugin_skill_kept` warning, and an unreadable one gives
+user-owned one, or OpenRig's own copy whose plugin source changed or moved after the loadout
+was resolved, `skill-catalog.ts:937–945`) gives a `plugin_skill_kept` warning, and an unreadable one gives
 `plugin_skill_skipped`. If plugin skills can't be projected at all, the seat starts without them
 and gets a `plugin_skills_not_projected` warning (`rigspec-instantiator.ts:2045`).
 
@@ -232,8 +233,12 @@ changed files but never deletes files the new version dropped.
 `ensureSkillGlobally()` projects a named plugin skill using a vendor-version marker.
 An existing unversioned global skill remains externally owned. Startup wires this service
 and its filesystem implementation; inspect that wiring when changing projection roots. At
-startup only `openrig-core` is vendored, and it is projected globally as `openrig-skills` into
-`~/.claude/skills` and `~/.agents/skills`.
+startup only `openrig-core` is vendored, and its `openrig-skills` and `refocusing` skills are
+projected globally into `~/.claude/skills` and `~/.agents/skills`
+(`packages/daemon/src/startup.ts:877–886`). The packaged `rigs` skill
+(`packages/daemon/assets/skills/rigs`) is not a plugin skill: `ensureSkillDirGlobally()`
+projects it into the same roots under the daemon version, so each upgrade refreshes it
+(`startup.ts:891–899`). A failed global projection is logged and does not stop startup.
 
 `ensureLatest()` performs local vendoring before `attemptAutoFetch()`. The latter
 requests a release asset with a bounded timeout and logs failures; even its successful

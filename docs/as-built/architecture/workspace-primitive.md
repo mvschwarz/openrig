@@ -12,7 +12,7 @@ applies-when: |
   Project UI.
 siblings: [content-surfaces.md, daemon-core.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
@@ -26,7 +26,7 @@ through `whoami` / node-inventory and gate per-item repo scope. Alongside it, a
 the Project UI's mission / slice surfaces.
 
 > Paths are relative to `packages/daemon/src/` unless prefixed `packages/` or
-> `docs/`. Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count sits beside
+> `docs/`. Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count sits beside
 > the command that produces it; run the commands from the repository root.
 > The files / markdown / progress / steering surfaces are in the sibling
 > `content-surfaces.md`.
@@ -60,13 +60,13 @@ Workspace initialization no longer seeds a getting-started mission (§3).
 `RigSpec.workspace` is an **optional** typed block. Rigs without it stay valid;
 `whoami` / node-inventory return a null workspace block in that case.
 
-> Source: `domain/types.ts:1159–1166` (`WorkspaceSpec`), `:1149–1155`
-> (`WorkspaceRepoSpec`), `:1184` (`RigSpec.workspace?`).
+> Source: `domain/types.ts:1163–1170` (`WorkspaceSpec`), `:1153–1159`
+> (`WorkspaceRepoSpec`), `:1188` (`RigSpec.workspace?`).
 
 | Field | Shape | Notes |
 |---|---|---|
 | `workspaceRoot` | string | Verbatim from spec |
-| `repos[]` | `{ name, path, kind }[]` | `path` resolved to absolute at parse time (`domain/rigspec-schema.ts:355–357`); authors may declare it relative to `workspaceRoot` in YAML |
+| `repos[]` | `{ name, path, kind }[]` | `path` resolved to absolute at parse time (`domain/rigspec-schema.ts:361–363`); authors may declare it relative to `workspaceRoot` in YAML |
 | `defaultRepo?` | string | active repo when no env override / cwd match |
 | `knowledgeRoot?` | string | treated as `kind=knowledge` when surfaced |
 
@@ -74,7 +74,7 @@ Workspace initialization no longer seeds a getting-started mission (§3).
 (`grep '^export const WORKSPACE_KINDS' packages/daemon/src/domain/types.ts | grep -o '"[a-z]*"' | wc -l`):
 `user`, `project`, `knowledge`, `lab`, `delivery`.
 
-> Source: `domain/types.ts:1145–1146` (`WORKSPACE_KINDS` / `WorkspaceKind`).
+> Source: `domain/types.ts:1149–1150` (`WORKSPACE_KINDS` / `WorkspaceKind`).
 
 In YAML the block is spelled `workspace: { workspace_root, repos: [{ name,
 path, kind }], default_repo?, knowledge_root? }`. Validation requires a
@@ -82,7 +82,7 @@ non-empty `workspace_root`, a `repos` array whose names are unique and whose
 `kind` is one of the five kinds, a `default_repo` that names a declared repo,
 and a non-empty `knowledge_root` when present.
 
-> Source: `domain/rigspec-schema.ts:287–337`.
+> Source: `domain/rigspec-schema.ts:288–347`.
 
 ### 1.1 Persistence — migration 038 + RigRepository
 
@@ -101,9 +101,9 @@ are **defensive no-ops** when the column is absent (`hasRigColumn` probe) —
 older test fixtures that bypass the canonical migration list don't have the
 column; the setter's contract is "best-effort persistence".
 
-> Source: `domain/rig-repository.ts:174–179` (setter; column probe `:175`),
-> `:182–192` (getter; probe `:183`; parse failure → null `:189–191`);
-> `hasRigColumn` `:337`.
+> Source: `domain/rig-repository.ts:184–189` (setter; column probe `:185`),
+> `:192–202` (getter; probe `:193`; parse failure → null `:199–201`);
+> `hasRigColumn` `:347`.
 
 The block is written only when declared. **3** call sites write it
 (`git grep -n 'setRigWorkspace(' -- packages/daemon/src | grep -v 'rig-repository.ts' | wc -l`):
@@ -159,10 +159,10 @@ so `/foo/bar` does not match `/foo/bar-other`. Node-inventory reads
 
 > Source: `domain/workspace/workspace-resolver.ts:57–95` (longest match
 > `:67–73`; knowledge fallback `:77–79`; default-repo fallback `:82–88`),
-> `isInside` `:97–103`; `domain/node-inventory.ts:681`
-> (`workspace: resolveNodeWorkspace(...)`), readers `:766–775`
-> (`readRigWorkspaceJson`) and `:692–702` (`readAllRigWorkspaceJson`,
-> batched); `NodeWorkspaceInfo` `domain/types.ts:791–795`.
+> `isInside` `:97–103`; `domain/node-inventory.ts:705`
+> (`workspace: resolveNodeWorkspace(...)`), readers `:790–799`
+> (`readRigWorkspaceJson`) and `:716–726` (`readAllRigWorkspaceJson`,
+> batched); `NodeWorkspaceInfo` `domain/types.ts:795–799`.
 
 ### 1.3 Per-item repo scope — migration 039 + queue validation
 
@@ -178,7 +178,7 @@ detail (`packages/ui/src/components/drawer-viewers/QueueItemViewer.tsx:157`).
 > Source: `db/migrations/039_queue_target_repo.ts:16–22`
 > (`ALTER TABLE queue_items ADD COLUMN target_repo TEXT` at `:19`;
 > `CREATE INDEX … idx_queue_items_target_repo` at `039_queue_target_repo.ts:20`); doc comment
-> `:3–15`; CLI flag `packages/cli/src/commands/queue.ts:458`.
+> `:3–15`; CLI flag `packages/cli/src/commands/queue.ts:461`.
 
 `validateTargetRepo` checks an explicit `targetRepo` against the **source
 rig's** `RigSpec.workspace.repos[]`: it parses the source session with
@@ -210,8 +210,8 @@ match; the filter is skipped when the column is absent.
 > `:758` in handlers `:650`, `:732` (`/create` handler `:450`); ordering note
 > `:482–489`; inherited value `:676–677`, `domain/queue-repository.ts:1681`,
 > `:1858`; list filter `routes/queue.ts:906`,
-> `domain/queue-repository.ts:3202–3204`, CLI
-> `packages/cli/src/commands/queue.ts:1140`; mounted `server.ts:784`.
+> `domain/queue-repository.ts:3226–3228`, CLI
+> `packages/cli/src/commands/queue.ts:1143`; mounted `server.ts:784`.
 
 ## 2. Workspace HTTP route — frontmatter validator and doctor
 
@@ -265,7 +265,7 @@ hard cap `maxFiles` default 10000.
 CLI surface: `rig workspace validate [root]` and `rig workspace doctor`.
 
 > Source: `packages/cli/src/commands/workspace.ts:86` (`validate`), `:146`
-> (`doctor`); `docs/as-built/cli-reference.md:610–611`.
+> (`doctor`); `docs/as-built/cli-reference.md#workspace`.
 
 ## 3. Default project-workspace scaffold
 
@@ -395,8 +395,8 @@ historical rows are not attributed to a selected project.
 > `proofPacket` `:81`), `:90–111` (`SliceListEntry`, which carries
 > `qitemCount` / `hasProofPacket` instead), `:865–875` and `:936–946` (queue
 > membership; project filter `:870`, `:942`); `domain/workspace/project-catalog.ts:132–138`
-> (`belongsToProject`); startup `startup.ts:1684`, `:1697` (`OPENRIG_SLICES_ROOT`
-> first), `:1704–1709`, `:1722–1727`, proof-source watch `:1741–1744`
+> (`belongsToProject`); startup `startup.ts:1705`, `:1718` (`OPENRIG_SLICES_ROOT`
+> first), `:1725–1730`, `:1743–1748`, proof-source watch `:1762–1765`
 > (`domain/proof/source-watch.ts:16`); default
 > `domain/user-settings/settings-store.ts:486`.
 
@@ -420,8 +420,8 @@ behavior (`workflowBinding`, `specGraph`, `phaseDefinitions` and
 > v1 enrichment), `:16–20` (v0 phase taxonomy removed), `:64`
 > (`StoryEvent.phase`), `:177–203` (`SliceDetailPayload`), `:205–213`
 > (optional `workflowSpecCache`); startup degrade path
-> `startup.ts:1728–1739` (comment `:1728–1734`;
-> `workflowSpecCache: workflowRuntime?.specCache` `:1738`).
+> `startup.ts:1749–1760` (comment `:1749–1755`;
+> `workflowSpecCache: workflowRuntime?.specCache` `:1759`).
 
 ### 4.3 Slices routes — 0.3.0
 
@@ -571,11 +571,11 @@ through the `/project*` destinations; it does not call `/api/projects`
 
 - **Optional + valid-without:** rigs without a `workspace` block stay valid;
   whoami / node-inventory return null and queue target-repo validation fails
-  open (`workspace-resolver.ts:32`, `:62`; `rig-repository.ts:175`, `:183`;
+  open (`workspace-resolver.ts:32`, `:62`; `rig-repository.ts:185`, `:193`;
   `routes/queue.ts:112`).
 - **Defensive column access:** `RigRepository` probes for `workspace_json`
-  (`rig-repository.ts:175`, `:183`), node-inventory's own reads fall back to
-  null on error (`node-inventory.ts:700`, `:772–774`), and the queue
+  (`rig-repository.ts:185`, `:193`), node-inventory's own reads fall back to
+  null on error (`node-inventory.ts:724`, `:796–798`), and the queue
   repository detects `target_repo` (`queue-repository.ts:752`), so partial
   test fixtures don't crash. Migrations 038/039 ship separately so a fixture
   can apply only the half it needs (`038_workspace_primitive.ts:12–14`).

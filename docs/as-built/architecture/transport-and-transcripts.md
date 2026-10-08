@@ -11,7 +11,7 @@ applies-when: |
   vs tmux-metadata-key naming distinction.
 siblings: [daemon-core.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
@@ -22,7 +22,7 @@ capture/broadcast wrap tmux with honest errors; transcripts are bounded
 `tmux capture-pane` snapshots written to files; chat is daemon-backed SQLite;
 the daemon's `rig ask` service gathers evidence and never calls an LLM.
 
-> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
+> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -44,7 +44,7 @@ source: **0** hits
 **Axis 2 — tmux metadata keys are `@rigged_*`, and are correct as-is.** The
 tmux metadata keys written at claim/bind time are a separate thing from MCP
 tool names and were not renamed. `setRiggedMetadata` in
-`packages/daemon/src/domain/claim-service.ts:180`–`184` writes exactly **5**
+`packages/daemon/src/domain/claim-service.ts:182`–`186` writes exactly **5**
 keys (`grep -c '@rigged_' packages/daemon/src/domain/claim-service.ts`):
 `@rigged_node_id`, `@rigged_session_name`, `@rigged_rig_id`,
 `@rigged_rig_name`, `@rigged_logical_id`. Do not blanket-sed `rigged` → `rig`.
@@ -85,51 +85,52 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
 `SessionTransport.send()`:
 
 1. Resolve the session name (`resolveBySessionName`,
-   `session-transport.ts:949`): not found → 404; the same name in more than
+   `session-transport.ts:939`): not found → 404; the same name in more than
    one rig → 409. A tmux probe of the session can also refuse it as missing or
-   tmux as unavailable (`:1301`–`1318`). Pod, rig, global and `--to` list
+   tmux as unavailable (`:1293`–`1310`). Pod, rig, global and `--to` list
    targets go through `POST /api/transport/broadcast`, which resolves them
    with `resolveSessions` and sends to each recipient in turn.
 2. Take the seat's delivery lease. Every write runs under a per-seat,
    serialized lease from the seat delivery guard, installed at daemon start
-   (`send`, `:1141`). With the seat's typing guard on, the message is held
+   (`send`, `:1131`). With the seat's typing guard on, the message is held
    instead of typed: the result is `outcome: "retained"` with HTTP 200
    (`routes/transport.ts:115`); operators use `rig seat set-typing-guard` and
    `rig seat held-messages`.
 3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
-   (`session-transport.ts:1465`), unless the caller passes
+   (`session-transport.ts:1457`), unless the caller passes
    `--dangerously-interact --reason`; that override persists an audit record
    before sending and refuses the send if it can't
-   (`prompt_override_audit_unavailable`, `:1454`). A mid-work reading (`running`, from a
+   (`prompt_override_audit_unavailable`, `:1446`). A pane that reads `unknown` while the seat's
+   latest runtime hook says it waits on a person reads as `needs_input` (`:1842`). A mid-work reading (`running`, from a
    fresh runtime hook or the pane's mid-work patterns,
    `findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN])`,
-   `:298`) or an `unknown` one proceeds with an advisory `warning` (`:1478`,
-   `:1486`). `--force` has no effect on this path, and combining it with
+   `:298`) or an `unknown` one proceeds with an advisory `warning` (`:1470`,
+   `:1478`). `--force` has no effect on this path, and combining it with
    `--wait-for-idle` is refused with 400 (`routes/transport.ts:66`–`73`).
 4. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
-   (`packages/daemon/src/adapters/tmux.ts:623`) → ~200ms delay
-   (`session-transport.ts:1541`) → separate named `Enter` (`:1559`). The paste
+   (`packages/daemon/src/adapters/tmux.ts:625`) → ~200ms delay
+   (`session-transport.ts:1533`) → separate named `Enter` (`:1551`). The paste
    targets the seat's registered pane ID, not the session name, and is refused
    with no input written if the session no longer holds exactly that pane.
    Bracketed paste preserves multiline input in supporting TUIs; the payload
    never enters a shell argument. A `--dangerously-interact` answer is pasted
-   without `-p` (`session-transport.ts:1524`) and Enter is pressed only if the
-   whole answer is still staged (`:1545`–`1553`). A successful paste proves
+   without `-p` (`session-transport.ts:1516`) and Enter is pressed only if the
+   whole answer is still staged (`:1537`–`1545`). A successful paste proves
    transport execution, not runtime consumption.
 5. Optional `--verify`: capture the last 30 pane lines before and after the
-   send (after a 500 ms wait, `:1580`) and count the message's first 40
+   send (after a 500 ms wait, `:1572`) and count the message's first 40
    characters in each. A higher count after the send reports
    `outcome: "delivered"`; otherwise the outcome is `rendered-unconfirmed` —
    text and Enter landed but the capture could not re-confirm the render,
    which is not a failure at the daemon (`session-transport.ts:681`
-   `verify?`; `:1579` `if (opts?.verify)`; `:1591`
+   `verify?`; `:1571` `if (opts?.verify)`; `:1583`
    `verified = postCount > preCount`). The outcome values are `delivered`,
    `rendered-unconfirmed`, `failed` and `retained` (`:748`).
 6. CLI `--verify` goes further (`packages/cli/src/commands/send.ts:596`): it
    looks for the text still unsubmitted at the prompt, makes one guarded
    Enter-only retry through the daemon's `submitOnly` path
-   (`session-transport.ts:1328`, which refuses with `staged_mismatch` unless the
+   (`session-transport.ts:1320`, which refuses with `staged_mismatch` unless the
    pane shows the expected staged text), and ends `staged-not-consumed` with
    exit code 1 if it is still there.
 7. Honest result with reason on failure. Reasons missing from the send
@@ -212,7 +213,7 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
    (`packages/daemon/src/domain/node-launcher.ts:181`).
 2. Each rotation tick captures the trailing lines with
    `capturePaneContent` (`transcript-rotation.ts:213` →
-   `adapters/tmux.ts:1079`) and atomically overwrites (temp file + rename,
+   `adapters/tmux.ts:1082`) and atomically overwrites (temp file + rename,
    `transcript-rotation.ts:283`–`285`)
    `transcripts/{rig-name}/{session-name}.log` under the OpenRig home (or
    the `transcripts.path` setting). It skips the write when the captured bytes
@@ -226,7 +227,7 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 3. `TranscriptStore` owns path convention, ANSI stripping for `readTail` and
    `grep`, boundary
    markers, `readTail`, `readFull`, `grep`. `readFull` returns the raw bytes
-   (`transcript-store.ts:366`); the `/full` route redacts them. The transcript
+   (`transcript-store.ts:378`); the `/full` route redacts them. The transcript
    routes check capture health first and can start capture lazily for a seat
    that has none.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
@@ -252,12 +253,13 @@ Claude or Codex session (`claude -p --resume` / `codex exec resume`,
 
 1. `rig chatroom send <rig> "message"` → `POST
    /api/rigs/:rigId/chat/send` → `ChatRepository.send()`
-   (`routes/chat.ts:35`); the route then emits `chat.message` (`:37`).
+   (`routes/chat.ts:43`); the route then emits `chat.message` (`:45`).
 2. SSE: `GET /api/rigs/:rigId/chat/watch` delivers real-time messages.
 3. History: `GET /api/rigs/:rigId/chat/history` returns channel history in id
    order, 100 messages unless `limit` says otherwise
    (`chat-repository.ts:68`), filterable by `topic`, `after`, `since` and
-   `sender`; `POST /api/rigs/:rigId/chat/topic` persists topic markers.
+   `sender` (a `since` SQLite cannot parse is refused with 400,
+   `routes/chat.ts:73`); `POST /api/rigs/:rigId/chat/topic` persists topic markers.
 4. UI: a `RigChatPanel` component exists
    (`packages/ui/src/components/RigChatPanel.tsx`), but no UI view mounts it:
    **1** file under `packages/ui/src` names it, its own

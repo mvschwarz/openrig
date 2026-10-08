@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `2620dea84efad75e3c5fff9fcf816a78c8e8155f`.
+Verified against source commit `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
 There are **87 top-level registrations**, **356 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,077 explicitly registered option objects**, including the root version
+**1,082 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are source counts, not a claim about a deployed release.
@@ -55,8 +55,9 @@ stdin and stdout are terminals. Arguments,
 pipes, and redirected streams follow normal CLI parsing.
 [`runFrontDoor` and `openMissionControl`](../../packages/cli/src/front-door.ts)
 own the entry behavior; [`tuiCommand`](../../packages/cli/src/commands/tui.ts)
-owns explicit TUI options; `rig terminal open saved:kernel` opens the kernel dashboard with
-its agent conversations. A daemon-down transport result can still open the
+owns explicit TUI options; `rig terminal open saved:kernel --window` opens the OpenRig TUI
+and the operator in a new terminal tab or window, and `rig tui --shared` is the
+dashboard-only fallback when that window cannot open. A daemon-down transport result can still open the
 recovery cockpit; it is not automatically a reason to exit before rendering.
 
 | Need | Start here |
@@ -457,7 +458,7 @@ Root: `rig`; declared option: `-V, --version`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--json` |
 
@@ -817,7 +818,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--policy <name>`<br>`--spec <path>` |
+| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--policy <name>`<br>`--spec <path>` |
 
 ### restore-check
 

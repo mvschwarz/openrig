@@ -7,13 +7,13 @@ applies-when: |
   request, what each check actually proves, and what CI will run for you. Also
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
 # Test layers: what to run before you push, and what each layer proves
 
-> **This page is a map, not the territory.** It was checked against source at `2620dea8`
+> **This page is a map, not the territory.** It was checked against source at `2caac7dd`
 > and it will drift. It is also incomplete on purpose. Before you rely on a command or a
 > claim here, read the script it names or run it. If a behaviour is missing from this page
 > (or from [arteries.md](arteries.md)), that tells you nothing about whether a change to it
@@ -245,7 +245,7 @@ The stub does not fabricate product outputs. It runs the real daemon, tmux and C
 not Claude Code or Codex, and it differs from them in ways that decide what a stub green
 means:
 
-| Area | What the stub does at `2620dea8` | What that means for your test |
+| Area | What the stub does at `2caac7dd` | What that means for your test |
 |---|---|---|
 | Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
 | Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). Otherwise Claude Code, Codex and Pi launch through `SeatLaunchEnvironment.command` and `tmux.sendShellCommand`; the stub adapter does not get that environment. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal` and `claude-code`, and only `codex` has a native-process proof; Claude Code ordinary delivery applies its own uncertainty policy at the input boundary. | A stub seat doesn't exercise the seat launch environment, managed launch, wrappers or native-process identity (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
@@ -382,7 +382,7 @@ not as current status.
 ## Help wanted: command families without a behavioural scenario
 
 > This list may be stale. It was taken from the `rig --help` tree of 0.6.3: 85 visible
-> top-level families. At `2620dea8`, `packages/cli/src/index.ts` registers 87 top-level
+> top-level families. At `2caac7dd`, `packages/cli/src/index.ts` registers 87 top-level
 > commands; `roster` and `telemetry` were added since and have no row yet. Before picking one up, check `packages/test-system/scenarios/`, the cases in
 > `scripts/run-pr-scenarios.sh`, and the current `rig --help`.
 > One scenario doesn't cover a family's every option, sequence or platform. A `--help`

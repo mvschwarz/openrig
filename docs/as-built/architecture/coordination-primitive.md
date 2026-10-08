@@ -10,7 +10,7 @@ applies-when: |
   transactional handoff guarantee, or where queue closure is enforced.
 siblings: [workflow-runtime.md, mission-control.md, daemon-core.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
+last-verified-against-source: 2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7
 last-updated: 2026-10-05
 ---
 
@@ -24,7 +24,7 @@ filesystem path remains untouched, and the daemon-backed `rig queue` /
 only to SQLite (`packages/cli/src/commands/queue.ts:19`,
 `packages/cli/src/commands/stream.ts:11`).
 
-> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
+> Verified against source at main `2caac7dd1bb16585138a6f7c1dd8b1f0752c49f7`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -70,9 +70,9 @@ Five host-scoped tables back the primitive, one per migration `023`–`027` in
   `pending | sending | delivered | failed | indeterminate | retained |
   retired`.
 
-These five are migrations `023`–`027` of the daemon's **94**
+These five are migrations `023`–`027` of the daemon's **96**
 (`git ls-files packages/daemon/src/db/migrations | wc -l`), applied in the
-order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:105`).
+order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:107`).
 Later migrations add columns to these tables; `daemon-core.md` covers the
 migration set.
 
@@ -89,13 +89,13 @@ Routes import these; services are Hono-free:
   every filter before taking the newest bounded page, then returns that page
   chronologically.
 - **`queue-repository.ts`** — L3 queue: create (`:1391`), claim/unclaim
-  (`:2186`, `:2268`), update (general state mutator with hot-potato
-  strict-rejection on `done`, `:2331`), transactional handoff (close source as
+  (`:2186`, `:2271`), update (general state mutator with hot-potato
+  strict-rejection on `done`, `:2334`), transactional handoff (close source as
   `handed-off` plus create new owned qitem in a single transaction, `:1656`;
   `handoffAndComplete`, `:1833`, closes the source as `done` instead),
-  pod-fallback rerouting (`routeToFallback`, `:3653`), overdue lookup
-  (`findOverdue`, `:3354`), nudge-result tracking (`recordNudgeAttempt`,
-  `:3638`). Nothing in the daemon writes the `last_heartbeat` column
+  pod-fallback rerouting (`routeToFallback`, `:3678`), overdue lookup
+  (`findOverdue`, `:3378`), nudge-result tracking (`recordNudgeAttempt`,
+  `:3663`). Nothing in the daemon writes the `last_heartbeat` column
   (`queue-pickup.ts:16`). Cross-rig validation hook exposed as `validateRig`
   constructor option (`queue-repository.ts:711`).
 - **`queue-transition-log.ts`** — append-only state-transition log; used by
@@ -126,7 +126,7 @@ commit (`queue-repository.ts:1404`–`1416`, `:1467`–`1475`). The returned
 `lastNudgeResult` is therefore normally null; `rig queue show <id>` reads the
 wake result later. If create cannot retain the intent, the task is still saved
 and the row records `failed:wake not retained: <reason>`. Startup reconciles
-and drains intents left pending by a crash once (`startup.ts:2338`–`2339`).
+and drains intents left pending by a crash once (`startup.ts:2361`–`2362`).
 `maybeNudge` remains only as the path for a repository with no outbox.
 
 The standing detector in `queue-stuck-sweep.ts` creates findings through the
@@ -167,17 +167,17 @@ canceled, no-follow-on, escalation, superseded}`. The reasons
 - `superseded` — the row was replaced by cancel-and-replace
   (`closure_target` = the successor qitem). The update path records it on
   `state=canceled` and refuses it there without a `closure_target`
-  (`queue-repository.ts:2597`).
+  (`queue-repository.ts:2619`).
 
 Tier→SLA mapping for `closure_required_at` also lives in
 `hot-potato-enforcer.ts` (`TIER_SLA_SECONDS`, `:114`). This validator is
 invoked by `QueueRepository.update()` (and `updateWithinTransaction()`), both
-through the call at `queue-repository.ts:2505`, so closure is enforced at the
+through the call at `queue-repository.ts:2521`, so closure is enforced at the
 daemon transaction boundary — the workflow runtime *projects* on closure but
 does not otherwise gate it (see `workflow-runtime.md`). The one
 workflow-aware check is in the queue: `update()` refuses a terminal close of a
 live workflow frontier packet from a non-workflow verb
-(`workflow_frontier_packet`, `queue-repository.ts:2531`), through a predicate
+(`workflow_frontier_packet`, `queue-repository.ts:2547`), through a predicate
 startup injects. "Terminal" there is the queue's terminal set, `done` and
 `handed-off` (`queue-repository.ts:51`).
 
@@ -190,10 +190,14 @@ note without a state change as an append-only transition; moving it to
 another state requires an explicit reopen with a note. A `qitem-` blocker must
 exist and be live on this daemon; when a blocker leaves the active states,
 each row parked on it follows the blocker's handoff successor or returns to
-`pending` with a durable wake (`queue-repository.ts:2384`–`2503`,
-`:2580`–`2624`, `:2903`–`2980`). `human-route-enforcer.ts` is a second pure
-validator at the same boundary: a `human-gate` row, a row addressed to a human
-seat, or a park on one must carry `summary` and `evidence_ref`.
+`pending` with a durable wake (`queue-repository.ts:2397`–`2519`,
+`:2602`–`2646`, `:2921`–`2998`). Claiming a parked row clears its
+`blocked_on`; the claim transition keeps the former gate as a `closure_target`
+audit pointer with no closure reason, which a re-park without `--blocked-on`
+reuses (`queue-repository.ts:2223`–`2244`, `:2561`–`2567`).
+`human-route-enforcer.ts` is a second pure validator at the same boundary: a
+`human-gate` row, a row addressed to a human seat, or a park on one must carry
+`summary` and `evidence_ref`.
 
 ## 3b. Cross-host queue routing
 
@@ -203,7 +207,7 @@ Three queue write routes are host-aware — `POST /create`,
 a write body may carry an out-of-band `hostId` envelope. The destination
 session stays `member@rig`; the 3-part `agent@rig@host` form is CLI input
 sugar that `resolveQueueHostDestination`
-(`packages/cli/src/commands/queue.ts:391`) splits into the destination and
+(`packages/cli/src/commands/queue.ts:394`) splits into the destination and
 `hostId` before the request leaves the CLI. The same split applies to
 `--host <id>`; queue verbs never follow `rig host select`, and naming two
 different hosts is refused with `host_qualifier_conflict`. The mechanism
