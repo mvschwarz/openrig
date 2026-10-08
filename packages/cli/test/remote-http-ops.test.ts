@@ -442,6 +442,64 @@ describe("rig launch --host HTTP", () => {
     expect(subsetCalls[0]!.body).toMatchObject({ seats: ["dev.impl", "dev.qa"] });
   });
 
+  function remoteLaunch(responses: Record<string, { status: number; data: unknown }>) {
+    vi.stubEnv("HOST_B_TOKEN", "remote-tok");
+    const client = mockClient(responses);
+    return import("../src/commands/launch.js").then(({ launchCommand }) => {
+      const prog = new Command();
+      prog.exitOverride();
+      prog.addCommand(launchCommand({
+        lifecycleDeps: {} as any,
+        clientFactory: () => client,
+        hostRegistryLoader: mockRegistry([
+          { id: "host-b", transport: "http", url: "http://remote:7433", bearer_env: "HOST_B_TOKEN" },
+        ]),
+      } as any));
+      return { prog, client };
+    });
+  }
+  const SUBSET = "/api/rigs/rig-1/nodes/launch-subset";
+  const VERSION = "/api/health-summary/version";
+
+  it.each([
+    ["an older remote daemon", { [VERSION]: { status: 200, data: { version: "0.5.8" } } }],
+    ["a remote daemon without the version route", {}],
+  ])("--plan refuses %s before posting", async (_label, responses) => {
+    const { prog, client } = await remoteLaunch(responses);
+    const { stdout, stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
+    });
+    expect(client._calls.map((c) => c.method)).toEqual(["GET"]);
+    expect(client._calls[0]!.path).toBe(VERSION);
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("0.5.9 or later");
+    expect(stdout).toEqual([]);
+  });
+
+  it("--plan on a current remote daemon reads the version, then prints the plan", async () => {
+    const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
+    const { prog, client } = await remoteLaunch({ [VERSION]: { status: 200, data: { version: "0.6.8" } }, [SUBSET]: { status: 200, data: plan } });
+    const { stdout, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
+    });
+    expect(client._calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${VERSION}`, `POST ${SUBSET}`]);
+    expect(client._calls[1]!.body).toMatchObject({ seats: ["dev.impl"], plan: true });
+    expect(exitCode).toBeUndefined();
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ ok: true, data: { planOnly: true } });
+  });
+
+  it.each([[["--json"]], [[]]])("--plan on a remote daemon that answers without planOnly exits non-zero (%j)", async (extra) => {
+    const { prog } = await remoteLaunch({
+      [VERSION]: { status: 200, data: { version: "0.6.8" } },
+      [SUBSET]: { status: 201, data: { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.impl", status: "fresh" }] } },
+    });
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", ...extra]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("did not return a plan");
+  });
+
   it("missing bearer exits nonzero with no HTTP request", async () => {
     delete process.env.MISSING_TOK;
     const client = mockClient({});

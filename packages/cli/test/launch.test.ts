@@ -128,16 +128,50 @@ describe("rig launch --seats", () => {
       },
     });
 
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
     await launchCommand(deps).parseAsync([
       "node", "rig", "rig-1", "--seats", "dev.driver", "--hold-reason", "operator hold", "--plan",
     ]);
 
+    expect(deps._client.get).toHaveBeenCalledWith("/api/health-summary/version");
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver"], holdReason: "operator hold", plan: true },
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
     expect(logs.join("\n")).toContain("dev.guard: operator hold");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([
+    ["an older daemon", { status: 200, data: { version: "0.5.8" } }],
+    ["a daemon without the version route", { status: 404, data: { error: "not found" } }],
+    ["a daemon reporting an unknown version", { status: 200, data: { version: "unknown" } }],
+  ])("refuses --plan against %s before sending anything", async (_label, versionAnswer) => {
+    const deps = makeDeps({ "launch-subset": { status: 201, data: { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }] } } });
+    deps._client.get.mockResolvedValue(versionAnswer);
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan", "--json"]);
+
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("0.5.9 or later");
+    expect(logs).toEqual([]);
+  });
+
+  it.each([[["--json"]], [[]]])("exits non-zero when a --plan answer has no planOnly (%j)", async (extra) => {
+    // A daemon that reports a new version but launches anyway: the answer must not read as a plan.
+    const launched = { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }], held: [], alreadyRunning: [] };
+    const deps = makeDeps({ "launch-subset": { status: 201, data: launched } });
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan", ...extra]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("did not return a plan");
+    expect(logs.join("\n")).not.toContain("Launched");
+    expect(logs.join("\n")).not.toContain("Plan only");
   });
 
   it("reports held and failedTargets honestly in human output", async () => {
