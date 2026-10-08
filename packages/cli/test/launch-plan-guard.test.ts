@@ -6,7 +6,7 @@ describe("launch --plan guard", () => {
     expect(await planSupportRefusal(async () => ({ version }))).toBeNull();
   });
 
-  it.each(["0.5.8", "0.4.9", "0.3.4"])("refuses before sending on daemon %s, which ignores plan", async (version) => {
+  it.each(["0.5.8", "0.5.9-rc.1", "0.4.9", "0.3.4"])("refuses before sending on daemon %s, which ignores plan", async (version) => {
     const refusal = await planSupportRefusal(async () => ({ version }));
     expect(refusal).toContain(`reports version ${version}`);
     expect(refusal).toContain("0.5.9 or later");

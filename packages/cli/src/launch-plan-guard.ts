@@ -11,13 +11,14 @@ export const DAEMON_VERSION_PATH = "/api/health-summary/version";
 const MIN = PLAN_MIN_DAEMON_VERSION.split(".").map(Number);
 
 function supportsPlan(version: unknown): boolean {
-  const match = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)/.exec(version) : null;
+  const match = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?/.exec(version) : null;
   if (!match) return false;
-  const parts = match.slice(1).map(Number);
+  const parts = match.slice(1, 4).map(Number);
   for (let i = 0; i < MIN.length; i++) {
     if (parts[i]! !== MIN[i]!) return parts[i]! > MIN[i]!;
   }
-  return true;
+  // A pre-release of the minimum itself (0.5.9-rc.1) sorts below it, so it may predate plan support.
+  return match[4] === undefined;
 }
 
 /**
