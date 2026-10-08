@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./windows-launch": { "types": "./dist/windows-launch-surface.d.ts", "import": "./dist/windows-launch-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
     "./router-line": { "types": "./dist/router-line-surface.d.ts", "import": "./dist/router-line-surface.js" },
     "./spec-validation": {

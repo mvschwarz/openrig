@@ -1,4 +1,4 @@
-# Native Windows Codex/Pi experiment
+# Native Windows support experiment
 
 Tracking: https://github.com/mvschwarz/openrig/issues/88
 
@@ -57,6 +57,36 @@ no kernel/operator or other runtime acceptance; no upstream merge/review claim.
 psmux 3.3.8 does not expose tmux server clipboard options, so that capability is
 reported unavailable. Git for Windows is required for Pi bash tools and packaging.
 WSL is not used by the native runtime or native build path.
+
+## Parity work on the v0.6.7 base, 2026-10-09
+
+The earlier live Codex/Pi acceptance above belongs to the prior experimental
+build. Merging v0.6.7 does not carry that acceptance forward automatically.
+
+| Surface | Implemented and checked | Remaining acceptance |
+| --- | --- | --- |
+| Browser opening | Literal Windows PowerShell URL launch; browser-launch and CLI UI tests | Actual interactive browser opening |
+| Daemon logs | Bounded last-ten-line reads; follow, truncation and split UTF-8 writes | Operator interruption in a real console |
+| Desktop views | Windows Terminal tabs and split-grid commands from the guarded view plan | Visible layout, focus and return navigation |
+| TUI control | Native named pipes; commands, live collision refusal, independent fallback and killed-owner recovery | Windows pipe access-control assessment |
+| TUI reading | Served drive/UNC paths, mixed separators and remote POSIX roots; actual files routes and UI state | File-symlink cases when the account has that OS permission |
+| Claude launch | Native executable selection, bound managed environment/argv and classic fresh/resume/fork command transport | Full native conversation, hooks, kernel/operator and same-conversation recovery |
+| OMP launch | Resolve native `.exe` before applying the isolated seat HOME; retain mise selection | Actual isolated-seat RPC, provider reply and recovery |
+| Workflow context | Native manifest selection and context-pack file resolution | Complete workflow and hook coverage |
+| Proof judgments | Exclusive immutable publication, corrections, concurrent writers and killed-process recovery | Power-loss durability; Windows flushes the writable receipt rather than a POSIX directory handle |
+
+The local whole-daemon run at the start of this repair pass reported 12,630
+passing, 1,109 failing and 181 skipped tests. The corresponding TUI run reported
+861 passing, 43 failing and one skipped test. Subsequent focused runs verified
+the repaired paths; they do not establish a green whole suite. Failures include
+POSIX-specific fixtures, mode/symlink assumptions and actual native path failures.
+Retain and investigate those groups rather than disabling the whole suite.
+
+The parity goal remains open: complete native lifecycle and startup integration,
+CLI/TUI actions and hooks, workflow/context/resource coverage, fresh live acceptance
+for all supported runtimes, interactive desktop checks, and physical reboot/suspend.
+The targeted Windows workflow and Linux/macOS regression jobs are separate from
+those operator/provider acceptance requirements.
 
 ## Reproduce
 

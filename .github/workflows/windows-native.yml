@@ -33,9 +33,34 @@ jobs:
           "OPENRIG_TEST_PSMUX=$($binary[0].FullName)" >> $env:GITHUB_ENV
       - name: Native terminal, identity and production drain tests
         working-directory: packages/daemon
-        run: npx vitest run test/windows-terminal-native.test.ts test/windows-launch.test.ts test/windows-pi-command.test.ts test/windows-process-lineage.test.ts test/windows-daemon-control.test.ts test/resume-token-validation.test.ts test/native-process-lineage.test.ts test/tmux-adapter.test.ts test/tmux-argv-exec.test.ts
+        run: npx vitest run test/windows-terminal-native.test.ts test/windows-launch.test.ts test/windows-pi-command.test.ts test/windows-process-lineage.test.ts test/windows-daemon-control.test.ts test/windows-managed-launch.test.ts test/windows-classic-claude.test.ts test/omp-runner.test.ts test/context-pack-library-service.test.ts test/workflow-guidance.test.ts test/proof-judgments.test.ts test/resume-token-validation.test.ts test/native-process-lineage.test.ts test/tmux-adapter.test.ts test/tmux-argv-exec.test.ts
       - name: CLI lifecycle
         working-directory: packages/cli
-        run: npx vitest run test/daemon-lifecycle.test.ts test/daemon-lifecycle-status.test.ts test/daemon-lifecycle-event-loop.test.ts
+        run: npx vitest run test/daemon-lifecycle.test.ts test/daemon-lifecycle-status.test.ts test/daemon-lifecycle-event-loop.test.ts test/browser-launch.test.ts test/log-tail.test.ts test/terminal-window-windows.test.ts
+      - name: Native TUI pipes, reading and live events
+        run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly
         run: npm run build:package
+  regression:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - name: Launch, context and immutable publication regression
+        working-directory: packages/daemon
+        run: npx vitest run test/windows-managed-launch.test.ts test/omp-runner.test.ts test/seat-launch-environment.test.ts test/context-pack-library-service.test.ts test/workflow-guidance.test.ts test/proof-judgments.test.ts
+      - name: Desktop and log regression
+        working-directory: packages/cli
+        run: npx vitest run test/browser-launch.test.ts test/log-tail.test.ts test/ui.test.ts test/terminal-window.test.ts
+      - name: TUI collision, reading and live-event regression
+        run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts

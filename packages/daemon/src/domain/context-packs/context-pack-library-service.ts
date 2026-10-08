@@ -430,7 +430,7 @@ export class ContextPackLibraryService {
       );
     }
     const abs = join(packEntry.sourcePath, relPath);
-    if (!abs.startsWith(packEntry.sourcePath + "/") && abs !== packEntry.sourcePath) {
+    if (!abs.startsWith(packEntry.sourcePath + sep) && abs !== packEntry.sourcePath) {
       throw new ContextPackError(
         "file_outside_pack",
         `resolved path '${abs}' falls outside pack '${packEntry.sourcePath}'`,

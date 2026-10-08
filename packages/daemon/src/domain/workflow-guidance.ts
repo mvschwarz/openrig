@@ -2,7 +2,7 @@ import { shellQuote as quote } from "../adapters/shell-quote.js";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { parse } from "yaml";
 import { parseAddress, parseMarkdownSections, resolveAddress, slugifyHeader } from "./markdown-address.js";
 import type { ContextPackLibraryService } from "./context-packs/context-pack-library-service.js";
@@ -52,17 +52,17 @@ export function readWorkflowGuidance(input: GuidanceInput) {
   };
   try {
     for (const kind of ["project", "mission"]) {
-      const paths = refs.filter(ref => ref.endsWith("/" + kind + ".yaml"));
+      const paths = refs.filter(ref => basename(ref) === kind + ".yaml");
       if (paths.length > 1) throw Error("Multiple " + kind + " sources; select unambiguous authored context: " + paths.join(", "));
       if (paths[0]) readManifest(kind, paths[0]);
     }
     // Bound members are membership, not the active slice. Only an explicit
     // context or a legacy slice's exact executable identity establishes it.
-    const slicePaths = refs.filter(ref => ref.endsWith("/slice.yaml"));
+    const slicePaths = refs.filter(ref => basename(ref) === "slice.yaml");
     if ((input.binding?.graphSource as Mapping | undefined)?.mode === "legacy-slices" && input.stepId) {
       for (const source of bound.filter(s => s.kind === "slice")) {
         const doc = mapping(parse(readFileSync(source.path, "utf8")), source.path);
-        if ((doc.metadata?.id ?? dirname(source.path).split("/").at(-1)) === input.stepId) slicePaths.push(source.path);
+        if ((doc.metadata?.id ?? basename(dirname(source.path))) === input.stepId) slicePaths.push(source.path);
       }
     }
     const slices = [...new Set(slicePaths)];

@@ -217,7 +217,7 @@ describe("retained authority negative controls", () => {
   it("refuses escaped scope/evidence paths before publishing a receipt", () => {
     const f = fixture(), outside = fs.mkdtempSync(join(tmpdir(), "proof-outside-")); fixtures.push(outside);
     fs.writeFileSync(join(outside, "evidence.md"), "outside boundary");
-    fs.symlinkSync(outside, join(f.alpha, "proof/outside"));
+    fs.symlinkSync(outside, join(f.alpha, "proof/outside"), process.platform === "win32" ? "junction" : "dir");
     expect(() => f.judge({ ...f.input(), evidence: ["proof/outside/evidence.md"] })).toThrow("escapes");
     expect(() => f.judge({ ...f.input(), scope: "../../" })).toThrow("within");
     expect(fs.existsSync(join(f.alpha, "proof/judgments"))).toBe(false);
@@ -301,6 +301,7 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
   const script = `
     import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
     const crash = ${JSON.stringify(crash)}, original = fs.linkSync;
+    const pause = () => { process.send({ stopped: crash }); fs.readSync(0, Buffer.alloc(1), 0, 1, null); };
     if (crash === "write-error" || crash === "fsync-error") {
       const write = fs.writeFileSync, sync = fs.fsyncSync; let receiptFd;
       fs.writeFileSync = (...args) => {
@@ -318,13 +319,13 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
     if (crash === "stale-read") {
       let reads = 0; const originalRead = fs.readdirSync;
       fs.readdirSync = (...args) => {
-        if (String(args[0]).endsWith("/proof/judgments") && ++reads === 2) { process.send({ stopped: crash }); process.kill(process.pid, "SIGSTOP"); }
+        if (String(args[0]).split(String.fromCharCode(92)).join("/").endsWith("/proof/judgments") && ++reads === 2) pause();
         return originalRead(...args);
       }; syncBuiltinESMExports();
     }
     if (crash === "before" || crash === "after") { fs.linkSync = (...args) => {
       if (crash === 'after') original(...args);
-      process.send({ stopped: crash }); process.kill(process.pid, 'SIGSTOP');
+      pause();
     }; syncBuiltinESMExports(); }
     const { recordJudgment } = await import(${JSON.stringify(module)});
     process.on('message', () => {
@@ -333,7 +334,7 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
       if (!crash) process.disconnect();
     }); process.send({ ready: true });
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { stdio: ["pipe", "ignore", "pipe", "ipc"] });
   await once(child, "message"); return child;
 }
 async function request(child: ChildProcess) {
@@ -389,7 +390,7 @@ describe("real process publication and recovery", () => {
     try {
       expect(await request(child)).toEqual({ stopped: "stale-read" });
       const intervening = f.judge(f.input(undefined, "withdraw"));
-      const reply = once(child, "message"); child.kill("SIGCONT");
+      const reply = once(child, "message"); child.stdin!.write("\n");
       expect((await reply)[0].error).toBe("revision_conflict");
       expect(readSliceReadiness(f.alpha).items[0]!.judgment!.id).toBe(intervening.judgment.id);
       expect(readSliceReadiness(f.alpha).items[0]!.state).toBe("withdrawn");

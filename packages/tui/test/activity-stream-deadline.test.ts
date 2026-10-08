@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createServer } from "node:http";
 import { DaemonClient } from "../src/daemon-client.js";
+import { httpFixtureOrigin } from "./http-fixture.js";
 import { subscribeActivityEvents } from "../src/live-events.js";
 
 function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -10,8 +11,7 @@ describe("activity stream header deadline", () => {
     let closed = false;
     const server = createServer((_req, res) => { res.on("close", () => { closed = true; }); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address() as { port: number };
-    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+    const client = new DaemonClient({ baseUrl: httpFixtureOrigin(server) });
     let guard: ReturnType<typeof setTimeout> | undefined;
     try {
       await expect(Promise.race([
@@ -33,8 +33,7 @@ describe("activity stream header deadline", () => {
       res.on("close", () => { closed = true; });
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address() as { port: number };
-    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+    const client = new DaemonClient({ baseUrl: httpFixtureOrigin(server) });
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const response = await client.openActivityEvents();
@@ -67,8 +66,7 @@ describe("temporary activity stream opening failures", () => {
       } else answer();
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address() as { port: number };
-    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+    const client = new DaemonClient({ baseUrl: httpFixtureOrigin(server) });
     const statuses: string[] = [];
     let received = false;
     const sub = subscribeActivityEvents({

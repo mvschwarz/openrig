@@ -1,5 +1,6 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
 import { DaemonClient, ForeignLocalDaemonError, connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
 import { blockedConnectionGuidance, daemonMayAnswer, isBlockedConnectionCode } from "./daemon-reachability.js";
@@ -1228,13 +1229,12 @@ export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
   const logFile = resolveLifecycleFile(deps, "daemon.log");
   if (!deps.exists(logFile)) return;
 
-  const args = opts.follow ? ["-f", logFile] : [logFile];
-  const child = deps.spawn("tail", args, {
+  const args = [fileURLToPath(new URL("./log-tail.js", import.meta.url)), logFile, ...(opts.follow ? ["--follow"] : [])];
+  deps.spawn(process.execPath, args, {
     env: process.env as Record<string, string>,
     stdio: "inherit" as unknown,
     detached: false,
   });
-  child.unref();
 }
 
 function readDatabaseWarnings(value: unknown): string[] {

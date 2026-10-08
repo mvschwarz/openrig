@@ -8,6 +8,7 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
 import { readProcessTable } from "./process-table.js";
+import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -673,10 +674,12 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
     // A unique native child rooted in this pane is the Windows occupancy proof.
     // Creation ordering rejects a recycled parent PID; no foreground PGID is invented.
     const matches: NativeProcessObservation[] = [];
+    const expectedName = runtime === "claude-code" ? "claude" : "codex";
     for (const row of rows) {
-      if (runtime !== "codex" || row.platform !== "win32" || executableName(row.executableName ?? "") !== "codex"
-        || !row.executablePath || executableName(row.executablePath) !== "codex"
-        || (tokens(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
+      if (row.platform !== "win32" || executableName(row.executableName ?? "") !== expectedName
+        || !row.executablePath || executableName(row.executablePath) !== expectedName
+        || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
+        || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
       const chain: NativeProcessRow[] = [];
       const visited = new Set<number>();
       let current: NativeProcessRow | undefined = row;
@@ -725,9 +728,10 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return null;
   const observation = chain[0]!;
   const { process } = observation;
+  const argv = process.platform === "win32" ? parseWindowsCommandLine(process.command) : tokens(process.command);
   if (runtime === "claude-code") {
     if (!expectedToken) return null;
-    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    const launched = claudeSessionToken(argv.slice(1));
     if (launched !== expectedToken && !(launched === rotation?.token && rotationProcess(process, rotation))) return null;
   } else {
     // Every link that names a conversation must name the expected one, and
@@ -832,7 +836,7 @@ async function observeNativePaneProcess(input: {
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
     if (rows.find(row => row.pid === pid)?.platform === "win32") {
       const foreground = executableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
-      if (runtime !== "codex" || !["codex", "codex-code-mode-host"].includes(foreground)) return null;
+      if (!(runtime === "claude-code" ? ["claude"] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
     }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch, input.requireArgv);

@@ -279,10 +279,20 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   // Synchronous in the supported daemon writer. A competing process loses the exclusive publication.
   const fd = fs.openSync(temporary, "wx", 0o600);
   try {
-    try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.linkSync(temporary, target);
-    const directory = fs.openSync(home, "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    try {
+      fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`);
+      fs.fsyncSync(fd);
+      fs.linkSync(temporary, target);
+      if (process.platform === "win32") {
+        // Windows FlushFileBuffers requires a writable file handle. A directory
+        // fsync fails after publication with EPERM; flush the still-open receipt
+        // instead. This does not claim POSIX directory-fsync power-loss durability.
+        fs.fsyncSync(fd);
+      } else {
+        const directory = fs.openSync(home, "r");
+        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      }
+    } finally { fs.closeSync(fd); }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new JudgmentError("revision_conflict", "Another writer committed first; inspect current readiness", 409);
     throw e;
