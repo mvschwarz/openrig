@@ -1,4 +1,6 @@
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import { latestHookWaitsOnPerson } from "./agent-activity-store.js";
+import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
@@ -907,6 +909,24 @@ export function classifyPromptAfterRefusal(
   const evidence = state.needsInputEvidence;
   if (!evidence) return "unknown";
   return Date.parse(evidence.observedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
+}
+
+/** The production prompt read for a refused destination. The activity oracle answers first; when it has no
+ *  evidence, the ladder reads the same retained runtime hook the send gate refused on, so a held wake still
+ *  escalates after the activity service is rebuilt, or when the oracle does not yet trust the hook source
+ *  (Codex's). A newer clearing hook, or the oracle's clear, ends the hold as before. */
+export function makePromptStateReader(deps: {
+  db: Database.Database;
+  getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "needsInputEvidence"> | null | undefined;
+  getLatestHook?: (sessionName: string) => AgentActivity | null | undefined;
+}): (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown" {
+  return (destination, refusedAt) => {
+    const nodeId = resolveSessionNodeId(deps.db, destination);
+    const verdict = classifyPromptAfterRefusal(nodeId ? deps.getSeatState?.(nodeId) : null, refusedAt);
+    if (verdict !== "unknown" || !nodeId) return verdict;
+    const node = deps.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
+    return latestHookWaitsOnPerson(deps.getLatestHook?.(destination), node?.runtime ?? null) ? "blocked" : "unknown";
+  };
 }
 
 const PROMPT_ALERT_TAG = "wake-prompt-refusal";

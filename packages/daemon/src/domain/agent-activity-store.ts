@@ -328,6 +328,15 @@ export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubt
     (seatRuntime === "omp" && rawSubtype === "runtime_error"));
 }
 
+/** The store's latest hook for a seat still says it waits on a person: a current needs_input, or one past the
+ *  freshness window whose retained raw event means that. Nothing newer was recorded, so nothing answered it.
+ *  Generation-mismatched or unresolvable evidence never counts. Shared by the send gate and the wake ladder. */
+export function latestHookWaitsOnPerson(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
+  if (activity?.evidenceSource !== "runtime_hook") return false;
+  if (activity.stale !== true) return activity.state === "needs_input";
+  return activity.reason === "stale_runtime_hook" && hookMeansNeedsInput(activity.rawEvent, activity.rawSubtype, seatRuntime);
+}
+
 function normalizeHookActivity(input: {
   runtime: string | null;
   /** The managed seat's runtime, never a hook's claim. */

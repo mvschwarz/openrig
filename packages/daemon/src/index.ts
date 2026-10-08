@@ -10,13 +10,12 @@ import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
   createStuckSweepStatus,
-  resolveSessionNodeId,
   resolveStuckSweepIntervalSeconds,
   runStuckSweep,
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
-  classifyPromptAfterRefusal,
+  makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
   WakeLadderScheduler,
@@ -189,6 +188,7 @@ export function startWakeLadderScheduler(deps: {
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
   gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
@@ -213,11 +213,11 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
-      readPromptState: (destination, refusedAt) => {
-        const nodeId = resolveSessionNodeId(db, destination);
-        const state = nodeId ? deps.seatActivityService?.getSeatState(nodeId) : null;
-        return classifyPromptAfterRefusal(state, refusedAt);
-      },
+      readPromptState: makePromptStateReader({
+        db,
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
+        getLatestHook: (sessionName) => deps.agentActivityStore?.getLatestForNode({ sessionName }),
+      }),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),

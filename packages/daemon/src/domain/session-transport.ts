@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { hookMeansNeedsInput, type AgentActivityStore } from "./agent-activity-store.js";
+import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
@@ -1839,13 +1839,7 @@ export class SessionTransport {
     // Claude AskUserQuestion with option previews read unknown, and a watchdog wake's Enter chose its
     // first option). An UNKNOWN pane keeps the hook's verdict; a pane that reads work or a recognized
     // empty composer shows the seat has moved on.
-    if (
-      probe.state === "unknown" &&
-      hookActivity?.evidenceSource === "runtime_hook" &&
-      ((hookActivity.stale !== true && hookActivity.state === "needs_input") ||
-        (hookActivity.reason === "stale_runtime_hook" &&
-          hookMeansNeedsInput(hookActivity.rawEvent, hookActivity.rawSubtype, input.runtime)))
-    ) {
+    if (probe.state === "unknown" && hookActivity && latestHookWaitsOnPerson(hookActivity, input.runtime)) {
       return {
         ...hookActivity,
         state: "needs_input",
