@@ -1,6 +1,6 @@
 "use strict";
 
-// Session-only Claude PreToolUse helper. The launcher supplies the existing team
+// Session-only Claude PreToolUse helper. The launcher supplies the kernel or team
 // lists; this file never reads or writes a person's permission settings.
 // This is command convenience, not containment (test runners can execute code).
 const { basename, isAbsolute } = require("node:path");
@@ -149,6 +149,8 @@ function normalize(tokens, forAllow = false) {
     }
     else if (first.literal && ["env", "command", "exec"].includes(basename(first.value))) {
       if (forAllow && first.value.includes("/") && !isAbsolute(first.value)) return [];
+      // command -v/-V inspects an executable rather than wrapping its execution.
+      if (basename(first.value) === "command" && ["-v", "-V"].includes(result[1]?.value)) break;
       result.shift();
       if (result[0]?.value === "--") result.shift();
       // Other wrapper options (including sudo) stay with native checks.
@@ -253,7 +255,7 @@ if (require.main === module) {
         hookEventName: "PreToolUse", permissionDecision: decision,
         permissionDecisionReason: decision === "ask"
           ? "This rig lifecycle command needs confirmation. Use --help or -h to read its help."
-          : "This command matches the OpenRig team launch allowance.",
+          : "This command matches the OpenRig session launch allowance.",
       } }));
     } catch { /* No decision: retain Claude's own permission handling. */ }
   });
