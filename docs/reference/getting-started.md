@@ -596,9 +596,10 @@ rig up kernel --existing --fresh <failed seats> --yes
 This recovery is for the case the reporter hit: the kernel's seats failed and none of them is still running.
 `rig up kernel --existing` refuses a kernel that still has a live session. Name the failed seats by their logical
 IDs, for example `advisor.lead operator.agent operator.human queue.worker` when all four failed. `--fresh` starts a
-new conversation for each seat you name; seats you don't name resume their conversations. A later `rig daemon start`
-doesn't retry the failed seats by itself: once a kernel exists, startup skips the built-in kernel boot, and
-`rig status` then reads `Kernel: skipped` whatever its seats' state, so check `rig ps --nodes --rig kernel --full`.
+new conversation for each seat you name. Seats you don't name follow their normal recovery policy and may remain
+awaiting a decision if their old conversation can't be resumed. A later `rig daemon start` doesn't retry the failed
+seats by itself: once a kernel exists, startup skips the built-in kernel boot, and `rig status` then reads
+`Kernel: skipped` whatever its seats' state, so check `rig ps --nodes --rig kernel --full`.
 
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a
