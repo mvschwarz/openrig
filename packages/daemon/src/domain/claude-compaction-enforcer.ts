@@ -1,6 +1,6 @@
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import type { SessionTransport } from "./session-transport.js";
-import type { SettingsStore } from "./user-settings/settings-store.js";
+import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
@@ -39,7 +39,9 @@ import * as path from "node:path";
  *   atomic publication of that completed artifact, within the preparation deadline.
  * - Post-compact restore: after a successful auto-compact, the enforcer
  *   first sends a turn-boundary handshake once context usage drops below
- *   threshold, then sends the restore prompt on a later polling tick.
+ *   threshold, or when the latest sample is stale or unknown (a seat that
+ *   takes no turn after /compact never refreshes its sample), then sends the
+ *   restore prompt on a later polling tick.
  *   This is intentionally active because Claude hooks can provide
  *   context, but they do not create a new assistant turn by themselves.
  */
@@ -121,7 +123,17 @@ export type EnforcerSkipReason =
   | "preparation_pending"
   | "preparation_incomplete"
   | "preparation_stopped"
-  | "occupant_generation_unavailable";
+  | "occupant_generation_unavailable"
+  | "no_pending_stage";
+
+/** Out-of-contract thresholds (0, 101, NaN, a non-integer) are treated as disabled. */
+function isValidThresholdPercent(value: unknown): boolean {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && Number.isInteger(value)
+    && value >= 1
+    && value <= 100;
+}
 
 export function buildCompactCommand(compactInstruction: string): string {
   const normalized = compactInstruction.trim().replace(/\s+/g, " ");
@@ -402,15 +414,165 @@ export class ClaudeCompactionEnforcer {
    */
   async maybeAutoCompact(input: EnforcerInput): Promise<EnforcerOutcome> {
     this.reconcilePreparations();
+    return this.withDeliveryGuard(input, () => this.maybeAutoCompactUnchecked(input));
+  }
+
+  /** True while a post-compact stage (turn boundary, restore or audit) is still owed to this seat. */
+  hasPendingPostCompactStage(sessionName: string): boolean {
+    return this.pendingPostCompactRestore.has(sessionName);
+  }
+
+  /**
+   * Drain a post-compact stage that is already pending, without a usage sample. ContextMonitor
+   * calls this when the latest sample is stale or unknown. Such a sample never starts a
+   * compaction, but a seat that takes no turn after /compact never refreshes its sample, so
+   * waiting for a fresh one can leave it unrestored. The same gates and the same
+   * one-stage-per-tick progression apply as on the sampled path. No width receipt is recorded,
+   * because no current usage is known.
+   */
+  async drainPendingPostCompactStage(input: Omit<EnforcerInput, "usedPercentage">): Promise<EnforcerOutcome> {
+    this.reconcilePreparations();
+    const unsampled: EnforcerInput = { ...input, usedPercentage: null };
+    return this.withDeliveryGuard(unsampled, async () => {
+      if (unsampled.runtime !== "claude-code") return { triggered: false, reason: "runtime_filter" };
+      if (!this.pendingPostCompactRestore.has(unsampled.sessionName)) {
+        return { triggered: false, reason: "no_pending_stage" };
+      }
+      const policy = this.settingsStore.resolveClaudeCompactionPolicy();
+      if (!isValidThresholdPercent(policy.thresholdPercent)) return { triggered: false, reason: "invalid_policy" };
+      return (await this.drainPendingStage(unsampled, policy)) ?? { triggered: false, reason: "no_pending_stage" };
+    });
+  }
+
+  private async withDeliveryGuard(
+    input: EnforcerInput,
+    run: () => Promise<EnforcerOutcome>,
+  ): Promise<EnforcerOutcome> {
     const guard = this.sessionTransport.deliveryGuard;
     if (guard && input.runtime === "claude-code") {
-      try { return await guard.lifecycle([guard.target(input.sessionName).nodeId], () => this.maybeAutoCompactUnchecked(input)); }
+      try { return await guard.lifecycle([guard.target(input.sessionName).nodeId], run); }
       catch (error) {
         if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
         throw error;
       }
     }
-    return this.maybeAutoCompactUnchecked(input);
+    return run();
+  }
+
+  /**
+   * Gate and send the pending post-compact stage, one stage per call. Returns null when no stage
+   * is pending, so the sampled path can run its below-threshold bookkeeping.
+   */
+  private async drainPendingStage(
+    input: EnforcerInput,
+    policy: ClaudeCompactionPolicy,
+  ): Promise<EnforcerOutcome | null> {
+    // GHOST-STAGE FIX (a) — gate the DRAIN by `enabled`. A disabled system drains NOTHING: the
+    // legacy compaction-stage defect (operator-confirmed ruling 05c174e0) proved that draining a
+    // queued stage while disabled fires a GHOST prompt — a handed-over successor inherits the
+    // predecessor's queued AUTO stage and it is delivered as an unenveloped user-channel prompt
+    // with fabricated telemetry. This SUPERSEDES OPR.0.4.3.14 (which drained the below-threshold
+    // back-half regardless of `enabled`). EXEMPTION: an OPERATOR-INITIATED manual sequence is
+    // enabled-independent by construction (the operator IS the live premise). The exemption is
+    // ACTOR-GATED (PM pin): automation calling the manual verb records operatorInitiated=false and
+    // is NOT exempt, so it cannot launder a drain past this gate. The manual-INHERITED-across-
+    // generations residue is covered by fix (b)'s generation gate (layered defense). Interpretation
+    // surfaced in the handoff for the PM evidence read (veto there if the literal reading was meant).
+    if (!policy.enabled && this.manualCompactionState.get(input.sessionName)?.operatorInitiated !== true) {
+      return { triggered: false, reason: "disabled" };
+    }
+    // GHOST-STAGE (b): gen-scoped stages. A stage minted by a RETIRED occupant generation must be
+    // undeliverable to the successor. Compare the queue-time generation to the LIVE one. NOTE-2: an
+    // ABSENT/unknown tenure on EITHER side is UNKNOWN — the gate is INERT (never treat the captured
+    // stale generation as if it were live; the enabled-gate (a) + cutover invalidation (e) remain the
+    // fail-closed layers when identity is unknown). Only a KNOWN mismatch refuses + drops the ghost.
+    const stageGen = this.pendingStageGeneration.get(input.sessionName);
+    if (stageGen != null) {
+      const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
+      if (liveGen != null && liveGen !== stageGen) {
+        this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
+        return { triggered: false, reason: "stale_generation" };
+      }
+    }
+    const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
+    if (pendingStage === "turn_boundary") {
+      const boundary = await this.sessionTransport.send(
+        input.sessionName,
+        buildPostCompactTurnBoundaryPrompt(),
+        { waitForIdleMs: this.postCompactSendWaitMs },
+      );
+      if (!boundary.ok || boundary.outcome === "retained") {
+        // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
+        return { triggered: false, reason: "send_failed" };
+      }
+      this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
+      return { triggered: true };
+    }
+    if (pendingStage === "restore_prompt") {
+      // OPR.0.4.1.09: resolve the extra FOR THIS SEAT (per-seat preferred; the legacy
+      // global is refused if it declares a different seat) - never inject wrong-seat state.
+      const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath);
+      const restore = await this.sessionTransport.send(
+        input.sessionName,
+        buildPostCompactRestorePrompt({
+          sessionName: input.sessionName,
+          openrigHome: this.openrigHome,
+          transcriptPath: input.transcriptPath,
+          sessionId: input.sessionId,
+          postCompactInstruction: policy.messageInline,
+          postCompactInstructionFilePath: extra.filePath,
+          ignoredWrongSeatExtra: extra.ignoredWrongSeat,
+        }),
+        { waitForIdleMs: this.postCompactSendWaitMs },
+      );
+      if (!restore.ok || restore.outcome === "retained") {
+        // Restore is exact-once + operator-authorized: if the seat is still busy
+        // (mid-compaction/boundary), do NOT advance to restore-sent on an
+        // undelivered send — retry the SAME stage next tick.
+        return { triggered: false, reason: "send_failed" };
+      }
+      this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
+      // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
+      this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
+      return { triggered: true };
+    }
+    if (pendingStage === "compliance_prompt") {
+      const compliance = await this.sessionTransport.send(
+        input.sessionName,
+        buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
+        { waitForIdleMs: this.postCompactSendWaitMs },
+      );
+      if (!compliance.ok || compliance.outcome === "retained") {
+        // Audit cannot overtake restore: only advances once the restore turn is
+        // idle and this send delivers; a busy tick retries the SAME stage.
+        return { triggered: false, reason: "send_failed" };
+      }
+      // The width receipt records post-restore usage. Without a current sample there is none to
+      // record, and a stale pre-compact figure would misreport the restore.
+      if (input.usedPercentage != null) {
+        await this.onPostRestoreComplete?.({
+          sessionName: input.sessionName,
+          occupantGeneration:
+            this.pendingStageGeneration.get(input.sessionName) ??
+            this.resolveOccupantGeneration?.(input.sessionName) ??
+            null,
+          postRestoreUsedPercentage: input.usedPercentage,
+          saturationBoundPercentage: policy.thresholdPercent,
+        });
+      }
+      this.pendingPostCompactRestore.delete(input.sessionName);
+      if (this.pendingPreCompactPrep.get(input.sessionName)?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
+      this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
+      this.postCompactRestoreCooldownUntil.set(
+        input.sessionName,
+        Date.now() + this.postCompactRestoreCooldownMs,
+      );
+      this.triggeredAboveThreshold.delete(input.sessionName);
+      // OPR.0.4.3.14 — terminal manual-trigger stage (no-op for auto seats).
+      this.advanceManualStage(input.sessionName, "restore-sent", "audit-sent");
+      return { triggered: true };
+    }
+    return null;
   }
 
   private async maybeAutoCompactUnchecked(input: EnforcerInput): Promise<EnforcerOutcome> {
@@ -429,117 +591,12 @@ export class ClaudeCompactionEnforcer {
     // compaction lifecycle remains operator-controlled even on bad
     // config. Mirrors the per-key constraint in
     // user-settings/settings-store.ts KEY_CONSTRAINTS.
-    if (
-      typeof policy.thresholdPercent !== "number"
-      || !Number.isFinite(policy.thresholdPercent)
-      || !Number.isInteger(policy.thresholdPercent)
-      || policy.thresholdPercent < 1
-      || policy.thresholdPercent > 100
-    ) {
+    if (!isValidThresholdPercent(policy.thresholdPercent)) {
       return { triggered: false, reason: "invalid_policy" };
     }
     if (input.usedPercentage < policy.thresholdPercent) {
-      // GHOST-STAGE FIX (a) — gate the DRAIN by `enabled`. A disabled system drains NOTHING: the
-      // legacy compaction-stage defect (operator-confirmed ruling 05c174e0) proved that draining a
-      // queued stage while disabled fires a GHOST prompt — a handed-over successor inherits the
-      // predecessor's queued AUTO stage and it is delivered as an unenveloped user-channel prompt
-      // with fabricated telemetry. This SUPERSEDES OPR.0.4.3.14 (which drained the below-threshold
-      // back-half regardless of `enabled`). EXEMPTION: an OPERATOR-INITIATED manual sequence is
-      // enabled-independent by construction (the operator IS the live premise). The exemption is
-      // ACTOR-GATED (PM pin): automation calling the manual verb records operatorInitiated=false and
-      // is NOT exempt, so it cannot launder a drain past this gate. The manual-INHERITED-across-
-      // generations residue is covered by fix (b)'s generation gate (layered defense). Interpretation
-      // surfaced in the handoff for the PM evidence read (veto there if the literal reading was meant).
-      if (!policy.enabled && this.manualCompactionState.get(input.sessionName)?.operatorInitiated !== true) {
-        return { triggered: false, reason: "disabled" };
-      }
-      // GHOST-STAGE (b): gen-scoped stages. A stage minted by a RETIRED occupant generation must be
-      // undeliverable to the successor. Compare the queue-time generation to the LIVE one. NOTE-2: an
-      // ABSENT/unknown tenure on EITHER side is UNKNOWN — the gate is INERT (never treat the captured
-      // stale generation as if it were live; the enabled-gate (a) + cutover invalidation (e) remain the
-      // fail-closed layers when identity is unknown). Only a KNOWN mismatch refuses + drops the ghost.
-      const stageGen = this.pendingStageGeneration.get(input.sessionName);
-      if (stageGen != null) {
-        const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
-        if (liveGen != null && liveGen !== stageGen) {
-          this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
-          return { triggered: false, reason: "stale_generation" };
-        }
-      }
-      const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
-      if (pendingStage === "turn_boundary") {
-        const boundary = await this.sessionTransport.send(
-          input.sessionName,
-          buildPostCompactTurnBoundaryPrompt(),
-          { waitForIdleMs: this.postCompactSendWaitMs },
-        );
-        if (!boundary.ok || boundary.outcome === "retained") {
-          // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
-          return { triggered: false, reason: "send_failed" };
-        }
-        this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
-        return { triggered: true };
-      }
-      if (pendingStage === "restore_prompt") {
-        // OPR.0.4.1.09: resolve the extra FOR THIS SEAT (per-seat preferred; the legacy
-        // global is refused if it declares a different seat) - never inject wrong-seat state.
-        const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath);
-        const restore = await this.sessionTransport.send(
-          input.sessionName,
-          buildPostCompactRestorePrompt({
-            sessionName: input.sessionName,
-            openrigHome: this.openrigHome,
-            transcriptPath: input.transcriptPath,
-            sessionId: input.sessionId,
-            postCompactInstruction: policy.messageInline,
-            postCompactInstructionFilePath: extra.filePath,
-            ignoredWrongSeatExtra: extra.ignoredWrongSeat,
-          }),
-          { waitForIdleMs: this.postCompactSendWaitMs },
-        );
-        if (!restore.ok || restore.outcome === "retained") {
-          // Restore is exact-once + operator-authorized: if the seat is still busy
-          // (mid-compaction/boundary), do NOT advance to restore-sent on an
-          // undelivered send — retry the SAME stage next tick.
-          return { triggered: false, reason: "send_failed" };
-        }
-        this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
-        // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
-        this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
-        return { triggered: true };
-      }
-      if (pendingStage === "compliance_prompt") {
-        const compliance = await this.sessionTransport.send(
-          input.sessionName,
-          buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
-          { waitForIdleMs: this.postCompactSendWaitMs },
-        );
-        if (!compliance.ok || compliance.outcome === "retained") {
-          // Audit cannot overtake restore: only advances once the restore turn is
-          // idle and this send delivers; a busy tick retries the SAME stage.
-          return { triggered: false, reason: "send_failed" };
-        }
-        await this.onPostRestoreComplete?.({
-          sessionName: input.sessionName,
-          occupantGeneration:
-            this.pendingStageGeneration.get(input.sessionName) ??
-            this.resolveOccupantGeneration?.(input.sessionName) ??
-            null,
-          postRestoreUsedPercentage: input.usedPercentage,
-          saturationBoundPercentage: policy.thresholdPercent,
-        });
-        this.pendingPostCompactRestore.delete(input.sessionName);
-        if (this.pendingPreCompactPrep.get(input.sessionName)?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
-        this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
-        this.postCompactRestoreCooldownUntil.set(
-          input.sessionName,
-          Date.now() + this.postCompactRestoreCooldownMs,
-        );
-        this.triggeredAboveThreshold.delete(input.sessionName);
-        // OPR.0.4.3.14 — terminal manual-trigger stage (no-op for auto seats).
-        this.advanceManualStage(input.sessionName, "restore-sent", "audit-sent");
-        return { triggered: true };
-      }
+      const drained = await this.drainPendingStage(input, policy);
+      if (drained) return drained;
       this.triggeredAboveThreshold.delete(input.sessionName);
       const preparation = this.pendingPreCompactPrep.get(input.sessionName);
       if (preparation?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);

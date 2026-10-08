@@ -433,6 +433,87 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(await belowTick(enforcer)).toEqual({ triggered: true }); // no resolver -> gate inert -> drains
   });
 
+  // A pending post-compact stage drains without a usage sample (ContextMonitor calls this when the
+  // latest sample is stale or unknown). A sample-less call never starts a compaction.
+  const drainTick = (enforcer: ClaudeCompactionEnforcer) =>
+    enforcer.drainPendingPostCompactStage({ sessionName: "claude-seat@rig", runtime: "claude-code", transcriptPath: "/tmp/c.jsonl" });
+
+  it("drains a pending post-compact stage without a usage sample, one stage per call, in order", async () => {
+    const { enforcer, send, queuedSends } = await queueStageWithGen("gen-uuid-1");
+    expect(enforcer.hasPendingPostCompactStage("claude-seat@rig")).toBe(true);
+
+    expect(await drainTick(enforcer)).toEqual({ triggered: true });
+    expect(send.mock.calls[queuedSends]?.[1]).toContain("OpenRig post-compaction turn boundary.");
+    expect(await drainTick(enforcer)).toEqual({ triggered: true });
+    expect(send.mock.calls[queuedSends + 1]?.[1]).toContain("restoring this Claude session after compaction");
+    expect(await drainTick(enforcer)).toEqual({ triggered: true });
+    expect(send.mock.calls[queuedSends + 2]?.[1]).toContain("Now audit your compaction restore");
+
+    expect(enforcer.hasPendingPostCompactStage("claude-seat@rig")).toBe(false);
+    expect(await drainTick(enforcer)).toEqual({ triggered: false, reason: "no_pending_stage" });
+    expect(send.mock.calls.length).toBe(queuedSends + 3);
+  });
+
+  it("a sample-less drain with no pending stage sends nothing and never starts a compaction", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: "/tmp/openrig-test-home" });
+
+    expect(enforcer.hasPendingPostCompactStage("claude-seat@rig")).toBe(false);
+    expect(await drainTick(enforcer)).toEqual({ triggered: false, reason: "no_pending_stage" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("a sample-less drain records no width receipt, because no current usage is known", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport } = makeSessionTransport();
+    const onPostRestoreComplete = vi.fn(async () => {});
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000, postCompactRestoreCooldownMs: 0, openrigHome: "/tmp/openrig-test-home",
+      resolveOccupantGeneration: () => "gen-uuid-1", onPostRestoreComplete,
+    });
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90 });
+    now += 30_000;
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 95 });
+
+    for (let i = 0; i < 3; i++) expect(await drainTick(enforcer)).toEqual({ triggered: true });
+    expect(enforcer.hasPendingPostCompactStage("claude-seat@rig")).toBe(false);
+    expect(onPostRestoreComplete).not.toHaveBeenCalled();
+  });
+
+  it("a sample-less drain keeps the ghost-stage gates: a disabled policy and a retired generation still refuse", async () => {
+    const policy: ClaudeCompactionPolicy = { ...POLICY_ENABLED_AT_80 };
+    const settings = makeSettingsStore(policy);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000, postCompactRestoreCooldownMs: 0, openrigHome: "/tmp/openrig-test-home",
+    });
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90 });
+    now += 30_000;
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 95 });
+    const queued = send.mock.calls.length;
+    policy.enabled = false;
+    expect(await drainTick(enforcer)).toEqual({ triggered: false, reason: "disabled" });
+    expect(send.mock.calls.length).toBe(queued);
+
+    const retired = await queueStageWithGen("gen-uuid-1");
+    retired.setLiveGen("gen-uuid-2");
+    expect(await drainTick(retired.enforcer)).toEqual({ triggered: false, reason: "stale_generation" });
+    expect(retired.send.mock.calls.length).toBe(retired.queuedSends);
+    expect(retired.enforcer.hasPendingPostCompactStage("claude-seat@rig")).toBe(false);
+  });
+
+  it("a sample-less drain ignores non-Claude runtimes", async () => {
+    const { enforcer, send, queuedSends } = await queueStageWithGen("gen-uuid-1");
+    expect(await enforcer.drainPendingPostCompactStage({ sessionName: "claude-seat@rig", runtime: "codex" }))
+      .toEqual({ triggered: false, reason: "runtime_filter" });
+    expect(send.mock.calls.length).toBe(queuedSends);
+  });
+
   it("post-compact compliance prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
