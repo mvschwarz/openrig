@@ -150,8 +150,18 @@ const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass 
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
 const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:running [^()·]+ hook · )?(?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+// The same live row before Claude shows its timer: glyph, text, a trailing ellipsis and nothing
+// after it, as in "✻ Compacting conversation…" during a compaction's first seconds. Completed rows
+// ("✻ Crunched for 2s") have no trailing ellipsis. Only callers that must not send into a busy
+// pane opt in (ClassifyPaneOptions.timerlessStatusIsLive); ordinary send readiness is unchanged.
+const CLAUDE_TIMERLESS_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S.*(?:…|\.{3})$/;
 
-function findClaudeComposer(paneContent: string) {
+export interface ClassifyPaneOptions {
+  /** Treat a timer-less live status row above the composer as work in progress. */
+  timerlessStatusIsLive?: boolean;
+}
+
+function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
@@ -184,7 +194,10 @@ function findClaudeComposer(paneContent: string) {
   for (let i = statusStart; i >= 0; i--) {
     if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
-    if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {
+    const livePatterns = options.timerlessStatusIsLive
+      ? [CLAUDE_LIVE_STATUS_PATTERN, CLAUDE_TIMERLESS_STATUS_PATTERN, ...MID_WORK_PATTERNS]
+      : [CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS];
+    if (livePatterns.some((pattern) => pattern.test(line))) {
       liveStatus = truncateEvidence(line);
       headSeen = true;
       break;
@@ -219,7 +232,7 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
-export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
@@ -237,7 +250,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const claudeComposer = findClaudeComposer(paneContent);
+  const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
@@ -295,7 +308,11 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN]);
+  const midWorkEvidence = findPatternEvidence(recentLines, [
+    ...MID_WORK_PATTERNS,
+    CLAUDE_LIVE_STATUS_PATTERN,
+    ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
+  ]);
   if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
@@ -358,6 +375,8 @@ export async function probeSessionActivity(input: {
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
   captureObserver?: CaptureObserverSink;
   binding?: Omit<ObservedBinding, "sessionName">;
+  /** See ClassifyPaneOptions.timerlessStatusIsLive. */
+  timerlessStatusIsLive?: boolean;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -470,7 +489,7 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "");
+    const classification = classifyPaneActivity(paneContent ?? "", { timerlessStatusIsLive: input.timerlessStatusIsLive === true });
     return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
@@ -1826,6 +1845,8 @@ export class SessionTransport {
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
+      // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
+      timerlessStatusIsLive: input.readinessFromPaneOnly === true,
     });
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)

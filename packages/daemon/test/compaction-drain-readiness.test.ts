@@ -20,8 +20,31 @@ import { SessionTransport, classifyPaneActivity } from "../src/domain/session-tr
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 
+// A synthetic busy pane: proves the mechanism (an active pane blocks the drain), not Claude's screen.
 const COMPACTING_PANE = "⠋ Compacting conversation\nesc to interrupt";
 const IDLE_PANE = "Conversation compacted\n❯ ";
+// Claude's real shape for a compaction's first seconds: the status row has no timer yet, a
+// progress row sits below it, and the framed composer is empty.
+const BORDER = "─".repeat(60);
+const COMPACTION_START_PANE = [
+  "⏺ The restore map is written.",
+  "",
+  "✻ Compacting conversation…",
+  "  ▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱ 34%",
+  "",
+  BORDER,
+  "❯ ",
+  BORDER,
+  "  ⏵⏵ accept edits on (shift+tab to cycle)",
+].join("\n");
+const COMPACTED_PANE = [
+  "✻ Conversation compacted (ctrl+o for history)",
+  "",
+  BORDER,
+  "❯ ",
+  BORDER,
+  "  ⏵⏵ accept edits on (shift+tab to cycle)",
+].join("\n");
 
 describe("post-compact drain readiness without a usage sample", () => {
   let db: Database.Database;
@@ -162,6 +185,40 @@ describe("post-compact drain readiness without a usage sample", () => {
     expect(boundaryWrites()).toHaveLength(1);
     await monitor.pollOnce();
     expect(boundaryWrites()).toHaveLength(1);
+  });
+
+  it("Claude's timer-less compaction row reads as work only for pane-only readiness", () => {
+    expect(classifyPaneActivity(COMPACTION_START_PANE).state).toBe("agent_idle");
+    expect(classifyPaneActivity(COMPACTION_START_PANE, { timerlessStatusIsLive: true }).state).toBe("agent_active");
+    expect(classifyPaneActivity(COMPACTION_START_PANE.replace("Compacting conversation…", "Running PreCompact hooks…"), { timerlessStatusIsLive: true }).state).toBe("agent_active");
+    // A completed row has no trailing ellipsis, so the composer below it is still idle.
+    expect(classifyPaneActivity(COMPACTED_PANE, { timerlessStatusIsLive: true }).state).toBe("agent_idle");
+    expect(classifyPaneActivity(COMPACTED_PANE.replace("✻ Conversation compacted (ctrl+o for history)", "✻ Crunched for 2s"), { timerlessStatusIsLive: true }).state).toBe("agent_idle");
+  });
+
+  it("the real timer-less compaction screen sends nothing and keeps the stage pending, then drains once when the composer is alone", async () => {
+    await compact();
+    hook("Stop", 30_000);
+    rmSync(sidecar(), { force: true });
+    pane = COMPACTION_START_PANE;
+
+    await monitor.pollOnce();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(enforcer.hasPendingPostCompactStage(sessionName)).toBe(true);
+
+    pane = COMPACTED_PANE;
+    await monitor.pollOnce();
+    expect(boundaryWrites()).toHaveLength(1);
+    await monitor.pollOnce();
+    expect(boundaryWrites()).toHaveLength(1);
+  });
+
+  it("an ordinary send's readiness on the same timer-less frame is unchanged", async () => {
+    pane = COMPACTION_START_PANE;
+    const result = await realTransport.send(sessionName, "ordinary message", { waitForIdleMs: 40 });
+    expect(result.ok).toBe(true);
+    expect(tmux.sendText).toHaveBeenCalledTimes(1);
   });
 
   it("an unreadable pane with only the old idle hook keeps waiting", async () => {
