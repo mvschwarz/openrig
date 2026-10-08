@@ -1794,6 +1794,18 @@ export class SessionTransport {
       sessionName: input.sessionName,
       now,
     });
+    // Pane-only readiness never lets a hook authorise a send, but a fresh hook showing work or a
+    // waiting person still refuses one, as it does for every other send.
+    if (
+      input.readinessFromPaneOnly &&
+      hookActivity &&
+      hookActivity.evidenceSource === "runtime_hook" &&
+      hookActivity.stale !== true &&
+      this.hookFreshForSend(hookActivity, now) &&
+      (hookActivity.state === "running" || hookActivity.state === "needs_input")
+    ) {
+      return hookActivity;
+    }
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).

@@ -73,9 +73,9 @@ describe("post-compact drain readiness without a usage sample", () => {
     sampled_at: new Date(Date.now() - ageMs).toISOString(),
     context_window: { context_window_size: 200000, used_percentage: value, remaining_percentage: value == null ? null : 100 - value },
   }));
-  const hook = (event: string, ageMs = 0) => {
+  const hook = (event: string, ageMs = 0, subtype?: string) => {
     const result = activity.recordHookEvent({
-      runtime: "claude-code", sessionName, hookEvent: event, generation: "gen-1",
+      runtime: "claude-code", sessionName, hookEvent: event, subtype, generation: "gen-1",
       occurredAt: new Date(clock - ageMs).toISOString(),
     });
     expect(result.ok).toBe(true);
@@ -219,6 +219,21 @@ describe("post-compact drain readiness without a usage sample", () => {
     const result = await realTransport.send(sessionName, "ordinary message", { waitForIdleMs: 40 });
     expect(result.ok).toBe(true);
     expect(tmux.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("a fresh permission-prompt hook refuses the drain even when the pane reads idle, as it does an ordinary send", async () => {
+    await compact();
+    rmSync(sidecar(), { force: true });
+    pane = COMPACTED_PANE;
+    hook("Notification", 1_000, "permission_prompt");
+
+    await monitor.pollOnce();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(enforcer.hasPendingPostCompactStage(sessionName)).toBe(true);
+    const ordinary = await realTransport.send(sessionName, "ordinary message", { waitForIdleMs: 40 });
+    expect(ordinary.ok).toBe(false);
+    expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
   it("an unreadable pane with only the old idle hook keeps waiting", async () => {
