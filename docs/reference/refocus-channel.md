@@ -27,7 +27,8 @@ redundant double-fire around Codex's own compaction cadence. Set
 always a no-op: the default onboarding pack owns fresh orientation. Both
 runtimes retain `PostCompact` due-state for the next prompt. After a managed Claude
 compaction, the acknowledgement-only boundary and other prompts (for up to 10 minutes)
-are skipped without consuming that state, so the hook delivers on the restore request;
+are skipped without consuming that state, so the hook delivers on the restore request
+(after 10 minutes, on the next prompt);
 that request asks the seat to read the refocusing skill and consume the delivered
 traces rather than rerun them, and the read-depth audit accounts for them. Otherwise the hook
 is a no-op (it writes a stderr advisory when the transcript shrinks or the
