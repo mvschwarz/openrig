@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import {
+  configuredMissionsRoot,
   ensureMissionId,
   findMission,
   findSlice,
@@ -16,6 +17,7 @@ import {
   nextSliceNN,
   readFrontmatter,
   resolveMissionsRoot,
+  sameDirectory,
   splitFrontmatter,
   updateFrontmatter,
 } from "../src/lib/scope/scope-fs.js";
@@ -89,6 +91,59 @@ describe("resolveMissionsRoot", () => {
     const configPath = path.join(root, "config.json");
     fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
     expect(resolveMissionsRoot({ override: root, cwd: root, configPath })).toBe(missions);
+  });
+});
+
+describe("configuredMissionsRoot", () => {
+  it("returns the configured slices root when it is a readable directory", () => {
+    const root = mktemp();
+    const missions = path.join(root, "declared-missions");
+    fs.mkdirSync(missions);
+    const configPath = path.join(root, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
+    expect(configuredMissionsRoot(configPath)).toBe(missions);
+  });
+
+  it("returns null when the setting is unset or not a readable directory", () => {
+    const root = mktemp();
+    const unsetPath = path.join(root, "unset.json");
+    fs.writeFileSync(unsetPath, JSON.stringify({}));
+    expect(configuredMissionsRoot(unsetPath)).toBeNull();
+
+    const missingPath = path.join(root, "missing.json");
+    fs.writeFileSync(missingPath, JSON.stringify({ workspace: { slicesRoot: path.join(root, "nope") } }));
+    expect(configuredMissionsRoot(missingPath)).toBeNull();
+
+    const filePath = path.join(root, "a-file");
+    fs.writeFileSync(filePath, "not a directory");
+    const fileConfig = path.join(root, "file.json");
+    fs.writeFileSync(fileConfig, JSON.stringify({ workspace: { slicesRoot: filePath } }));
+    expect(configuredMissionsRoot(fileConfig)).toBeNull();
+  });
+});
+
+describe("sameDirectory", () => {
+  it("matches a path against itself, with or without a trailing separator", () => {
+    const root = mktemp();
+    expect(sameDirectory(root, root)).toBe(true);
+    expect(sameDirectory(root, root + path.sep)).toBe(true);
+  });
+
+  it("matches a directory reached through a symlink (macOS /var↔/private/var class)", () => {
+    const root = mktemp();
+    const linkParent = mktemp();
+    const link = path.join(linkParent, "linked");
+    fs.symlinkSync(root, link);
+    expect(fs.realpathSync(link)).not.toBe(link);
+    expect(sameDirectory(link, root)).toBe(true);
+    fs.rmSync(linkParent, { recursive: true, force: true });
+  });
+
+  it("separates two different directories, including ones that do not exist", () => {
+    const a = mktemp();
+    const b = mktemp();
+    expect(sameDirectory(a, b)).toBe(false);
+    expect(sameDirectory(path.join(a, "ghost"), path.join(b, "ghost"))).toBe(false);
   });
 });
 

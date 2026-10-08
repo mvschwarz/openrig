@@ -129,6 +129,36 @@ export function updateFrontmatter(
 /** Locate the missions root from an explicit workspace override or the typed
  * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
  * candidates, but selection comes from configuration. */
+/**
+ * The `workspace.slices_root` from the config the daemon reads, when it is a
+ * readable directory; null when it is unset or unreadable.
+ *
+ * This is the root the daemon resolves its own writes against, so a command
+ * whose write happens in the daemon can compare it with the root the caller
+ * asked for.
+ */
+export function configuredMissionsRoot(configPath?: string): string | null {
+  const configured = new ConfigStore(configPath).get("workspace.slices_root") as string;
+  if (configured && fs.existsSync(configured) && fs.statSync(configured).isDirectory()) return configured;
+  return null;
+}
+
+/**
+ * Whether two paths name the same directory. Symlinks are resolved when the
+ * path exists, so a worktree reached through a link does not read as a
+ * different root than the same directory named outright.
+ */
+export function sameDirectory(a: string, b: string): boolean {
+  const canonical = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  return canonical(a) === canonical(b);
+}
+
 export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
@@ -142,10 +172,10 @@ export function resolveMissionsRoot(opts: {
     if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
   }
-  const configured = new ConfigStore(opts.configPath).get("workspace.slices_root") as string;
-  if (configured && fs.existsSync(configured) && fs.statSync(configured).isDirectory()) return configured;
+  const configured = configuredMissionsRoot(opts.configPath);
+  if (configured) return configured;
   throw new ScopeCliError({
-    fact: `Configured workspace.slices_root is not a readable directory: ${configured || "(unset)"}.`,
+    fact: `Configured workspace.slices_root is not a readable directory: ${(new ConfigStore(opts.configPath).get("workspace.slices_root") as string) || "(unset)"}.`,
     consequence: "No mission tree to operate on.",
     action: "Set workspace.slices_root with `rig config set`, or pass --workspace /path/to/your/workspace.",
   });

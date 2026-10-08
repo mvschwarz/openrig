@@ -53,6 +53,8 @@ import {
   readFrontmatter,
   resolveNotesFile,
   resolveMissionsRoot,
+  configuredMissionsRoot,
+  sameDirectory,
   splitFrontmatter,
   todayDateISO,
   updateFrontmatter,
@@ -1998,6 +2000,29 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
           scopeAbsPath = mission.absPath;
         }
         const scopePath = path.relative(missionsRoot, scopeAbsPath).split(path.sep).join("/");
+
+        // #995 — approve is the one scope write that happens inside the DAEMON: the
+        // CLI resolves the target locally and sends a missions-root-relative path,
+        // which the daemon resolves against ITS OWN root. When the caller named a
+        // different workspace (--workspace or OPENRIG_WORK_ROOT) and the same
+        // relative path exists in both trees, the stamp lands in the daemon's copy
+        // and nothing says so. Refuse rather than write to a tree nobody named;
+        // `stage` and `verified` write from the CLI, so they honour the override.
+        const daemonMissionsRoot = configuredMissionsRoot();
+        if (daemonMissionsRoot === null) {
+          throw new ScopeCliError({
+            fact: "No readable workspace.slices_root in the daemon's config.",
+            consequence: "approve writes through the daemon, which has no mission tree to write to; nothing was written.",
+            action: "Set it with: rig config set workspace.slices_root /path/to/your/workspace/missions",
+          });
+        }
+        if (!sameDirectory(missionsRoot, daemonMissionsRoot)) {
+          throw new ScopeCliError({
+            fact: `The workspace you named (${missionsRoot}) is not the daemon's workspace (${daemonMissionsRoot}).`,
+            consequence: `approve writes the stamp and audit row inside the daemon, against the daemon's root — it would have written ${scopePath} under ${daemonMissionsRoot}, not the tree you named. Nothing was written.`,
+            action: `Re-run without --workspace to stamp the daemon's workspace, or point the daemon at this one: rig config set workspace.slices_root ${missionsRoot} (then restart it).`,
+          });
+        }
 
         const lifecycleDeps = realDeps();
         const status = await getDaemonStatus(lifecycleDeps);
