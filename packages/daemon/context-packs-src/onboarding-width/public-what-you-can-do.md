@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-seven top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.7`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.6.8`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -157,7 +157,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
   `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
-  sent with “Also send to #channel” reach the seat like any other thread reply.
+  sent with “Also send to #channel” reach the seat like any other thread reply. A person's reply
+  inside a thread OpenRig opened is answered in that thread: answer with `rig queue create
+  --human-intent update --reply-to <the inbound reply's row>`; a top-level message is answered
+  top-level.
 
 ## Making work outlive you
 
@@ -224,6 +227,8 @@ relay is a reason to inspect the available routing, not to surrender judgment to
 - **`rig workflow specs`** — what can be started here, and which are shipped versus authored by
   this rig.
 - **`rig workflow validate`** — will this spec instantiate at all, before a run finds out for you.
+  A step that can never finish (its allowed exits leave out `done` and its handoff has no next
+  step) is reported as `step_cannot_finish`, and such a spec can't be instantiated.
 - **`rig workflow compile <mission>`** / **`instantiate-lifecycle`** — derive one executable graph
   from `project.yaml` → `mission.yaml` → `slice.yaml`, inspect it without writing, then start an
   eligible graph with an opaque replay key. Typed acceptance candidate, verdict, and evidence
@@ -335,7 +340,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   best-effort snapshot, not a record of what was interrupted. With `--host`, a remote teardown
   that reports errors exits 2.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
-  rest.
+  rest. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
+  daemon older than 0.5.9, which would ignore it and launch.
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses.
@@ -553,7 +559,10 @@ scheme, and nothing downstream can see it.
   are listed after the System World; read each with `rig context get <ref>`.
   `context profile` and `context work-install` both accept `--runtime claude-code` (alias
   `claude`) or `codex`; explicit invalid values refuse before projection. This does not rename
-  every other command's runtime vocabulary.
+  every other command's runtime vocabulary. A catalog skill with uncommitted content blocks only
+  itself: it is skipped and named (`catalog_skill_skipped`, or `selected_skill_skipped` with its
+  selector), every other skill projects, a seat keeps the copy it already has, and the command
+  exits 1 when a selected skill was skipped. Commit or restore that skill's folder, then rerun.
 - **`rig context show` / `sync` / `rm`** — what is inside a context pack before you prime a seat
   with it, and how to make the library catch up when you edit one. `sync` also finds a workspace
   pack created after the daemon started; a daemon restart is no longer needed.
@@ -773,6 +782,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   it attaches to the existing kernel terminal; Ctrl-b then d detaches, and no missing
   seat or terminal is implicitly launched. Explain the failure and help with the
   chosen fallback. Plain `rig tui` remains a separate dashboard.
+  On an empty command line every typed command reaches the line whole and `j`/`k` move the
+  selection; the footer toggle is `F`, and a selected Scopes view's mini-requirements and
+  narrative keys are `M` and `N`.
   Open the instance row for one continuous cross-rig agent table with pod separators and material
   `RECENT` transitions; drill into a rig, mission, slice, or agent without losing the owning
   identity. Use the mission's workflow/packet view and Specs purpose/source to understand work.

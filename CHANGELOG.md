@@ -8,6 +8,75 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.8]
+
+0.6.8 is mostly fixes, most of them from the community: one skill being edited
+in the managed catalog no longer stops every seat's skills, a launch plan can
+never start a seat, Slack replies stay in their thread, and a workflow that
+could never finish is caught at validate. It is built from the commit tagged
+`v0.6.8`. The changes since 0.6.7:
+
+### Before you upgrade
+
+- Restart the daemon after upgrading the CLI (`rig daemon stop`, then `rig
+  daemon start`). There are no migrations, and openrig-core stays at 0.1.8.
+- Move the TUI's footer toggle to `F`, and the selected Scopes view's
+  mini-requirements and narrative keys to `M` and `N`, so `find`, `feed`,
+  `mission`, `narrative` and `needs` type whole on an empty command line
+  ([#1020](https://github.com/mvschwarz/openrig/pull/1020)). Move the selection down and up with `j` and `k` on an empty
+  line ([#1019](https://github.com/mvschwarz/openrig/pull/1019)).
+- Report `step_cannot_finish` from `rig workflow validate`, and refuse to
+  instantiate, for a step whose allowed exits leave out `done` and whose handoff
+  has no next step. A spec that validated on 0.6.7 can be refused now ([#1012](https://github.com/mvschwarz/openrig/pull/1012)).
+- Exit 1 from `rig context work-install` and `rig skill loadout` when a
+  selected skill was skipped for uncommitted catalog content, after projecting
+  the rest ([#1031](https://github.com/mvschwarz/openrig/pull/1031)).
+- Refuse `rig launch --plan` against a daemon older than 0.5.9, which would
+  ignore the plan and launch ([#1024](https://github.com/mvschwarz/openrig/pull/1024)).
+
+### Highlights
+
+- Skip a managed catalog skill with uncommitted or untracked content by itself,
+  with a named warning, instead of making the whole catalog unavailable for
+  `rig context work-install`, `rig up`, launch and restore preflight. A seat
+  keeps the copy it already has until the change is committed, no runtime gets
+  the uncommitted files, and launch only warns. Uncommitted `catalog.yaml`
+  still makes the catalog unavailable ([#1031](https://github.com/mvschwarz/openrig/pull/1031)).
+- Preview a single seat's launch with `rig launch <rig> <seat> --plan`, locally
+  or over `--host` ([#1023](https://github.com/mvschwarz/openrig/pull/1023)). Read the daemon's version before any plan, and
+  exit non-zero, naming `rig ps --nodes -A`, when an answer isn't a plan but
+  shows the daemon acted ([#1024](https://github.com/mvschwarz/openrig/pull/1024)).
+- Post an agent's `--human-intent update --reply-to <reply row>` answer in the
+  Slack thread where the person replied; the `messaging-the-human` skill says
+  how ([#1021](https://github.com/mvschwarz/openrig/pull/1021)). Wait out a Slack rate limit of 10 seconds or less and retry
+  the post once ([#1026](https://github.com/mvschwarz/openrig/pull/1026)). Keep the bot token on Slack's hosts inside the
+  private-file download itself ([#1006](https://github.com/mvschwarz/openrig/pull/1006)).
+
+### Dependency and install-script changes
+
+- No npm dependency or lockfile change beyond OpenRig's own version, the same
+  `postinstall`, and the same `node >=22`.
+- Finish the CLI and TUI build output with `scripts/prepare-workspace-build.mjs`
+  instead of `chmod`, `mkdir` and `cp`, so building from source no longer needs
+  POSIX shell tools; not yet run on Windows. Originally contributed by
+  @dajiaohuang in [#956](https://github.com/mvschwarz/openrig/pull/956) ([#1033](https://github.com/mvschwarz/openrig/pull/1033)).
+
+### Launch, seats, queue and scope
+
+- Confirm a Claude seat's identity when it was launched with `--remote-control`
+  ([#1025](https://github.com/mvschwarz/openrig/pull/1025)). Save `rig down`'s recovery snapshot even when finding one seat's
+  resume details fails ([#1030](https://github.com/mvschwarz/openrig/pull/1030)).
+- Show a handed-off task's summary, on one line of up to 120 characters, in its
+  wake ([#1028](https://github.com/mvschwarz/openrig/pull/1028)).
+- Accept slice folders numbered 100 and above in `rig scope audit` ([#1016](https://github.com/mvschwarz/openrig/pull/1016)).
+  Keep a leading UTF-8 byte-order mark in `rig proof add --file` ([#270](https://github.com/mvschwarz/openrig/pull/270)).
+
+### Docs
+
+- Add a topology naming reference and point the rig spec, bundle and authoring
+  guides to it ([#1000](https://github.com/mvschwarz/openrig/pull/1000)). Bring the architecture and CLI reference docs to
+  0.6.7 ([#1015](https://github.com/mvschwarz/openrig/pull/1015)).
+
 ## [0.6.7]
 
 0.6.7 is about the first hour: after install or start, the agent opens the
