@@ -336,6 +336,15 @@ describe("chat routes", () => {
     expect(String(data.error)).not.toContain("\n");
   });
 
+  it("GET /history?since escapes C1 control characters and keeps other non-ASCII text", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\u009bbéc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // U+009B is a single-byte CSI that some terminals act on; an accented letter is ordinary text.
+    expect(String(data.error)).toContain("a\\x9bbéc");
+    expect(String(data.error)).not.toContain("\u009b");
+  });
+
   it("GET /history?since still accepts the cutoff formats SQLite parses", async () => {
     chatRepo.send(rigId, "alice", "msg1");
 

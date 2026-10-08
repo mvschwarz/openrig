@@ -4,11 +4,12 @@ import type { EventBus } from "../domain/event-bus.js";
 import type { ChatRepository } from "../domain/chat-repository.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 
-/** Render control characters (newline, ESC, …) as visible \n / \x1b text so a
- *  rejected value cannot smuggle line breaks or terminal escapes into a
- *  diagnostic the CLI prints verbatim. */
+/** Render control characters (newline, ESC, DEL and the C1 range, whose U+009B
+ *  is a single-byte CSI) as visible \x0a / \x1b / \x9b text so a rejected value
+ *  cannot smuggle line breaks or terminal escapes into a diagnostic the CLI
+ *  prints verbatim. */
 function escapeControlChars(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
 export function chatRoutes(): Hono {
