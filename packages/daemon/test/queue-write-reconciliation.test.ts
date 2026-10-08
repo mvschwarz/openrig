@@ -282,8 +282,10 @@ describe("queue unknown-write reconciliation", () => {
     expect(retry.stderr.join("\n")).toContain("not saved");
     if (verify) {
       // These fields refer to the returned original row, never to the rejected body.
+      // An agent destination reports the original row's wake result, not a human receipt.
       expect(returned.persisted).toBe(true);
-      expect(returned.delivery.outcome).toBe("still-pending");
+      expect(returned.delivery).toMatchObject({ receiptSource: "terminal", destinationKind: "agent", outcome: "verified", wakeResult: "verified" });
+      expect(returned.delivery).not.toHaveProperty("humanReadership");
     }
     expect(h.db.prepare("SELECT * FROM queue_items").all()).toEqual(before.rows);
     expect(h.db.prepare("SELECT * FROM queue_transitions").all()).toEqual(before.transitions);
