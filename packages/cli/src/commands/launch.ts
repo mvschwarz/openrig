@@ -134,7 +134,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           }
         }
         const result = await runRemoteHttpOp(opts.host, "POST", apiPath, body, deps, opts);
-        const notAPlan = Boolean(opts.plan && result.ok && !isPlanAnswer(result.data));
+        const notAPlan = Boolean(opts.plan && !isPlanAnswer(result.data));
         if (notAPlan) {
           console.error(`Host ${opts.host}: ${NOT_A_PLAN_MESSAGE}`);
           process.exitCode = 1;
@@ -142,7 +142,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         if (opts.json) {
           console.log(JSON.stringify(result));
           if (!result.ok) process.exitCode = 1;
-        } else if (notAPlan) {
+        } else if (notAPlan && result.ok) {
           console.error(JSON.stringify(result.data, null, 2));
         } else if (result.ok) {
           console.log(JSON.stringify(result.data, null, 2));
@@ -166,19 +166,26 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         if (opts.holdReason) body.holdReason = opts.holdReason;
         if (opts.snapshotId) body.snapshotId = opts.snapshotId;
         if (opts.plan) {
+          let readError: string | undefined;
           const refusal = await planSupportRefusal(async (path) => {
-            const read = await client.get<unknown>(path);
-            return read.status === 200 ? read.data : undefined;
+            try {
+              const read = await client.get<unknown>(path);
+              if (read.status !== 200) readError = `HTTP ${read.status}`;
+              return read.status === 200 ? read.data : undefined;
+            } catch (err) {
+              readError = (err as Error).message;
+              return undefined;
+            }
           });
           if (refusal) {
-            console.error(refusal);
+            console.error(`${refusal}${readError ? ` (version read: ${readError})` : ""}`);
             process.exitCode = 1;
             return;
           }
           body.plan = true;
         }
         const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body);
-        const notAPlan = Boolean(opts.plan && res.status < 400 && !isPlanAnswer(res.data));
+        const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data));
         if (notAPlan) {
           console.error(NOT_A_PLAN_MESSAGE);
           process.exitCode = 1;

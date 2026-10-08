@@ -174,6 +174,27 @@ describe("rig launch --seats", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it("names the version-read failure when it refuses --plan locally", async () => {
+    const deps = makeDeps({});
+    deps._client.get.mockRejectedValue(new Error("connect ECONNREFUSED 127.0.0.1:7433"));
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan"]);
+
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("(version read: connect ECONNREFUSED 127.0.0.1:7433)");
+  });
+
+  it("warns that the daemon may have acted when a --plan request gets a 409 launch answer", async () => {
+    const deps = makeDeps({ "launch-subset": { status: 409, data: { ok: false, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "attention_required" }] } } });
+    deps._client.get.mockResolvedValue({ status: 200, data: { status: "ok", semver: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("did not return a plan");
+  });
+
   it.each([[["--json"]], [[]]])("exits non-zero when a --plan answer has no planOnly (%j)", async (extra) => {
     // A daemon that reports a new version but launches anyway: the answer must not read as a plan.
     const launched = { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }], held: [], alreadyRunning: [] };
