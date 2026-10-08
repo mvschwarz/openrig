@@ -55,9 +55,9 @@ stdin and stdout are terminals. Arguments,
 pipes, and redirected streams follow normal CLI parsing.
 [`runFrontDoor` and `openMissionControl`](../../packages/cli/src/front-door.ts)
 own the entry behavior; [`tuiCommand`](../../packages/cli/src/commands/tui.ts)
-owns explicit TUI options; `rig terminal open saved:kernel --window` opens the OpenRig TUI
-and the operator in a new terminal tab or window, and `rig tui --shared` is the
-dashboard-only fallback when that window cannot open. A daemon-down transport result can still open the
+owns explicit TUI options; `rig terminal open saved:kernel --window` opens a terminal view
+of the OpenRig TUI, the operator and the advisor (in a new tab or window, or the current
+Herdr session), and `rig tui --shared` is the dashboard-only fallback when that view cannot open. A daemon-down transport result can still open the
 recovery cockpit; it is not automatically a reason to exit before rendering.
 
 | Need | Start here |
