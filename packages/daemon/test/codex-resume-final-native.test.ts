@@ -21,7 +21,7 @@ async function finalObservation(output: string) {
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "codex"), `#!${process.execPath}\n` +
     `const fs = require("node:fs");\n` +
-    `if (process.argv.slice(2).join(" ") !== "-s workspace-write resume fixture-id") process.exit(2);\n` +
+    `if (process.argv.slice(2).join(" ") !== "-s workspace-write -c check_for_update_on_startup=false resume fixture-id") process.exit(2);\n` +
     `process.stdout.write("\\n".repeat(36) + "fixture waiting for final observation\\n");\n` +
     `const tick = setInterval(() => { if (fs.existsSync(${JSON.stringify(gate)})) {\n` +
     `process.stdout.write(fs.readFileSync(${JSON.stringify(gate)}, "utf8") + "\\n"); clearInterval(tick);\n` +

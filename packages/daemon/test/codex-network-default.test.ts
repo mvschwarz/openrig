@@ -191,7 +191,7 @@ describe("#275 every Codex launch site adds the override only when the reader ap
       const launchDefaults = " -s workspace-write '-c' 'check_for_update_on_startup=false'";
       expect(baseline.commands()[0]).toContain(launchDefaults);
       expect(applied.commands()).toEqual([
-        baseline.commands()[0]!.replace(launchDefaults, `${launchDefaults}${OVERRIDE}`),
+        baseline.commands()[0]!.replace(launchDefaults, `${launchDefaults} -c 'sandbox_workspace_write.network_access=true'`),
       ]);
       expect(appliedRead).toHaveBeenCalledTimes(1);
       expect(appliedRead).toHaveBeenCalledWith(cwd);
