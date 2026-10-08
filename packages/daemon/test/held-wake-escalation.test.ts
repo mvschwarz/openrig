@@ -61,7 +61,7 @@ function fixture(runtime = "claude-code") {
   const readPromptState = makePromptStateReader({ db,
     getSeatState: (nodeId) => oracle.getSeatState(nodeId),
     getLatestHook: (sessionName) => store.getLatestForNode({ sessionName }) });
-  return { db, bus, node, name, hook, transport, paste, enter, clock, readPromptState,
+  return { db, bus, node, name, store, hook, transport, paste, enter, clock, readPromptState,
     oracle: () => oracle, reconstruct: () => { oracle = newOracle(); },
     changeGeneration: (g: string | null) => { currentGeneration = g; } };
 }
@@ -110,23 +110,46 @@ async function refuseAndClimb(f: ReturnType<typeof fixture>, oracleAlone?: "unkn
   expect(f.paste).not.toHaveBeenCalled();
   expect(f.enter).not.toHaveBeenCalled();
   expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
-  return targets;
+  return { targets, repo, policy, job };
 }
 
 it.each([false, true])("a held Claude wake escalates to the orchestrator (activity service rebuilt=%s)", async (rebuilt) => {
   const f = fixture();
   await f.hook("Notification", "permission_prompt", 600_000);
   if (rebuilt) f.reconstruct(); // same durable DB and occupant, a new daemon service
-  expect(await refuseAndClimb(f, rebuilt ? "unknown" : undefined)).toContain("lead@r1001");
+  expect((await refuseAndClimb(f, rebuilt ? "unknown" : undefined)).targets).toContain("lead@r1001");
 });
 
 it("a held Codex wake escalates to the orchestrator (a PermissionRequest hook the oracle may not trust yet)", async () => {
   const f = fixture("codex");
   await f.hook("PermissionRequest", null, 600_000);
-  expect(await refuseAndClimb(f, "unknown")).toContain("lead@r1001");
+  expect((await refuseAndClimb(f, "unknown")).targets).toContain("lead@r1001");
 });
 
-it("the reader keeps the oracle's verdicts and ends the hold on newer or foreign evidence", async () => {
+// review50-r2 F2: a later, generation-valid clearing hook ends the held episode from the same evidence,
+// so the prompt alert retires and the parked owner can receive its next wake.
+it.each([["codex", "PermissionRequest", null], ["claude-code", "Notification", "permission_prompt"]] as const)(
+  "a later Stop ends the held %s episode: the alert retires and the next wake is sent", async (runtime, event, subtype) => {
+    const f = fixture(runtime);
+    await f.hook(event, subtype, 600_000);
+    f.reconstruct();
+    const { targets, repo, policy, job } = await refuseAndClimb(f, "unknown");
+    expect(targets).toContain("lead@r1001");
+    const alerts = () => repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 })
+      .filter((r) => r.tags?.includes("wake-prompt-refusal"));
+    expect(alerts()).toHaveLength(1);
+    f.clock.value = new Date(f.clock.value.getTime() + 10_000);
+    await f.hook("Stop", null, 0);
+    await f.oracle().pollAllRunningTmuxSeats(f.db);
+    expect((await f.transport.send(f.name, "synthetic follow-on after Stop")).ok).toBe(true);
+    await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value,
+      resolveOrchestrator: () => "lead@r1001", readPromptState: f.readPromptState, retryIntervalSeconds: 1,
+      attemptWake: async (_id, target) => { targets.push(target); return "verified"; }, log: () => {} });
+    expect(alerts()).toHaveLength(0);
+    expect((await policy.evaluate(job as never)).action).toBe("send");
+  });
+
+it("the reader keeps the oracle's verdicts; only a newer, generation-valid moved-on hook clears", async () => {
   const f = fixture();
   const refusedAt = new Date(f.clock.value.getTime() - 30_000).toISOString();
   await f.hook("Notification", "permission_prompt", 600_000);
@@ -136,10 +159,22 @@ it("the reader keeps the oracle's verdicts and ends the hold on newer or foreign
   expect(f.readPromptState(f.name, refusedAt)).toBe("unknown");
   f.changeGeneration(null);
   expect(f.readPromptState(f.name, refusedAt)).toBe("unknown");
+  // The hook route also feeds each fixture's oracle; these reads isolate the store fallback (no oracle).
+  const fallbackOnly = (fx: ReturnType<typeof fixture>) =>
+    makePromptStateReader({ db: fx.db, getLatestHook: (sessionName) => fx.store.getLatestForNode({ sessionName }) });
   const g = fixture();
   await g.hook("Notification", "permission_prompt", 600_000);
-  await g.hook("UserPromptSubmit", null, 20_000); // answered: a newer hook ends the retained hold
-  expect(g.readPromptState(g.name, refusedAt)).toBe("unknown");
+  await g.hook("UserPromptSubmit", null, 20_000); // answered after the refusal: the hold ends, the episode clears
+  expect(fallbackOnly(g)(g.name, refusedAt)).toBe("clear");
+  const older = fixture();
+  await older.hook("Notification", "permission_prompt", 600_000);
+  await older.hook("Stop", null, 60_000); // older than the refusal: cannot clear it
+  expect(fallbackOnly(older)(older.name, refusedAt)).toBe("unknown");
+  const foreign = fixture();
+  await foreign.hook("Notification", "permission_prompt", 600_000);
+  await foreign.hook("Stop", null, 0);
+  foreign.changeGeneration("successor-generation"); // a mismatched occupant's hook cannot clear it either
+  expect(fallbackOnly(foreign)(foreign.name, refusedAt)).toBe("unknown");
   // An oracle verdict, when it has one, still decides.
   const clearReader = makePromptStateReader({ db: g.db,
     getSeatState: () => ({ activity: "idle-at-prompt", needsInput: { count: 0, reason: null },
