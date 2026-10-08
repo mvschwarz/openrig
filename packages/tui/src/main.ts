@@ -621,10 +621,11 @@ async function run(): Promise<void> {
           perform(parseCommand("select-text", view.get().sections));
           continue;
         }
-        // SCOPES accelerators: m/n ride the REGISTERED commands (one path).
+        // SCOPES accelerators: M/N ride the REGISTERED commands (one path). Upper case, like S and
+        // L, so a typed verb that starts with m or n (mission, narrative, needs) reaches the line.
         if (inputLine === "" && view.get().section === "scopes" && view.get().scopesSelected) {
-          if (ev.ch === "m") { perform(parseCommand("reqs", view.get().sections)); continue; }
-          if (ev.ch === "n") { perform(parseCommand("narrative", view.get().sections)); continue; }
+          if (ev.ch === "M") { perform(parseCommand("reqs", view.get().sections)); continue; }
+          if (ev.ch === "N") { perform(parseCommand("narrative", view.get().sections)); continue; }
         }
         if (ev.ch === "?" && inputLine === "") {
           // The registered palette trigger — through the grammar, never beside it.
@@ -635,7 +636,8 @@ async function run(): Promise<void> {
           void shutdown();
           return;
         }
-        if (ev.ch === "f" && inputLine === "") {
+        // F, not f: feed and find start with f and must stay typeable on an empty line.
+        if (ev.ch === "F" && inputLine === "") {
           view.dispatch({ type: "footer" });
           continue;
         }

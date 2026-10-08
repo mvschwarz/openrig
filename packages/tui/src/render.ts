@@ -1279,7 +1279,7 @@ function keybindHints(state: ViewState): string {
   const nav = arrowsScroll ? "↑↓ scroll" : "↑↓ move";
   const pageScroll = state.contentMaxOffset > 0 && !arrowsScroll ? "⇞⇟ scroll · " : "";
   const filter = state.filter ? "/ replace · esc clear" : "/ filter";
-  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · ${filter} · S startup · v select/copy · f footer · q quit`;
+  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · ${filter} · S startup · v select/copy · F footer · q quit`;
 }
 
 /** The PULSE view renders FULL-WIDTH with NO explorer sidebar (increment 2). A
