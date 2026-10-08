@@ -93,9 +93,10 @@ reply in that thread would answer the decision. In every such case the
 `--verify` result says `threaded: false` with the reason.
 
 To answer a reply the human typed inside one of your threads, `--reply-to` the
-row their reply landed as: the update posts in that thread. A message the human
-started at the top level of the channel has no thread yet, so the answer posts
-as a new message.
+row their reply landed as. The update posts in that thread unless one of the
+cases above applies, and `--verify` reports it the same way. A message the
+human started at the top level of the channel has no thread yet, so the answer
+posts as a new message.
 
 A **decision** with a few clear choices can carry `--human-questions-file <path>`:
 a JSON array of 1–4 questions, each
