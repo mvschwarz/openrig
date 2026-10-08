@@ -228,6 +228,16 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     return { ok: false, errors: catalogResult.errors.map((error) => `${error.code}: ${error.message}`) };
   }
   const skillWarnings: string[] = (catalogResult.loadout.skipped ?? []).map((skip) => skip.message);
+  // Filesystem discovery scans the catalog's working tree too, so a skipped skill would still reach the adapter
+  // through the profile's selection. Drop a selection that resolves into a skipped folder; one from another source,
+  // such as a rig bundle, keeps that source.
+  const skippedDirs = new Set((catalogResult.loadout.skipped ?? []).map((skip) => realDir(skip.sourceDir)));
+  for (let i = selectedResult!.skills.length - 1; i >= 0 && skippedDirs.size > 0; i--) {
+    const entry = selectedResult!.skills[i]!;
+    const resource = entry.resource as SkillResource;
+    const source = nodePath.isAbsolute(resource.path) ? resource.path : nodePath.resolve(entry.sourcePath, resource.path);
+    if (skippedDirs.has(realDir(source))) selectedResult!.skills.splice(i, 1);
+  }
   for (const managed of catalogResult.loadout.entries) {
     const qualified: QualifiedResource = {
       effectiveId: managed.id,
@@ -361,6 +371,14 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       ...(skillWarnings.length ? { skillWarnings } : {}),
     },
   };
+}
+
+function realDir(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return nodePath.resolve(path);
+  }
 }
 
 /** Only profile-selected resources reach this check. Ambient cwd/home discovery

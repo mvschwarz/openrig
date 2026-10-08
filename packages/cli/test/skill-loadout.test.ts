@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -75,6 +75,27 @@ describe("rig skill loadout", () => {
     expect(applied.projection).toMatchObject({ ok: true, applied: true });
     expect(applied.projection.receipts.every((receipt) => receipt.status === "current")).toBe(true);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("warns about a skill with uncommitted content, projects the rest, and exits 1 only when something selected it", async () => {
+    writeFileSync(join(catalog, "topology-skill", "draft.md"), "uncommitted work\n");
+    const run = async (...topology: string[]) => {
+      errors.length = 0;
+      process.exitCode = undefined;
+      await skillCommand().parseAsync(["node", "rig", "loadout", "--runtime", "codex", "--cwd", project, ...topology, "--apply"]);
+    };
+
+    await run();
+    expect(process.exitCode).toBeUndefined();
+    expect(errors).toEqual([expect.stringMatching(/^Warning: catalog_skill_skipped: 'topology-skill' has uncommitted content at /)]);
+
+    await run("--topology", "topology-skill");
+    expect(process.exitCode).toBe(1);
+    expect(errors).toEqual([expect.stringMatching(
+      /^Warning: selected_skill_skipped: 'topology-skill' \(selected by topology\) has uncommitted content at .*; a copy already projected is kept as it was/,
+    )]);
+    expect(existsSync(join(project, ".agents", "skills", "system-skill", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(project, ".agents", "skills", "topology-skill"))).toBe(false);
   });
 
   it("rejects an incompatible runtime before touching the target", async () => {

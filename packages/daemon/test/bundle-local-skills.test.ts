@@ -288,6 +288,49 @@ describe("bundle-local skills", () => {
     },
   );
 
+  it("delivers no working-tree bytes of a catalog skill with uncommitted content on any runtime", async () => {
+    const specRoot = path.join(root, "source");
+    write("source/agents/worker/agent.yaml", `name: worker\nversion: "1.0"\nprofiles:\n  default:\n    uses:\n      skills: [edited]\n`);
+    write("source/agents/plain/agent.yaml", `name: plain\nversion: "1.0"\nprofiles:\n  default:\n    uses:\n      skills: []\n`);
+    const catalog = path.join(root, "catalog");
+    write("catalog/catalog.yaml", "schema: openrig.skill-catalog/v1\nsystem: []\n");
+    write("catalog/edited/SKILL.md", skill("edited"));
+    write("catalog/clean/SKILL.md", skill("clean"));
+    execFileSync("git", ["init", "-q", catalog]);
+    execFileSync("git", ["-C", catalog, "add", "."]);
+    execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+    write("catalog/edited/SKILL.md", `${skill("edited")}\nUncommitted draft.\n`);
+    const rig = RigSpecSchema.normalize(RigSpecCodec.parse(rigYaml) as Record<string, unknown>);
+    const cwd = path.join(root, "work");
+    fs.mkdirSync(cwd, { recursive: true });
+    const tmux = {} as TmuxAdapter;
+    const pi = new PiRuntimeAdapter({ tmux, fsOps, stateRoot: path.join(root, "pi"), runnerEntryPath: "unused" });
+    for (const adapter of [new ClaudeCodeAdapter({ tmux, fsOps }), new CodexRuntimeAdapter({ tmux, fsOps }), pi] as RuntimeAdapter[]) {
+      // Claude and Codex discovery scans the catalog, so the profile selects the dirty skill by name. Pi discovers
+      // only its bundle, so there the System World selects it.
+      const viaProfile = adapter.runtime !== "pi";
+      const resolved = resolveAgentRef(viaProfile ? "local:agents/worker" : "local:agents/plain", specRoot, fsOps);
+      if (!resolved.ok) throw new Error(JSON.stringify(resolved));
+      const member = { ...rig.pods[0]!.members[0]!, runtime: adapter.runtime, cwd };
+      const result = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+        profileName: "default", member, pod: rig.pods[0]!, rig, specRoot, homedir: path.join(root, "home"), skillsRoot: catalog,
+        systemSkills: viaProfile ? ["clean"] : ["clean", "edited"] });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) throw new Error(result.errors.join("; "));
+      expect(result.config.selectedResources.skills.map(s => s.effectiveId)).toEqual(["clean"]);
+      expect(result.config.skillWarnings).toEqual([expect.stringMatching(/^selected_skill_skipped: 'edited' \(selected by (topology|system)\) /)]);
+      const session = `${adapter.runtime}@portable`;
+      const targetOf = (id: string) => adapter.runtime === "pi" ? pi.skillTargetPath(session, id)!
+        : path.join(cwd, adapter.runtime === "codex" ? ".agents" : ".claude", "skills", id, "SKILL.md");
+      const planned = planProjection({ config: result.config, collisions: resolved.collisions, fsOps, resolveTargetPath: (_category, id) => targetOf(id) });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) throw new Error(planned.errors.join("; "));
+      expect((await adapter.project(planned.plan, { tmuxSession: session, cwd } as NodeBinding)).failed).toEqual([]);
+      expect(fs.readFileSync(targetOf("clean"), "utf8")).toBe(skill("clean"));
+      expect(fs.existsSync(targetOf("edited"))).toBe(false);
+    }
+  });
+
   it("discovers Pi bundle skills without importing Claude/Codex home or workspace pools", () => {
     for (const prefix of ["home/.agents", "home/.claude", "work/.agents", "work/.claude"]) {
       write(`${prefix}/skills/sibling/SKILL.md`, skill("sibling"));

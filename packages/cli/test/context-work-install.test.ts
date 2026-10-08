@@ -505,6 +505,36 @@ ${worlds}`);
     expect(execFileSync("git", ["-C", workingRoot, "status", "--short"], { encoding: "utf8" })).toBe("");
   });
 
+  it("projects the rest past a skill with uncommitted content, and exits 1 only when something selected it", async () => {
+    writeFileSync(join(skillsRoot, "topology-skill", "draft.md"), "uncommitted work\n");
+    const run = (...topology: string[]) => captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "alpha", "--runtime", "codex", "--cwd", workingRoot,
+        ...topology, "--apply-skills", "--json",
+      ]);
+    });
+    type Output = {
+      skillLoadout: { entries: Array<{ id: string }>; skipped: Array<{ id: string; selectedBy: string[]; message: string }> };
+      skillProjection: { ok: boolean; applied: boolean };
+    };
+
+    const unselected = await run();
+    expect(unselected.exitCode).toBeUndefined();
+    const quiet = JSON.parse(unselected.logs.join("")) as Output;
+    expect(quiet.skillLoadout.skipped).toMatchObject([{ id: "topology-skill", selectedBy: [] }]);
+    expect(quiet.skillLoadout.skipped[0]!.message).toMatch(/^catalog_skill_skipped: 'topology-skill' /);
+
+    const selected = await run("--topology", "topology-skill");
+    expect(selected.exitCode).toBe(1);
+    const output = JSON.parse(selected.logs.join("")) as Output;
+    expect(output.skillLoadout.entries.map((entry) => entry.id)).toEqual(["project-skill", "system-skill"]);
+    expect(output.skillLoadout.skipped).toMatchObject([{ id: "topology-skill", selectedBy: ["topology"] }]);
+    expect(output.skillProjection).toMatchObject({ ok: true });
+    expect(existsSync(join(workingRoot, ".agents", "skills", "project-skill", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(workingRoot, ".agents", "skills", "topology-skill"))).toBe(false);
+  });
+
   it.each(["unknown-runtime", ""])("rejects explicit runtime %j before project lookup or projection", async (runtime) => {
     const command = makeCommand();
     const workInstall = command.commands[0]!.commands.find((cmd) => cmd.name() === "work-install")!;

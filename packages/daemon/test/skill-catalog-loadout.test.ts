@@ -123,7 +123,7 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(result.loadout.entries.map((entry) => [entry.id, entry.selectedBy])).toEqual([["known", ["system"]]]);
     expect(result.loadout.skipped).toHaveLength(1);
     expect(result.loadout.skipped![0]).toMatchObject({ id: "edited", selectedBy: ["project"] });
-    expect(result.loadout.skipped![0]!.message).toMatch(/^selected_skill_skipped: 'edited' \(selected by project\) has uncommitted content at .*edited; it is not projected/);
+    expect(result.loadout.skipped![0]!.message).toMatch(/^selected_skill_skipped: 'edited' \(selected by project\) has uncommitted content at .*edited; a copy already projected is kept as it was/);
   });
 
   it("keeps a clean catalog unchanged and still reports a missing selected identity", () => {
@@ -208,6 +208,67 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(projection.ok).toBe(true);
     expect(existsSync(join(f.project, ".agents", "skills", "known", "SKILL.md"))).toBe(true);
     expect(existsSync(join(f.project, ".agents", "skills", "edited"))).toBe(false);
+  });
+
+  it.each(["folder", "SKILL.md", "frontmatter name"] as const)(
+    "finds a dirty skill by its committed name after its %s is deleted or renamed, in a folder named otherwise",
+    (change) => {
+      const f = fixture([]);
+      writeSkill(f.catalog, "known");
+      writeSkill(f.catalog, "folder alias", "edited");
+      commit(f.root);
+      const dir = join(f.catalog, "folder alias");
+      if (change === "folder") rmSync(dir, { recursive: true });
+      else if (change === "SKILL.md") rmSync(join(dir, "SKILL.md"));
+      else writeSkill(f.catalog, "folder alias", "renamed");
+
+      const result = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "edited"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.loadout.entries.map((entry) => entry.id)).toEqual(["known"]);
+      expect(result.loadout.skipped!.map((skip) => [skip.id, skip.sourceDir, skip.selectedBy])).toEqual([["edited", dir, ["project"]]]);
+    },
+  );
+
+  it("marks both skills dirty for a staged move between them, with spaces in the paths", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "from skill", "from");
+    writeSkill(f.catalog, "to skill", "to");
+    writeFileSync(join(f.catalog, "from skill", "old name.md"), "helper\n");
+    commit(f.root);
+    git(f.root, "mv", "skills/from skill/old name.md", "skills/to skill/new name.md");
+
+    const result = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["known", "from", "to"] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.loadout.entries.map((entry) => entry.id)).toEqual(["known"]);
+    expect(result.loadout.skipped!.map((skip) => [skip.id, skip.sourceDir])).toEqual([
+      ["from", join(f.catalog, "from skill")],
+      ["to", join(f.catalog, "to skill")],
+    ]);
+  });
+
+  it("keeps one owner's selection and kept copy when another owner reconciles the same cwd", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "known");
+    writeSkill(f.catalog, "edited");
+    commit(f.root);
+    const reconcile = (owner: string, topologySkills: string[]) => {
+      const resolved = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills });
+      if (!resolved.ok) throw new Error(JSON.stringify(resolved.errors));
+      return reconcileSkillLoadout({ loadout: resolved.loadout, runtime: "codex", cwd: f.project, topologyOwner: owner, apply: true });
+    };
+    expect(reconcile("a@rig", ["edited"]).ok).toBe(true);
+    const target = join(f.project, ".agents", "skills", "edited", "SKILL.md");
+    const projected = readFileSync(target, "utf8");
+
+    writeFileSync(join(f.catalog, "edited", "SKILL.md"), "---\nname: edited\ndescription: Use when testing edited.\n---\n\n# draft\n");
+    expect(reconcile("a@rig", ["edited"]).ok).toBe(true);
+    const other = reconcile("b@rig", ["known"]);
+    expect(other).toMatchObject({ ok: true, removed: [] });
+    expect(readFileSync(target, "utf8")).toBe(projected);
+    expect(JSON.parse(readFileSync(other.manifestPath, "utf8")).topologySelections).toEqual({ "a@rig": ["edited"], "b@rig": ["known"] });
   });
 
   it("reports duplicate catalog identities explicitly", () => {

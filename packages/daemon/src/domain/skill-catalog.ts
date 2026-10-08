@@ -228,7 +228,7 @@ export function inspectSkillDirectory(root: string): { digest: string; files: Re
 /** The catalog's HEAD, and the top-level folders holding uncommitted or untracked content. A skill folder with
  *  such content is skipped by itself; content directly in the catalog root (such as catalog.yaml) still makes the
  *  whole catalog unavailable, because it can change what every skill selection means. */
-function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<string>; committedSkill: (dir: string) => boolean } {
+function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<string>; committedName: (dir: string) => string | null } {
   let repoRoot: string;
   try {
     repoRoot = execFileSync("git", ["-C", catalogRoot, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
@@ -260,22 +260,28 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
     }
   }
   const revision = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const committedSkill = (dir: string): boolean => {
+  // The frontmatter name of `dir`'s SKILL.md at HEAD: null when HEAD has none there, "" when it doesn't parse.
+  const committedName = (dir: string): string | null => {
+    let text: string;
     try {
-      execFileSync("git", ["-C", repoRoot, "cat-file", "-e", `${revision}:${rel ? `${rel}/` : ""}${dir}/SKILL.md`], { stdio: "ignore" });
-      return true;
+      text = execFileSync("git", ["-C", repoRoot, "show", `${revision}:${rel ? `${rel}/` : ""}${dir}/SKILL.md`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
     } catch {
-      return false;
+      return null;
     }
+    const parsed = parseSkillFrontmatter(text);
+    return parsed.ok && SAFE_ID.test(parsed.frontmatter.name) ? parsed.frontmatter.name : "";
   };
-  return { revision, dirtyDirs, committedSkill };
+  return { revision, dirtyDirs, committedName };
 }
 
 function scanCatalog(catalogRoot: string): {
   revision: string;
   digest: string;
   skills: Map<string, Omit<CatalogSkill, "selectedBy">>;
-  /** Dirty skill folders, keyed by frontmatter name when it reads, and by folder name. */
+  /** Dirty skill folders, keyed by folder name, current frontmatter name and committed frontmatter name. */
   skipped: Map<string, string>;
 } {
   if (!existsSync(catalogRoot)) throw new Error(`managed skill catalog root does not exist: ${catalogRoot}`);
@@ -283,9 +289,24 @@ function scanCatalog(catalogRoot: string): {
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     throw new Error(`managed skill catalog root must be a real directory, not a symlink: ${catalogRoot}`);
   }
-  const { revision, dirtyDirs, committedSkill } = gitState(catalogRoot);
+  const { revision, dirtyDirs, committedName } = gitState(catalogRoot);
   const skills = new Map<string, Omit<CatalogSkill, "selectedBy">>();
   const skipped = new Map<string, string>();
+  // A folder that is a skill now or at HEAD, with working-tree bytes that are not the committed revision: it is not
+  // projected, and nothing else is affected. It answers to every name it has had, so a selection by its committed
+  // name finds it after a rename, a deleted SKILL.md or a deleted folder. Any other dirty folder isn't a skill.
+  const skipDirty = (dir: string): void => {
+    const sourceDir = nodePath.join(catalogRoot, dir);
+    const skillFile = nodePath.join(sourceDir, "SKILL.md");
+    const committed = committedName(dir);
+    if (committed === null && !existsSync(skillFile)) return;
+    const names = [dir, ...(committed ? [committed] : [])];
+    try {
+      const parsed = parseSkillFrontmatter(readFileSync(skillFile, "utf8"));
+      if (parsed.ok && SAFE_ID.test(parsed.frontmatter.name)) names.push(parsed.frontmatter.name);
+    } catch { /* deleted or unreadable: the folder and committed names still identify it */ }
+    for (const name of names) skipped.set(name, sourceDir);
+  };
   for (const entry of readdirSync(catalogRoot, { withFileTypes: true }).sort((a, b) => compareBytes(a.name, b.name))) {
     if (!entry.isDirectory()) continue;
     const sourceDir = nodePath.join(catalogRoot, entry.name);
@@ -294,14 +315,7 @@ function scanCatalog(catalogRoot: string): {
     }
     const skillFile = nodePath.join(sourceDir, "SKILL.md");
     if (dirtyDirs.has(entry.name)) {
-      // A folder that is a skill now or at HEAD, with working-tree bytes that are not the committed revision: it
-      // is not projected, and nothing else is affected. Any other dirty folder isn't a skill and is ignored.
-      if (!existsSync(skillFile) && !committedSkill(entry.name)) continue;
-      skipped.set(entry.name, sourceDir);
-      try {
-        const parsed = parseSkillFrontmatter(readFileSync(skillFile, "utf8"));
-        if (parsed.ok && SAFE_ID.test(parsed.frontmatter.name)) skipped.set(parsed.frontmatter.name, sourceDir);
-      } catch { /* the folder name still identifies it */ }
+      skipDirty(entry.name);
       continue;
     }
     if (!existsSync(skillFile)) continue;
@@ -324,8 +338,8 @@ function scanCatalog(catalogRoot: string): {
     });
   }
   // A committed skill whose folder was deleted in the working tree is named too, not reported as missing.
-  for (const dir of dirtyDirs) {
-    if (!skipped.has(dir) && !existsSync(nodePath.join(catalogRoot, dir)) && committedSkill(dir)) skipped.set(dir, nodePath.join(catalogRoot, dir));
+  for (const dir of [...dirtyDirs].sort(compareBytes)) {
+    if (!existsSync(nodePath.join(catalogRoot, dir))) skipDirty(dir);
   }
   const digest = sha256([...skills.values()].map((skill) => `${skill.id}\0${skill.digest}`).join("\n"));
   return { revision, digest, skills, skipped };
@@ -402,7 +416,7 @@ export function resolveSkillLoadout(input: {
         id,
         sourceDir: dirtyDir,
         selectedBy,
-        message: `selected_skill_skipped: '${id}' (selected by ${selectedBy.join("+")}) has uncommitted content at ${dirtyDir}; it is not projected until that content is committed or restored`,
+        message: `selected_skill_skipped: '${id}' (selected by ${selectedBy.join("+")}) has uncommitted content at ${dirtyDir}; a copy already projected is kept as it was, and the new content is not projected until it is committed or restored`,
       });
       continue;
     }
@@ -905,10 +919,19 @@ export function reconcileSkillLoadout(input: {
   for (const owner of Object.keys(manifest.topologySelections).sort(compareBytes)) {
     topologySelections[owner] = [...manifest.topologySelections[owner]!].sort(compareBytes);
   }
-  const currentTopology = loadoutEntries
-    .filter((entry) => entry.selectedBy.includes("topology"))
-    .map((entry) => entry.id)
-    .sort(compareBytes);
+  // A topology skill skipped for uncommitted catalog content stays in this owner's selection while its kept copy
+  // exists, so another owner reconciling the same cwd doesn't remove that copy as deselected.
+  const keptSkippedTopology = (input.loadout.skipped ?? [])
+    .filter((skip) => skip.selectedBy.includes("topology"))
+    .filter((skip) => {
+      const prior = owned.get(skip.id);
+      return prior !== undefined && pathEntryExists(prior.target);
+    })
+    .map((skip) => skip.id);
+  const currentTopology = [...new Set([
+    ...loadoutEntries.filter((entry) => entry.selectedBy.includes("topology")).map((entry) => entry.id),
+    ...keptSkippedTopology,
+  ])].sort(compareBytes);
   if (currentTopology.length > 0) topologySelections[topologyOwner] = currentTopology;
   else delete topologySelections[topologyOwner];
   const canonicalTopologySelections: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
