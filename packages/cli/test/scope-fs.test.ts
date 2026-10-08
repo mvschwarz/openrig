@@ -17,7 +17,6 @@ import {
   nextSliceNN,
   readFrontmatter,
   resolveMissionsRoot,
-  sameDirectory,
   splitFrontmatter,
   updateFrontmatter,
 } from "../src/lib/scope/scope-fs.js";
@@ -84,6 +83,23 @@ describe("resolveMissionsRoot", () => {
     expect(resolve).toThrow(`Configured workspace.slices_root is not a readable directory: ${missingMissions}.`);
   });
 
+  it("strictOverride refuses an explicit override with no missions tree instead of falling back", () => {
+    // #995: the silent fallback let a command operate on the configured tree
+    // while the caller had named another one.
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const namedWithoutMissions = mktemp();
+
+    expect(resolveMissionsRoot({ override: namedWithoutMissions, configPath })).toBe(configuredMissions);
+
+    const strict = () => resolveMissionsRoot({ override: namedWithoutMissions, configPath, strictOverride: true });
+    expect(strict).toThrow(ScopeCliError);
+    expect(strict).toThrow("has no missions tree");
+  });
+
   it("uses the typed workspace.slices_root setting instead of walking cwd", () => {
     const root = mktemp();
     const missions = path.join(root, "declared-missions");
@@ -119,31 +135,6 @@ describe("configuredMissionsRoot", () => {
     const fileConfig = path.join(root, "file.json");
     fs.writeFileSync(fileConfig, JSON.stringify({ workspace: { slicesRoot: filePath } }));
     expect(configuredMissionsRoot(fileConfig)).toBeNull();
-  });
-});
-
-describe("sameDirectory", () => {
-  it("matches a path against itself, with or without a trailing separator", () => {
-    const root = mktemp();
-    expect(sameDirectory(root, root)).toBe(true);
-    expect(sameDirectory(root, root + path.sep)).toBe(true);
-  });
-
-  it("matches a directory reached through a symlink (macOS /var↔/private/var class)", () => {
-    const root = mktemp();
-    const linkParent = mktemp();
-    const link = path.join(linkParent, "linked");
-    fs.symlinkSync(root, link);
-    expect(fs.realpathSync(link)).not.toBe(link);
-    expect(sameDirectory(link, root)).toBe(true);
-    fs.rmSync(linkParent, { recursive: true, force: true });
-  });
-
-  it("separates two different directories, including ones that do not exist", () => {
-    const a = mktemp();
-    const b = mktemp();
-    expect(sameDirectory(a, b)).toBe(false);
-    expect(sameDirectory(path.join(a, "ghost"), path.join(b, "ghost"))).toBe(false);
   });
 });
 

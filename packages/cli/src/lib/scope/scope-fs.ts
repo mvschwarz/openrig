@@ -143,26 +143,17 @@ export function configuredMissionsRoot(configPath?: string): string | null {
   return null;
 }
 
-/**
- * Whether two paths name the same directory. Symlinks are resolved when the
- * path exists, so a worktree reached through a link does not read as a
- * different root than the same directory named outright.
- */
-export function sameDirectory(a: string, b: string): boolean {
-  const canonical = (p: string): string => {
-    try {
-      return fs.realpathSync(p);
-    } catch {
-      return path.resolve(p);
-    }
-  };
-  return canonical(a) === canonical(b);
-}
-
 export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
   configPath?: string;
+  /**
+   * Fail instead of falling back to the configured root when an explicit
+   * override (`--workspace` or OPENRIG_WORK_ROOT) names no missions tree.
+   * A caller that writes to the root it resolved wants the refusal: the silent
+   * fallback would operate on a tree the caller never named (#995).
+   */
+  strictOverride?: boolean;
 } = {}): string {
   const cwd = opts.cwd ?? process.cwd();
   const fromOverride = opts.override ?? process.env.OPENRIG_WORK_ROOT;
@@ -171,6 +162,13 @@ export function resolveMissionsRoot(opts: {
     const missions = path.join(candidate, "missions");
     if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
+    if (opts.strictOverride) {
+      throw new ScopeCliError({
+        fact: `The workspace you named has no missions tree: neither ${missions} nor ${candidate} is a readable directory.`,
+        consequence: "Nothing was written; the configured workspace was NOT used as a fallback.",
+        action: "Point --workspace at a workspace whose missions/ directory exists, or drop the flag to use the configured one.",
+      });
+    }
   }
   const configured = configuredMissionsRoot(opts.configPath);
   if (configured) return configured;

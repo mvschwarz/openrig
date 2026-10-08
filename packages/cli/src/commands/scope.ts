@@ -53,8 +53,6 @@ import {
   readFrontmatter,
   resolveNotesFile,
   resolveMissionsRoot,
-  configuredMissionsRoot,
-  sameDirectory,
   splitFrontmatter,
   todayDateISO,
   updateFrontmatter,
@@ -1990,7 +1988,15 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         }
         // Resolve the scope target LOCALLY (rich NN-slug resolution), then
         // send the canonical missions-root-relative path to the daemon.
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        // #995 — approve is the one scope write that happens inside the DAEMON.
+        // The resolved root travels WITH the request so the daemon stamps the
+        // tree the caller named instead of its own; strictOverride stops a
+        // named workspace without a missions/ directory from falling back to
+        // the configured root, which would stamp a tree nobody named.
+        const missionsRoot = resolveMissionsRoot({
+          override: getOpts(command).workspace,
+          strictOverride: true,
+        });
         let scopeAbsPath: string;
         if (tier === "slice") {
           const slice = findSlice(missionsRoot, target, opts.mission ?? null);
@@ -2000,29 +2006,6 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
           scopeAbsPath = mission.absPath;
         }
         const scopePath = path.relative(missionsRoot, scopeAbsPath).split(path.sep).join("/");
-
-        // #995 — approve is the one scope write that happens inside the DAEMON: the
-        // CLI resolves the target locally and sends a missions-root-relative path,
-        // which the daemon resolves against ITS OWN root. When the caller named a
-        // different workspace (--workspace or OPENRIG_WORK_ROOT) and the same
-        // relative path exists in both trees, the stamp lands in the daemon's copy
-        // and nothing says so. Refuse rather than write to a tree nobody named;
-        // `stage` and `verified` write from the CLI, so they honour the override.
-        const daemonMissionsRoot = configuredMissionsRoot();
-        if (daemonMissionsRoot === null) {
-          throw new ScopeCliError({
-            fact: "No readable workspace.slices_root in the daemon's config.",
-            consequence: "approve writes through the daemon, which has no mission tree to write to; nothing was written.",
-            action: "Set it with: rig config set workspace.slices_root /path/to/your/workspace/missions",
-          });
-        }
-        if (!sameDirectory(missionsRoot, daemonMissionsRoot)) {
-          throw new ScopeCliError({
-            fact: `The workspace you named (${missionsRoot}) is not the daemon's workspace (${daemonMissionsRoot}).`,
-            consequence: `approve writes the stamp and audit row inside the daemon, against the daemon's root — it would have written ${scopePath} under ${daemonMissionsRoot}, not the tree you named. Nothing was written.`,
-            action: `Re-run without --workspace to stamp the daemon's workspace, or point the daemon at this one: rig config set workspace.slices_root ${missionsRoot} (then restart it).`,
-          });
-        }
 
         const lifecycleDeps = realDeps();
         const status = await getDaemonStatus(lifecycleDeps);
@@ -2037,6 +2020,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         const res = await client.post<Record<string, unknown>>("/api/scope/approve", {
           scopeTier: tier,
           scopePath,
+          missionsRoot,
           approvalScope: opts.scope,
           // P21: no body actorSession — the daemon derives the approver from the transport header.
           onBehalfOf: opts.onBehalfOf ?? null,
