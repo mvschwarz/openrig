@@ -401,17 +401,31 @@ export class RestoreOrchestrator {
   planNodeSubset(rigId: string, logicalIds: string[], opts?: {
     holdReason?: string;
     snapshotId?: string;
+    nonTargetMode?: "unchanged" | "detach_and_hold";
   }): NarrowLaunchResult {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
     const selected = this.snapshotRepo.selectRestoreUsable(rigId, opts?.snapshotId);
     if (!selected.ok) return selected;
     const intendedNodes = resolveSnapshotRestoreTopology(selected.snapshot.data).intendedNodes;
-    const targetIds = new Set(intendedNodes.filter((node) => logicalIds.includes(node.logicalId)).map((node) => node.logicalId));
+    const targetNodes = intendedNodes.filter((node) => logicalIds.includes(node.logicalId) || logicalIds.includes(node.id));
+    const targetIds = new Set(targetNodes.map((node) => node.logicalId));
+    const targetNodeIds = new Set(targetNodes.map((node) => node.id));
     if (targetIds.size === 0) {
       return { ok: false, code: "no_matching_nodes", message: `No nodes match logical ids: ${logicalIds.join(", ")}` };
     }
-    const reason = opts?.holdReason ?? "excluded_from_subset";
+    const nonTargetMode = opts?.nonTargetMode ?? "detach_and_hold";
+    const reason = nonTargetMode === "unchanged" ? null : (opts?.holdReason ?? "excluded_from_subset");
+    const nonTargetEffects: NarrowLaunchResult["nonTargetEffects"] = nonTargetMode === "unchanged"
+      ? { mode: "unchanged", reason: null, affected: [] }
+      : {
+        mode: "detach_and_hold",
+        reason,
+        affected: rig.nodes
+          .filter((node) => !targetIds.has(node.logicalId) && !targetNodeIds.has(node.id))
+          .map((node) => ({ nodeId: node.id, logicalId: node.logicalId, reason: reason! })),
+        condition: "applies only to non-target seats proven not live at execution time",
+      };
     return {
       ok: true,
       planOnly: true,
@@ -419,15 +433,8 @@ export class RestoreOrchestrator {
       targetNodes: intendedNodes
         .filter((node) => targetIds.has(node.logicalId))
         .map((node) => ({ nodeId: node.id, logicalId: node.logicalId })),
-      unmatchedIds: logicalIds.filter((logicalId) => !targetIds.has(logicalId)),
-      nonTargetEffects: {
-        mode: "detach_and_hold",
-        reason,
-        affected: rig.nodes
-          .filter((node) => !targetIds.has(node.logicalId))
-          .map((node) => ({ nodeId: node.id, logicalId: node.logicalId, reason })),
-        condition: "applies only to non-target seats proven not live at execution time",
-      },
+      unmatchedIds: logicalIds.filter((id) => !targetIds.has(id) && !targetNodeIds.has(id)),
+      nonTargetEffects,
     };
   }
 

@@ -275,6 +275,25 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
   });
 
+  it("plans single-node subset by node id with nonTargetMode unchanged (#887)", () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+
+    const result = orchestrator.planNodeSubset(rigId, [nodeIds[0]!], { nonTargetMode: "unchanged" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      planOnly: true,
+      targetNodes: [{ nodeId: nodeIds[0], logicalId: "dev.driver" }],
+      unmatchedIds: [],
+      nonTargetEffects: {
+        mode: "unchanged",
+        reason: null,
+        affected: [],
+      },
+    });
+  });
+
   it("emits restore.subset_completed for launched targets only", async () => {
     const { rigId, nodeIds } = seedPodAwareRig();
     seedSnapshot(rigId, nodeIds);

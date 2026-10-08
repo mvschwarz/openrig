@@ -533,6 +533,35 @@ describe("rig launch --host HTTP", () => {
     expect(stderr.join("\n")).toContain("Error on host host-b");
   });
 
+  it("single nodeRef launch with --plan sends launch-subset with single seat array on remote host (#887)", async () => {
+    const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
+    const { prog, client } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 200, data: plan },
+    });
+    const { exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "dev.impl", "--host", "host-b", "--plan", "--json"]);
+    });
+    const subsetCalls = client._calls.filter((c) => c.path.includes("launch-subset"));
+    expect(subsetCalls.length).toBe(1);
+    expect(subsetCalls[0]!.body).toMatchObject({ seats: ["dev.impl"], plan: true, nonTargetMode: "unchanged" });
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("single nodeRef launch with --plan exits non-zero on remote host when daemon answers detach_and_hold (#887)", async () => {
+    const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "detach_and_hold", reason: "excluded_from_subset", affected: [] } };
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 200, data: plan },
+    });
+    const { stderr, stdout, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "dev.impl", "--host", "host-b", "--plan"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("this daemon can't preview a single-seat launch; upgrade or restart it, or preview the subset with --seats <seat>");
+    expect(stdout.join("\n")).not.toContain("Plan only");
+  });
+
   it("missing bearer exits nonzero with no HTTP request", async () => {
     delete process.env.MISSING_TOK;
     const client = mockClient({});
