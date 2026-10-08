@@ -59,8 +59,22 @@ export function defaultWindowDeps(): WindowDeps {
           const size = await run("tmux", ["display-message", "-p", "-t", process.env["TMUX_PANE"], "#{window_width}"], { encoding: "utf8", timeout: 1000 });
           const width = Number(size.stdout.trim());
           if (Number.isSafeInteger(width) && width > 0) return width;
-        } catch { /* Unknown is a narrow layout, never an invented wide measurement. */ }
+        } catch { /* An ancestor may still own the person's terminal. */ }
       }
+      // An agent's shell tool has no terminal, but the agent process above it runs in the person's
+      // terminal (a Ghostty or Terminal tab, or a Herdr pane). Read the nearest ancestor's terminal size.
+      try {
+        let pid = process.ppid;
+        for (let depth = 0; depth < 8 && pid > 1; depth++) {
+          const [parent, tty] = (await run("ps", ["-o", "ppid=,tty=", "-p", String(pid)], { encoding: "utf8", timeout: 1000 })).stdout.trim().split(/\s+/);
+          if (tty && /^[A-Za-z0-9/]+$/.test(tty) && tty !== "??" && tty !== "?") {
+            const size = await run("/bin/sh", ["-c", `stty size < /dev/${tty}`], { encoding: "utf8", timeout: 1000 });
+            const width = Number(size.stdout.trim().split(/\s+/)[1]);
+            return Number.isSafeInteger(width) && width > 0 ? width : undefined;
+          }
+          pid = Number(parent);
+        }
+      } catch { /* Unknown is a narrow layout, never an invented wide measurement. */ }
       return undefined;
     },
   };
