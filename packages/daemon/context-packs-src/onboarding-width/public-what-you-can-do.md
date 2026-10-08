@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-seven top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.6`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.6.7`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -45,8 +45,10 @@ one command away. Your memory of the fleet is a claim about the past.
   only the default workspace). Mission and wave inspection shows admission and exit guidance; wave/slice details
   include review decisions. Accepted-core guidance stays separate from full-contract proof,
   live custody and executable dependencies. An `INDETERMINATE` cell stays unknown rather than
-  being filled from memory. **`rig view register`** turns a query you keep re-running into a
-  first-class view.
+  being filled from memory. A project that integrates somewhere other than `main` declares
+  `arrangement.source.integration_ref` in `mission.yaml`, and the folded rung checks landed work
+  against it; a ref that is invalid or can't be resolved reads INDETERMINATE.
+  **`rig view register`** turns a query you keep re-running into a first-class view.
 - **`rig config`** — bare, with no arguments: every key, every current value, and where each came
   from. Most agents assume compaction thresholds, snapshot cadence and scan intervals are hardcoded
   daemon behaviour. They are configuration. **Watch one thing:** `source: default` does not mean
@@ -66,7 +68,8 @@ one command away. Your memory of the fleet is a claim about the past.
   replaying a case does not establish improved behavior or authorize unrelated work.
 - **`rig roster list` / `show` / `find`** — who across your rigs and hosts is recommended for a
   kind of work, from JSON rosters in `<workspace.root>/rosters`. Read-only: it dispatches nothing
-  and does not claim anyone is available.
+  and does not claim anyone is available. The built-in starter and factory leads publish their
+  team's roster at first start.
 - **`rig telemetry events` / `transitions` / `tenures <node-id>`** — past events, queue
   transitions and a seat's occupants, one bounded page at a time with gaps reported. Reach for it
   before querying the database yourself.
@@ -83,7 +86,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   on it. Alternate-screen and queued-command cases can still yield false negatives, so
   consequential delivery gets an effect check at the far end rather than a blind retry. A
   producer-link advisory reading `no_activity_signal` means activity could not be determined;
-  confirm by effect, never relaunch on it.
+  confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
+  question waiting for a person is refused with `target_needs_input`, even when its screen
+  can't be read: read it with `rig capture` and get the question answered instead of retrying.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -109,22 +114,30 @@ unseen — which makes messages the one delivery channel that never gets skipped
 - **`rig stream emit` / `list` / `watch` / `archive`** — drop an observation somewhere the *next*
   agent will find it. Emitting costs nothing and does not interrupt anyone; the value appears when
   someone lists the stream before starting.
-- **`rig terminal open <view> --window`** — open a new desktop terminal with live agent tiles.
-  For “show me my agents”, “show me the terminals” or “welcome screen”, run **`rig terminal open saved:kernel --window`**
-  on the daemon's desktop: TUI | advisor | operator, no YAML, herdr when installed or plain tmux.
-  Herdr is visible only in a terminal the person can see; switching the shared TUI to `:terminals` does not
-  open one. Over headless SSH, explain the limitation and give one exact connection/attachment command for
-  a new terminal window or tab, using the current endpoint or binding from the getting-started guide.
-  Inspect the result and visible content, or say what cannot be verified. On a desktop, do not finish by
-  printing a command for the person to type. Only if the window cannot open, `rig tui --shared`
-  is the dashboard-only fallback; explain the failure. Existing herdr or cmux workspaces
-  can use `rig terminal open <view> --provider herdr` or `--provider cmux` without `--window`
-  to add tiles inside that provider, not to open the first desktop window.
+- **`rig terminal open <view>`** — open a desktop terminal with live agent tiles; a window is the
+  default. **Opening `rig terminal open saved:kernel --window` is the step after install or start**:
+  say you're opening it, run it on the daemon's desktop, then tell the person where it opened. Don't
+  wait for a phrase like “show me my agents”; the same command brings their agents back later. No
+  YAML, herdr when installed or plain tmux. The layout follows the terminal's width: on a narrow
+  one the operator gets the first tab; on a wide one the dashboard and operator sit side by side
+  and the advisor gets its own tab. A `kernel` view the person saved still wins. Inside herdr it
+  opens a focused `openrig kernel` space. It opens where the caller is: Terminal gets a window and
+  Ghostty a tab; from Claude Desktop, iTerm or VS Code on a Mac it opens a new Ghostty or Terminal
+  window, and only then say that clicking macOS's Allow is fine. Herdr is visible only in a
+  terminal the person can see; switching the shared TUI to `:terminals` does not open one. Over
+  SSH, in CI or with no display, the command returns a definite no-window result with the reason
+  and an attach command: relay that command exactly. Inspect the result and visible content, or
+  say what cannot be verified. On a desktop, do not finish by printing a command for the person to
+  type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
+  the failure. `--provider herdr` or `--provider cmux` adds tiles inside a workspace that is
+  already visible, without opening a window; in `--json` output, `reusedWorkspace` with no new
+  tiles means an existing view was reused, which is success.
   In the TUI, **TERMINALS** keeps Saved views prominent and Derived groups collapsed until
   expanded. Names load before detailed readiness. Select a view to inspect its members,
   layout and pages; preview is passive. Saved membership requires deliberate setup.
-  **Open in Herdr** deliberately opens the inspected plan
-  and reports opened, absent or degraded members. Help or a side trip returns to the same preview.
+  **Open terminals ▸** opens the inspected plan through the same desktop launcher, herdr or plain
+  tmux, so the TUI must run on the daemon's desktop; when no window was attempted it shows the
+  preview and attach commands. Help or a side trip returns to the same preview.
 - **`rig walk <seat> --through <files> --pace <n>`** — deliver context pieces through
   file-backed terminal paste. When the current native generation record resolves, the complete
   piece and its matching Claude/Codex turn closure must arrive before pacing onward, including
@@ -135,7 +148,16 @@ unseen — which makes messages the one delivery channel that never gets skipped
   readiness for the delivery decision and `queue create --verify` for its receipt; connector
   setup or verification is not an outbound human message. After a connection gap the daemon
   catches up on missed channel messages and marks them late; `rig slack status` shows the
-  connection and the catch-up state.
+  connection and the catch-up state. **`rig slack channel-map list` / `set <match> <channel>` /
+  `remove <match>`** sends a rig's or seat's human-bound posts to its own channel (a seat match
+  beats a rig match; the rest use the default channel). After a change, invite the app to each
+  channel, run `rig slack verify`, and rewire the connector (`rig slack disable` then `enable`, or
+  restart the daemon). An emoji reaction on any message posted for an ask reaches the asking seat
+  as a task tagged `human-reaction`: a signal to interpret, not an answer, and the ask stays open.
+  It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app), and
+  `rig slack verify` warns without them. A long ask is posted in numbered thread parts; one that
+  still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
+  sent with “Also send to #channel” reach the seat like any other thread reply.
 
 ## Making work outlive you
 
@@ -270,13 +292,17 @@ operator greets the person, asks the goal once and recommends one of three teams
 Claude Code builder and a Codex reviewer), `workshop` (a rig bundle: a lead, a builder, QA and a
 reviewer) or `factory` (seven agents). It fits the team to the providers on the machine, launches
 on a yes and hands the goal to the team's lead, which makes one light mission and slice for
-continuing work. After a launch it gives each seat's attach command, names the dashboard as the
-overview and the lead as the place to talk, and asks whether the person can see the team. **If you
-are the agent installing OpenRig for someone**, keep the kernel running and pass the person's goal
+continuing work. While explaining the choices it shows each team's graph in the shared TUI. After
+a launch it gives each seat's attach command, names the dashboard as the overview and the lead as
+the place to talk, and asks whether the person can see the team. **If you are the agent installing
+OpenRig for someone**, show them the one-command install's `--dry-run` preview first
+(`docs/reference/getting-started.md` has both forms) and run it on their yes. Then open the OpenRig
+view as the handoff (`rig terminal open` above), keep the kernel running and pass the person's goal
 and folder to the operator; don't build their project yourself. `rig setup` prints that handoff
-even after an incomplete or dry-run result. The `rigs` skill (`skills/rigs/SKILL.md` in the
-repository, not in the package) takes an agent outside OpenRig from install to a team doing the
-work.
+even after an incomplete or dry-run result. The `rigs` skill takes an agent outside OpenRig from
+install to a team doing the work. The daemon installs it for the person's own agent
+(`~/.claude/skills/rigs` and `~/.agents/skills/rigs`) and refreshes it on every upgrade; a copy
+added with skills.sh is left alone and never refreshed.
 
 `starter` and `factory` are built in: preview the team, inspect `rig up <team> --cwd . --plan`,
 and follow `docs/reference/getting-started.md`. `first-project` is starter's old name and still
@@ -289,9 +315,9 @@ fresh, since a web tool's cached copy can be older. The built-in shelf also hold
 `research-team` and `pm-team` became `code-review`, `research` and `pm` with no alias, and
 `first-project-claude`, `first-project-mixed`, `conveyor`, `demo`, `implementation-pair` and
 `product-team` were removed. Verify prerequisites (Node 22 or 24) and actual runtime readiness
-before work. Known limit at 0.6.6: the starter's Codex model `gpt-6-astra` needs a Codex newer
-than 0.145. Existing Herdr/cmux terminals can present the managed team through
-`rig terminal open`.
+before work. The starter's Codex model `gpt-6-astra` needs a Codex newer than 0.145; when a Codex
+seat reports that, the operator offers to update Codex and restart that seat. Existing Herdr/cmux
+terminals can present the managed team through `rig terminal open`.
 
 **Need a small team now, without authoring YAML?** Start with `rig create`, then use `rig grow`
 (including `--new-pod`) while it runs. A working topology can become a reusable spec later; you do
@@ -302,7 +328,10 @@ not have to tear one down to change it, and you rarely have to start from nothin
   rig. `rig up` with a pod-aware spec on a stopped team's name replaces that team (the earlier one
   is archived), so check `rig ps --nodes` first. Launch-created `AGENTS.md` or `CLAUDE` files now show in `git status`.
 - **`rig down`** — stop a rig's seats and take it out of the running set. It ends the agents'
-  sessions and any work in progress; don't run it on a live team unless the person asked.
+  sessions and any work in progress; don't run it on a live team unless the person asked. In
+  human mode it first prints one line with each agent's last known activity, or “unknown”: a
+  best-effort snapshot, not a record of what was interrupted. With `--host`, a remote teardown
+  that reports errors exits 2.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
   rest.
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
@@ -349,8 +378,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
 - **`rig doctor`** — is the *installation* wired up correctly, or are you chasing a bug that is
-  really a broken install. A pass is not "ready": it names what it didn't check, including provider
-  logins and agent readiness. **`rig preflight`** asks whether this machine can run OpenRig at all.
+  really a broken install. It checks Claude and Codex installs and logins the way setup does, and
+  it fails for a harness the person doesn't use, which they can ignore. A pass is not "ready": a
+  login is not proof that a provider accepts the credential or that an agent can work.
+  **`rig preflight`** asks whether this machine can run OpenRig at all.
 - **Bare `rig`** — the same TUI for first setup, daemon-down startup and ordinary work.
   After a successful daemon read it opens the ordinary work views, even when no rig is running;
   press **S** for Startup. Slow or unverified detection does not mean stopped.
@@ -391,21 +422,24 @@ version, from checking the environment to a useful report to the OpenRig team.
   backup, plugin-refresh, and 0.5.9 instance-migration helpers. The migration is an
   Agent-Operated Workflow: inspect, take one bounded reversible action, verify its effect, and
   continue from the receipt. There is no `rig upgrade` verb, and `rig down` is not part of a
-  continuity-preserving upgrade.
+  continuity-preserving upgrade. After an upgrade, `rig context get reference/whats-new.md` says
+  what behaves differently for an agent; the skill's last step reads it and tells the person.
 - **A seat's `compaction_strategy` is declared, not improvised at the wall.** Pair a threshold-
   managed seat with the `context-usage-threshold` watchdog above so continuity is arranged while
   the seat can still act.
 - **`rig handover <seat>`** — replace the **occupant** of a seat while the seat, its name, its
   edges and its inbound work stay exactly where they are. **`rig seat handover` uses the same
   effectful handover path.** Both forms perform the operation by default; pass `--dry-run`
-  to plan without changing the seat. Check the selected source and continuity evidence first.
+  to plan without changing the seat. Check the selected source and continuity evidence first. A
+  seat can be handed over again into its own pane, so a seat left half-handed-over recovers by
+  running the handover again.
 - **`rig seat clear-attention` / `set-resume-token`** — clear a stale attention flag, or repair a
   lost resume handle so restore works next time.
 - **`rig seat continue <seat>`** — a launch stopped on Claude's bypass-permissions consent dialog.
   After the person accepts it in the pane, this delivers the pending startup text into the same
   conversation without relaunching; `rig up` and `rig bundle install` name it when startup pauses.
-  Recognised Codex update notices no longer stop a launch: they are skipped without updating, so
-  don't dismiss them by hand.
+  Managed Codex launches turn off Codex's startup update check, so no update notice stops them;
+  updating Codex is the operator's job.
 - **`rig seat set-model` / `stop` / `clean`** — persist the model for later managed resumes, stop
   exactly one live seat (ending its session and any work in progress), or clear a dead seat's
   stale binding. When the topology is right and only
@@ -425,7 +459,10 @@ version, from checking the environment to a useful report to the OpenRig team.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
   Managed compaction waits for the seat's restore map before compacting; `rig compact --state`,
   `--cancel` and `--skip-map` inspect, stop or skip that wait. The `claude-compaction-restore`
-  skill covers writing and reading the map; `claude-compact-in-place` no longer ships.
+  skill covers writing and reading the map; `claude-compact-in-place` no longer ships. After a
+  managed compaction, refocus waits for the restore request, which names the `refocusing` skill
+  (the daemon installs it globally); three failed refocus attempts in a row for one occupant post
+  one issue to the stream.
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
   enough context left to believe it knows everything and not enough to actually know anything — and
   **the compacted agent is the only one who knows it happened**, while every other seat keeps
@@ -519,7 +556,7 @@ scheme, and nothing downstream can see it.
   pack created after the daemon started; a daemon restart is no longer needed.
 - **`rig context add <repository-path-or-URL> --git`** — select a pack while retaining its Git
   source and checkout; `--pack <path>` chooses a repository-relative pack. It starts a stopped
-  local daemon itself. Inspect that relationship
+  local daemon itself, and the checkout holds one commit, not the whole history. Inspect that relationship
   with **`rig context source inspect <ref>`**; it does not fetch or prove agent consumption.
   **`rig context source update <ref>`** explicitly fetches and merges, preserving committed local
   authorship before selecting clean content. Dirty work, conflicts, unavailable upstreams and
@@ -548,6 +585,7 @@ scheme, and nothing downstream can see it.
 - **`rig context recap-write`** — a durable, seat-scoped RECAP beside LEARNED with a
   collision-safe superseded chain, written at the handover or compaction boundary; restore
   packets carry the pointer, so a successor reads decisions-with-rationale instead of scrollback.
+  Write it with this command, not a file tool, so earlier recaps are kept.
 - **`rig project classify` / `list` / `show`** — turn a raw observation into a routed, typed,
   deduped record instead of hand-creating a row from a hunch.
 
@@ -560,7 +598,10 @@ working arrangement becomes something someone else can instantiate.
   file well-formed, would it boot *on this host*, and **will the agents it launches actually know
   anything when they arrive**. The third is the one people skip. Unknown structural keys refuse
   with their path instead of being normalized away. Use `rig spec validate --help` for its current
-  behavior and options.
+  behavior and options. For Pi seats, preflight reports the Pi version against the tested
+  baseline, and at launch the runner says whether the seat has a stored sign-in or provider key
+  (advisory; launch continues). A provider key reaches a Pi seat only when its name is in
+  `recovery.provider_auth_env_allowlist`; `MINIMAX_API_KEY` serves `minimax/<id>` models.
 - **`rig context trace --pod <pod>`** — walk the context chain through instance → rig → pod → seat
   when the pod altitude matters.
 - **`rig specs show` / `preview` / `add` / `sync` / `rename` / `remove`** — where a spec lives,
@@ -587,8 +628,11 @@ working arrangement becomes something someone else can instantiate.
   are written, and a stopped one is replaced: the earlier team is archived, and reinstalling into its
   own install folder first copies each differing file to a backup. A legacy bundle doesn't replace
   a stopped team, and with `--force` it can run its approved install steps before its name check
-  fails. Read those choices before reaching for `--force`.
-- **`rig bundle check <folder>`** — a local, advisory check of a team you are authoring.
+  fails. Read those choices before reaching for `--force`. The manifest safety check always runs,
+  even with `--skip-version-check --force`.
+- **`rig bundle check <folder>`** — a local, advisory check of a team you are authoring; each
+  finding names its file. `rig bundle create` and `rig up <link>` name the bundle after
+  `rig.yaml`'s `name`.
   `rig bundle create --context-pack <dir>` and `--project-dir <dir>` carry a context pack or a
   project with it, and `docs/reference/publishing-a-rig-bundle.md` explains how to share it on
   openrig.dev/rigs.
@@ -663,9 +707,12 @@ your circumstances is configuration, and the ones that are not, another agent ca
   When setting up a team, the operator recommends keeping this default. It offers to remember
   extra OpenRig commands in your native settings, for this project or user-wide, only when you
   want that, and stricter rules and Claude's lifecycle asks remain. The `openrig-core` plugin's
-  `applying-a-permission-policy` skill has the procedure. Known limits at 0.6.6: Codex team seats
-  are not yet asked before lifecycle commands, and in a Claude team seat `rig down --help` asks
-  because it matches the `rig down` rule (`rig help down` prints the same help without a prompt).
+  `applying-a-permission-policy` skill has the procedure. In a Claude team seat, help on lifecycle
+  commands (`rig down --help`, `-h`) and equivalent spellings of allowed commands run without a
+  prompt; the lifecycle actions still ask, and pipelines, command substitutions, redirects and
+  heredocs are left to Claude's own check. The kernel operator's Claude session also runs routine
+  inspection (Python, command lookup, `cd`, text helpers) and WebFetch without prompts. Known
+  limit: Codex team seats are not yet asked before lifecycle commands.
 - **`permission_policy: builtin:auto`**, and a fixed order for a seat's first launch:
   `rig seat set-permissions`, then the member policy, then the rig policy, then the system floor.
   See `docs/reference/rig-spec.md#built-in-permission-policies`.
@@ -707,13 +754,17 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you
   stop them without killing the rig.
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
+  It installs herdr by default on macOS and Linux (`--no-herdr` declines; if the install fails,
+  views fall back to plain tmux) and on a Mac offers Ghostty once (`--ghostty` / `--no-ghostty`).
+  It no longer installs cmux; an existing cmux still works.
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. `rig` and `rig tui` open
   the status dashboard, not a conversation with an agent: talk to the operator through
-  `rig terminal open saved:kernel --window`. For “show me my agents”, “show me the terminals”, “see my agents” or
-  “welcome screen”, run that command to open the dashboard and conversations together;
-  do not finish by showing a table or suggesting a command for the person to type.
+  `rig terminal open saved:kernel --window`, which opens the dashboard and conversations together.
+  Open it as the step after install or start, and whenever the person wants their agents back
+  (see `rig terminal open` above); do not finish by showing a table or suggesting a command for
+  the person to type.
   Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback:
   it attaches to the existing kernel terminal; Ctrl-b then d detaches, and no missing
   seat or terminal is implicitly launched. Explain the failure and help with the
