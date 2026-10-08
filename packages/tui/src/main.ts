@@ -648,6 +648,20 @@ async function run(): Promise<void> {
             continue;
           }
         }
+        if (inputLine === "" && (ev.ch === "j" || ev.ch === "k")) {
+          if (lastScreen) {
+            const key = ev.ch === "j" ? "down" : "up";
+            const delta = key === "down" ? 1 : -1;
+            const action = resolveKeyAction(
+              { type: "key", key, action: { type: "select", delta } },
+              view.get(),
+              lastScreen,
+              computeExplorerRows(view.get(), snapshot).length,
+            );
+            if (action) perform(action);
+          }
+          continue;
+        }
         inputLine += ev.ch;
       } else if (ev.type === "key" && ev.key === "backspace") {
         inputLine = [...inputLine].slice(0, -1).join("");
