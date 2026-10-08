@@ -471,7 +471,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   skill covers writing and reading the map; `claude-compact-in-place` no longer ships. After a
   managed compaction, refocus waits for the restore request, which names the `refocusing` skill
   (the daemon installs it globally); three failed refocus attempts in a row for one occupant post
-  one issue to the stream.
+  one issue to the stream. The turn boundary, restore request and read-depth audit reach a seat
+  that stays quiet after `/compact`; they don't wait for its next turn.
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
   enough context left to believe it knows everything and not enough to actually know anything — and
   **the compacted agent is the only one who knows it happened**, while every other seat keeps

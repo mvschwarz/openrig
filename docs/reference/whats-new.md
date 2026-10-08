@@ -38,6 +38,12 @@ after an upgrade it can still hold the previous version's note.
 - **A short rate limit is waited out.** When Slack asks for a pause of 10 seconds or less, OpenRig waits and retries the
   post once. A longer pause is still left to the usual retry of retained messages.
 
+## Managed compaction
+
+- **A quiet seat is restored after `/compact`.** The turn boundary, the restore request and the read-depth
+  audit now reach a Claude seat that takes no turn after compacting. Before, they waited for the seat's next turn,
+  so a seat with nothing to do could sit unrestored. Each stage still waits until the seat's screen shows it idle.
+
 ## Workflows
 
 - **Validate before you run.** `rig workflow validate` now reports `step_cannot_finish` for a step whose allowed exits

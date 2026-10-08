@@ -51,6 +51,9 @@ could never finish is caught at validate. It is built from the commit tagged
   how ([#1021](https://github.com/mvschwarz/openrig/pull/1021)). Wait out a Slack rate limit of 10 seconds or less and retry
   the post once ([#1026](https://github.com/mvschwarz/openrig/pull/1026)). Keep the bot token on Slack's hosts inside the
   private-file download itself ([#1006](https://github.com/mvschwarz/openrig/pull/1006)).
+- Deliver the turn boundary, restore request and read-depth audit to a Claude
+  seat that stays quiet after a managed `/compact`, instead of waiting for its
+  next turn. Each stage still waits for an idle screen ([#1035](https://github.com/mvschwarz/openrig/pull/1035)).
 
 ### Dependency and install-script changes
 
