@@ -604,9 +604,26 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "bound-plan", viewportColumns: 174 }, { timeoutMs: 45_000 });
     expect(f.deps.herdrConfig).not.toHaveBeenCalled(); expect(f.deps.launch).not.toHaveBeenCalled();
     expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/bin/launchctl")).toBe(false);
-    expect(f.exec.mock.calls.filter(([file]) => file === "/usr/bin/env")).toEqual([
-      ["/usr/bin/env", ["-u", "TMUX", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH", `HERDR_SOCKET_PATH=${f.preview.status.launch.socketPath}`, "/fixture/bin/herdr", "workspace", "list"]],
-    ]);
+    // Read-only Herdr calls only: the inventory before opening, then which space is focused.
+    const list = ["/usr/bin/env", ["-u", "TMUX", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH", `HERDR_SOCKET_PATH=${f.preview.status.launch.socketPath}`, "/fixture/bin/herdr", "workspace", "list"]];
+    expect(f.exec.mock.calls.filter(([file]) => file === "/usr/bin/env")).toEqual([list, list]);
+    expect(result.notes?.at(-1)).toBe("Herdr did not confirm the view's space is focused; ask the person whether they see it.");
+  });
+
+  it("says the switchboard space is showing when the person's Herdr reports it focused", async () => {
+    const f = fixture();
+    f.deps.env = { HOME: "/fixture", TERM_PROGRAM: "herdr" };
+    f.preview.status.launch.socketPath = "/fixture/.config/herdr/herdr.sock";
+    (f.preview.composed as typeof f.preview.composed & { spaceLabel?: string }).spaceLabel = "switchboard";
+    let lists = 0;
+    f.exec.mockImplementation(async (file: string, args: string[]) => {
+      if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { workspaces: ++lists > 1 ? [{ workspace_id: "w2", label: "switchboard", focused: true }] : [] } });
+      if (args.includes("--version")) return "herdr 0.9.3";
+      return file === "/bin/sh" ? "/fixture/bin/herdr" : "";
+    });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: true });
+    expect(result.notes?.at(-1)).toBe("Herdr shows the switchboard space in the person's current session.");
   });
 
   it("does not place the current Herdr caller's view on a different daemon endpoint", async () => {
