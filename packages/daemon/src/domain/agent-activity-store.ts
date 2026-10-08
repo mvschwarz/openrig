@@ -5,6 +5,8 @@ import type { AgentActivity, PersistedEvent } from "./types.js";
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
 export interface HookActivityInput {
+  turnId?: string | null;
+
   runtime: string | null;
   sessionName?: string | null;
   nodeId?: string | null;
@@ -108,6 +110,7 @@ export class AgentActivityStore {
       eventAt,
       generation,
     });
+    activity.turnId = input.turnId ?? null;
 
     const event = this.eventBus.emit({
       type: "agent.activity",
@@ -339,15 +342,13 @@ function normalizeHookActivity(input: {
   if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") {
     state = "running";
   } else if (rawEvent === "PermissionRequest") {
-    // OPR.0.4.1.10 — Codex's official approval hook (openai/codex PR #17563). A PermissionRequest
-    // means the agent is BLOCKED waiting on a command / patch / network approval = needs_input. This is
-    // the HOOK-PRIMARY signal for Codex, which emits no Claude-style Notification; classifySendReadiness
-    // already prefers a fresh runtime_hook needs_input runtime-agnostically, so wiring this event makes
-    // the Codex rig-send guard hook-primary by construction (capture-pane scan stays as the fallback).
-    // The official payload carries session_id/turn_id/cwd/model/permission_mode/tool_name/tool_input;
-    // the relay forwards tool_name as the subtype, so `evidence` names the tool being approved.
+    state = input.seatRuntime === "codex" ? "unknown" : "needs_input";
+    normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
+  } else if (rawEvent === "PermissionPromptConfirmed") {
     state = "needs_input";
-    normalizedReason = "permission_request";
+    normalizedReason = "permission_prompt";
+  } else if (rawEvent === "PermissionPromptCleared") {
+    normalizedReason = "permission_prompt_cleared";
   } else if (rawEvent === "Notification") {
     // runtime_error is an OMP runner signal; a hook claiming OMP on another
     // runtime's seat must not escalate it.

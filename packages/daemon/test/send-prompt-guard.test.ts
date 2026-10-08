@@ -201,18 +201,21 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // K-5 HOOK-PRIMARY (founder expansion): a fresh Codex PermissionRequest hook is the PRIMARY signal —
   // it blocks default/raw/force even when the pane looks idle (a high-stakes guard must not depend on
   // screen-scraping). Only --dangerously-interact --reason drives it (+ audit).
-  it("K-5(hook): a Codex PermissionRequest hook is HOOK-PRIMARY — default/raw/force refused, only --dangerously-interact drives + audits", async () => {
+  it.each([0, 90_000])("K-5(hook): a pending Codex permission (%sms old) may hide a prompt — refuse sends, allow only an audited answer", async ageMs => {
     const seat = seedCodexSeat();
-    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash" });
+    const now = new Date();
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash",
+      occurredAt: new Date(now.getTime() - ageMs).toISOString() });
     const { sendText, sendKeys } = spies();
     // Pane looks idle, but the fresh hook is authoritative.
-    const t = makeTransport(mockTmux({ capturePaneContent: async () => "› ready\n\n  gpt-5.5 xhigh fast · Context [████ ] · ~/code", sendText, sendKeys }));
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "› ready\n\n  gpt-5.5 xhigh fast · Context [████ ] · ~/code", sendText, sendKeys }), { now: () => now });
 
     const def = await t.send(seat, "hi");
     expect(def.ok).toBe(false);
     expect(def.reason).toBe("target_needs_input");
     expect(def.activity?.evidenceSource).toBe("runtime_hook"); // HOOK-PRIMARY, not screen-scrape
-    expect(def.activity?.reason).toBe("permission_request");
+    expect(def.activity?.reason).toBe("permission_request_pending");
+    expect(agentActivityStore.getLatestForNode({ sessionName: seat })).toMatchObject({ state: "unknown", reason: "permission_request_pending" });
 
     const raw = await t.send(seat, "/compact", {});
     expect(raw.ok).toBe(false);
@@ -229,7 +232,9 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalledWith(seat, "1", undefined, { bracketed: false });
     const ev = overrideEvents();
     expect(ev.length).toBe(1);
-    expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request", overrideReason: "approve the blocked command" });
+    expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request_pending", overrideReason: "approve the blocked command" });
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "Stop" });
+    expect((await t.send(seat, "hi")).ok).toBe(true);
   });
 
   // BOTH PATHS: when the hook is ABSENT (or stale), the capture-pane fallback still catches a Codex

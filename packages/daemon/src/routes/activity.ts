@@ -36,6 +36,9 @@ export function evidenceFromHookActivity(input: {
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
   };
+  if (input.activity.reason === "permission_request_pending") {
+    return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
+  }
   switch (input.activity.state) {
     case "running":
       return { ...base, activity: "working", needsInput: { count: 0, reason: null } };
@@ -268,6 +271,7 @@ activityRoutes.post("/hooks", async (c) => {
     // Legacy, excluded, or no-tenure emitting paths may omit it ⇒ stamped null ⇒ unresolved at read
     // (sound per-path absence; never false-fresh).
     generation: stringOrNull(body.generation),
+    turnId: stringOrNull(body.turnId),
   });
 
   if (!result.ok) {
