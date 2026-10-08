@@ -10,6 +10,7 @@ import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
@@ -902,15 +903,17 @@ export class QueueRepository {
     // W1-c guard is nudge-aware for the same reason: absence of an intent is a
     // defect only when a wake WAS intended.
     if (nudge === false) return;
+    // The successor row is already written in this txn, so its stored summary is
+    // read here rather than threaded through every staging caller.
+    const successor = this.getById(successorQitemId);
     this.recordWakeIntent({
       outboxId: `${WAKE_INTENT_PREFIX}${successorQitemId}`,
       auditPointer: successorQitemId,
       fromSession,
       toSession,
       identityProvenance,
-      bareBody: `Queue handoff: ${successorQitemId} - check your queue.`,
-      tags: this.getById(successorQitemId)?.handedOffFrom
-        ? [`queue:return:${this.getByIdOrThrow(successorQitemId).handedOffFrom}`] : undefined,
+      bareBody: renderQueueHandoffNudge(successorQitemId, successor?.summary),
+      tags: successor?.handedOffFrom ? [`queue:return:${successor.handedOffFrom}`] : undefined,
     });
   }
 
@@ -1342,7 +1345,7 @@ export class QueueRepository {
     } else {
       // OPR.0.4.4.19 FR-7: bodyOverride lets the resolve verb carry the
       // decision text to the parked owner; default stays the handoff nudge.
-      const bareBody = bodyOverride ?? `Queue handoff: ${qitemId} - check your queue.`;
+      const bareBody = bodyOverride ?? renderQueueHandoffNudge(qitemId, null);
       // GHOST-STAGE (h): the single HG-5 baseline change deferred from g — the handoff nudge now carries
       // a Sent: stamp (so it renders byte-parically with a rig send) plus the SOURCE seat's occupant
       // generation (g's already-wired render, resolved here; absent=UNKNOWN=omit, never forged). The
