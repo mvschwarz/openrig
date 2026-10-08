@@ -5,14 +5,14 @@ the advisor and TUI beside it. No starter team is needed to reach that view.
 Tell the operator what you want to do, then choose a project team for a bounded
 change you can exercise. Reuse the accounts and terminal tools you already have.
 
-Want the **switchboard**, the **OpenRig view**, or to **show me my agents** / **see my agents**?
+Want the **OpenRig view**, or to **show me my agents** / **see my agents**?
 After installation and sign-in, the path is `rig daemon start` (if stopped),
 then `rig terminal open saved:kernel --window`. The second command opens the
 desktop window itself. An agent can run it from its shell on the daemon's
 desktop; it does not need to type into your current terminal. See
 [Open the kernel conversations](#open-the-kernel-conversations).
 `rig tui` is the team dashboard; installation ends when you are talking to the
-operator in the switchboard.
+operator in the OpenRig view.
 
 ## Before you start
 
@@ -98,7 +98,7 @@ user.
 ## Install and sign in
 
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
-switchboard and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
+OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
 `~/.claude/skills` and `~/.agents/skills` when the daemon starts. Before that, add it with
 `npx skills add mvschwarz/openrig --skill rigs`, or read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md).
 
@@ -186,14 +186,14 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
-This is the **switchboard**, the **OpenRig view**, in a new terminal window or tab.
+This is the **OpenRig view**, in a new terminal window or tab.
 Below 120 measured columns, the operator fills the first page; from 120, the dashboard and operator share it equally.
 The advisor always has a separate tab or tmux window.
 **Agents:** the `rigs` skill says when to open it, what to check, what to do when it can't open, and how to hand the
 person's goal to the operator; [Install and sign in](#install-and-sign-in) says how to load it.
 
 `rig setup` installs Herdr by default on macOS and Linux. If the person declines
-Herdr, use `rig setup --no-herdr`; the switchboard can use plain tmux. Setup
+Herdr, use `rig setup --no-herdr`; the OpenRig view can use plain tmux. Setup
 checks both PATH and the installer's default `~/.local/bin/herdr` location. It
 leaves existing cmux settings alone and does not open a view during setup.
 
@@ -220,7 +220,7 @@ support is confirmed (1.3 or newer), otherwise Terminal.app with an explanation.
 That window uses the app's own profile defaults because
 there is no hosting window to copy. Before running the command, the agent should say that clicking **Allow**
 on macOS's one-time control prompt is fine: it lets OpenRig open the requested
-switchboard. A denied or uncertain action is reported once, not replayed in
+OpenRig view. A denied or uncertain action is reported once, not replayed in
 another app. If macOS remembers a denial, enable the calling app in System Settings
 → Privacy & Security → Automation, or use the printed command in a terminal yourself.
 Unknown width keeps the operator-only layout.
@@ -270,7 +270,7 @@ uses the viewing terminal's measured width. Below 120 columns (or when width is
 unknown), **the operator** fills the first page, followed by dashboard and advisor
 pages. From 120 columns, dashboard and operator share the first page equally, with
 the advisor on a separate page. Select a Herdr tab to switch; in plain tmux, press
-**Ctrl-b, then w** and choose a `view-*` window; `view-1` is the switchboard's first page.
+**Ctrl-b, then w** and choose a `view-*` window; `view-1` is the OpenRig view's first page.
 Missing roles are reported rather than filled with another conversation. The queue worker remains
 reachable through the dashboard. The composition uses the installed kernel's current
 bindings; no YAML edit, seat launch or daemon restart is needed. A custom saved
@@ -288,7 +288,7 @@ Opening the view can happen while the kernel finishes starting. Report its actua
 state; do not start or restore seats just to obtain a view. If the kernel is absent
 or blocked, follow [Incomplete setup and restart](#incomplete-setup-and-restart).
 
-### What can interrupt installation and the switchboard
+### What can interrupt installation and the OpenRig view
 
 For an installing agent, a blocked step needs an explanation, not silence. Name
 the command, the reported reason and what remains unfinished. These checks cover
@@ -348,7 +348,7 @@ is separate from the first-install desktop action above.
 ### Plain terminal: a new viewing session
 
 `rig terminal open saved:kernel --provider tmux --window --json` creates and opens
-the same width-based switchboard layout, with the advisor in a separate window. It reuses
+the same width-based OpenRig view layout, with the advisor in a separate window. It reuses
 the daemon's composition and preserves existing sessions. The result names the viewing session. No pane names or shell
 commands need to be assembled by the person.
 
@@ -486,7 +486,7 @@ Read the artifact, exercise its behavior, and check the candidate reviewed.
 
 ## Share the dashboard and return to it
 
-For “show me my agents” or the switchboard, the installing agent runs
+For “show me my agents” or the OpenRig view, the installing agent runs
 `rig terminal open saved:kernel --window` and checks the result. It does not
 finish by suggesting a dashboard command for the person to type.
 

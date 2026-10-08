@@ -561,7 +561,7 @@ export function goldenPathNextSteps(): string[] {
     "  3. rig status                       Read the kernel boot state; rig ps --nodes --rig kernel checks its seats",
     "     Started is not ready. The view may open while agents finish starting; report their actual state",
     "     For an existing kernel or blocked startup: rig context get reference/getting-started.md#incomplete-setup-and-restart",
-    "  4. For 'show me my agents', 'show me the terminals' or 'switchboard', run the command below; otherwise ask 'Open the OpenRig switchboard now?'",
+    "  4. For 'show me my agents', 'show me the terminals' or 'the OpenRig view', run the command below; otherwise ask 'Open the OpenRig view now?'",
     "     Yes: run the command below; it opens a NEW terminal tab/window and preserves this terminal",
     "     rig terminal open saved:kernel --window --json (TUI | advisor | operator; herdr, otherwise plain tmux)",
     "     rig context get reference/getting-started.md#open-the-kernel-conversations",
@@ -641,7 +641,7 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--dry-run", "Show the plan without making changes")
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
-    .option("--no-herdr", "Skip the default herdr installation; the switchboard can use plain tmux")
+    .option("--no-herdr", "Skip the default herdr installation; the OpenRig view can use plain tmux")
     .option("--ghostty", "Install Ghostty on macOS after the person accepts the offer")
     .option("--no-ghostty", "Decline Ghostty; Terminal.app remains available on macOS")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)

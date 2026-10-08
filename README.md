@@ -57,9 +57,9 @@ Check `tmux -V` and only your selected CLI/login: `claude --version` plus
 sign in once with `claude auth login` or `codex login`; do not install or log in
 to an unused provider.
 
-### Open the switchboard
+### Open the OpenRig view
 
-Ask your agent to **“open the switchboard”**, **“open the OpenRig view”** or
+Ask your agent to **“open the OpenRig view”** or
 **“show me my agents”**, **“show me the terminals”** / **“let me see my agents.”** After checking the selected login, it runs:
 
 ```sh
@@ -86,7 +86,7 @@ installation result.
 
 The desktop may need an Automation approval; SSH/headless sessions may have no
 display. Herdr can show first-run panels, and an 80×24 window can cramp the view.
-Follow [the switchboard checks and next steps](docs/reference/getting-started.md#what-can-interrupt-installation-and-the-switchboard).
+Follow [the OpenRig view checks and next steps](docs/reference/getting-started.md#what-can-interrupt-installation-and-the-openrig-view).
 Herdr is visible only inside a terminal you can see. Changing the shared TUI to
 `:terminals` does not open that terminal. The agent checks the visible window when
 it has desktop access and says what it could not verify otherwise. Over headless
@@ -443,7 +443,7 @@ Before setup or managed launch, review [what OpenRig changes on your machine](#w
 
 Already-running adopted sessions may need restart before they pick up newly written runtime config.
 
-**For agents:** First ask which available provider(s) the user wants, reusing an explicit choice. Recommend the working account they already have and follow the selected-provider guide above. Offer core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) only when they want those additional tools. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues. Then start the daemon if it is stopped, ask “Open the OpenRig switchboard now?”, run `rig terminal open saved:kernel --window --json` on yes (no commands for the person to copy), and hand the person's goal and project folder to the kernel operator ([installing-agent handoff](docs/reference/getting-started.md#installing-agent-handoff)). Installation is finished when the person is talking to the operator; don't implement the project yourself. When OpenRig itself misbehaves, read [docs/reference/help.md](docs/reference/help.md) (installed agents can run `rig context get help`; the same text is at [openrig.dev/help/agents](https://www.openrig.dev/help/agents)): it covers the next step, known problems, and how to reach the team if you're still stuck.
+**For agents:** First ask which available provider(s) the user wants, reusing an explicit choice. Recommend the working account they already have and follow the selected-provider guide above. Offer core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) only when they want those additional tools. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues. Then start the daemon if it is stopped, ask “Open the OpenRig view now?”, run `rig terminal open saved:kernel --window --json` on yes (no commands for the person to copy), and hand the person's goal and project folder to the kernel operator ([installing-agent handoff](docs/reference/getting-started.md#installing-agent-handoff)). Installation is finished when the person is talking to the operator; don't implement the project yourself. When OpenRig itself misbehaves, read [docs/reference/help.md](docs/reference/help.md) (installed agents can run `rig context get help`; the same text is at [openrig.dev/help/agents](https://www.openrig.dev/help/agents)): it covers the next step, known problems, and how to reach the team if you're still stuck.
 
 ## Comparison with Claude Managed Agents
 

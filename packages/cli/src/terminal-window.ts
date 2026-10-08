@@ -129,7 +129,7 @@ async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((comm
     }
     if (inGhostty && !ghostty) return "The installed Ghostty does not provide a supported scripting interface (1.3 or newer required).";
     if (app && !ghostty) notes.push("The installed Ghostty could not be confirmed to support scripting (1.3 or newer required); using Terminal for this desktop caller.");
-    const permissionNotice = `It is fine to click Allow if macOS asks to control ${ghostty ? "Ghostty" : "Terminal"}; this lets OpenRig open the requested switchboard.`;
+    const permissionNotice = `It is fine to click Allow if macOS asks to control ${ghostty ? "Ghostty" : "Terminal"}; this lets OpenRig open the view they asked for.`;
     if (newApp) notes.push(`Tell the person: ${permissionNotice} The app uses its own new-window size because this caller has no scriptable terminal window to copy.`);
     // A tab group shares bounds: copying its current bounds also leaves the original unchanged.
     const script = ghostty ? `on run argv
@@ -290,8 +290,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         if (!composed.opened.length) throw new Error("No conversations are attachable after opening the terminal.");
       }
       if (composed.kernelLayout) windowNotes.push(viewportColumns === undefined
-        ? "Terminal width could not be measured; the switchboard uses the operator-only first page."
-        : `Switchboard layout measured at ${viewportColumns} columns: ${viewportColumns >= 120 ? "dashboard and operator side by side; advisor on a separate page" : "operator first; dashboard and advisor on separate pages"}.`);
+        ? "Terminal width could not be measured; the OpenRig view uses the operator-only first page."
+        : `OpenRig view layout measured at ${viewportColumns} columns: ${viewportColumns >= 120 ? "dashboard and operator side by side; advisor on a separate page" : "operator first; dashboard and advisor on separate pages"}.`);
     };
     const socket = preview.data.status.launch?.socketPath;
     if (typeof launchWindow === "object") {
@@ -430,7 +430,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     let placeholder: string | undefined;
     if (composed.kernelLayout) {
       // This is our fresh, empty viewer, never a source seat. Attach it first so Terminal can
-      // report the real new window width before we select the switchboard layout.
+      // report the real new window width before we select the OpenRig view layout.
       placeholder = (await deps.exec(tmux, ["new-session", "-d", "-s", viewer, "-n", "view-1", "-P", "-F", "#{pane_id}"])).trim();
       windowAttempted = true;
       window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);

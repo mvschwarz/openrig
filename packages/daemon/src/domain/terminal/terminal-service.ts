@@ -144,7 +144,7 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
 }
 
 /** The default kernel view's space name in a terminal multiplexer such as Herdr. */
-export const KERNEL_SPACE_LABEL = "switchboard";
+export const KERNEL_SPACE_LABEL = "openrig kernel";
 
 type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };

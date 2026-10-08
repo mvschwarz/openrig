@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when the user types /rigs, or asks to install OpenRig, to see their OpenRig agents ("show me my agents", "show me the terminals", the switchboard or the OpenRig view), to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
+description: Use when the user types /rigs, or asks to install OpenRig, to see their OpenRig agents ("show me my agents", "show me the terminals", the OpenRig view), to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
 ---
 
 # rigs: your route into OpenRig
@@ -36,10 +36,10 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
-- **Open the switchboard:** for “show me my agents”, “show me the terminals”, “see my agents” or “switchboard”, run
-  `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig switchboard now?”
-  first. It opens the switchboard itself, using herdr when installed or plain tmux otherwise:
-  - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to a `switchboard` space, reusing a live
+- **Open the OpenRig view:** for “show me my agents”, “show me the terminals”, “see my agents” or “the OpenRig view”, run
+  `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig view now?”
+  first. It opens the OpenRig view itself, using herdr when installed or plain tmux otherwise:
+  - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to an `openrig kernel` space, reusing a live
     one. No new window and no macOS prompt; their own spaces stay in the sidebar.
   - **In Terminal or Ghostty:** a new tab or window the size of theirs.
   - **From Claude Desktop, iTerm or VS Code on a Mac:** a new Ghostty window when supported, otherwise Terminal. Only
@@ -48,7 +48,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
     advisor has its own tab or tmux window.
 
   Then tell the person in a sentence or two where it opened and that the operator is ready for what they want to
-  build. Don't list agents or statuses (the switchboard shows them), and don't suggest a command for them to type.
+  build. Don't list agents or statuses (the OpenRig view shows them), and don't suggest a command for them to type.
   Preserve the current terminal. If OpenRig's notes say it couldn't confirm the view, say so plainly. If it's already
   open, point them to it rather than opening another. Only if the window cannot open, `rig tui --shared` is the
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
@@ -67,7 +67,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
     `canonicalSessionName` (never a guessed name) and give
     `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'` for the operator's conversation.
 
-  For any other failure, the table under "What can interrupt installation and the switchboard" in
+  For any other failure, the table under "What can interrupt installation and the OpenRig view" in
   `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`

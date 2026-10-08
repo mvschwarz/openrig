@@ -126,8 +126,8 @@ describe("reopening a Herdr view in a desktop window", () => {
   });
 
   it.each([["live", true], ["plain shells", false]] as const)("finds a named view's space by its tab names and reuses it only when attached: %s", async (state, reused) => {
-    const f = fixture([{ workspace_id: "switchboard", tab_id: "named", label: "tui · advisor · operator" }]);
-    (f.composed as typeof f.composed & { spaceLabel?: string }).spaceLabel = "switchboard";
+    const f = fixture([{ workspace_id: "openrig-kernel", tab_id: "named", label: "tui · advisor · operator" }]);
+    (f.composed as typeof f.composed & { spaceLabel?: string }).spaceLabel = "openrig kernel";
     if (state === "plain shells") f.processInfo.mockImplementation(async paneId => JSON.stringify({ result: { process_info: { pane_id: paneId, foreground_processes: [{ pid: 999, name: "zsh" }] } } }));
     await f.run();
     if (reused) {
