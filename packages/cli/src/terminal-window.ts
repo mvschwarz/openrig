@@ -352,13 +352,15 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       // Scope each tab list to its workspace, on the daemon's exact endpoint.
       const herdrArgs = ["-u", "TMUX", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH", `HERDR_SOCKET_PATH=${endpoint.socketPath}`, herdr];
       let tabs: HerdrTab[] = [];
+      const spaceLabels = new Map<string, string>();
       try {
         const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "workspace", "list"]));
-        const workspaces = listed?.result?.workspaces as Array<{ workspace_id: string }> | undefined;
+        const workspaces = listed?.result?.workspaces as Array<{ workspace_id: string; label?: string }> | undefined;
         if (!Array.isArray(workspaces) || !workspaces.every(ws => ws && typeof ws.workspace_id === "string" && ws.workspace_id)) {
           throw new Error("Herdr returned no usable workspace inventory.");
         }
         for (const workspace of workspaces) {
+          if (typeof workspace.label === "string") spaceLabels.set(workspace.workspace_id, workspace.label);
           const listedTabs = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "tab", "list", "--workspace", workspace.workspace_id]));
           const scoped = listedTabs?.result?.tabs as typeof tabs | undefined;
           if (!Array.isArray(scoped) || !scoped.every(tab => tab && typeof tab.label === "string" && typeof tab.tab_id === "string" && tab.tab_id && tab.workspace_id === workspace.workspace_id)) {
@@ -389,7 +391,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       const pageLabel = (existing: HerdrTab) => (index: number) => named ? named[index]!
         : composed.pages.length > 1 ? `${existing.label.slice(0, -2)}/${index + 1}` : existing.label;
       const candidates = named
-        ? tabs.filter(tab => tab.label === named[0] && named.every(label => tabs.filter(other => other.workspace_id === tab.workspace_id && other.label === label).length === 1))
+        ? tabs.filter(tab => tab.label === named[0] && spaceLabels.get(tab.workspace_id)?.replace(/ \(\d+\)$/, "") === composed.spaceLabel && named.every(label => tabs.filter(other => other.workspace_id === tab.workspace_id && other.label === label).length === 1))
         : tabs.filter(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
       const stale = tabs.filter(tab => {
         const value = marker(tab.label);

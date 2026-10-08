@@ -12,6 +12,7 @@ vi.mock("../src/daemon-lifecycle.js", async () => ({
 const planId = "0123456789abcdef".repeat(4);
 const label = (id = "kernel", token = "l1") => `openrig:${id}#${planId.slice(0, 16)}#${token}`;
 interface Tab { workspace_id: string; tab_id: string; label: string }
+const spaceLabels: Record<string, string> = { "openrig-kernel": "openrig kernel", "old-name": "switchboard" };
 function fixture(tabs: Tab[] = [], id = "kernel") {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach -t 'fixture-${seat}'` }));
   const composed = { id, opened: panes, pages: [panes], absent: [] as Array<{ seat: string; host: string | null; reason: string }>, degraded: [] as Array<{ seat: string; host: string; reason: string }> };
@@ -23,7 +24,7 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
     tabs.push({ workspace_id: `ws-${tabs.length}`, tab_id: `tab-${tabs.length}`, label: label(id) });
     return { status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } };
   });
-  const workspaces = vi.fn(async () => JSON.stringify({ result: { workspaces: [...new Set(tabs.map(tab => tab.workspace_id))].map(workspace_id => ({ workspace_id })) } }));
+  const workspaces = vi.fn(async () => JSON.stringify({ result: { workspaces: [...new Set(tabs.map(tab => tab.workspace_id))].map(workspace_id => ({ workspace_id, label: spaceLabels[workspace_id] })) } }));
   const list = vi.fn(async (workspace: string) => JSON.stringify({ id: "cli:tab:list", result: { tabs: tabs.filter(tab => tab.workspace_id === workspace) } }));
   const focus = vi.fn(async (tabId: string) => JSON.stringify({ id: "cli:tab:focus", result: { tab: tabs.find(tab => tab.tab_id === tabId) } }));
   const paneList = vi.fn(async (workspace: string) => JSON.stringify({ result: { panes: tabs
@@ -123,6 +124,14 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(f.focus).toHaveBeenCalledExactlyOnceWith("fresh");
     expect(f.post).not.toHaveBeenCalled();
     expect(f.tabs).toHaveLength(2);
+  });
+
+  it("does not reuse a live space with the same tab names under another space name", async () => {
+    const f = fixture([{ workspace_id: "old-name", tab_id: "named", label: "tui · advisor · operator" }]);
+    (f.composed as typeof f.composed & { spaceLabel?: string }).spaceLabel = "openrig kernel";
+    await f.run();
+    expect(f.focus).not.toHaveBeenCalled();
+    expect(f.post).toHaveBeenCalledTimes(1);
   });
 
   it.each([["live", true], ["plain shells", false]] as const)("finds a named view's space by its tab names and reuses it only when attached: %s", async (state, reused) => {
