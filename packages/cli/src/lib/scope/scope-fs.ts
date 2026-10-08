@@ -441,6 +441,12 @@ export function findSlice(
   slicePath: string,
   hintMission?: string | null,
 ): SliceInfo {
+  // Only a bare name with a mission hint can fall through an unrelated
+  // directory. Explicit paths keep their existing refusal and precedence.
+  const hintedName = Boolean(hintMission) && slicePath !== "" &&
+    slicePath !== "." && slicePath !== ".." &&
+    !path.isAbsolute(slicePath) && path.basename(slicePath) === slicePath;
+  let firstContextError: ScopeCliError | null = null;
   const candidates: string[] = [];
   if (path.isAbsolute(slicePath)) {
     candidates.push(slicePath);
@@ -457,17 +463,21 @@ export function findSlice(
       // Walk up to find the owning mission.
       const owningMissionPath = findOwningMission(missionsRoot, candidate);
       if (!owningMissionPath) {
-        throw new ScopeCliError({
+        const error = new ScopeCliError({
           fact: `Slice path "${slicePath}" resolved to ${candidate} but no parent mission was found.`,
           consequence: "Cannot determine mission context for this slice.",
           action: "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/.",
         });
+        if (!hintedName) throw error;
+        firstContextError ??= error;
+        continue;
       }
       const mission = buildMissionInfo(missionsRoot, owningMissionPath);
       const sliceRoot = path.dirname(candidate);
       return buildSliceInfo(mission, sliceRoot, path.basename(candidate));
     }
   }
+  if (firstContextError) throw firstContextError;
   throw new ScopeCliError({
     fact: `Slice "${slicePath}" not found.`,
     consequence: "Command did not run.",

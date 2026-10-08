@@ -290,6 +290,84 @@ describe("findSlice + resolution variants", () => {
     expect(slice.missionName).toBe("release-0.3.2");
   });
 
+  it.each(["workspace", "missions", "declared mission"])(
+    "resolves a hinted bare slice past an unrelated %s directory",
+    (collision) => {
+      const scratch = path.join(collision === "workspace" ? root : missionsRoot, "07-target");
+      fs.mkdirSync(scratch);
+      if (collision === "declared mission") writeFile(path.join(scratch, "README.md"), "# Other mission\n");
+      const slice = findSlice(missionsRoot, "07-target", "release-0.3.2");
+      expect(slice.absPath).toBe(path.join(missionsRoot, "release-0.3.2", "slices", "07-target"));
+      expect(slice.id).toBe("OPR.0.3.2.7");
+    },
+  );
+
+  it.each(["relative", "absolute", "trailing separator"])(
+    "keeps an invalid explicit %s path refusal despite a valid mission hint",
+    (form) => {
+      const scratch = path.join(root, "07-target");
+      fs.mkdirSync(scratch);
+      const argument = form === "absolute" ? scratch : form === "relative" ? `.${path.sep}07-target` : `07-target${path.sep}`;
+      expect(() => findSlice(missionsRoot, argument, "release-0.3.2")).toThrow(
+        `resolved to ${scratch} but no parent mission was found`,
+      );
+    },
+  );
+
+  it.each(["mission relative", "workspace relative", "absolute"])(
+    "preserves a valid explicit %s path in another mission",
+    (form) => {
+      const other = path.join(missionsRoot, "other", "slices", "07-target");
+      writeFile(path.join(missionsRoot, "other", "README.md"), "---\nid: OPR.9.1\n---\nbody");
+      writeFile(path.join(other, "README.md"), "---\nid: OPR.9.1.7\nstatus: active\n---\nother body");
+      const argument = form === "absolute" ? other : path.join(
+        ...(form === "workspace relative" ? ["missions"] : []), "other", "slices", "07-target",
+      );
+      const slice = findSlice(missionsRoot, argument, "release-0.3.2");
+      expect(slice.absPath).toBe(other);
+      expect(slice.missionName).toBe("other");
+      expect(slice.id).toBe("OPR.9.1.7");
+    },
+  );
+
+  it("preserves the first context error when a hinted slice does not exist", () => {
+    const first = path.join(root, "07-target");
+    fs.mkdirSync(first);
+    fs.mkdirSync(path.join(missionsRoot, "07-target"));
+    expect(() => findSlice(missionsRoot, "07-target", "missing-mission")).toThrow(
+      `resolved to ${first} but no parent mission was found`,
+    );
+  });
+
+  it("keeps an unhinted bare collision refusal", () => {
+    const scratch = path.join(root, "07-target");
+    fs.mkdirSync(scratch);
+    expect(() => findSlice(missionsRoot, "07-target")).toThrow(
+      `resolved to ${scratch} but no parent mission was found`,
+    );
+  });
+
+  it("prefers active slices over closed slices after a bare-name collision", () => {
+    fs.mkdirSync(path.join(root, "07-target"));
+    writeFile(
+      path.join(missionsRoot, "release-0.3.2", "closed", "07-target", "README.md"),
+      "---\nid: OPR.0.3.2.7\nstatus: closed-wontfix\n---\nclosed body",
+    );
+    expect(findSlice(missionsRoot, "07-target", "release-0.3.2").absPath).toBe(
+      path.join(missionsRoot, "release-0.3.2", "slices", "07-target"),
+    );
+  });
+
+  it("resolves a closed slice after a bare-name collision when no active slice exists", () => {
+    fs.mkdirSync(path.join(root, "07-target"));
+    const mission = path.join(missionsRoot, "release-0.3.2");
+    fs.mkdirSync(path.join(mission, "closed"));
+    fs.renameSync(path.join(mission, "slices", "07-target"), path.join(mission, "closed", "07-target"));
+    expect(findSlice(missionsRoot, "07-target", "release-0.3.2").absPath).toBe(
+      path.join(mission, "closed", "07-target"),
+    );
+  });
+
   it("3-part error when slice not found (HG-10)", () => {
     expect(() => findSlice(missionsRoot, "99-missing", "release-0.3.2")).toThrow(/not found/);
   });
