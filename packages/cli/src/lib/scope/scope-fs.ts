@@ -573,7 +573,7 @@ export function assertCleanWorkingTree(repoRoot: string, relPath: string): void 
   try {
     status = execFileSync(
       "git",
-      ["-C", repoRoot, "status", "--porcelain", "--", relPath],
+      ["-C", repoRoot, "--literal-pathspecs", "status", "--porcelain", "--", relPath],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (err) {

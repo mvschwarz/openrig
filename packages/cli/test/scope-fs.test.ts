@@ -364,6 +364,56 @@ function initRepo(root: string): void {
   execFileSync("git", ["-C", root, "commit", "--allow-empty", "-m", "init", "-q"], { stdio: "ignore" });
 }
 
+describe("moveSlice — literal directory names in the dirty-tree guard", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mktemp();
+    // Exercise Git's default pathspec interpretation independently of the host.
+    for (const key of ["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"]) {
+      vi.stubEnv(key, "0");
+    }
+    initRepo(root);
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it.skipIf(process.platform === "win32").each([
+    [":(exclude)workspace", "outside", true],
+    [":!workspace", "outside", true],
+    [":(literal)workspace", "inside", false],
+    ["workspace", "outside", true],
+    ["workspace", "inside", false],
+    ["literal:workspace", "outside", true],
+    ["workspace[owned]", "outside", true],
+  ] as const)("checks the selected slice under %s with %s edits", (workspaceName, dirty, shouldMove) => {
+    const missionsRoot = path.join(root, workspaceName, "missions");
+    const src = path.join(missionsRoot, "backlog", "slices", "01-owned");
+    const dest = path.join(missionsRoot, "backlog", "closed", "01-owned");
+    const readme = path.join(src, "README.md");
+    const unrelated = path.join(root, "unrelated.txt");
+    writeFile(readme, "---\nstatus: active\n---\n# Owned slice\n");
+    writeFile(unrelated, "Owned unrelated baseline\n");
+    execFileSync("git", ["-C", root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", root, "commit", "-m", "seed", "-q"], { stdio: "ignore" });
+    fs.appendFileSync(dirty === "inside" ? readme : unrelated, "Owned uncommitted edit\n");
+    const before = fs.readFileSync(readme);
+    const unrelatedBefore = fs.readFileSync(unrelated);
+
+    if (shouldMove) {
+      expect(moveSlice(src, dest).usedGit).toBe(true);
+      expect(fs.existsSync(src)).toBe(false);
+      expect(fs.readFileSync(path.join(dest, "README.md"))).toEqual(before);
+    } else {
+      expect(() => moveSlice(src, dest)).toThrow(/uncommitted changes/);
+      expect(fs.existsSync(path.dirname(dest))).toBe(false);
+      expect(fs.readFileSync(readme)).toEqual(before);
+    }
+    expect(fs.readFileSync(unrelated)).toEqual(unrelatedBefore);
+  });
+});
+
 describe("moveSlice — git mv preserves history (HG-5) + refuses dirty tree (HG-11)", () => {
   let root: string;
   let missionsRoot: string;
