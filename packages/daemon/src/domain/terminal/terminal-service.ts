@@ -141,7 +141,7 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
   };
 }
 
-type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number } | { code: string; error: string };
+type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
@@ -204,7 +204,7 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux() });
     return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns } : composed;
   }
 
@@ -341,7 +341,7 @@ export class TerminalService {
   }
 
   /** An in-memory default; a user's saved kernel view always takes precedence. */
-  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number } | null> {
+  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number; panesPerPage: number } | null> {
     const rows = await this.deps.listRigSeats("kernel");
     if (rows == null) return null;
     const advisor = rows.find(row => row.logicalId === "advisor.lead");
@@ -349,7 +349,8 @@ export class TerminalService {
     const runtimesKnown = !!advisor?.runtime && !!operator?.runtime;
     const singleRuntime = runtimesKnown && advisor!.runtime === operator!.runtime;
     const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; TUI, advisor and operator";
-    const roles = ["operator.human", "advisor.lead", "operator.agent"];
+    // One full-width conversation per page; the operator is the first populated page when ready.
+    const roles = ["operator.agent", "operator.human", "advisor.lead"];
     const members = roles.map(logicalId => {
       const row = rows.find(row => row.logicalId === logicalId);
       const bound = row && deriveViewMembers([row])[0];
@@ -357,7 +358,7 @@ export class TerminalService {
       // Its logical ID names the absence; it is never used as a tmux target.
       return bound ?? { seat: logicalId, label: logicalId, tmuxSession: null, host: null, readOnly: false, alive: false };
     });
-    return { id: "kernel", members, kernelLayout, columns: members.length };
+    return { id: "kernel", members, kernelLayout, columns: 1, panesPerPage: 1 };
   }
 
   /** Refine local members' liveness with a real has-session probe (a dead seat → absent, honest-partial). */

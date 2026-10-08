@@ -13,8 +13,8 @@ these plain commands let the health check finish without that extra prompt.
 
 For “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
 `rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
-TUI | advisor | operator view itself in a new terminal tab/window. Inspect its
-result and visible content, or state what you cannot confirm. On a desktop, do
+operator in one full-width pane in a new terminal tab/window. The dashboard and advisor
+each have their own tab or tmux window. Inspect its result and visible content, or state what you cannot confirm. On a desktop, do
 not end by showing a table or suggesting a command for the person to type. Herdr is visible
 only inside a terminal the person can see; changing the shared TUI to `:terminals`
 does not open one. Over headless SSH, explain that limitation, ask the person to

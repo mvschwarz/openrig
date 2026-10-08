@@ -186,7 +186,8 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
-This is the **welcome screen** or **OpenRig view**: TUI | advisor | operator, in a new terminal window or tab.
+This is the **welcome screen** or **OpenRig view**: the operator in one full-width pane, in a new terminal window or tab.
+The dashboard and advisor each have a separate tab or tmux window.
 **Agents:** the `rigs` skill says when to open it, what to check, what to do when it can't open, and how to hand the
 person's goal to the operator; [Install and sign in](#install-and-sign-in) says how to load it.
 
@@ -236,15 +237,18 @@ inventory problem.
 
 ### Confirm the view
 
-The default `saved:kernel` composition is **TUI | advisor | operator**, in three
-columns, for Claude-only, Codex-only and mixed kernels. The queue worker remains
-reachable through the TUI. The composition uses the installed kernel's current
+The default `saved:kernel` composition opens **the operator** alone on the first
+page, for Claude-only, Codex-only and mixed kernels. With all three roles ready,
+the dashboard is on the second page and the advisor on the third: select their
+Herdr tab to switch. In plain tmux, press **Ctrl-b, then w** and choose `view-2` for the dashboard or `view-3`
+for the advisor; `view-1` returns to the operator. The queue worker remains
+reachable through the dashboard. The composition uses the installed kernel's current
 bindings; no YAML edit, seat launch or daemon restart is needed. A custom saved
 view named `kernel` still takes precedence.
 
 Inspect `opened`, `absent`, `degraded`, `window` and any notes. Confirm the new
-surface visibly shows the intended conversations and TUI, and that the original
-terminal remains intact. The person sees Herdr only in a terminal they can see.
+surface visibly shows the operator, with the dashboard and advisor reachable on
+their own pages, and that the original terminal remains intact. The person sees Herdr only in a terminal they can see.
 Creating its workspace or switching the shared TUI to `:terminals` does not open
 that terminal. A created window or successful CLI response alone is not visual
 confirmation. A partial view remains partial. If the shared TUI tile shows a
@@ -268,8 +272,8 @@ different points in the same journey:
 | macOS asks for Automation access, or the window action is denied | The command asks the desktop terminal app to open a new surface. Let the person answer the system prompt. Read the error and inspect any new window before retrying an uncertain action; do not silently switch apps and open a duplicate. |
 | No local display, or the configured daemon is remote | `--window` needs the daemon's desktop. An SSH shell or remote daemon address alone does not give the agent that desktop. Explain the limit and use the [manual](#talk-to-the-operator-in-any-terminal) or [SSH handoff](#headless-or-ssh-handoff) with the actual operator binding. |
 | Herdr shows its introduction or agent-integration panel | These are Herdr's first-run panels. Follow the displayed controls: Return continues the intro and Esc closes the integration panel. Opening this view does not require installing Herdr's agent integrations or changing your Claude/Codex settings. |
-| Three columns are cramped in an 80×24 window | The desktop app's window size can be smaller than the composed layout. Enlarge the newly opened window so the dashboard and conversations are readable. Changing or restarting the team is unnecessary. |
-| The command returned, but visibility is unconfirmed | With authorized desktop tools, inspect the new window and a screenshot of its contents. A window listing alone proves only that a window exists. If the agent has only shell access, report what the command confirmed and ask the person to confirm the visible TUI, advisor and operator. Do not report visual success without seeing it. |
+| A saved layout is cramped in an 80×24 window | The default kernel view gives each role a full-width page. A custom saved `kernel` view still controls its own layout; adjust that saved view if needed. Changing or restarting the team is unnecessary. |
+| The command returned, but visibility is unconfirmed | With authorized desktop tools, inspect the new window and a screenshot of its contents. A window listing alone proves only that a window exists. If the agent has only shell access, report what the command confirmed and ask the person to confirm the visible operator and that the dashboard and advisor tabs or windows are available. Do not report visual success without seeing it. |
 
 After a failure, inspect any newly opened surface before retrying. A tmux failure
 may name a newly created viewing session for inspection. Do not replace a failed
@@ -313,8 +317,8 @@ is separate from the first-install desktop action above.
 ### Plain terminal: a new viewing session
 
 `rig terminal open saved:kernel --provider tmux --window --json` creates and opens
-the three-column view itself. It reuses the daemon's composition and preserves
-existing sessions. The result names the viewing session. No pane names or shell
+the operator page first, with separate dashboard and advisor windows. It reuses
+the daemon's composition and preserves existing sessions. The result names the viewing session. No pane names or shell
 commands need to be assembled by the person.
 
 ### Headless or SSH handoff

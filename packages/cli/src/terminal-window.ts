@@ -221,7 +221,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       const viewMarker = `openrig:${composed.id}`;
       const planMarker = `${viewMarker}#${planId.slice(0, 16)}`;
       const marker = (label: string) => label.includes("#") ? label.slice(0, label.lastIndexOf("#")) : "";
-      const existing = tabs.find(tab => marker(tab.label) === planMarker);
+      const existing = tabs.find(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
       const stale = tabs.filter(tab => {
         const value = marker(tab.label);
         return value !== planMarker && (value === viewMarker ||

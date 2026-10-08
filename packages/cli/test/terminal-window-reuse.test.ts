@@ -91,6 +91,22 @@ describe("reopening a Herdr view in a desktop window", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it("reopens the first page even when the dashboard or advisor is listed first", async () => {
+    const tabs = [
+      { workspace_id: "kernel", tab_id: "advisor", label: label("kernel", "l1/3") },
+      { workspace_id: "kernel", tab_id: "dashboard", label: label("kernel", "l1/2") },
+      { workspace_id: "kernel", tab_id: "operator", label: label("kernel", "l1/1") },
+    ];
+    const f = fixture(structuredClone(tabs));
+    f.composed.opened = [f.composed.opened[2]!, f.composed.opened[0]!, f.composed.opened[1]!];
+    f.composed.pages = f.composed.opened.map(pane => [pane]);
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("operator");
+    expect(f.tabs).toEqual(tabs);
+    expect(f.post).not.toHaveBeenCalled();
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, reusedWorkspace: { tabId: "operator" } });
+  });
+
   it.each(["kernel-other", "kernel#other", "rig:kernel"])("does not reuse the different view %s", async other => {
     const f = fixture([{ workspace_id: "same-human-name", tab_id: "unrelated", label: label(other) }]);
     await f.run();
