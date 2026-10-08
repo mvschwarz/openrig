@@ -56,21 +56,28 @@ export interface RenderOpts {
   intent_visual_build_command?: string;
 }
 
+/** Interpolate only template tokens, without interpreting or rescanning values. */
+function replacePlaceholders(content: string, values: Record<string, string>): string {
+  return content.replace(/\{\{([A-Za-z_]+)\}\}/g, (placeholder: string, key: string) =>
+    Object.hasOwn(values, key) ? values[key]! : placeholder);
+}
+
 function applyPlaceholders(content: string, opts: RenderOpts): string {
-  return content
-    .replace(/\{\{id\}\}/g, opts.id)
-    .replace(/\{\{slice_number\}\}/g, opts.slice_number ?? "")
-    .replace(/\{\{slug\}\}/g, opts.slug)
-    .replace(/\{\{mission\}\}/g, opts.mission)
-    .replace(/\{\{title\}\}/g, opts.title)
-    .replace(/\{\{created_date\}\}/g, opts.created_date)
-    .replace(/\{\{intent_yaml\}\}/g, JSON.stringify(opts.intent ?? opts.title))
-    .replace(/\{\{intent\}\}/g, opts.intent ?? opts.title)
-    .replace(/\{\{depends_on\}\}/g, JSON.stringify(opts.depends_on ?? []))
-    .replace(/\{\{release_version\}\}/g, opts.release_version ?? "")
-    .replace(/\{\{intent_visual_image_path\}\}/g, opts.intent_visual_image_path ?? "./intent.png")
-    .replace(/\{\{intent_visual_diff_path\}\}/g, opts.intent_visual_diff_path ?? "./change.diff")
-    .replace(/\{\{intent_visual_build_command\}\}/g, opts.intent_visual_build_command ?? "TWIN_ROUTE=<route> npm run twin:build");
+  return replacePlaceholders(content, {
+    id: opts.id,
+    slice_number: opts.slice_number ?? "",
+    slug: opts.slug,
+    mission: opts.mission,
+    title: opts.title,
+    created_date: opts.created_date,
+    intent_yaml: JSON.stringify(opts.intent ?? opts.title),
+    intent: opts.intent ?? opts.title,
+    depends_on: JSON.stringify(opts.depends_on ?? []),
+    release_version: opts.release_version ?? "",
+    intent_visual_image_path: opts.intent_visual_image_path ?? "./intent.png",
+    intent_visual_diff_path: opts.intent_visual_diff_path ?? "./change.diff",
+    intent_visual_build_command: opts.intent_visual_build_command ?? "TWIN_ROUTE=<route> npm run twin:build",
+  });
 }
 
 export function renderSliceTemplate(kind: SliceTemplateKind, opts: RenderOpts): string {
@@ -104,11 +111,12 @@ export interface NotesRenderOpts {
 }
 
 function applyNotesPlaceholders(content: string, opts: NotesRenderOpts): string {
-  return content
-    .replace(/\{\{mission_id\}\}/g, opts.mission_id)
-    .replace(/\{\{mission_name_yaml\}\}/g, JSON.stringify(opts.mission_name))
-    .replace(/\{\{mission_name\}\}/g, opts.mission_name)
-    .replace(/\{\{created_date\}\}/g, opts.created_date);
+  return replacePlaceholders(content, {
+    mission_id: opts.mission_id,
+    mission_name_yaml: JSON.stringify(opts.mission_name),
+    mission_name: opts.mission_name,
+    created_date: opts.created_date,
+  });
 }
 
 export type NotesTemplateSource = "env" | "legacy-env" | "built-in";
@@ -154,12 +162,12 @@ export function renderNotesTemplate(
 
 export function renderMissionProgressTemplate(missionName: string): string {
   const raw = fs.readFileSync(resolveTemplate("mission-progress.md"), "utf8");
-  return raw.replace(/\{\{missionName\}\}/g, missionName);
+  return replacePlaceholders(raw, { missionName });
 }
 
 export function renderSliceProgressTemplate(sliceName: string): string {
   const raw = fs.readFileSync(resolveTemplate("slice-progress.md"), "utf8");
-  return raw.replace(/\{\{sliceName\}\}/g, sliceName);
+  return replacePlaceholders(raw, { sliceName });
 }
 
 export interface SliceProofRenderOpts {
@@ -169,9 +177,7 @@ export interface SliceProofRenderOpts {
 
 export function renderSliceProofTemplate(opts: SliceProofRenderOpts): string {
   const raw = fs.readFileSync(resolveTemplate("proof.md"), "utf8");
-  return raw
-    .replace(/\{\{id\}\}/g, opts.id)
-    .replace(/\{\{title\}\}/g, opts.title);
+  return replacePlaceholders(raw, { id: opts.id, title: opts.title });
 }
 
 /** Convert a folder-slug to a title-cased display name. */
