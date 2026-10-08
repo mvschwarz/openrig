@@ -104,7 +104,7 @@ after an upgrade it can still hold the previous version's note.
   empty) and a `--wake-after` such as `7d` (use hours, for example `168h`).
 - **Pi seats print a `[pi-runner] seat …:` line at start** saying whether a credential was found and, if not, how to
   fix it. A MiniMax model gets `MINIMAX_API_KEY` when that name is in `recovery.provider_auth_env_allowlist`.
-- **`agents.advisor_session` defaults to `advisor-lead@kernel`.**
+- **`agents.advisor_session` defaults to the kernel's advisor seat.**
 
 ## What to stop doing
 
