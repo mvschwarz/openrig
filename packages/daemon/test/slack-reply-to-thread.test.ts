@@ -4,6 +4,7 @@
 // decision. The thread choice is recorded once, before the first post; a missing/closed
 // root posts top-level and the row says so (the verify result reads it).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,6 +89,16 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(hasLiveHumanGate({ humanIntent: null, state: "blocked", destinationSession: "worker@rig", blockedOn: "human-founder@kernel" })).toBe(true);
     });
 
+    it("#822: an inbound reply's thread item is recorded only when it exists; the public replyTo rule is unchanged", async () => {
+      const decision = await repo.create(request);
+      const inbound = { sourceSession: human, destinationSession: "author@rig", body: "thanks", nudge: false };
+      const a = await repo.create({ ...inbound, inboundReplyTo: decision.qitemId });
+      const b = await repo.create({ ...inbound, inboundReplyTo: "no-such-qitem" });
+      expect(repo.getById(a.qitemId)?.replyTo).toBe(decision.qitemId);
+      expect(repo.getById(b.qitemId)?.replyTo).toBeNull();
+      await expect(repo.create({ ...inbound, replyTo: decision.qitemId })).rejects.toMatchObject({ code: "reply_to_requires_update" });
+    });
+
     it("accepts an earlier update or an already-made decision and records the reference", async () => {
       const earlierUpdate = await repo.create({ ...request, humanIntent: "update" });
       const decision = await repo.create(request);
@@ -170,7 +181,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     // Rebuild the wire with inbound Socket Mode on a fake socket; returns a human-reply sender.
-    async function connectInbound(): Promise<(threadTs: string, ts: string) => Promise<void>> {
+    async function connectInbound(): Promise<(threadTs: string | undefined, ts: string) => Promise<void>> {
       const secrets = join(home, "fake.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       const sockets: WsLike[] = [];
@@ -189,7 +200,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       stops.push(() => wire.stop()); wire.startServices?.();
       await vi.waitFor(() => expect(sockets).toHaveLength(1));
       sockets[0]!.onopen?.();
-      const humanReply = async (threadTs: string, ts: string) => {
+      const humanReply = async (threadTs: string | undefined, ts: string) => {
         sockets[0]!.onmessage?.({ data: JSON.stringify({ envelope_id: `e-${ts}`, type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "thanks", ts, thread_ts: threadTs, channel: "C-TEST" } } }) });
         await new Promise((r) => setTimeout(r, 50));
       };
@@ -244,6 +255,58 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await deliver(update.qitemId);
       expect(posts.at(-1)?.thread_ts).toBe("1.1");
       expect(repo.getById(update.qitemId)?.replyToFallback).toBeNull();
+    });
+
+    // The row a person's Slack message lands as (inbound.ts names it by channel and ts).
+    const inboundRow = (ts: string) =>
+      repo.getById(`qitem-slack-inbound-${createHash("sha256").update(`C-TEST:${ts}`).digest("hex").slice(0, 20)}`);
+
+    it("#822: an answer to a reply the person typed in an OpenRig thread posts in that thread", async () => {
+      const humanReply = await connectInbound();
+      const decision = await repo.create(request);
+      await deliver(decision.qitemId);
+      await humanReply("1.1", "903.1");
+      await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
+      await postPendingNotice(decision.qitemId);
+      const inbound = inboundRow("903.1")!;
+      expect(inbound).toMatchObject({ destinationSession: "author@rig", replyTo: decision.qitemId });
+
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "On it.", replyTo: inbound.qitemId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+      // The thread still belongs to the decision; the answer opened no root of its own.
+      expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
+    });
+
+    it("#822: a top-level message records no thread, so its answer still posts top-level", async () => {
+      const humanReply = await connectInbound();
+      await humanReply(undefined, "904.1");
+      const inbound = inboundRow("904.1")!;
+      expect(inbound.replyTo).toBeNull();
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "On it.", replyTo: inbound.qitemId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBe(`root-missing (qitem ${inbound.qitemId})`);
+    });
+
+    it("#822: a reply's seat parking it on the person still asks in a fresh root, and the answer there resolves the park", async () => {
+      const humanReply = await connectInbound();
+      const decision = await repo.create(request);
+      await deliver(decision.qitemId);
+      await humanReply("1.1", "905.1");
+      await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
+      await postPendingNotice(decision.qitemId);
+      const inbound = inboundRow("905.1")!;
+      expect(inbound.replyTo).toBe(decision.qitemId);
+
+      repo.update({ qitemId: inbound.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: "human-founder@kernel", summary: "Which branch?", evidenceRef: "/proof/branches.md", transitionNote: "parked for a question" });
+      await deliver(inbound.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      const parkRoot = `${posts.length}.1`;
+      expect(new ThreadSeatMap(db).resolveByThread(parkRoot)?.conversationId).toBe(inbound.qitemId);
+      await humanReply(parkRoot, "905.2");
+      await vi.waitFor(() => expect(repo.getById(inbound.qitemId)?.state).toBe("in-progress"));
     });
 
     it("a resolved park's 'resolved' notice stays in the park's root, so the worker's update still threads there", async () => {

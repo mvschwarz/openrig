@@ -286,6 +286,11 @@ export interface QueueCreateInput {
    *  that thread can't be used (e.g. a live human gate, see hasLiveHumanGate), it posts
    *  top-level and the row records why. */
   replyTo?: string | null;
+  /** #822 — Slack inbound only: the item whose OpenRig thread a person's reply was typed in.
+   *  Stored as this row's replyTo, so an update that answers this row (--reply-to it) walks on
+   *  to that thread. It never steers this row's own posts: delivery reads replyTo on updates
+   *  only. An item that does not exist is dropped, never a reason to lose the message. */
+  inboundReplyTo?: string | null;
   /** #193 — 1–4 structured questions; accepted only with humanIntent "decision". */
   humanQuestions?: HumanQuestion[] | null;
   summary?: string | null;
@@ -1604,8 +1609,10 @@ export class QueueRepository {
       this.db.prepare("UPDATE queue_items SET human_intent = ?, human_detail = ? WHERE qitem_id = ?")
         .run(input.humanIntent ?? null, input.humanDetail ?? null, id);
     }
-    if (input.replyTo != null) {
-      this.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(input.replyTo, id);
+    const replyTo = input.replyTo
+      ?? (input.inboundReplyTo != null && this.hasReplyToColumn && this.getById(input.inboundReplyTo) ? input.inboundReplyTo : null);
+    if (replyTo != null) {
+      this.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(replyTo, id);
     }
     if (humanQuestions) {
       this.db.prepare("UPDATE queue_items SET human_questions = ? WHERE qitem_id = ?").run(JSON.stringify(humanQuestions), id);

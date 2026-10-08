@@ -266,6 +266,7 @@ export class InboundRouter {
           tags: route.tags ?? ["founder-slack", "inbound"],
           summary,
           body,
+          ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);

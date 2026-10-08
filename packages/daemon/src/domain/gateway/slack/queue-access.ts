@@ -54,6 +54,8 @@ export interface CreateQitemInput {
   body: string;
   priority?: string;
   tags?: string[];
+  /** #822 — the item whose OpenRig thread this reply was typed in (the route's correlation). */
+  inReplyTo?: string;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
@@ -135,6 +137,7 @@ export function makeQueuePorts(
         summary: input.summary,
         priority: (input.priority ?? "routine") as never,
         tags: input.tags ?? ["founder-slack", "inbound"],
+        inboundReplyTo: input.inReplyTo ?? null,
       });
       return (created as unknown as { qitemId: string }).qitemId;
     },

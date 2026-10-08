@@ -318,6 +318,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     });
   };
 
+  // #822: a person's inbound reply records the item it answers as replyTo. If its seat parks
+  // that row on the person, the park is a decision and opens its own root, so only an update's
+  // replyTo steers where a post goes.
+  const threadReplyTo = (p: OutboundPostPayload): string | null => (p.humanIntent === "update" ? p.replyTo ?? null : null);
+
   // #96 — where a replyTo update posts. Walks back through earlier threaded updates (which
   // open no root of their own) to the item that owns the root.
   const MAX_REPLY_TO_CHAIN = 32;
@@ -375,7 +380,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // default channel it was made for. Otherwise the map. (The delivery layer first reuses the
         // channel of this post's first attempt.) With no map every branch is the default channel.
         resolveChannel: (p) => {
-          const recorded = p.replyTo ? opts.queueRepo.replyToChoiceFor(p.qitemId) : null;
+          const recorded = threadReplyTo(p) ? opts.queueRepo.replyToChoiceFor(p.qitemId) : null;
           return recorded ? recorded.channel ?? cfg.channel! : channelFor(p);
         },
         pinChannel: Boolean(cfg.channelMap?.length),
@@ -391,7 +396,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // Re-delivery/new notification episodes for one qitem still reuse its exact root.
         // #96: an update may name an earlier qitem's root; the guard lives in deriveReplyToChoice.
         resolveThreadTs: (p, channel) => {
-          if (p.replyTo) {
+          if (threadReplyTo(p)) {
             const choice = chooseReplyToThread(p, channel);
             if (choice.kind === "thread") return choice.threadTs;
           }
@@ -402,7 +407,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           );
           // #96: once an update shares this root, a new decision from its owner starts a fresh
           // root instead, so the decision never lands in a thread a reader took as FYI-only.
-          if (own && !p.replyTo && opts.queueRepo.isReplyToThread(own.threadTs)) return undefined;
+          if (own && !threadReplyTo(p) && opts.queueRepo.isReplyToThread(own.threadTs)) return undefined;
           // #192: with a channel map, a root in another channel than this attempt's (the seat was
           // remapped since this item's root was posted) cannot carry this post, so a fresh root
           // opens in this attempt's channel. Without a map the root is reused as it always was,
