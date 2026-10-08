@@ -66,6 +66,19 @@ describe("ChatRepository", () => {
     expect(messages[2]!.body).toBe("third");
   });
 
+  it("history with a limit and no cursor returns the newest messages in chronological order", () => {
+    for (let i = 1; i <= 5; i++) chatRepo.send(rigId, "alice", `msg ${i}`);
+
+    expect(chatRepo.history(rigId, { limit: 2 }).map((m) => m.body)).toEqual(["msg 4", "msg 5"]);
+    expect(chatRepo.history(rigId, { sender: "alice", limit: 3 }).map((m) => m.body)).toEqual(["msg 3", "msg 4", "msg 5"]);
+  });
+
+  it("history with --after pages forward from the cursor", () => {
+    const sent = [1, 2, 3, 4, 5].map((i) => chatRepo.send(rigId, "alice", `msg ${i}`));
+
+    expect(chatRepo.history(rigId, { after: sent[0]!.id, limit: 2 }).map((m) => m.body)).toEqual(["msg 2", "msg 3"]);
+  });
+
   it("history --topic returns messages between topic marker and next topic marker", () => {
     chatRepo.send(rigId, "alice", "before topic");
     chatRepo.sendTopic(rigId, "alice", "deploy", "starting deploy");

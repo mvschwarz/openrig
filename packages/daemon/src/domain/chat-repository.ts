@@ -121,8 +121,11 @@ export class ChatRepository {
     }
 
     params.push(limit);
-    const sql = `SELECT * FROM chat_messages WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
+    // With a cursor, page forward from it; without one, keep the newest rows.
+    const order = after ? "ASC" : "DESC";
+    const sql = `SELECT * FROM chat_messages WHERE ${conditions.join(" AND ")} ORDER BY id ${order} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params) as ChatMessageRow[];
+    if (!after) rows.reverse();
     return rows.map((r) => this.rowToMessage(r));
   }
 
