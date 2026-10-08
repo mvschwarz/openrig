@@ -440,6 +440,15 @@ export interface DrillSegment {
   specKind?: SpecKind;
 }
 
+/** A topology address typed on a page that reads no rigs; it resolves once
+ *  Topology's own read settles. `seq` gives every request a fresh page read. */
+export interface PendingDrill {
+  resource: "host" | "rig" | "pod" | "agent";
+  name: string;
+  target?: ResourceTarget;
+  seq: number;
+}
+
 export type ViewTab = "table" | "recent" | "overview" | "graph" | "health" | "topology" | "configuration" | "yaml" | "pulse";
 
 export type Action =
@@ -471,6 +480,8 @@ export type Action =
   | { type: "select"; delta?: number; index?: number; rowCount?: number; origin?: "refresh" }
   | { type: "activate" }
   | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget; specKind?: SpecKind }
+  /** Resolve `pendingDrill` against the current (settled Topology) snapshot. */
+  | { type: "resolve-pending" }
   | { type: "cross"; kind: "spec-of" | "running"; name: string; target?: ResourceTarget }
   | { type: "tab"; tab: ViewTab }
   | { type: "content-scroll"; delta: number }
@@ -532,6 +543,9 @@ export interface ViewState {
   history?: NavigationFrame[];
   configCategory?: string | null;
   configKey?: string | null;
+  pendingDrill?: PendingDrill | null;
+  /** Last PendingDrill seq handed out; never reused while this view lives. */
+  pendingSeq?: number;
   /** Canonical health finding opened from any instance/rig/seat surface. */
   healthOpen: string | null;
   /** SCOPES view: the mission whose execution story is open (null = selector only). */
