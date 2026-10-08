@@ -14,7 +14,7 @@ interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
   status: { launch?: { socketPath: string; session?: string } };
-  composed: { id: string; opened: Pane[]; pages: Pane[][]; columns?: number; kernelLayout?: string; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
+  composed: { id: string; opened: Pane[]; pages: Pane[][]; columns?: number; kernelLayout?: string; spaceLabel?: string; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
 }
 
 export interface WindowDeps {
@@ -183,7 +183,7 @@ function failure(provider: string, error: string): OpenViewResult {
 }
 
 /** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
-async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], herdrArgs: string[], deps: WindowDeps): Promise<boolean> {
+async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps): Promise<boolean> {
   try {
     const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
     if (!path.isAbsolute(tmux)) return false;
@@ -203,7 +203,7 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
     }
     const used = new Set<string>();
     for (const [index, page] of pages.entries()) {
-      const label = pages.length > 1 ? `${existing.label.slice(0, -2)}/${index + 1}` : existing.label;
+      const label = pageLabel(index);
       const matches = tabs.filter(tab => tab.workspace_id === existing.workspace_id && tab.label === label);
       if (matches.length !== 1) return false;
       const remaining = page.map(pane => pane.paneCommand);
@@ -359,7 +359,13 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       const viewMarker = `openrig:${composed.id}`;
       const planMarker = `${viewMarker}#${planId.slice(0, 16)}`;
       const marker = (label: string) => label.includes("#") ? label.slice(0, label.lastIndexOf("#")) : "";
-      const candidates = tabs.filter(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
+      // A named view's tabs carry its panes' names; the attachment check below decides reuse.
+      const named = composed.spaceLabel ? composed.pages.map(page => page.map(pane => pane.label).join(" · ")) : undefined;
+      const pageLabel = (existing: HerdrTab) => (index: number) => named ? named[index]!
+        : composed.pages.length > 1 ? `${existing.label.slice(0, -2)}/${index + 1}` : existing.label;
+      const candidates = named
+        ? tabs.filter(tab => tab.label === named[0] && named.every(label => tabs.filter(other => other.workspace_id === tab.workspace_id && other.label === label).length === 1))
+        : tabs.filter(tab => marker(tab.label) === planMarker && (composed.pages.length <= 1 || tab.label.endsWith("/1")));
       const stale = tabs.filter(tab => {
         const value = marker(tab.label);
         return value !== planMarker && (value === viewMarker ||
@@ -370,7 +376,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       }
       let existing: HerdrTab | undefined;
       for (const candidate of candidates) {
-        if (await hasLiveAttachments(candidate, tabs, composed.pages, herdrArgs, deps)) { existing = candidate; break; }
+        if (await hasLiveAttachments(candidate, tabs, composed.pages, pageLabel(candidate), herdrArgs, deps)) { existing = candidate; break; }
         windowNotes.push(`Could not confirm live attachments in workspace ${candidate.workspace_id}. Its contents were kept. After inspecting it, close it if no longer needed: herdr workspace close ${shellQuote(candidate.workspace_id)}`);
       }
       if (existing) {

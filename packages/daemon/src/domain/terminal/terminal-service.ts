@@ -143,6 +143,9 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
   };
 }
 
+/** The default kernel view's space name in a terminal multiplexer such as Herdr. */
+export const KERNEL_SPACE_LABEL = "openrig";
+
 type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
@@ -212,9 +215,9 @@ export class TerminalService {
       // even when one of the other roles is unavailable; chunking two at a time would not.
       const page = (indexes: number[]) => indexes.flatMap(index => composed.opened.filter(pane => pane.seat === resolved.members[index]?.seat));
       const pages = [page([1, 0]), page([2])].filter(panes => panes.length > 0);
-      return { ...composed, opened: pages.flat(), pages, kernelLayout: resolved.kernelLayout, columns: 2 };
+      return { ...composed, opened: pages.flat(), pages, kernelLayout: resolved.kernelLayout, columns: 2, spaceLabel: KERNEL_SPACE_LABEL };
     }
-    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns } : composed;
+    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns, spaceLabel: KERNEL_SPACE_LABEL } : composed;
   }
 
   private planId(provider: string, composed: ComposedView): string {
@@ -359,13 +362,14 @@ export class TerminalService {
     const singleRuntime = runtimesKnown && advisor!.runtime === operator!.runtime;
     const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; TUI, advisor and operator";
     // One full-width conversation per page; the operator is the first populated page when ready.
-    const roles = ["operator.agent", "operator.human", "advisor.lead"];
-    const members = roles.map(logicalId => {
+    // Panes and tabs are named for what the person sees there, not by logical id.
+    const roles: Array<[string, string]> = [["operator.agent", "operator"], ["operator.human", "dashboard"], ["advisor.lead", "advisor"]];
+    const members = roles.map(([logicalId, label]) => {
       const row = rows.find(row => row.logicalId === logicalId);
       const bound = row && deriveViewMembers([row])[0];
       // An expected role is still visible when there is no attachable binding.
       // Its logical ID names the absence; it is never used as a tmux target.
-      return bound ?? { seat: logicalId, label: logicalId, tmuxSession: null, host: null, readOnly: false, alive: false };
+      return bound ? { ...bound, label } : { seat: logicalId, label, tmuxSession: null, host: null, readOnly: false, alive: false };
     });
     return { id: "kernel", members, kernelLayout, columns: 1, panesPerPage: 1 };
   }
