@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Command } from "commander";
 import YAML from "yaml";
 
@@ -212,6 +214,114 @@ describe("rig scope slice create", () => {
   let env: { root: string; missionsRoot: string };
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  async function publicCreate(args: string[]): Promise<CaptureResult> {
+    const home = path.join(env.root, "owned-cli-home");
+    fs.mkdirSync(home, { recursive: true });
+    const command = [
+      fileURLToPath(new URL("../dist/index.js", import.meta.url)),
+      "scope", "slice", "create", ...args,
+      "--workspace", path.dirname(env.missionsRoot), "--json",
+    ];
+    const options = { encoding: "utf8" as const, timeout: 15000, env: {
+      PATH: process.env.PATH, HOME: home, TMPDIR: env.root,
+      OPENRIG_HOME: path.join(home, ".openrig"), CODEX_HOME: path.join(home, "codex"),
+      CLAUDE_CONFIG_DIR: path.join(home, "claude"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
+    } };
+    try {
+      const result = await promisify(execFile)(process.execPath, command, options);
+      return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+    } catch (error) {
+      const failure = error as Error & { code: unknown; stdout: string; stderr: string };
+      if (typeof failure.code !== "number") throw error;
+      return { exitCode: failure.code, stdout: failure.stdout, stderr: failure.stderr };
+    }
+  }
+
+  it("refuses an overlapping create without changing its guard or mission", async () => {
+    const mission = path.join(env.missionsRoot, "release-0.3.2");
+    const guard = path.join(mission, ".openrig-slice-create-lock");
+    writeFile(path.join(guard, "owned-by-other"), "existing creator\n");
+    const original = fs.readFileSync(path.join(mission, "README.md"), "utf8");
+    const result = await publicCreate(["release-0.3.2", "overlap"]);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout).error.action).toMatch(/retry/i);
+    expect(fs.readFileSync(path.join(guard, "owned-by-other"), "utf8")).toBe("existing creator\n");
+    expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(original);
+    expect(fs.readdirSync(path.join(mission, "slices"))).toEqual(["01-existing"]);
+  });
+
+  it("concurrent public creates return unique IDs or explicit retry refusals", async () => {
+    const mission = path.join(env.missionsRoot, "release-0.3.2");
+    const original = fs.readFileSync(path.join(mission, "README.md"), "utf8");
+    const results = await Promise.all(Array.from({ length: 8 }, async (_, index) => {
+      const result = await publicCreate(["release-0.3.2", `parallel-${index}`]);
+      const payload = JSON.parse(result.stdout);
+      if (result.exitCode !== 0) {
+        expect(result.exitCode).toBe(1);
+        expect(payload.ok).toBe(false);
+        expect(payload.error.fact).toMatch(/creation guard already exists/);
+        expect(payload.error.action).toMatch(/retry/i);
+        return null;
+      }
+      expect(payload.ok).toBe(true);
+      expect(readFrontmatter(payload.slice.readmePath).id).toBe(payload.slice.id);
+      return payload.slice.id as string;
+    }));
+    const ids = results.filter((id) => id !== null);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(fs.readdirSync(path.join(mission, "slices"))).toHaveLength(ids.length + 1);
+    expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(original);
+    expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
+  });
+
+  it("an acquired guard in another mission does not prevent creation", async () => {
+    const guard = path.join(env.missionsRoot, "backlog", ".openrig-slice-create-lock");
+    writeFile(path.join(guard, "owned-by-other"), "existing creator\n");
+    const result = await publicCreate(["release-0.3.2", "independent"]);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).slice.id).toBe("OPR.0.3.2.2");
+    expect(fs.readFileSync(path.join(guard, "owned-by-other"), "utf8")).toBe("existing creator\n");
+    expect(fs.existsSync(path.join(env.missionsRoot, "release-0.3.2", ".openrig-slice-create-lock"))).toBe(false);
+  });
+
+  it("releases a create guard after validation failure without consuming a number", async () => {
+    const mission = path.join(env.missionsRoot, "release-0.3.2");
+    const original = fs.readFileSync(path.join(mission, "README.md"), "utf8");
+    const failed = await publicCreate([
+      "release-0.3.2", "invalid", "--depends-on", "OPR.0.3.2.2",
+    ]);
+    expect(failed.exitCode).toBe(1);
+    expect(JSON.parse(failed.stdout).error.fact).toMatch(/cannot depend on itself/);
+    expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
+    expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(original);
+    expect(fs.readdirSync(path.join(mission, "slices"))).toEqual(["01-existing"]);
+    const retried = await publicCreate(["release-0.3.2", "retry"]);
+    expect(JSON.parse(retried.stdout).slice.id).toBe("OPR.0.3.2.2");
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "releases a create guard after an actual filesystem refusal and permits retry",
+    async () => {
+      const mission = path.join(env.missionsRoot, "release-0.3.2");
+      const slices = path.join(mission, "slices");
+      const original = fs.readFileSync(path.join(mission, "README.md"), "utf8");
+      fs.chmodSync(slices, 0o500);
+      try {
+        const failed = await publicCreate(["release-0.3.2", "unwritable"]);
+        expect(failed.exitCode).toBe(1);
+        expect(failed.stderr).toMatch(/EACCES/);
+        expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
+        expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(original);
+        expect(fs.readdirSync(slices)).toEqual(["01-existing"]);
+      } finally {
+        fs.chmodSync(slices, 0o700);
+      }
+      const retried = await publicCreate(["release-0.3.2", "retry"]);
+      expect(JSON.parse(retried.stdout).slice.id).toBe("OPR.0.3.2.2");
+    },
+  );
 
   it("HG-3: auto-finds next NN, never reuses numbers", async () => {
     // Add a closed slice 04 so existing NNs are 01 + 04. Next must be 05.
