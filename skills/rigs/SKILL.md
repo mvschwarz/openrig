@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when the user types /rigs, or asks to install OpenRig, to see their OpenRig agents ("show me my agents", "show me the terminals", the OpenRig view), to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
+description: Use when the user mentions OpenRig, rigs or the rig command, or wants a team of coding agents (Claude Code, Codex) on their project. That includes installing, setting up, starting or updating OpenRig, seeing or getting back to their OpenRig agents, TUI or operator, starting or sharing a team, and joining this session to one.
 ---
 
 # rigs: your route into OpenRig
@@ -36,9 +36,11 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
-- **Open the OpenRig view:** for “show me my agents”, “show me the terminals”, “see my agents” or “the OpenRig view”, run
-  `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig view now?”
-  first. It opens the OpenRig view itself, using herdr when installed or plain tmux otherwise:
+- **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
+  you're opening it, then run `rig terminal open saved:kernel --window` on the daemon's desktop. This is the next step
+  after installing or starting OpenRig, and the way back whenever they want their agents or OpenRig again. Don't wait
+  to be asked or for particular words. If they've said not now, give them that command for later. It opens a view
+  itself, using herdr when installed or plain tmux otherwise:
   - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to an `openrig kernel` space, reusing a live
     one. No new window and no macOS prompt; their own spaces stay in the sidebar.
   - **In Terminal or Ghostty:** a new tab or window the size of theirs.
@@ -48,7 +50,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
     advisor has its own tab or tmux window.
 
   Then tell the person in a sentence or two where it opened and that the operator is ready for what they want to
-  build. Don't list agents or statuses (the OpenRig view shows them), and don't suggest a command for them to type.
+  build. Don't list agents or statuses (the TUI shows them), and don't suggest a command for them to type.
   Preserve the current terminal. If OpenRig's notes say it couldn't confirm the view, say so plainly. If it's already
   open, point them to it rather than opening another. Only if the window cannot open, `rig tui --shared` is the
   dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal

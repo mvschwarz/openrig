@@ -5,8 +5,7 @@ the advisor and TUI beside it. No starter team is needed to reach that view.
 Tell the operator what you want to do, then choose a project team for a bounded
 change you can exercise. Reuse the accounts and terminal tools you already have.
 
-Want the **OpenRig view**, or to **show me my agents** / **see my agents**?
-After installation and sign-in, the path is `rig daemon start` (if stopped),
+After installation and sign-in, your agent opens the **OpenRig TUI and operator** for you. The path is `rig daemon start` (if stopped),
 then `rig terminal open saved:kernel --window`. The second command opens the
 desktop window itself. An agent can run it from its shell on the daemon's
 desktop; it does not need to type into your current terminal. See
@@ -486,7 +485,7 @@ Read the artifact, exercise its behavior, and check the candidate reviewed.
 
 ## Share the dashboard and return to it
 
-For “show me my agents” or the OpenRig view, the installing agent runs
+After install, and whenever the person wants their agents again, the installing agent runs
 `rig terminal open saved:kernel --window` and checks the result. It does not
 finish by suggesting a dashboard command for the person to type.
 
