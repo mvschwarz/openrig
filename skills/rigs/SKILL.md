@@ -41,6 +41,9 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   first. It opens a new terminal tab/window itself, using herdr when installed or plain tmux otherwise.
   Below 120 measured columns (or unknown width), the operator fills the first page; from 120, dashboard and operator
   share it equally. The advisor always has a separate tab or tmux window; select one to switch.
+  Inside Herdr, it focuses a matching view or creates one in the current session without another window.
+  On a Mac, Claude Desktop, iTerm and VS Code callers get a new supported Ghostty window, otherwise Terminal.
+  Before running it, tell the person **Allow is fine** if macOS asks to control that app: it opens the welcome view they requested.
   Preserve the current terminal. Check the result and visible content, or report what cannot be
   verified. If the view is already open, point them to it rather than opening another. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
   cannot open, `rig tui --shared` is the dashboard-only fallback; explain the failure and help with the chosen

@@ -214,13 +214,27 @@ rig terminal open saved:kernel --window --json
 
 Run this on the daemon's desktop, as the same user. On macOS, the command
 opens a new tab or window in the hosting Ghostty (1.3 or newer), or a new
-window when hosted by Terminal. macOS may ask for Automation permission; let the person
-answer that system prompt. A denied or uncertain action is reported once,
-not replayed in another app. On Linux, a local graphical display and a
-supported hosting terminal are required (Ghostty, GNOME Terminal, Konsole or
-xterm). Linux reports a window request; verify what actually appeared. SSH,
-headless, CI and unsupported hosts get a no-window result with the reason,
-a command for the person to run, and any follow-up the agent needs to perform.
+window when hosted by Terminal. For Claude Desktop, iTerm or VS Code, it checks
+for a local macOS desktop session and opens a new Ghostty window if its scripting
+support is confirmed (1.3 or newer), otherwise Terminal.app with an explanation.
+That window uses the app's own profile defaults because
+there is no hosting window to copy. Before running the command, the agent should say that clicking **Allow**
+on macOS's one-time control prompt is fine: it lets OpenRig open the requested
+welcome view. A denied or uncertain action is reported once, not replayed in
+another app. If macOS remembers a denial, enable the calling app in System Settings
+→ Privacy & Security → Automation, or use the printed command in a terminal yourself.
+Unknown width keeps the operator-only layout.
+
+When the agent already runs inside Herdr, the command focuses a space with the
+same view and plan, or creates one if none matches, preserving its config and existing spaces. The
+caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
+without opening a window or putting the view in another session.
+
+On Linux, a local graphical display and a supported hosting terminal are required
+(Ghostty, GNOME Terminal, Konsole or xterm). Linux reports a window request; verify
+what actually appeared. SSH, headless, CI and unsupported Linux hosts get a
+no-window result with the reason, a command for the person to run, and any
+follow-up the agent needs to perform.
 
 OpenRig's Herdr launch and its printed manual command keep your personal Herdr
 config when present. If it is absent, OpenRig creates private sidebar defaults;

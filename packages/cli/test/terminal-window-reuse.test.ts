@@ -43,7 +43,7 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
     clientFactory: () => ({ baseUrl: "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
   };
-  return { tabs, composed, workspaces, list, focus, exec, post, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
+  return { tabs, composed, workspaces, list, focus, exec, post, windowDeps, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
 }
 
 describe("reopening a Herdr view in a desktop window", () => {
@@ -72,6 +72,33 @@ describe("reopening a Herdr view in a desktop window", () => {
     for (const [, args] of f.exec.mock.calls.filter(([file]) => file === "/usr/bin/env")) {
       expect(args.slice(0, 8)).toEqual(["-u", "TMUX", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH", "HERDR_SOCKET_PATH=/daemon home/herdr.sock", "/fixture/bin/herdr"]);
     }
+  });
+
+  it("creates once and then focuses the same plan inside Herdr without a window or config change", async () => {
+    const f = fixture();
+    f.windowDeps.env = { TERM_PROGRAM: "herdr", HERDR_SOCKET_PATH: "/daemon home/herdr.sock" };
+    await f.run();
+    await f.run();
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.tabs).toHaveLength(1);
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("tab-0");
+    expect(JSON.parse(logs[1]!)).toMatchObject({ ok: true, reusedWorkspace: { id: "ws-0", tabId: "tab-0", view: "kernel" } });
+    expect(JSON.parse(logs[1]!).window).toBeUndefined();
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript")).toBe(false);
+    expect(f.windowDeps.herdrConfig).not.toHaveBeenCalled();
+    expect(f.windowDeps.launch).not.toHaveBeenCalled();
+  });
+
+  it("keeps an uncertain current-Herdr focus from creating or launching a replacement", async () => {
+    const f = fixture([{ workspace_id: "existing", tab_id: "first", label: label() }]);
+    f.windowDeps.env = { TERM_PROGRAM: "herdr", HERDR_SOCKET_PATH: "/daemon home/herdr.sock" };
+    f.focus.mockRejectedValue(new Error("focus reply lost"));
+    await f.run();
+    expect(f.focus).toHaveBeenCalledTimes(1);
+    expect(f.post).not.toHaveBeenCalled();
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript")).toBe(false);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, error: expect.stringContaining("current Herdr view outcome could not be confirmed") });
+    expect(process.exitCode).toBe(1);
   });
 
   it("keeps all existing pages and duplicate spaces, selecting only the first matching tab", async () => {

@@ -13,7 +13,8 @@ these plain commands let the health check finish without that extra prompt.
 
 For “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
 `rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
-welcome view in a new terminal tab/window: below 120 measured columns, operator alone first;
+welcome view in a new terminal tab/window, or a space in the current Herdr session:
+below 120 measured columns, operator alone first;
 from 120, dashboard and operator equally side by side. The advisor has a separate tab or tmux window. Inspect its result and visible content, or state what you cannot confirm. On a desktop, do
 not end by showing a table or suggesting a command for the person to type. Herdr is visible
 only inside a terminal the person can see; changing the shared TUI to `:terminals`
