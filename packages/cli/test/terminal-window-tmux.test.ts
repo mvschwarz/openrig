@@ -98,7 +98,8 @@ it.each([false, true])("opens real viewer panes and preserves source processes (
   const result = await openTerminalWindow(client, "saved:kernel", "tmux", deps);
   expect(result).toMatchObject({ ok: true, opened: names, pages: paged ? 3 : 1 });
   expect(desktop).toHaveBeenCalledTimes(1);
-  expect(tmux(viewer, ["display-message", "-p", "-t", "=openrig-view-owned-view", "#{window_name}"]).trim()).toBe("view-1");
+  expect(tmux(viewer, ["list-windows", "-t", "=openrig-view-owned-view", "-F", "#{window_name}|#{window_active}"]).trim().split("\n"))
+    .toEqual(paged ? ["view-1|1", "view-2|0", "view-3|0"] : ["view-1|1"]);
   for (const [index, expected] of (paged ? names.map(name => [name]) : [names]).entries()) {
     const actual = tmux(viewer, ["list-panes", "-t", `openrig-view-owned-view:view-${index + 1}`, "-F", "#{pane_title}|#{pane_top}|#{pane_left}|#{pane_dead}"]).trim().split("\n").map(line => line.split("|"));
     expect(actual.map(row => row[0])).toEqual(expected);
