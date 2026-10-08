@@ -220,6 +220,9 @@ describe("SeatAttentionReconciler", () => {
         getPaneCommand: vi.fn(async () => null),
       },
     });
+    // clearAttention re-observes with the wall clock, and the inventory ignores a
+    // verdict from the registration's own millisecond (applicableVerdict).
+    while (Date.now() <= decodeTime(session.id)) await new Promise((resolve) => setTimeout(resolve, 1));
 
     const result = await paneReconciler.clearAttention(session.sessionName, { reason: "reattached" });
 
