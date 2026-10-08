@@ -6,7 +6,7 @@ import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
-import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
+import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError, rigSpecName } from "../lib/bundle-source.js";
 import { checkBundleFolder } from "../lib/bundle-check.js";
 import type { StatusDeps } from "./status.js";
 import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
@@ -76,7 +76,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
   cmd.command("create <spec>")
     .description("Create a .rigbundle from a rig spec or GitHub folder link")
     .requiredOption("-o, --output <path>", "Output path for .rigbundle")
-    .option("--name <name>", "Bundle name", "my-bundle")
+    .option("--name <name>", "Bundle name (default: the rig's name in rig.yaml)")
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
@@ -89,7 +89,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
     .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name?: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       if (isGitHubBundleLink(spec)) {
         try {
@@ -128,6 +128,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       // them against ITS cwd. Nothing is uploaded — the files must exist on the daemon's host.
       // A chosen configuration is applied to an owned copy of the rig folder; the author's folder is never changed.
       let specPath = nodePath.resolve(spec);
+      const bundleName = opts.name ?? rigSpecName(specPath) ?? "my-bundle";
       let rigRoot = opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined;
       let chosen: ChosenConfiguration | undefined;
       let stagingDir: string | undefined;
@@ -149,7 +150,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         }
       }
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
-        specPath, bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
+        specPath, bundleName, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
         includePackages: opts.includePackages,
         rigRoot,
         ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map((dir) => nodePath.resolve(dir)) } : {}),
@@ -360,7 +361,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       if (opts.json) console.log(JSON.stringify(result));
       else {
         console.log(`Bundle standard: ${result.standardVersion} (advisory)`);
-        for (const check of result.checks) console.log(`${check.status}: ${check.ruleId}: ${check.reason}`);
+        for (const check of result.checks) console.log(`${check.status}: ${check.ruleId}: ${check.reason}${check.path ? ` (${check.path})` : ""}`);
       }
       if (result.checks.some(check => check.status === "finding")) process.exitCode = 1;
     });

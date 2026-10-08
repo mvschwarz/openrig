@@ -69,6 +69,18 @@ describe("advisory bundle check", () => {
     } finally { log.mockRestore(); }
   });
 
+  it("human output names the file a finding is about", async () => {
+    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("docs: [{path: README.md}]", "docs: [{path: README.md}, {path: docs/missing.md}]"));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const exitCode = process.exitCode;
+    try {
+      const deps = { clientFactory: vi.fn(), lifecycleDeps: {} } as unknown as StatusDeps;
+      await new Command().addCommand(bundleCommand(deps)).parseAsync(["bundle", "check", root], { from: "user" });
+      expect(log.mock.calls.map(c => String(c[0]))).toContain("finding: referenced_files: Declared file is missing, unreadable or outside the bundle folder. (docs/missing.md)");
+      expect(process.exitCode).toBe(1);
+    } finally { log.mockRestore(); process.exitCode = exitCode; }
+  });
+
   it("checks that the recommended configuration is the authored team", async () => {
     const config = `schema: openrig.bundle-configurations/v1
 recommended: authored

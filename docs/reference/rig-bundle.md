@@ -20,8 +20,8 @@ Replace `COMMIT` with a full commit ID. Branches and tags are also accepted, inc
 resolve once to a full commit before fetching. Each result names the resolved source, configuration ID, package digest
 and assembler. Save the printed commit-pinned URL to repeat the same source selection. Only a full 40-character commit
 ID counts as a commit; a shorter one is looked up as a branch or tag name. `--preset` and repeatable
-`--seat pod.member=runtime` select only configurations the folder declares. A link build is named `github-bundle`
-unless `--name` says otherwise.
+`--seat pod.member=runtime` select only configurations the folder declares. A link build takes the rig's `name` from
+its `rig.yaml` unless `--name` says otherwise.
 
 Link import needs a running, verified local daemon and a credential-free, publicly readable GitHub URL. It does not
 upload files to remote daemons. For a remote target, run the link command on that host, or create an archive, transfer
@@ -59,7 +59,8 @@ checks pod-aware rig validity, README inclusion in `docs`, readable declared fil
 minimum-version shape, declared preset consistency and known sensitive filenames. It does not contact a daemon,
 build an archive, run preflight or launch anything. Findings give exit status 1; they are never an install gate. It
 reads the folder on disk, not a link or a commit, so files that aren't committed are checked too. Human output gives
-each rule's status, ID and reason; `--json` also names the files a finding is about.
+each rule's status, ID and reason, then the file it's about in parentheses when there is one; `--json` carries the
+same as a `path` field.
 
 README completeness and arbitrary embedded secrets need human review and are reported as `not_checked`. A bounded
 or unreadable scan is also `not_checked`, never a clean scan. The check is advice for authors, not a security audit or
@@ -283,7 +284,7 @@ rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <
 | `--seat <pod.member=runtime>` | no | — | Use this runtime for one seat, within what `configurations.yaml` allows. Repeatable; applied after `--preset`. An undeclared choice is refused with the allowed set, and nothing is built. |
 | `--context-pack <dir>` | no | — | Carry the context pack in `<dir>`. Repeatable. The directory may be outside the rig folder, for example a world pack whose `manifest.yaml` is at its repository root. Only `manifest.yaml` and the files it declares are carried, the same set `rig context add --git` installs, and the pack lands in the bundle at `context-packs/<manifest name>/`. Needs a pod-aware spec. |
 | `--project-dir <dir>` | no | — | Carry the project the rig works in: the folder holding its `project.yaml` (which must declare an `id`) and files beside it, such as `SPEC.md`. On install the project is registered in the workspace catalog and the rig is associated with it, before any seat launches (see [project-workspace.md](project-workspace.md)). Needs a pod-aware spec. |
-| `--name` | no | `my-bundle` (`github-bundle` for a link) | Bundle name in the manifest. |
+| `--name` | no | the rig's `name` in `rig.yaml` | Bundle name in the manifest. |
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 | `--min-cli-version`, `--min-daemon-version` | no | — | The oldest OpenRig CLI or daemon that may install the bundle, checked on install. For a link they override the author's `bundle.yaml` minimums. |
 | `--notes <text>` | no | — | Notes stored in the manifest's provenance. |
