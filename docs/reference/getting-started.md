@@ -577,9 +577,9 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 a throwaway socket, without touching your own sessions:
 
 ```sh
-tmux -L openrig-check -f /dev/null new-session -d -s check
-tmux -L openrig-check capture-pane -p -t check >/dev/null && echo "capture-pane works"
-tmux -L openrig-check kill-server
+tmux -L "openrig-check-$$" -f /dev/null new-session -d -s check
+tmux -L "openrig-check-$$" capture-pane -p -t check >/dev/null && echo "capture-pane works"
+tmux -L "openrig-check-$$" kill-server
 ```
 
 If the second command fails because the server exited, put a tmux that passes this check first on your `PATH`; the
@@ -589,15 +589,16 @@ and start the failed seats again, as the reporter did:
 ```sh
 rig daemon stop
 rig start --last
-rig ps --nodes --rig kernel   # the failed seats show startup status "failed"
+rig ps --nodes --rig kernel --full   # the failed seats show "failed" under STARTUP
 rig up kernel --existing --fresh <failed seats> --yes
 ```
 
-Name the failed seats by their logical IDs, for example `advisor.lead operator.agent operator.human queue.worker`
-when all four failed. `--fresh` starts a new conversation for each seat you name, so name only the failed ones; seats
-you don't name keep their conversations. A later `rig daemon start` doesn't retry them by itself: once a kernel
-exists, startup skips the built-in kernel boot, and `rig status` then reads `Kernel: skipped` whatever its seats'
-state, so check `rig ps --nodes --rig kernel`.
+This recovery is for the case the reporter hit: the kernel's seats failed and none of them is still running.
+`rig up kernel --existing` refuses a kernel that still has a live session. Name the failed seats by their logical
+IDs, for example `advisor.lead operator.agent operator.human queue.worker` when all four failed. `--fresh` starts a
+new conversation for each seat you name; seats you don't name resume their conversations. A later `rig daemon start`
+doesn't retry the failed seats by itself: once a kernel exists, startup skips the built-in kernel boot, and
+`rig status` then reads `Kernel: skipped` whatever its seats' state, so check `rig ps --nodes --rig kernel --full`.
 
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a
