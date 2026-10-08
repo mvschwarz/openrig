@@ -2,7 +2,7 @@
 // tests. Drives the commander tree end-to-end with a tmp substrate
 // fixture so every HG-N gate has direct coverage.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -490,6 +490,28 @@ describe("rig scope slice close (HG-6)", () => {
     expect(fs.readFileSync(destination, "utf8").endsWith(body)).toBe(true);
     const listed = await run(["slice", "ls", "--mission", "backlog", "--state", "closed", "--json"], env.missionsRoot);
     expect(JSON.parse(listed.stdout).slices).toEqual([expect.objectContaining({ id: "OPR.99.0.1.1", status: "closed-wontfix" })]);
+  });
+
+  it.each([
+    "title: Fix: the parser\nstatus: active",
+    "status: &state active\nrelated: *state",
+  ])("closes with a named warning and writes the field when YAML cannot be spliced: %j", async (block) => {
+    const source = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo", "README.md");
+    fs.writeFileSync(source, `---\nid: OPR.99.0.1.1\n${block}\n---\n\n# owned body\n`, "utf8");
+    commitFixture(env.root);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await run(["slice", "close", "01-debt-foo", "--mission", "backlog", "--reason", "wontfix", "--json"], env.missionsRoot);
+      const destination = path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo", "README.md");
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout).ok).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(destination));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+      expect(fs.existsSync(source)).toBe(false);
+      const updated = fs.readFileSync(destination, "utf8");
+      expect(updated).toContain("status: closed-wontfix");
+      expect(updated.endsWith("---\n\n# owned body\n")).toBe(true);
+    } finally { warn.mockRestore(); }
   });
 
   let env: { root: string; missionsRoot: string };

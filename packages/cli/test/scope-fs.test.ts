@@ -1,6 +1,6 @@
 // release-0.3.2 slice 12 — scope-fs helpers + frontmatter parser tests.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -93,21 +93,38 @@ describe("frontmatter parser", () => {
     expect(fm.custom).toBe("keep-me");
   });
 
-  it.each(["status: active\nstatus: closed", "status: [broken", "- scalar sequence"])("leaves an invalid frontmatter mapping untouched: %j", (block) => {
+  it.each([
+    "title: Fix: the parser\nstatus: active",
+    "status: active\nstatus: shipped",
+    "- root-list",
+    "root-scalar",
+    "status: *missing",
+    "status: &state active\nrelated: *state",
+  ])("warns and retains main's line-based update for invalid YAML: %j", (block) => {
     const dir = mktemp();
     const file = path.join(dir, "README.md");
     const original = `---\n${block}\n---\n\n# owned body\n`;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       writeFile(file, original);
-      expect(() => updateFrontmatter(file, { status: "closed" })).toThrow(ScopeCliError);
-      expect(fs.readFileSync(file, "utf8")).toBe(original);
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      expect(() => updateFrontmatter(file, { status: "closed" })).not.toThrow();
+      const updated = fs.readFileSync(file, "utf8");
+      expect(updated).toContain("status: closed");
+      expect(updated.endsWith("---\n\n# owned body\n")).toBe(true);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(file));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+      if (block.includes("*state")) expect(updated).toContain("related: *state");
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("preserves CRLF delimiters, unowned comments, and body when updating a quoted key", () => {
     const dir = mktemp();
     const file = path.join(dir, "README.md");
-    const original = "---\r\n\"status\": active\r\n# keep\r\ncustom: 'retain: exactly'\r\n---\r\n\r\n# owned body\r\n";
+    const original = "---\r\n\"status\": active # retained field note\r\n# keep\r\ncustom: 'retain: exactly'\r\n---\r\n\r\n# owned body\r\n";
     try {
       writeFile(file, original);
       updateFrontmatter(file, { status: "closed" });
