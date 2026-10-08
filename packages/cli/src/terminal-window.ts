@@ -231,7 +231,6 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     };
     const socket = preview.data.status.launch?.socketPath;
     if (typeof launchWindow === "object") {
-      currentHerdr = true;
       provider = "herdr";
       if (requestedProvider === "tmux") return failed("The current Herdr view requires provider herdr; no extra window was opened.");
       const base = path.join(deps.env["HOME"] ?? homedir(), ".config", "herdr");
@@ -239,6 +238,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         ? path.join(base, "sessions", deps.env["HERDR_SESSION"], "herdr.sock") : path.join(base, "herdr.sock"));
       if (!socket || path.resolve(socket) !== path.resolve(callerSocket)) return failed("The current Herdr endpoint differs from the daemon's endpoint; no space was opened in another session.");
       if (!herdr) return failed("The Herdr executable is unavailable; no space was opened.");
+      // Set only once a space may open, so the refusals above read as "nothing was opened".
+      currentHerdr = true;
       windowNotes.push("Using the current Herdr session; no terminal window or personal config was changed. Check the selected space is visible.");
     }
     let configEnv = "";

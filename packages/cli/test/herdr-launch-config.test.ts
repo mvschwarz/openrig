@@ -38,7 +38,7 @@ it.each([false, true])("preserves normal HOME/XDG config selection, including an
 it.each([[undefined, true], [80, true], [119, true], [120, true], [159, true], [160, false], [268, false]] as const)("defaults only an absent config at width %s to collapsed=%s", (columns, collapsed) => {
   const dir = root(), env = { HOME: dir };
   const output = prepareHerdrLaunchConfig(env, "/owned/herdr.sock", columns);
-  expect(read(output)).toEqual({ ui: { sidebar_start_collapsed: collapsed } });
+  expect(read(output)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: collapsed } });
   expect(statSync(output).mode & 0o777).toBe(0o600);
   expect(existsSync(path.join(path.dirname(output), "config.toml"))).toBe(false);
   expect(prepareHerdrLaunchConfig(env, "/owned/herdr.sock", columns)).toBe(output);
@@ -50,8 +50,8 @@ it("keeps generated narrow/wide and endpoint settings independent", () => {
   const wide = prepareHerdrLaunchConfig(env, "/one.sock", 160);
   const other = prepareHerdrLaunchConfig(env, "/two.sock", 160);
   expect(new Set([narrow, wide, other]).size).toBe(3);
-  expect(read(narrow)).toEqual({ ui: { sidebar_start_collapsed: true } });
-  expect(read(wide)).toEqual({ ui: { sidebar_start_collapsed: false } });
+  expect(read(narrow)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: true } });
+  expect(read(wide)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: false } });
 });
 
 it.each(['[ui\n', 'ui = "not a table"', 'ui = []', ''])("leaves interpretation of an existing config to Herdr: %s", text => {
@@ -68,5 +68,5 @@ it("replaces its generated file atomically without following an output symlink",
   rmSync(output); symlinkSync(victim, output);
   expect(prepareHerdrLaunchConfig(env, "/owned.sock", 160)).toBe(output);
   expect(readFileSync(victim, "utf8")).toBe('[ui]\nsidebar_width = 18\n');
-  expect(read(output)).toEqual({ ui: { sidebar_start_collapsed: false } });
+  expect(read(output)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: false } });
 });
