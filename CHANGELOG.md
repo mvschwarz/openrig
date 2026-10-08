@@ -36,7 +36,7 @@ tagged `v0.6.7`. The changes since 0.6.6:
 - Check Claude Code and Codex installs and logins in `rig doctor`, with four
   new rows, and exit 1 when either is missing or signed out, including an
   unused harness ([#924](https://github.com/mvschwarz/openrig/pull/924)).
-- Default `agents.advisor_session` to `advisor-lead@kernel`, and target the
+- Default `agents.advisor_session` to the kernel's advisor seat, and target the
   seat's own rig in `rig restore-packet write` ([#937](https://github.com/mvschwarz/openrig/pull/937)). Name bundles after
   `rig.yaml`'s `name` in `rig bundle create` and `rig up <link>` ([#985](https://github.com/mvschwarz/openrig/pull/985)). Fire a
   periodic reminder one interval after registration ([#860](https://github.com/mvschwarz/openrig/pull/860)). Resolve
