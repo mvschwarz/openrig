@@ -460,29 +460,35 @@ describe("rig launch --host HTTP", () => {
   }
   const SUBSET = "/api/rigs/rig-1/nodes/launch-subset";
   const VERSION = "/api/health-summary/version";
+  const HEALTH = "/healthz";
 
   it.each([
-    ["an older remote daemon", { [VERSION]: { status: 200, data: { version: "0.5.8" } } }],
-    ["a remote daemon without the version route", {}],
+    ["an older stamped remote daemon", { [HEALTH]: { status: 200, data: { status: "ok", semver: "0.5.8" } } }],
+    ["an older unstamped remote daemon", { [HEALTH]: { status: 200, data: { status: "ok" } }, [VERSION]: { status: 200, data: { version: "0.5.8" } } }],
+    ["a remote daemon that reports no version", {}],
   ])("--plan refuses %s before posting", async (_label, responses) => {
     const { prog, client } = await remoteLaunch(responses);
     const { stdout, stderr, exitCode } = await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
     });
-    expect(client._calls.map((c) => c.method)).toEqual(["GET"]);
-    expect(client._calls[0]!.path).toBe(VERSION);
+    expect(client._calls.every((c) => c.method === "GET")).toBe(true);
+    expect(client._calls[0]!.path).toBe(HEALTH);
     expect(exitCode).toBe(1);
     expect(stderr.join("\n")).toContain("0.5.9 or later");
     expect(stdout).toEqual([]);
   });
 
-  it("--plan on a current remote daemon reads the version, then prints the plan", async () => {
+  it("--plan on a stamped remote daemon reads /healthz, then prints the plan, even when its version route says unknown", async () => {
     const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
-    const { prog, client } = await remoteLaunch({ [VERSION]: { status: 200, data: { version: "0.6.8" } }, [SUBSET]: { status: 200, data: plan } });
+    const { prog, client } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.4-rc.1" } },
+      [VERSION]: { status: 200, data: { version: "unknown" } },
+      [SUBSET]: { status: 200, data: plan },
+    });
     const { stdout, exitCode } = await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
     });
-    expect(client._calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${VERSION}`, `POST ${SUBSET}`]);
+    expect(client._calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${HEALTH}`, `POST ${SUBSET}`]);
     expect(client._calls[1]!.body).toMatchObject({ seats: ["dev.impl"], plan: true });
     expect(exitCode).toBeUndefined();
     expect(JSON.parse(stdout.join(""))).toMatchObject({ ok: true, data: { planOnly: true } });
@@ -490,7 +496,7 @@ describe("rig launch --host HTTP", () => {
 
   it.each([[["--json"]], [[]]])("--plan on a remote daemon that answers without planOnly exits non-zero (%j)", async (extra) => {
     const { prog } = await remoteLaunch({
-      [VERSION]: { status: 200, data: { version: "0.6.8" } },
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
       [SUBSET]: { status: 201, data: { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.impl", status: "fresh" }] } },
     });
     const { stderr, exitCode } = await captureLogs(async () => {

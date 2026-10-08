@@ -5,7 +5,11 @@
 /** The first daemon version whose launch-subset route honours `plan: true`. */
 export const PLAN_MIN_DAEMON_VERSION = "0.5.9";
 
-/** Read-only, and present on every daemon from 0.4.1; an older one answers 404 and is refused. */
+/** A packaged daemon's stamped version: /healthz has carried `semver` on stamped builds since 0.4.4. */
+export const DAEMON_HEALTH_PATH = "/healthz";
+
+/** For unstamped development runs. Packaged 0.5.9 to 0.6.5 answer "unknown" here, so it is the fallback only;
+ *  a daemon before 0.4.1 answers 404 and is refused. */
 export const DAEMON_VERSION_PATH = "/api/health-summary/version";
 
 const MIN = PLAN_MIN_DAEMON_VERSION.split(".").map(Number);
@@ -21,19 +25,26 @@ function supportsPlan(version: unknown): boolean {
   return match[4] === undefined;
 }
 
+function field(body: unknown, key: string): unknown {
+  return body && typeof body === "object" ? (body as Record<string, unknown>)[key] : undefined;
+}
+
 /**
  * Before sending a plan request: returns null when the daemon reports version 0.5.9 or later, otherwise the
- * message to print instead of sending. `fetchVersion` returns the version route's JSON body, or undefined when the
- * read failed; the caller picks the transport (local client or `--host`).
+ * message to print instead of sending. `read(path)` GETs a read-only daemon path and returns its JSON body, or
+ * undefined when the read failed; the caller picks the transport (local client or `--host`). The stamped
+ * `/healthz` semver is read first; the version route answers only for unstamped development runs.
  */
-export async function planSupportRefusal(fetchVersion: () => Promise<unknown>): Promise<string | null> {
-  let body: unknown;
-  try {
-    body = await fetchVersion();
-  } catch {
-    body = undefined;
-  }
-  const version = body && typeof body === "object" ? (body as { version?: unknown }).version : undefined;
+export async function planSupportRefusal(read: (path: string) => Promise<unknown>): Promise<string | null> {
+  const get = async (path: string): Promise<unknown> => {
+    try {
+      return await read(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const stamped = field(await get(DAEMON_HEALTH_PATH), "semver");
+  const version = typeof stamped === "string" ? stamped : field(await get(DAEMON_VERSION_PATH), "version");
   if (supportsPlan(version)) return null;
   const seen = typeof version === "string" ? `reports version ${version}` : "did not report its version";
   return `Not sent: the daemon ${seen}, and --plan needs ${PLAN_MIN_DAEMON_VERSION} or later. An older daemon ignores --plan and launches. Upgrade or restart the daemon, then retry.`;

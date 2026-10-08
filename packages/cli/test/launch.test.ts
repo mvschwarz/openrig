@@ -160,6 +160,20 @@ describe("rig launch --seats", () => {
     expect(logs).toEqual([]);
   });
 
+  it("allows --plan on a packaged daemon whose stamp is on /healthz while its version route says unknown", async () => {
+    // Packaged 0.5.9 to 0.6.5 answer "unknown" on /api/health-summary/version; /healthz carries the semver.
+    const deps = makeDeps({ "launch-subset": { status: 200, data: { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } } } });
+    deps._client.get.mockImplementation(async (path: string) => path === "/healthz"
+      ? { status: 200, data: { status: "ok", semver: "0.6.4-rc.1" } }
+      : { status: 200, data: { version: "unknown" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan"]);
+
+    expect(deps._client.post).toHaveBeenCalledOnce();
+    expect(logs.join("\n")).toContain("Plan only; no changes made.");
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it.each([[["--json"]], [[]]])("exits non-zero when a --plan answer has no planOnly (%j)", async (extra) => {
     // A daemon that reports a new version but launches anyway: the answer must not read as a plan.
     const launched = { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }], held: [], alreadyRunning: [] };

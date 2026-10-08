@@ -6,7 +6,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { DAEMON_VERSION_PATH, NOT_A_PLAN_MESSAGE, isPlanAnswer, planSupportRefusal } from "../launch-plan-guard.js";
+import { NOT_A_PLAN_MESSAGE, isPlanAnswer, planSupportRefusal } from "../launch-plan-guard.js";
 
 type LaunchResponse = {
   ok: boolean;
@@ -122,8 +122,8 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         if (opts.plan) {
           const host = opts.host;
           let readError: string | undefined;
-          const refusal = await planSupportRefusal(async () => {
-            const read = await runRemoteHttpOp(host, "GET", DAEMON_VERSION_PATH, undefined, deps, {});
+          const refusal = await planSupportRefusal(async (path) => {
+            const read = await runRemoteHttpOp(host, "GET", path, undefined, deps, {});
             if (!read.ok) readError = read.error;
             return read.ok ? read.data : undefined;
           });
@@ -166,8 +166,8 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         if (opts.holdReason) body.holdReason = opts.holdReason;
         if (opts.snapshotId) body.snapshotId = opts.snapshotId;
         if (opts.plan) {
-          const refusal = await planSupportRefusal(async () => {
-            const read = await client.get<unknown>(DAEMON_VERSION_PATH);
+          const refusal = await planSupportRefusal(async (path) => {
+            const read = await client.get<unknown>(path);
             return read.status === 200 ? read.data : undefined;
           });
           if (refusal) {
