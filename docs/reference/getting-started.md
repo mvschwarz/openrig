@@ -211,14 +211,22 @@ without a local display it can't, and the [headless handoff](#headless-or-ssh-ha
 rig terminal open saved:kernel --window --json
 ```
 
-Run this on the daemon's desktop, as the same user. The command prefers a new
-Ghostty tab on macOS when Ghostty 1.3 or newer is installed, otherwise a new
-Terminal window. With no existing window, including an installation run from
-Claude Desktop, it creates one. macOS may ask for Automation permission; let the
-person answer that system prompt. A denied or uncertain action is reported once,
-not replayed in another app. On Linux a local graphical display and a supported
-terminal are required (Ghostty, the system terminal, GNOME Terminal, Konsole or
-xterm). Linux reports a window request; verify what actually appeared.
+Run this on the daemon's desktop, as the same user. On macOS, the command
+opens a new tab or window in the hosting Ghostty (1.3 or newer), or a new
+window when hosted by Terminal. macOS may ask for Automation permission; let the person
+answer that system prompt. A denied or uncertain action is reported once,
+not replayed in another app. On Linux, a local graphical display and a
+supported hosting terminal are required (Ghostty, GNOME Terminal, Konsole or
+xterm). Linux reports a window request; verify what actually appeared. SSH,
+headless, CI and unsupported hosts get a no-window result with the reason,
+a command for the person to run, and any follow-up the agent needs to perform.
+
+OpenRig's Herdr launch and its printed manual command use a private copy of
+your Herdr settings with only the initial sidebar preference changed to
+collapsed. An endpoint's saved choice takes precedence; later sidebar toggles
+persist normally. Your global config is untouched. If that copy cannot be
+prepared, OpenRig reports why and keeps the ordinary launch or manual command
+with its usual settings and sidebar.
 
 The command runs Herdr when installed, using the daemon's configured session and
 socket. Otherwise it creates a plain tmux viewing session. Explicitly choose the

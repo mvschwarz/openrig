@@ -24,7 +24,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
     if (args.includes("#{pane_id}")) return `%${++pane}`;
     return "";
   });
-  const deps: WindowDeps = { platform: "darwin", env: { HOME: "/fixture", TERM_PROGRAM: options.ghostty ? "ghostty" : "Apple_Terminal", HERDR_SESSION: "wrong-session", HERDR_SOCKET_PATH: "/wrong.sock" }, exists: () => !!options.ghostty, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "owned-test" };
+  const deps: WindowDeps = { platform: "darwin", env: { HOME: "/fixture", TERM_PROGRAM: options.ghostty ? "ghostty" : "Apple_Terminal", HERDR_SESSION: "wrong-session", HERDR_SOCKET_PATH: "/wrong.sock" }, exists: () => !!options.ghostty, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), herdrConfig: vi.fn(() => "/fixture/private herdr.toml"), id: () => "owned-test" };
   return { client, deps, get, post, exec, preview };
 }
 
@@ -68,9 +68,38 @@ describe("desktop terminal view", () => {
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false, opened: [], code: "terminal_window_failed" });
     expect(result.error).toContain("No terminal window was opened.");
-    expect(result.error).toContain("run: env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
-    expect(result.notes).toEqual(["After the person starts Herdr, have the agent place this view by running: rig terminal open 'saved:kernel' --provider herdr"]);
+    expect(result.error).toContain("run: env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' HERDR_CONFIG_PATH='/fixture/private herdr.toml' '/fixture/bin/herdr'");
+    expect(f.deps.herdrConfig).toHaveBeenCalledExactlyOnceWith("/daemon home/herdr.sock");
+    expect(result.notes).toEqual([
+      "After the person starts Herdr, have the agent place this view by running: rig terminal open 'saved:kernel' --provider herdr",
+      "Herdr starts with the sidebar collapsed unless this endpoint has a saved choice; later toggles are kept.",
+    ]);
     expect(result.error).not.toContain("\n");
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/usr/bin/open")).toBe(false);
+    expect(f.deps.launch).not.toHaveBeenCalled();
+    expect(f.deps.sleep).not.toHaveBeenCalled();
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new Error("EACCES: cannot read Herdr config"),
+    new SyntaxError("Invalid TOML"),
+    new Error("EROFS: cannot write private Herdr config"),
+  ])("keeps the ordinary manual command when preparation fails over SSH: %s", async error => {
+    const f = fixture();
+    f.deps.env = { SSH_TTY: "/dev/pts/1", HERDR_CONFIG_PATH: "/fixture/original config.toml" };
+    const originalEnv = { ...f.deps.env };
+    f.deps.herdrConfig = vi.fn(() => { throw error; });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: false, windowAttempted: false, opened: [], code: "terminal_window_failed" });
+    expect(result.error).toContain("No terminal window was opened. This is an SSH session");
+    expect(result.error).toContain("run: env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(result.notes).toEqual([
+      "After the person starts Herdr, have the agent place this view by running: rig terminal open 'saved:kernel' --provider herdr",
+      `Could not prepare OpenRig's private Herdr settings (${error.message}); Herdr starts with its usual sidebar.`,
+    ]);
+    expect(f.deps.env).toEqual(originalEnv);
+    expect(f.deps.herdrConfig).toHaveBeenCalledExactlyOnceWith("/daemon home/herdr.sock");
     expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/usr/bin/open")).toBe(false);
     expect(f.deps.launch).not.toHaveBeenCalled();
     expect(f.deps.sleep).not.toHaveBeenCalled();
@@ -157,6 +186,7 @@ describe("desktop terminal view", () => {
     expect(result).toMatchObject({ ok: false, windowAttempted: false });
     expect(result.error).toContain("run: env -u TMUX ssh -t 'user@remote-host' 'tmux attach-session -t =operator'");
     expect(result.notes).toEqual([]);
+    expect(f.deps.herdrConfig).not.toHaveBeenCalled();
     expect(f.post).not.toHaveBeenCalled();
     expect(f.deps.launch).not.toHaveBeenCalled();
     expect(f.exec.mock.calls.some(([file]) => file === "ssh" || file === "/usr/bin/osascript")).toBe(false);
@@ -168,6 +198,7 @@ describe("desktop terminal view", () => {
     const result = await openTerminalWindow(f.client, "saved:kernel", "tmux", f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false, opened: [] });
     expect(result.error).toContain("run: env -u TMUX tmux attach-session -t '=fixture-tui'");
+    expect(f.deps.herdrConfig).not.toHaveBeenCalled();
     expect(f.exec.mock.calls.some(([file]) => file === "/fixture/bin/tmux" || file === "/usr/bin/osascript")).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
   });
@@ -196,6 +227,7 @@ describe("desktop terminal view", () => {
     expect(result).toMatchObject({ ok: false, opened: [], error: expect.stringContaining("changed since preview") });
     expect(f.exec.mock.calls.some(([file, args]) => file === "/usr/bin/osascript" || args.includes("new-session"))).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
+    expect(f.deps.herdrConfig).not.toHaveBeenCalled();
   });
 
   it("opens the previewed tmux layout when the expected plan still matches", async () => {
@@ -214,6 +246,8 @@ describe("desktop terminal view", () => {
     expect(launch[1][1]).not.toMatch(/set (bounds|number of columns|number of rows)/);
     expect(result.notes).toContain("Ghostty's macOS scripting interface does not expose window size. Enlarge the new view manually if its columns are cramped; existing window settings were kept.");
     expect(launch[1][2]).toContain("HERDR_SOCKET_PATH='/daemon home/herdr.sock'");
+    expect(launch[1][2]).toContain("HERDR_CONFIG_PATH='/fixture/private herdr.toml'");
+    expect(f.deps.herdrConfig).toHaveBeenCalledExactlyOnceWith("/daemon home/herdr.sock");
     expect(launch[1][2]).not.toContain("--session");
     expect(launch[1][2]).toContain("-u HERDR_SESSION");
     expect(launch[1][2]).not.toContain("wrong-session");
@@ -280,6 +314,29 @@ describe("desktop terminal view", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
+  it.each([
+    new Error("EACCES: cannot read Herdr config"),
+    new SyntaxError("Invalid TOML"),
+    new Error("EROFS: cannot write private Herdr config"),
+  ])("opens one window with the original configuration when preparation fails: %s", async error => {
+    const f = fixture();
+    f.deps.env["HERDR_CONFIG_PATH"] = "/fixture/original config.toml";
+    const originalEnv = { ...f.deps.env };
+    f.deps.herdrConfig = vi.fn(() => { throw error; });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({
+      ok: true, opened: ["tui", "advisor", "operator"], window: { app: "Terminal", surface: "window" },
+    });
+    const launches = f.exec.mock.calls.filter(([file]) => file === "/usr/bin/osascript");
+    expect(launches).toHaveLength(1);
+    expect(launches[0]![1][2]).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(f.deps.env).toEqual(originalEnv);
+    expect(f.deps.herdrConfig).toHaveBeenCalledExactlyOnceWith("/daemon home/herdr.sock");
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "bound-plan" }, { timeoutMs: 45_000 });
+    expect(result.notes).toContain(`Could not prepare OpenRig's private Herdr settings (${error.message}); Herdr starts with its usual sidebar.`);
+    expect(result.notes?.join(" ")).not.toContain("sidebar collapsed");
+  });
+
   it("returns Automation denial without replaying in another terminal or applying a layout", async () => {
     const f = fixture();
     const original = f.deps.exec;
@@ -315,6 +372,7 @@ describe("desktop terminal view", () => {
     expect(result).toMatchObject({ ok: true, provider: "tmux", window: { app: "ghostty", surface: "window-requested" } });
     expect(f.exec.mock.calls.some(([,args]) => args.includes("--version"))).toBe(false);
     expect(f.deps.launch).toHaveBeenCalledTimes(1);
+    expect(f.deps.herdrConfig).not.toHaveBeenCalled();
   });
 
   it.each<[string, string[]]>([
@@ -338,7 +396,7 @@ describe("desktop terminal view", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]![0]).toBe(app);
     expect(calls[0]![1].slice(0, -1)).toEqual([...prefix, "/bin/sh", "-c"]);
-    expect(calls[0]![1].at(-1)).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(calls[0]![1].at(-1)).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' HERDR_CONFIG_PATH='/fixture/private herdr.toml' '/fixture/bin/herdr'");
     expect(result).toMatchObject({ ok: true, window: { app, surface: "window-requested" } });
     expect(result.notes?.join(" ")).toContain("Requested 140 columns by 40 rows");
   });

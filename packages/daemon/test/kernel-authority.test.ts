@@ -15,6 +15,8 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { observeClaudePaneProcess } from "../src/domain/native-process-lineage.js";
+import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -44,12 +46,18 @@ function assertGrant(command: string, runtime: string) {
     expect(command).toContain("Bash(rig:*)"); expect(command).toContain("Bash(tmux:*)");
     expect(command).toContain('"Skill"'); expect(command).not.toContain("--dangerously-skip-permissions");
     expect(command).not.toContain("skipDangerousModePermissionPrompt");
-    const json = command.match(/'--settings' '([^']+)'/)?.[1];
-    expect(json).toBeDefined();
-    expect(Object.keys(JSON.parse(json!))).toEqual(["permissions"]);
-    expect(Object.keys(JSON.parse(json!).permissions)).toEqual(["allow"]); // no reset of user ask/deny
-    expect(JSON.parse(json!).permissions.allow).toContain("Read(~/**)");
-    expect(JSON.parse(json!).permissions.allow).toEqual(expect.arrayContaining(["Bash(claude auth status:*)", "Bash(codex login status:*)"]));
+    const args = operationalLaunchArgs("claude-code", { kernelAuthority: true });
+    expect(command).toContain(args.map(arg => ` ${shellQuote(arg)}`).join(""));
+    const settings = JSON.parse(args[1]);
+    expect(Object.keys(settings)).toEqual(["permissions", "hooks"]);
+    expect(Object.keys(settings.permissions)).toEqual(["allow"]); // no reset of user ask/deny
+    expect(settings.permissions.allow).toEqual(expect.arrayContaining([
+      "Read(~/**)", "WebFetch", "Bash(claude auth status:*)", "Bash(codex login status:*)",
+      "Bash(command -v:*)", "Bash(python3:*)", "Bash(cd:*)", "Bash(sort:*)", "Bash(wc:*)",
+    ]));
+    expect(settings.permissions.allow).not.toContain("Bash");
+    expect(settings.hooks.PreToolUse[0].matcher).toBe("Bash");
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain("claude-team-permissions.cjs");
   } else {
     expect(command).toContain("-s danger-full-access -a never");
     expect(command).toContain("notice.hide_full_access_warning=true");

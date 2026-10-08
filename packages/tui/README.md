@@ -77,6 +77,11 @@ registry with live availability):
 
     printf 'agent dev.impl\n' | nc -U ~/.openrig/run/tui-tui-1.sock
 
+Terminals, Needs, System, Scopes, Config, Specs and file pages read no rigs. A
+`host`, `rig`, `pod` or `agent` address sent from one switches to Topology and
+resolves once that page's read settles. Until then the reply carries `resolving` and a `notice`; send `state`
+for the result (the drill, or the error).
+
 Socket rules (arch standing constraint): every socket command goes through the
 one resolver/mutation path, and verbs stay OBSERVE/NAVIGATE/DRIVE-STRUCTURE
 only. Unix-socket paths must stay under ~104 bytes (sun_path) — keep the

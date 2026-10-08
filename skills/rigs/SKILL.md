@@ -70,6 +70,11 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way. The operator helps them pick a team that fits their logins, starts it on their yes and gives the goal to the
   team's lead. Show them where the operator answers, and don't build the project yourself.
+- **Relay the operator's questions:** the operator asks in its own pane, and the person may not be looking there.
+  After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
+  something (start this team? which folder? which option?), ask them here in the operator's words and send their
+  answer back with `rig send`, or tell them to answer in the operator's pane. Unlike a prompt or a menu, a question
+  doesn't show up as a stopped seat, so don't leave it to a background wait.
 - **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
   that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
   operator is still pending.

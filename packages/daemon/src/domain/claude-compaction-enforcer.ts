@@ -282,7 +282,7 @@ export function buildPostCompactRestorePrompt(input: {
     pieces.push("A post-compaction instruction file declaring a DIFFERENT seat was present and has been IGNORED — it is not yours; do NOT read or follow it. Rely on the per-seat marker and the JSONL transcript for restore.");
   }
   pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read your newest restore map and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.");
-  pieces.push(`During this restore, read ${path.join(input.openrigHome, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and run its topology and work traces. Name any missing source, the current user outcome, and your next action from the files you actually read, not from the compact summary.`);
+  pieces.push(`During this restore, read ${path.join(input.openrigHome, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and consume the current topology and work traces delivered with this restore request, if present; do not rerun Python just to duplicate a delivered trace. Missing trace delivery is a named gap. Read required notes and full sources with the native file-read tool; a pointer, compact summary or truncated extract is not a full source read. Name any missing source, the current user outcome, and your next action from the files you actually read, not from the compact summary.`);
   return pieces.join(" ");
 }
 
@@ -297,7 +297,7 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
   pieces.push(
     "List every file, packet, marker, restore map, instruction file, and source document you were asked to read during restore.",
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
-    "Include the refocusing skill and the topology and work trace sources; if the traces did not run during restore, run them now and report any gaps.",
+    "Include the refocusing skill and the topology and work trace sources. Account for the current traces actually delivered during restore; do not rerun Python to duplicate them. If no current trace arrived, report that delivery gap. Read required notes and full sources with the native file-read tool; pointers, compact summaries and truncated extracts do not count as full source reads.",
     "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
     "Read every required item that is not FULL in full now, without skimming, then report the final read-depth table before continuing.",
   );

@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
+import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 
 interface Pane { seat: string; label: string; paneCommand: string }
@@ -23,6 +24,7 @@ export interface WindowDeps {
   launch(file: string, args: string[]): Promise<void>;
   sleep(ms: number): Promise<void>;
   id(): string;
+  herdrConfig(socketPath: string): string;
 }
 
 export function defaultWindowDeps(): WindowDeps {
@@ -39,6 +41,7 @@ export function defaultWindowDeps(): WindowDeps {
     }),
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     id: () => randomUUID().slice(0, 12),
+    herdrConfig: socketPath => prepareHerdrLaunchConfig(env, socketPath),
   };
 }
 
@@ -170,17 +173,26 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failure(provider, "The terminal view changed since preview. Refresh the preview before opening.");
     }
     if (!composed.opened.length) return { ...failed("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
+    const socket = preview.data.status.launch?.socketPath;
+    let configEnv = "";
+    if (herdr && socket) {
+      try {
+        configEnv = ` HERDR_CONFIG_PATH=${shellQuote(deps.herdrConfig(socket))}`;
+        windowNotes.push("Herdr starts with the sidebar collapsed unless this endpoint has a saved choice; later toggles are kept.");
+      } catch (error) {
+        windowNotes.push(`Could not prepare OpenRig's private Herdr settings (${error instanceof Error ? error.message : String(error)}); Herdr starts with its usual sidebar.`);
+      }
+    }
     if (typeof launchWindow === "string") {
-      const socket = preview.data.status.launch?.socketPath;
       const command = herdr && socket
-        ? `env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)} ${shellQuote(herdr)}`
+        ? `env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`
         : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh /, "ssh -t ")}`;
       const headless = deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]
         || (deps.platform === "linux" && !deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]);
       const where = headless ? "Open a new SSH session to the daemon's host" : "Open a new terminal window on the daemon's host";
       const notes = herdr && socket
         ? [`After the person starts Herdr, have the agent place this view by running: rig terminal open ${shellQuote(view)} --provider herdr`] : [];
-      return { ...failure(provider, `No terminal window was opened. ${launchWindow} ${where} and run: ${command}`), windowAttempted: false, absent: composed.absent, degraded: composed.degraded, notes };
+      return { ...failure(provider, `No terminal window was opened. ${launchWindow} ${where} and run: ${command}`), windowAttempted: false, absent: composed.absent, degraded: composed.degraded, notes: [...notes, ...windowNotes] };
     }
 
     if (herdr) {
@@ -188,7 +200,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       if (!endpoint?.socketPath) throw new Error("The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window.");
       // A CLI session would override the daemon's resolved socket in Herdr.
       windowAttempted = true;
-      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`);
+      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)}${configEnv} ${shellQuote(herdr)}`);
       let alive = false;
       for (let attempt = 0; attempt < 20; attempt++) {
         const status = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>("/api/terminal/status?provider=herdr");
