@@ -133,9 +133,9 @@ first:
 3. the latest restore packet, when one is marked;
 4. the superseded recaps.
 
-A missing `RECAP.md` is recorded as a gap, and the successor starts from `LEARNED.md`
-alone. So before a handover, a compaction or a long pause, the sitting occupant
-writes its recap alongside `LEARNED.md`:
+A missing `RECAP.md` is recorded as a gap. The successor is directed to the remaining
+available artifacts in that order. So before a handover, a compaction or a long pause,
+the sitting occupant writes its recap alongside `LEARNED.md`:
 
 ```sh
 rig context recap-write --rig <rig> --seat <seat> --file <draft.md>
@@ -149,12 +149,12 @@ rig context recap-write --rig <rig> --seat <seat> --file <draft.md>
   the chain is kept.
 
 **The store refuses the write, and writes nothing,** when a section can't be
-addressed. Only H2 and H3 headings are sections, and a heading's address is its
-title in lowercase with each run of other characters turned into one hyphen. It
-refuses:
-- two H2s whose titles give the same address, or two such H3s under one H2;
-- a heading with no letters or digits in its title;
-- an unclosed code fence.
+addressed. Only H2 and H3 headings are sections. Addresses lowercase the title,
+remove Markdown formatting markers, replace remaining runs outside `a-z`/`0-9` with
+a hyphen, and trim edge hyphens. Duplicate section paths, a nonblank H2/H3 title
+that normalizes to an empty slug, and an unclosed code fence are refused. A
+duplicate path is two H2s with the same address, or two H3s with the same address
+under one H2. Blank headings are retained as scope boundaries.
 
 **It writes, with an advisory on stderr,** when:
 - no H2 or H3 title contains "decision";
