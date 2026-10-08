@@ -7,7 +7,10 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
+import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
+import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
+import { CheckpointStore } from "../src/domain/checkpoint-store.js";
+import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -173,6 +176,54 @@ describe("RigTeardownOrchestrator", () => {
     await td.teardown(rigId);
 
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures durable recovery state before stopping when live metadata discovery fails", async () => {
+    const { rigId, nodeId, sessionId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
+    sessionRegistry.updateResumeToken(sessionId, "codex_id", "saved-thread", "operator");
+    const missingTokenNode = rigRepo.addNode(rigId, "new-seat", { runtime: "codex", cwd: tmpDir });
+    const missingTokenSession = sessionRegistry.registerSession(missingTokenNode.id, "new-seat@test-rig");
+    sessionRegistry.updateStatus(missingTokenSession.id, "running");
+    const checkpointStore = new CheckpointStore(db);
+    checkpointStore.createCheckpoint(nodeId, { summary: "latest work", nextStep: "finish review" });
+    const snapshotRepo = new SnapshotRepository(db);
+    const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
+    const tmux = mockTmux();
+    tmux.getPanePid = vi.fn(async () => 100);
+    const refresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: tmux,
+      listProcesses: async () => { throw new Error("process discovery timed out"); } });
+    tmux.killSession = vi.fn(async () => {
+      const captured = snapshotRepo.findLatestAutoPreDown(rigId);
+      expect(captured?.data.sessions.find(s => s.id === sessionId)).toMatchObject({ status: "running", resumeToken: "saved-thread" });
+      expect(captured?.data.checkpoints[nodeId]).toMatchObject({ summary: "latest work", nextStep: "finish review" });
+      return { ok: true };
+    });
+    const td = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus,
+      tmuxAdapter: tmux, snapshotCapture, resumeMetadataRefresher: refresher });
+
+    const result = await td.teardown(rigId);
+
+    expect(result.snapshotId).toBe(snapshotRepo.findLatestAutoPreDown(rigId)?.id);
+    expect(result.snapshotId).not.toBeNull();
+    expect(result.sessionsKilled).toBe(2);
+    expect(result.errors).toContain("Resume metadata refresh failed: process discovery timed out");
+    expect(result.errors.some(error => error.startsWith("Snapshot failed:"))).toBe(false);
+    expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === sessionId)?.status).toBe("exited");
+  });
+
+  it("reports refresh and capture failures separately and still stops the rig", async () => {
+    const { rigId } = seedRig();
+    const snapshotCapture = mockSnapshotCapture(db);
+    vi.mocked(snapshotCapture.captureSnapshot).mockImplementation(() => { throw new Error("snapshot storage unavailable"); });
+    const tmux = mockTmux();
+    const td = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, snapshotCapture,
+      resumeMetadataRefresher: { refresh: async () => { throw new Error("discovery unavailable"); } } as unknown as ResumeMetadataRefresher });
+
+    const result = await td.teardown(rigId);
+
+    expect(snapshotCapture.captureSnapshot).toHaveBeenCalledWith(rigId, "auto-pre-down");
+    expect(result).toMatchObject({ snapshotId: null, sessionsKilled: 1 });
+    expect(result.errors).toEqual(["Resume metadata refresh failed: discovery unavailable", "Snapshot failed: snapshot storage unavailable"]);
   });
 
   // T7: --force (same as default in v1)
