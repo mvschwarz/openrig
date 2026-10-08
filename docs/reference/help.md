@@ -63,7 +63,7 @@ in a report; otherwise follow the accompanying diagnostic. If the only remaining
 
 ### Installation finished, but there is nobody to talk to
 
-Load the `rigs` skill and follow its step 2: it opens the welcome screen (`rig terminal open saved:kernel --window`),
+Load the `rigs` skill and follow its step 2: it opens the switchboard (`rig terminal open saved:kernel --window`),
 gives the attach commands when the window can't open or over SSH, and hands the person's goal to the operator.
 [Install and sign in](getting-started.md#install-and-sign-in) says how to load it. The reference for the view, manual
 attachment and the table of what can interrupt it is
@@ -71,7 +71,7 @@ attachment and the table of what can interrupt it is
 (`rig context get reference/getting-started.md#open-the-kernel-conversations`). Started is not ready: the view can
 open while the kernel's agents finish starting, and opening it creates no other kernel or account.
 
-### A step interrupted setup or the welcome screen
+### A step interrupted setup or the switchboard
 
 Name the exact command and result, the reason it stopped and the next useful step. A harness's permission rules,
 sandbox or automatic permission decision can refuse an installing agent's tool call before OpenRig runs.
@@ -86,7 +86,7 @@ Automation permission; a missing display or remote daemon needs the documented h
 Herdr may show an intro (Return to continue) and an agent-integration panel (Esc to close); the view does not
 require installing those integrations. Enlarge a cramped 80×24 window. Use authorized desktop tools to inspect the
 window contents, or state that visibility is unconfirmed and ask the person to check. A successful command or
-window listing alone is not visual proof. The [welcome-screen guide and friction table](getting-started.md#open-the-kernel-conversations)
+window listing alone is not visual proof. The [switchboard guide and friction table](getting-started.md#open-the-kernel-conversations)
 connects each observation to its next step. Preserve existing conversations while resolving it.
 
 ### The team did not start, or a terminal is missing

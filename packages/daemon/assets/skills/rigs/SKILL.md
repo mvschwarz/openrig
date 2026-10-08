@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when the user types /rigs, or asks to install OpenRig, to see their OpenRig agents ("show me my agents", "show me the terminals", the welcome screen or the OpenRig view), to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
+description: Use when the user types /rigs, or asks to install OpenRig, to see their OpenRig agents ("show me my agents", "show me the terminals", the switchboard or the OpenRig view), to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
 ---
 
 # rigs: your route into OpenRig
@@ -36,14 +36,15 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
-- **Open the welcome screen:** for “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
+- **Open the switchboard:** for “show me my agents”, “show me the terminals”, “see my agents” or “switchboard”, run
   `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig view now?”
   first. It opens a new terminal tab/window itself, using herdr when installed or plain tmux otherwise.
   Below 120 measured columns (or unknown width), the operator fills the first page; from 120, dashboard and operator
   share it equally. The advisor always has a separate tab or tmux window; select one to switch.
-  Inside Herdr, it focuses a matching view or creates one in the current session without another window.
+  Inside Herdr, it switches the person's Herdr to a `switchboard` space, reusing a live one, without another window;
+  their own spaces stay in the sidebar.
   On a Mac, Claude Desktop, iTerm and VS Code callers get a new supported Ghostty window, otherwise Terminal.
-  Before running it, tell the person **Allow is fine** if macOS asks to control that app: it opens the welcome view they requested.
+  Before running it, tell the person **Allow is fine** if macOS asks to control that app: it opens the switchboard they requested.
   Preserve the current terminal. Check the result and visible content, or report what cannot be
   verified. If the view is already open, point them to it rather than opening another. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
   cannot open, `rig tui --shared` is the dashboard-only fallback; explain the failure and help with the chosen
@@ -62,7 +63,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
     `canonicalSessionName` (never a guessed name) and give
     `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'` for the operator's conversation.
 
-  For any other failure, the table under "What can interrupt installation and the welcome screen" in
+  For any other failure, the table under "What can interrupt installation and the switchboard" in
   `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`

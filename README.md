@@ -57,9 +57,9 @@ Check `tmux -V` and only your selected CLI/login: `claude --version` plus
 sign in once with `claude auth login` or `codex login`; do not install or log in
 to an unused provider.
 
-### Open the welcome screen
+### Open the switchboard
 
-Ask your agent to **“open the welcome screen”**, **“open the OpenRig view”** or
+Ask your agent to **“open the switchboard”**, **“open the OpenRig view”** or
 **“show me my agents”**, **“show me the terminals”** / **“let me see my agents.”** After checking the selected login, it runs:
 
 ```sh
@@ -86,7 +86,7 @@ installation result.
 
 The desktop may need an Automation approval; SSH/headless sessions may have no
 display. Herdr can show first-run panels, and an 80×24 window can cramp the view.
-Follow [the welcome-view checks and next steps](docs/reference/getting-started.md#what-can-interrupt-installation-and-the-welcome-screen).
+Follow [the switchboard checks and next steps](docs/reference/getting-started.md#what-can-interrupt-installation-and-the-switchboard).
 Herdr is visible only inside a terminal you can see. Changing the shared TUI to
 `:terminals` does not open that terminal. The agent checks the visible window when
 it has desktop access and says what it could not verify otherwise. Over headless

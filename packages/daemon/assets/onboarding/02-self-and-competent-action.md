@@ -50,7 +50,7 @@ Keep the kernel for a normal install. `rig daemon start --no-kernel` is for auto
 omit its startup, including the operator that helps the person start a team.
 Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The view may open
 while agents finish starting; report their actual state and use the guide's existing recovery routes when needed.
-For “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
+For “show me my agents”, “show me the terminals”, “see my agents” or “switchboard”, run
 `rig terminal open saved:kernel --window --json` on the daemon's desktop. The request is already permission to
 open it; otherwise ask **“Open the OpenRig view now?”** first. The command opens a new terminal tab/window using
 installed herdr, otherwise plain tmux; inside Herdr it opens a space there. It preserves existing conversations. The default view
