@@ -154,6 +154,17 @@ describe("Claude identity with inline settings in ps output", () => {
     expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
     expect(await verifyClaudePaneProcess({ ...input(args), expectedToken: "different" })).toBeNull();
   });
+  it.each([
+    `--remote-control orch.lead@rig --session-id ${token}`,
+    `--session-id ${token} --remote-control orch.lead@rig`,
+    `--remote-control=orch.lead@rig --resume ${token}`,
+  ])("proves the exact Claude identity with the launch-only Remote Control option: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+  });
   it("preserves an apostrophe in the native Claude executable path", async () => {
     const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
     const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,

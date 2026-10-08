@@ -143,8 +143,13 @@ function claudeSessionToken(args: string[]): string | null {
       if (!value || value.startsWith("-")) return null;
       continue;
     }
+    if (arg === "--remote-control") {
+      if (args[index + 1] && !args[index + 1]!.startsWith("-")) index += 1;
+      continue;
+    }
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
-    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
@@ -168,7 +173,12 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
       if (!value || value.startsWith("-")) return unparsed;
       continue;
     }
-    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (arg === "--remote-control") {
+      if (args[index + 1] && !args[index + 1]!.startsWith("-")) index += 1;
+      continue;
+    }
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
