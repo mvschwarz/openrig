@@ -11,7 +11,7 @@
 // usage data short-circuit, send-failure no-dedup-update semantics.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ClaudeCompactionEnforcer as ActualEnforcer } from "../src/domain/claude-compaction-enforcer.js";
+import { ClaudeCompactionEnforcer as ActualEnforcer, buildPostCompactRestorePrompt } from "../src/domain/claude-compaction-enforcer.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
@@ -448,10 +448,26 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[queuedSends + 1]?.[1]).toContain("restoring this Claude session after compaction");
     expect(await drainTick(enforcer)).toEqual({ triggered: true });
     expect(send.mock.calls[queuedSends + 2]?.[1]).toContain("Now audit your compaction restore");
+    // Without a sample, every stage's send must read the pane: no hook may stand in for it.
+    for (let i = 0; i < 3; i++) {
+      expect(send.mock.calls[queuedSends + i]?.[2]).toEqual({ waitForIdleMs: expect.any(Number), readinessFromPaneOnly: true });
+    }
 
     expect(enforcer.hasPendingPostCompactStage("claude-seat@rig")).toBe(false);
     expect(await drainTick(enforcer)).toEqual({ triggered: false, reason: "no_pending_stage" });
     expect(send.mock.calls.length).toBe(queuedSends + 3);
+  });
+
+  it("the sampled drain keeps ordinary send readiness", async () => {
+    const { enforcer, send, queuedSends } = await queueStageWithGen("gen-uuid-1");
+    expect(await belowTick(enforcer)).toEqual({ triggered: true });
+    expect(send.mock.calls[queuedSends]?.[2]).toEqual({ waitForIdleMs: expect.any(Number) });
+  });
+
+  it("the restore prompt tells a seat that did not compact to say so and skip the restore reading", () => {
+    const prompt = buildPostCompactRestorePrompt({ sessionName: "claude-seat@rig", openrigHome: "/tmp/openrig-test-home" });
+    expect(prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")).toBe(true);
+    expect(prompt).toContain("If you did not compact (your earlier context is still present), say so and skip the restore reading.");
   });
 
   it("a sample-less drain with no pending stage sends nothing and never starts a compaction", async () => {

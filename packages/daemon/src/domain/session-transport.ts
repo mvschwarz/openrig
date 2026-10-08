@@ -681,6 +681,11 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
+   *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
+   *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
+   *  can be the Stop from before /compact. */
+  readinessFromPaneOnly?: boolean;
   // OPR.0.4.1.10 — interactive-prompt / permission guard.
   // `dangerouslyInteract` is the ONLY override of the prompt/permission guard (force does NOT bypass
   // it). It requires `reason` and writes an auditable `transport.prompt_override` record before the
@@ -1377,6 +1382,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -1617,6 +1623,7 @@ export class SessionTransport {
     timeoutMs: number;
     signal?: AbortSignal;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -1698,7 +1705,7 @@ export class SessionTransport {
   /** One readiness observation, raced against the time left before the wait's deadline. Null
    *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
   private async observeReadinessWithin(
-    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding },
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
   ): Promise<AgentActivity | null> {
     const observation = this.classifySendReadiness(input);
@@ -1761,6 +1768,7 @@ export class SessionTransport {
     runtime: string | null;
     attachmentType: string | null;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<AgentActivity> {
     const now = this.now();
     const hookActivity = this.agentActivityStore?.getLatestForNode({
@@ -1771,6 +1779,7 @@ export class SessionTransport {
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
     if (
+      !input.readinessFromPaneOnly &&
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
       hookActivity.stale !== true

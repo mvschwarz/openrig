@@ -272,6 +272,7 @@ export function buildPostCompactRestorePrompt(input: {
     "Please respond to this normal user message now by restoring this Claude session after compaction.",
     "This is the operator-authorized OpenRig restore request referenced by the compact summary; it is not local-command stdout or hook output.",
     "Restoration is the current task. Do not wait for a future user request or task assignment before reading the required files.",
+    "If you did not compact (your earlier context is still present), say so and skip the restore reading.",
     `First, look for the pending restore marker at ${markerPath}.`,
   ];
   if (input.transcriptPath) {
@@ -427,8 +428,10 @@ export class ClaudeCompactionEnforcer {
    * calls this when the latest sample is stale or unknown. Such a sample never starts a
    * compaction, but a seat that takes no turn after /compact never refreshes its sample, so
    * waiting for a fresh one can leave it unrestored. The same gates and the same
-   * one-stage-per-tick progression apply as on the sampled path. No width receipt is recorded,
-   * because no current usage is known.
+   * one-stage-per-tick progression apply as on the sampled path. Each send waits for the pane
+   * itself to read idle: the newest hook can be the Stop from before /compact, so no hook counts
+   * as proof that compaction finished. No width receipt is recorded, because no current usage is
+   * known.
    */
   async drainPendingPostCompactStage(input: Omit<EnforcerInput, "usedPercentage">): Promise<EnforcerOutcome> {
     this.reconcilePreparations();
@@ -467,6 +470,12 @@ export class ClaudeCompactionEnforcer {
     input: EnforcerInput,
     policy: ClaudeCompactionPolicy,
   ): Promise<EnforcerOutcome | null> {
+    // Without a usage sample nothing shows compaction has finished, and the newest hook can be the
+    // Stop from before /compact. Then only a live pane read may count as idle.
+    const sendOpts = {
+      waitForIdleMs: this.postCompactSendWaitMs,
+      ...(input.usedPercentage == null ? { readinessFromPaneOnly: true } : {}),
+    };
     // GHOST-STAGE FIX (a) — gate the DRAIN by `enabled`. A disabled system drains NOTHING: the
     // legacy compaction-stage defect (operator-confirmed ruling 05c174e0) proved that draining a
     // queued stage while disabled fires a GHOST prompt — a handed-over successor inherits the
@@ -499,7 +508,7 @@ export class ClaudeCompactionEnforcer {
       const boundary = await this.sessionTransport.send(
         input.sessionName,
         buildPostCompactTurnBoundaryPrompt(),
-        { waitForIdleMs: this.postCompactSendWaitMs },
+        sendOpts,
       );
       if (!boundary.ok || boundary.outcome === "retained") {
         // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
@@ -523,7 +532,7 @@ export class ClaudeCompactionEnforcer {
           postCompactInstructionFilePath: extra.filePath,
           ignoredWrongSeatExtra: extra.ignoredWrongSeat,
         }),
-        { waitForIdleMs: this.postCompactSendWaitMs },
+        sendOpts,
       );
       if (!restore.ok || restore.outcome === "retained") {
         // Restore is exact-once + operator-authorized: if the seat is still busy
@@ -540,7 +549,7 @@ export class ClaudeCompactionEnforcer {
       const compliance = await this.sessionTransport.send(
         input.sessionName,
         buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
-        { waitForIdleMs: this.postCompactSendWaitMs },
+        sendOpts,
       );
       if (!compliance.ok || compliance.outcome === "retained") {
         // Audit cannot overtake restore: only advances once the restore turn is
