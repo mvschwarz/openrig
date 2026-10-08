@@ -18,6 +18,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run lint
+      - name: Native workspace preparation and packaging selection
+        run: node --test scripts/prepare-workspace-build.test.mjs scripts/run-package-build.test.mjs
       - name: Install pinned portable psmux
         shell: pwsh
         run: |
