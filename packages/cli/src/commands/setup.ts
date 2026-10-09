@@ -183,7 +183,7 @@ function installGhostty(deps: SetupDeps, platform: NodeJS.Platform, choice?: boo
   if (choice !== true) return {
     id, status: "skipped",
     message: "Installing agent: ask once, 'Install Ghostty for the OpenRig view?'",
-    fixHint: "On Yes, rerun rig setup with --ghostty, preserving earlier choices such as --no-herdr. On No, use --no-ghostty; Terminal.app remains available. The person types no command.",
+    fixHint: "On Yes, rerun rig setup with --ghostty, preserving earlier choices such as --no-herdr and --providers. On No, use --no-ghostty; Terminal.app remains available. The person types no command.",
   };
   try {
     installCommand(deps, "brew install --cask ghostty");
@@ -610,7 +610,7 @@ export function goldenPathNextSteps(): string[] {
     "     Herdr needs a terminal the person can see; switching the shared TUI to :terminals does not open one",
     "     No, SSH and headless use are fine background outcomes; do not report an unseen window as opened",
     "     On a desktop, no copying or typing for the person; check the result notes, not just CLI success",
-    "     On a Mac, offer Ghostty once: on Yes run rig setup --ghostty; preserve earlier choices such as --no-herdr",
+    "     On a Mac, offer Ghostty once: on Yes run rig setup --ghostty; preserve earlier choices such as --no-herdr and --providers",
     "     On No use --no-ghostty; Terminal.app remains available",
     "     Setup installs herdr by default; use --no-herdr if the person declines. Plain tmux remains available",
     "     Only if the window cannot open: rig tui --shared is the dashboard-only fallback, not the operator's conversation",
