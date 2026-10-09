@@ -16,6 +16,7 @@
 import nodePath from "node:path";
 import {
   MANAGED_BLOCK_START,
+  MANAGED_BLOCK_END,
   DEFAULT_CLAUDE_MANAGED_BLOCK_FILE,
   mergeManagedBlock,
   type ManagedBlockMergeFsOps,
@@ -25,6 +26,7 @@ import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./bu
 import type { NodeStartupSnapshot } from "./types.js";
 
 const LEGACY_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
+const LEGACY_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
 /** The per-seat role block is delivered through send_text, never merged into a shared file
  *  (ADR-0006); the adapters skip it, and so does this. */
@@ -46,6 +48,7 @@ export function seatGuidance(
   cwd: string | null | undefined,
   claudeManagedBlockFile: string | null | undefined,
   exists: (path: string) => boolean,
+  readFile: (path: string) => string,
 ): SeatGuidance | null {
   if (!startupCtx || !cwd) return null;
   const fileName = startupCtx.runtime === "claude-code"
@@ -61,7 +64,16 @@ export function seatGuidance(
   for (const saved of startupCtx.resolvedStartupFiles) {
     if (!saved.appliesOn.includes("restore")) continue;
     const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
-    const hint = f.deliveryHint === "auto" ? resolveConcreteHint(f.path, "") : f.deliveryHint;
+    // An "auto" file is classified from its content, as at launch (a `# SKILL` file is a skill,
+    // not guidance). If the source can't be read, it can't be classified, so it is left out.
+    let hint: string = f.deliveryHint;
+    if (hint === "auto") {
+      try {
+        hint = resolveConcreteHint(f.path, readFile(f.absolutePath));
+      } catch {
+        continue;
+      }
+    }
     if (hint !== "guidance_merge") continue;
     items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
   }
@@ -69,14 +81,26 @@ export function seatGuidance(
   return { targetPath: nodePath.join(cwd, fileName), items: [...items.values()] };
 }
 
-function hasBlock(content: string, blockId: string): boolean {
-  return content.includes(MANAGED_BLOCK_START(blockId)) || content.includes(LEGACY_BLOCK_START(blockId));
+type BlockState = "complete" | "absent" | "incomplete";
+
+/** A block counts only with both its markers (current or legacy form). A lone marker is incomplete:
+ *  writing next to it is unsafe, because cleanup strips from a BEGIN to the next END. */
+function blockState(content: string, blockId: string): BlockState {
+  const current = [content.includes(MANAGED_BLOCK_START(blockId)), content.includes(MANAGED_BLOCK_END(blockId))];
+  const legacy = [content.includes(LEGACY_BLOCK_START(blockId)), content.includes(LEGACY_BLOCK_END(blockId))];
+  if ((current[0] && current[1]) || (legacy[0] && legacy[1])) return "complete";
+  if (current[0] || current[1] || legacy[0] || legacy[1]) return "incomplete";
+  return "absent";
 }
 
-/** The block ids the seat's guidance file lacks right now. */
-export function missingGuidanceBlocks(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): string[] {
+function blockStates(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): Map<string, BlockState> {
   const content = fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : "";
-  return guidance.items.filter((item) => !hasBlock(content, item.blockId)).map((item) => item.blockId);
+  return new Map(guidance.items.map((item) => [item.blockId, blockState(content, item.blockId)]));
+}
+
+/** The block ids the seat's guidance file lacks right now (absent, or only partly there). */
+export function missingGuidanceBlocks(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): string[] {
+  return [...blockStates(guidance, fs)].filter(([, state]) => state !== "complete").map(([id]) => id);
 }
 
 export interface GuidanceRepair {
@@ -90,14 +114,20 @@ export interface GuidanceRepair {
  *  file are left exactly as they are. Never throws: a failure becomes a reported gap. */
 export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps): GuidanceRepair {
   const repair: GuidanceRepair = { restored: [], gaps: [] };
-  let missing: string[];
+  let states: Map<string, BlockState>;
   try {
-    missing = missingGuidanceBlocks(guidance, fs);
+    states = blockStates(guidance, fs);
   } catch (err) {
     repair.gaps.push(`could not read ${guidance.targetPath}: ${(err as Error).message}`);
     return repair;
   }
-  for (const item of guidance.items.filter((i) => missing.includes(i.blockId))) {
+  for (const item of guidance.items) {
+    const state = states.get(item.blockId);
+    if (state === "complete") continue;
+    if (state === "incomplete") {
+      repair.gaps.push(`${item.blockId}: ${guidance.targetPath} holds only part of this block (one marker); left as it is`);
+      continue;
+    }
     try {
       if (!fs.exists(item.sourcePath)) {
         repair.gaps.push(`${item.blockId}: its source ${item.sourcePath} no longer exists`);

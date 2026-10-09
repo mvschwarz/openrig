@@ -35,7 +35,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 
 const TOKEN = "tok-lead";
 
-function mockTmux(): TmuxAdapter {
+function mockTmux(opts: { noPane?: boolean } = {}): TmuxAdapter {
   return {
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
@@ -46,7 +46,7 @@ function mockTmux(): TmuxAdapter {
     capturePaneContent: vi.fn(async () => ""),
     listSessions: async () => [],
     listWindows: async () => [],
-    listPanes: async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }],
+    listPanes: async () => (opts.noPane ? [] : [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
     hasSession: async () => false,
   } as unknown as TmuxAdapter;
 }
@@ -63,6 +63,8 @@ interface SeatOptions {
   runtime?: "claude-code" | "codex";
   claudeManagedBlockFile?: "CLAUDE.md" | "CLAUDE.local.md";
   userText?: string;
+  /** An extra "auto" startup file whose content marks it as a skill. */
+  autoSkillFile?: boolean;
 }
 
 describe("a seat's guidance across rig down then rig up --existing (exact resume)", () => {
@@ -132,6 +134,11 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       path: "SOP.md", absolutePath: path.join(spec, "SOP.md"), ownerRoot: spec,
       deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"],
     }];
+    if (opts.autoSkillFile) {
+      fs.writeFileSync(path.join(spec, "helper.md"), "# SKILL\nA skill, never merged into guidance.");
+      files.push({ path: "helper.md", absolutePath: path.join(spec, "helper.md"), ownerRoot: spec,
+        deliveryHint: "auto", required: false, appliesOn: ["fresh_start", "restore"] });
+    }
     const actions = [{ type: "send_text", value: "STARTUP-PROMPT-MUST-NOT-REPLAY", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true }];
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
       .run(node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify(actions), runtime);
@@ -144,9 +151,9 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
 
   /** `rig down` (the real teardown), then `rig up --existing` from its auto snapshot. Records
    *  the guidance file's content at the moment the native harness was started. */
-  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void } = {}) {
+  async function downThenUpExisting(rigId: string, guidanceFile: string, opts: SeatOptions & { betweenDownAndUp?: () => void; noPane?: boolean } = {}) {
     const runtime = opts.runtime ?? "claude-code";
-    const tmux = mockTmux();
+    const tmux = mockTmux({ noPane: opts.noPane });
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, snapshotCapture, eventBus })
       .teardown(rigId);
     expect(down.snapshotId).toBeTruthy();
@@ -278,5 +285,41 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.warnings.join("\n")).toMatch(/no longer exists/);
     const content = fs.readFileSync(guidanceFile, "utf-8");
     expect(content).toContain(MANAGED_BLOCK_START("lead-role")); // what could be put back, was
+  });
+
+  it("an auto startup file that is a skill (by its content) is not put into the guidance file", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ autoSkillFile: true });
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile);
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(fileAtHarnessStart).not.toContain(MANAGED_BLOCK_START("helper.md"));
+    expect(fileAtHarnessStart).not.toContain("A skill, never merged into guidance.");
+    expect(result.rigResult).toBe("fully_restored"); // a skill is not a guidance gap
+  });
+
+  it("a block with only one marker is reported, not written next to: the file is left as it is", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const halfBlock = `# Notes\n${MANAGED_BLOCK_START("SOP.md")}\nhalf of an old block, its END marker lost\n`;
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
+      betweenDownAndUp: () => fs.writeFileSync(guidanceFile, halfBlock),
+    });
+    expect(fileAtHarnessStart).toContain(halfBlock.trim()); // untouched apart from the missing role block
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(fileAtHarnessStart!.split(MANAGED_BLOCK_START("SOP.md")).length - 1).toBe(1);
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect(lead?.guidanceGaps).toEqual(["SOP.md"]);
+    expect(result.rigResult).toBe("partially_restored");
+    expect(result.warnings.join("\n")).toMatch(/only part of this block/);
+  });
+
+  it("a live seat that needs attention keeps that status and also discloses its guidance gap", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const { result } = await downThenUpExisting(rigId, guidanceFile, {
+      noPane: true, // the joined-resume proof can't find a pane: attention_required, session preserved
+      betweenDownAndUp: () => fs.rmSync(path.join(spec, "SOP.md")),
+    });
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("attention_required");
+    expect(lead?.guidanceGaps).toEqual(["SOP.md"]);
   });
 });

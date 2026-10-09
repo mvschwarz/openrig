@@ -946,9 +946,10 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     warnings?: string[],
   ): RestoreNodeResult {
-    if (!["resumed", "fresh-primed", "fresh", "rebuilt"].includes(result.status)) return result;
+    // Every status with a live session; attention_required keeps its status and gains the disclosure.
+    if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     const guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
-      this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync);
+      this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
     if (!guidance || guidance.items.length === 0) return result;
     let missing: string[];
     try {
@@ -1059,7 +1060,7 @@ export class RestoreOrchestrator {
     // seat came back with no role, culture or SOP. Existing blocks are never refreshed; nothing
     // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
     if (resumeRequested && resumeToken && launchResult) {
-      const guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync);
+      const guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
       if (guidance && guidance.items.length > 0) {
         const repair = restoreMissingGuidance(guidance, {
           exists: existsSync,
