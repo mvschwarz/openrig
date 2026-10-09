@@ -327,6 +327,30 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
     expect(find(viaShell)).toBe(11);
     expect(find(scriptRows(`claude --session-id ${other}`).map(r => r.pid === 12 ? { ...r, pgid: 99 } : r))).toBe(11);
   });
+  // #1091 round 3.
+  it("does not count a grandchild of an intermediate Claude runtime against the launcher", () => {
+    const rows = scriptRows("claude --settings /shim/settings.json");
+    rows.push({ ...rows[2]!, pid: 13, ppid: 12, command: `claude --session-id ${other}` });
+    expect(find(rows)).toBe(11);
+  });
+  const helper = (pid: number, args: string): NativeProcessRow =>
+    ({ pid, ppid: 11, pgid: 11, tpgid: 11, executableName: "ugrep", command: `ugrep -n claude ${args} file.ts`, startedAt });
+  it("returns the exact Claude child, never a helper, whatever the row order", () => {
+    const base = scriptRows(`claude --resume ${token}`);
+    const withHelper = [...base.slice(0, 2), helper(9, `--session-id ${token}`), base[2]!];
+    expect(find(withHelper)).toBe(12);
+    expect(find([...withHelper].reverse())).toBe(12);
+    expect(find([...base, helper(13, `--session-id ${token}`)])).toBe(12);
+  });
+  it("refuses a script on X with a helper on X over a real Claude on Y", () => {
+    const rows = [...scriptRows(`claude --session-id ${other}`), helper(9, `--session-id ${token}`)];
+    expect(find(rows)).toBeNull();
+    expect(find([...rows].reverse())).toBeNull();
+  });
+  it("keeps the pane root as the proof when the root Claude has an exact child", () => {
+    const rows = realRows(`claude --session-id ${token}`);
+    expect(findExactNativeResumeProcess(rows, 11, "claude-code", token)?.pid).toBe(11);
+  });
   it("leaves --fork-session children as on main (separate follow-up)", () => {
     expect(find(scriptRows(`claude --resume ${token} --fork-session`))).toBe(11);
   });

@@ -12,6 +12,7 @@ import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.j
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { verifyClaudePaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
+import { resolveIdentityVerifiedClaudeRecord } from "../src/domain/model-divergence/current-generation-record.js";
 
 // Same foreground/OS/argv specimen as the #197 diagnosis. These are process
 // observations, not a provider, a conversation, or evidence of input consumption.
@@ -235,11 +236,34 @@ describe("Claude wrapper manual attention recovery", () => {
     ["a script launcher over a child on another conversation", [script, kid(101, 100, "claude", "claude --session-id different")], false],
     ["a child that names the token", [script, kid(101, 100, "claude", "claude --resume review-token")], true],
     ["a verified Claude that starts a child Claude on another conversation", [real("--resume review-token"), kid(101, 100, "claude", "claude --session-id different")], true],
+    ["an intermediate opaque Claude whose own child is on another conversation",
+      [script, kid(101, 100, "claude", "claude --settings /shim/settings.json"), kid(102, 101, "claude", "claude --session-id different")], true],
+    ["a script and a helper on the token over a real Claude on another conversation",
+      [script, kid(101, 100, "ugrep", "ugrep -n claude --session-id review-token file.ts"), kid(102, 100, "claude", "claude --session-id different")], false],
   ] as const)("strict restore with %s", async (_name, rows, proved) => {
     const f = fixture("review-token");
     f.tmux.getPaneCommand.mockResolvedValue("claude");
     f.listProcesses.mockResolvedValue([...rows]);
     expect((await f.verify(true)).ok).toBe(proved);
+  });
+
+  // #1091 round 3: a pane-root Claude with an exact child keeps the pane root as its
+  // observed pid, so the record resolver accepts the unchanged live pane, as on main.
+  it("a pane-root Claude with an exact child stays resolvable", async () => {
+    const id = "00000000-0000-4000-8000-000000001091";
+    const f = fixture(id);
+    f.tmux.getPaneCommand.mockResolvedValue("claude");
+    const rows = [real(`--resume ${id} --name worker@review197`), kid(101, 100, "claude", `claude --session-id ${id}`)];
+    f.listProcesses.mockResolvedValue(rows);
+    expect((await f.verify(true)).ok).toBe(true);
+    const identity = f.store.getForNode(f.node.id)!;
+    expect(identity.evidence.observedPid).toBe(100);
+    const selection = await resolveIdentityVerifiedClaudeRecord({
+      sessionName: f.name, generation: "generation-current", occupantBootAt: "2000-01-01 00:00:00",
+      binding: { tmuxSession: f.name, tmuxPane: f.pane }, identity,
+      sidecar: { session_id: id, session_name: f.name, transcript_path: `/fixture/${id}.jsonl` },
+    }, { getPanePid: async () => 100, listProcesses: async () => rows }, () => true);
+    expect(selection).toMatchObject({ ok: true, id });
   });
 
   it("keeps full restore outcome reconciliation ahead of runtime occupancy", async () => {

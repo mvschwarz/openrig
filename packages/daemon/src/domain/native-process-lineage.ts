@@ -211,14 +211,15 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   return token;
 }
 
-/** Conversations named by verified Claude runtimes that `parent` starts directly
- * (same process group, no shell between). A runtime counts only on executable,
- * argv0 and path evidence (`claudeProcess`), never on an argument that mentions
- * claude, and only an explicitly parsed `--session-id`/`--resume` names one: an
- * opaque or unparsed child names nothing. */
-function directClaudeChildIdentities(parent: NativeProcessRow, processes: NativeProcessRow[], byPid: Map<number, NativeProcessRow>): Set<string> {
-  const identities = new Set<string>();
-  if (parent.pgid === undefined) return identities;
+/** Verified Claude runtimes that `parent` starts directly (same process group,
+ * no shell or other Claude runtime between), keyed by the conversation each
+ * names. A runtime counts only on executable, argv0 and path evidence
+ * (`claudeProcess`), never on an argument that mentions claude, and only an
+ * explicitly parsed `--session-id`/`--resume` names one: an opaque or unparsed
+ * child names nothing. The lowest pid wins, so row order cannot change it. */
+function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcessRow[], byPid: Map<number, NativeProcessRow>): Map<string, NativeProcessRow> {
+  const children = new Map<string, NativeProcessRow>();
+  if (parent.pgid === undefined) return children;
   const isShell = (row: NativeProcessRow) => isShellForeground(executableName(tokens(row.command)[0]?.replace(/^-/, "") ?? ""));
   for (const row of processes) {
     if (row === parent || row.pgid !== parent.pgid || !claudeProcess(row)) continue;
@@ -227,13 +228,18 @@ function directClaudeChildIdentities(parent: NativeProcessRow, processes: Native
     const seen = new Set<number>();
     let current = byPid.get(row.ppid);
     while (current && !seen.has(current.pid)) {
-      if (current.pid === parent.pid) { identities.add(identity); break; }
-      if (isShell(current)) break;
+      if (current.pid === parent.pid) {
+        const known = children.get(identity);
+        if (!known || row.pid < known.pid) children.set(identity, row);
+        break;
+      }
+      // A child of an intermediate runtime belongs to that runtime, not to parent.
+      if (isShell(current) || claudeProcess(current)) break;
       seen.add(current.pid);
       current = byPid.get(current.ppid);
     }
   }
-  return identities;
+  return children;
 }
 
 /** Require a live process in the pane's own lineage whose argv names both the
@@ -261,13 +267,19 @@ export function findExactNativeResumeProcess(
     visited.add(pid);
     const process = byPid.get(pid);
     if (process && commandUsesExpectedToken(process.command, runtime, expectedToken)) {
-      const deeper = directClaudeChildIdentities(process, processes, byPid);
-      // A deeper runtime naming the token is the proof process.
+      const deeper = directClaudeChildren(process, processes, byPid);
+      const exact = deeper.get(expectedToken);
+      // A deeper runtime naming the token is the proof process, returned directly so
+      // the descent never stops at a helper. The pane root keeps its own row: pane
+      // identity stays the root, as on main.
+      if (exact) return pid === panePid ? process : exact;
       // A launcher that is not itself a verified Claude runtime is refused only
-      // when a deeper runtime positively names another conversation. A verified
-      // Claude on the token keeps its proof: ps cannot tell a launcher binary over
-      // the real Claude from a real Claude that started a child Claude.
-      if (!deeper.has(expectedToken) && (claudeProcess(process) || deeper.size === 0)) return process;
+      // when a deeper runtime positively names another conversation; its subtree
+      // is that runtime chain, so nothing below it is searched. A verified Claude
+      // on the token keeps its proof: ps cannot tell a launcher binary over the
+      // real Claude from a real Claude that started a child Claude.
+      if (claudeProcess(process) || deeper.size === 0) return process;
+      continue;
     }
     for (const child of byParent.get(pid) ?? []) queue.push(child.pid);
   }
