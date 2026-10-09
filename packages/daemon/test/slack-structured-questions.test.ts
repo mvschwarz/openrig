@@ -17,6 +17,7 @@ import { buildOutboundMessage } from "../src/domain/gateway/slack/message.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import type { WsLike } from "../src/domain/gateway/slack/socket-inbound.js";
+import { CLICK_REPLIES, clickNotRecordedReply } from "../src/domain/gateway/slack/inbound.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
@@ -344,6 +345,50 @@ describe("structured human questions (#193)", () => {
       expect(threadAcks().some((t) => t.startsWith("All answered"))).toBe(false);
     });
 
+    // A refused or unrecorded click is answered in the thread, once per click (0.6.9).
+    it("tells an unregistered sender in the thread who may answer, and records nothing", async () => {
+      expect(await click("db", "pg", { user: "USTRANGER" })).toMatchObject({ status: "refused", reason: "unregistered" });
+      await vi.waitFor(() => expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]));
+      expect(repo.getById(decisionId)?.humanAnswers).toBeNull();
+    });
+
+    it("says a decision is already closed, once, and never answers Slack's redelivery of a click it already handled", async () => {
+      await click("db", "pg");
+      await click("ship", "no", { actionTs: "2000.1" });
+      await vi.waitFor(() => expect(threadAcks()).toHaveLength(2)); // Recorded …, All answered …
+      await click("ship", "no", { actionTs: "2000.1" }); // Socket Mode redelivery of the final click
+      await click("ship", "yes", { actionTs: "2001.1" }); // a real late click
+      await click("ship", "yes", { actionTs: "2001.1" }); // and its redelivery
+      await vi.waitFor(() => expect(threadAcks()).toHaveLength(3));
+      expect(threadAcks()[2]).toBe(CLICK_REPLIES.closed);
+      expect(threadAcks().filter((t) => t === CLICK_REPLIES.closed)).toHaveLength(1);
+      expect(repliesToSeat()).toHaveLength(1);
+    });
+
+    it("tells the person when a button no longer matches the decision, or its message can't be matched", async () => {
+      await click("db", "mysql");
+      await vi.waitFor(() => expect(threadAcks()).toEqual([CLICK_REPLIES.stale]));
+      await click("db", "pg", { root: "9.9" }); // a message with no decision mapped to it
+      await vi.waitFor(() => expect(posts.filter((p) => p.thread_ts === "9.9").map((p) => String(p.text))).toEqual([CLICK_REPLIES.unmapped]));
+      expect(repo.getById(decisionId)?.humanAnswers).toBeNull();
+    });
+
+    it("says the answers were sent back when the decision itself didn't close", async () => {
+      resolveOverride = async () => "not-applicable";
+      await click("db", "pg");
+      await click("ship", "yes");
+      await vi.waitFor(() => expect(threadAcks()).toContain(CLICK_REPLIES.notClosed));
+    });
+
+    it("still confirms a hand-back that the dead-letter retry lands", async () => {
+      const create = repo.create.bind(repo);
+      vi.spyOn(repo, "create").mockImplementationOnce(async () => { throw new Error("database is locked"); }).mockImplementation(create);
+      await click("db", "pg");
+      await click("ship", "yes");
+      await vi.waitFor(() => expect(threadAcks().some((t) => t.startsWith("All answered"))).toBe(true));
+      expect(threadAcks().filter((t) => t.startsWith("Your answers are recorded, but handing them back failed"))).toHaveLength(1);
+    });
+
     it("keeps a single-question typed correction on the decision before notifying its subscribers (#1037)", async () => {
       const { id, root } = await postDecision([questions[1]!]);
       const text = "Not yet — change X first.\nThen ask again.";
@@ -451,5 +496,16 @@ describe("structured human questions (#193)", () => {
       expect(await resolver(input)).toBe("already-resolved");
       expect(repo.getById(decisionId)?.humanAnswers).toEqual({ db: typedReply(input.decision, 1) });
     });
+  });
+});
+
+describe("the reply to a click that wasn't recorded", () => {
+  it("names a closed decision, someone else's decision, a stale button, or an unavailable answer", () => {
+    expect(clickNotRecordedReply("state-done")).toBe(CLICK_REPLIES.closed);
+    expect(clickNotRecordedReply("state-failed")).toBe(CLICK_REPLIES.closed);
+    expect(clickNotRecordedReply("not-the-asked-human")).toBe(CLICK_REPLIES.someoneElse);
+    expect(clickNotRecordedReply("unknown-option")).toBe(CLICK_REPLIES.stale);
+    expect(clickNotRecordedReply("no-questions")).toBe(CLICK_REPLIES.stale);
+    expect(clickNotRecordedReply("schema")).toBe(CLICK_REPLIES.unavailable);
   });
 });

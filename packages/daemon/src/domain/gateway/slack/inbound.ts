@@ -52,6 +52,26 @@ export interface SlackBlockActions {
 
 export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string }) => RecordHumanAnswerResult;
 
+/** What a person reads in the thread when OpenRig refuses a click or can't record it. Plain words: what happened, and
+ *  who may answer or what to do instead. The same clicks are refused as before; they just aren't silent. */
+export const CLICK_REPLIES = {
+  unregistered: "This click wasn't recorded: only the person this decision was sent to can answer it, and your Slack account isn't registered with this OpenRig.",
+  unmapped: "This click wasn't recorded: OpenRig can't find the decision this message belongs to. Reply in this thread in words instead.",
+  closed: "This decision is already closed, so this click wasn't recorded.",
+  someoneElse: "This click wasn't recorded: this decision was sent to someone else, and only they can answer it.",
+  stale: "This click wasn't recorded: the button no longer matches this decision's questions. Reply in this thread in words instead.",
+  unavailable: "This click wasn't recorded: OpenRig couldn't record a button answer here. Reply in this thread in words instead.",
+  notClosed: "Your answers were recorded and sent to the agent that asked, but the decision itself didn't close.",
+} as const;
+
+/** The reply for a click recordHumanAnswer didn't record, by its reason. */
+export function clickNotRecordedReply(reason: string): string {
+  if (reason.startsWith("state-")) return CLICK_REPLIES.closed;
+  if (reason === "not-the-asked-human") return CLICK_REPLIES.someoneElse;
+  if (reason === "unknown-option" || reason === "no-questions") return CLICK_REPLIES.stale;
+  return CLICK_REPLIES.unavailable;
+}
+
 /** The root message a click was made on: buttons live on the decision's root post, whose ts is
  *  the thread map's key (a click inside a thread would carry that thread's root instead). */
 export function clickedRootTs(payload: SlackBlockActions): string | undefined {
@@ -329,30 +349,51 @@ export class InboundRouter {
     return r;
   }
 
+  /** A live click claims its one thread reply: Slack can redeliver an envelope we already handled, and the person must
+   *  not read a second reply, such as "already closed" after "All answered". Keyed by the click (its user and
+   *  action_ts) in the durable seen store, so a restart doesn't reopen it. A click without an action_ts can't be told
+   *  from its redelivery, so it replies as before. */
+  private claimClickReply(payload: SlackBlockActions): boolean {
+    const actionTs = payload.actions?.[0]?.action_ts;
+    if (!actionTs) return true;
+    const key = `click-reply:${payload.user?.id ?? "-"}:${actionTs}`;
+    if (this.deps.seen.load().has(key)) return false;
+    this.deps.seen.mark(key, "click-reply");
+    return true;
+  }
+
   private async attemptAction(payload: SlackBlockActions, live: boolean): Promise<{ status: InboundDisposition; reason?: string }> {
     const action = payload.actions?.[0];
     const picked = parseQuestionAction(action?.block_id, action?.action_id);
     if (!picked) return { status: "ignored", reason: "not-a-question-button" };
-    const who = this.deps.resolveSender(payload.user?.id ?? "");
-    if (!who.admitted) {
-      this.deps.log?.(`click REFUSED — unregistered sender ${payload.user?.id}: ${who.teaching}`);
-      return { status: "refused", reason: "unregistered" };
-    }
     const rootTs = clickedRootTs(payload);
-    const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel: payload.channel?.id }) : undefined;
-    const qitemId = route?.correlationQitemId;
-    if (!rootTs || !route || !qitemId) return { status: "ignored", reason: "unmapped-message" };
-    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
-    if (!recorded || recorded.status !== "recorded") {
-      return { status: "ignored", reason: recorded?.reason ?? "answers-unavailable" };
-    }
+    // A thread reply about this click: once per live click; the dead-letter retry (live false) only confirms success.
     const acknowledge = async (text: string) => {
+      if (!rootTs || (live && !this.claimClickReply(payload))) return;
       try {
         await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
       } catch (e) {
-        this.deps.log?.(`answer acknowledgement failed qitem=${qitemId}: ${(e as Error).message}`);
+        this.deps.log?.(`click reply failed thread=${rootTs}: ${(e as Error).message}`);
       }
     };
+    const who = this.deps.resolveSender(payload.user?.id ?? "");
+    if (!who.admitted) {
+      this.deps.log?.(`click REFUSED — unregistered sender ${payload.user?.id}: ${who.teaching}`);
+      if (live) await acknowledge(CLICK_REPLIES.unregistered);
+      return { status: "refused", reason: "unregistered" };
+    }
+    const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel: payload.channel?.id }) : undefined;
+    const qitemId = route?.correlationQitemId;
+    if (!rootTs || !route || !qitemId) {
+      if (live) await acknowledge(CLICK_REPLIES.unmapped);
+      return { status: "ignored", reason: "unmapped-message" };
+    }
+    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
+    if (!recorded || recorded.status !== "recorded") {
+      const reason = recorded?.reason ?? "answers-unavailable";
+      if (live) await acknowledge(clickNotRecordedReply(reason));
+      return { status: "ignored", reason };
+    }
     const lines = formatHumanAnswers(recorded.questions, recorded.answers);
     if (!recorded.complete) {
       this.deps.log?.(`answer recorded qitem=${qitemId} question=${picked.questionId}`);
@@ -382,6 +423,7 @@ export class InboundRouter {
       // The reply row reached the seat, but the decision did not close: say so on the log and
       // the receipt instead of reporting success. Retrying cannot change this outcome.
       this.deps.log?.(`answers complete but resolve not applicable qitem=${qitemId}`);
+      if (live) await acknowledge(CLICK_REPLIES.notClosed);
       return { status: "refused", reason: "resolve-not-applicable" };
     }
     this.deps.log?.(`answers complete qitem=${qitemId} -> ${route.destination}`);
