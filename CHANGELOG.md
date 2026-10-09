@@ -20,13 +20,13 @@ built from the commit tagged `v0.6.9`. The changes since 0.6.8:
 ### Before you upgrade
 
 - Restart the daemon after upgrading the CLI (`rig daemon stop`, then `rig
-  daemon start`). One migration adds an index to the queue's transition
-  history, and openrig-core stays at 0.1.8.
+  daemon start`). Migration `098` adds an index on `(qitem_id, transition_id)`
+  to the queue's transition history, and openrig-core stays at 0.1.8.
 - Stamp the work tree named by `rig scope <tier> approve --workspace <path>`,
   and refuse a named workspace with no `missions/` folder instead of stamping
   the configured one ([#997](https://github.com/mvschwarz/openrig/pull/997)).
-- Wait up to 30 seconds for a cross-host `rig send --host` to an
-  http-registered host, and report a send that may have arrived as
+- Give a cross-host `rig send --host` to an http-registered host a 30-second
+  request budget, plus any `--wait-for-idle` time, and report a send that may have arrived as
   `remote-outcome-unknown` ("Delivery UNCONFIRMED", exit 1) with the check to
   run before any resend; only a host never reached reads as unreachable
   ([#1048](https://github.com/mvschwarz/openrig/pull/1048)).
@@ -37,8 +37,9 @@ built from the commit tagged `v0.6.9`. The changes since 0.6.8:
   `humanAnswers`, as a tagged typed reply placed under the first unanswered
   question; typed text that matches an option's ID is never read as a click,
   and closing still isn't approval ([#1045](https://github.com/mvschwarz/openrig/pull/1045)).
-- Show in `rig slack status` how many inbound messages, reactions and click
-  answers wait to be retried, or that the count is unknown and why ([#1036](https://github.com/mvschwarz/openrig/pull/1036)).
+- Show in `rig slack status` how many retained inbound retry records wait,
+  covering messages, reactions and click answers, or that the count is unknown
+  and why ([#1036](https://github.com/mvschwarz/openrig/pull/1036)).
 - Drop a retained Slack alert, replayed at gateway start, whose row has left
   the active states, and record why on the row; open rows' alerts,
   decision-resolved notices and digests still post ([#1051](https://github.com/mvschwarz/openrig/pull/1051)).

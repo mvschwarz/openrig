@@ -14,9 +14,9 @@ after an upgrade it can still hold the previous version's note.
   unanswered. A clicked answer is still the option's ID. Typed text that matches an option's ID is never read as clicking
   it. The decision still closes, and closing doesn't mean approval: read the reply and its placement before acting. The
   `messaging-the-human` skill says how.
-- **`rig slack status` shows the inbound retry backlog:** how many inbound messages, reactions and click answers are
-  waiting to be retried, kept across restarts. If those records can't be read, the line says the count is unknown and
-  why; it never reads as an empty backlog.
+- **`rig slack status` shows the inbound retry backlog:** how many retained records for inbound messages, reactions
+  and click answers are waiting to be retried, kept across restarts. This counts records, not distinct messages.
+  If the records can't be read, the line says the count is unknown and why; it never reads as an empty backlog.
 - **An alert retried after its row closed isn't posted.** A Slack post that failed is kept and retried when the gateway
   next starts. If the row has left the active states by then, the alert is dropped and the row records
   `slack-owner-notification-dropped … reason=row-not-active`. Alerts for rows still open, decision-resolved notices and
@@ -35,13 +35,14 @@ after an upgrade it can still hold the previous version's note.
 ## Sends and waits
 
 - **A cross-host send that may have arrived reads as unconfirmed, not failed.** `rig send <session> --host <id>` to an
-  http-registered host now waits up to 30 seconds. When the answer doesn't come back, or the connection drops after the
+  http-registered host now has a 30-second request budget, plus any `--wait-for-idle` time. When the answer doesn't come back, or the connection drops after the
   request went out, the send exits 1 with `failedStep: "remote-outcome-unknown"` and "Delivery UNCONFIRMED". **Check the
   target with `rig capture <session> --host <id>` before any resend**; a blind resend can deliver twice. Only a host
   that was never reached reads as unreachable.
-- **`rig chatroom wait` keeps waiting through a slow or restarting daemon.** A failed poll is retried until your
-  `--timeout`; the first one prints a line on stderr. An error answer from the daemon, such as a removed rig, still ends
-  the wait at once. If the last poll before the deadline failed, the timeout says new messages may have arrived unseen.
+- **`rig chatroom wait` keeps waiting through a slow or restarting daemon.** Poll timeouts, connection refusals, and
+  reset or closed connections are retried until your `--timeout`; the first failure in a run prints a line on stderr.
+  Other errors, including an error answer from the daemon such as a removed rig, still end the wait. If the last
+  recorded poll failure remains unresolved at the deadline, the timeout says new messages may have arrived unseen.
 
 ## Kernel status
 
@@ -76,7 +77,9 @@ after an upgrade it can still hold the previous version's note.
 
 ## Known gaps in 0.6.9
 
-- **The first install from nothing has been checked on a Mac, in Terminal,** not yet on Linux or Windows.
+- **The latest first-install check used 0.6.8 on a fresh Mac account in Terminal,** with assistance to install the
+  candidate. It reached setup, the kernel window and a team plan; team launch and work weren't exercised.
+  Linux and Windows first installs remain unchecked in the evidence behind this note.
 - **Only one selected lifecycle-help command has been checked in a live Claude session;** source and parser coverage
   is broader. If a help command still asks, report it.
 - **Codex team seats aren't asked before lifecycle commands yet.**

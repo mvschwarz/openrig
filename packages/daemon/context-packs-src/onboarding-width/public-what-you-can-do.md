@@ -113,9 +113,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   runtime tokens.
 - **`rig chatroom wait`** — block until a peer actually says something, instead of polling
   `capture` in a loop. Also `history`, `watch`, `topic` for a named thread that stays retrievable.
-  Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds. A failed poll is
-  retried until that deadline, so a slow or restarting daemon doesn't end the wait; an error answer,
-  such as a removed rig, still does.
+  Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds. Poll timeouts,
+  connection refusals, and reset or closed connections are retried until that deadline; other errors,
+  including an error answer from the daemon such as a removed rig, still end the wait.
 - **`rig stream emit` / `list` / `watch` / `archive`** — drop an observation somewhere the *next*
   agent will find it. Emitting costs nothing and does not interrupt anyone; the value appears when
   someone lists the stream before starting.
@@ -153,8 +153,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   readiness for the delivery decision and `queue create --verify` for its receipt; connector
   setup or verification is not an outbound human message. After a connection gap the daemon
   catches up on missed channel messages and marks them late; `rig slack status` shows the
-  connection, the catch-up state, and how many inbound messages, reactions and click answers wait
-  to be retried (kept across restarts). A retained alert whose row closed before its retry isn't
+  connection, the catch-up state, and the count of retained retry records for inbound messages,
+  reactions and click answers (kept across restarts, not a distinct-message count). A retained alert whose row closed before its retry isn't
   posted; the row says why. Its `Delivery:` line says whether events are confirmed arriving;
   "connected" alone is not delivery, and a connection that stops delivering is replaced. **`rig slack channel-map list` / `set <match> <channel>` /
   `remove <match>`** sends a rig's or seat's human-bound posts to its own channel (a seat match
