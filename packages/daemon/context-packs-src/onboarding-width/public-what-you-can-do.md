@@ -177,7 +177,10 @@ your context, your compaction and your replacement — and it is the only thing 
 
 - **`rig queue create`** — a row with an owner, a body and a transition history. Its reply, like
   `handoff`'s, confirms the row was saved; the owner is woken after that. Before you say they were
-  told, read the row's transitions (or use `--verify` for a person's request).
+  told, read the row's transitions, or use `--verify`. For a seat it reports the wake's terminal
+  receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
+  pickup, not proof the body was read. For a registered person who is also a seat with a pane, it
+  also waits, bounded, for the Slack receipt and reports it on its own.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.

@@ -1085,9 +1085,18 @@ export function queueRoutes(): Hono {
   // GET /:qitemId — show one
   app.get("/:qitemId", (c) => {
     const qitemId = c.req.param("qitemId");
-    const item = getRepo(c).getById(qitemId);
+    const repo = getRepo(c);
+    const item = repo.getById(qitemId);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
-    return c.json(item);
+    // #1029: the wake path's own routing decision, so a reader never guesses a registered
+    // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
+    // The owner notification level is what the Slack selector keys on: a registered person who
+    // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
+    return c.json({
+      ...item,
+      destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
+      ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
+    });
   });
 
   // ---- Inbox routes (mailbox) ----

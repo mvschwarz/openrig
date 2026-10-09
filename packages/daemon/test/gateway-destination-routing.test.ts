@@ -34,6 +34,8 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { Hono } from "hono";
+import { queueRoutes } from "../src/routes/queue.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -535,5 +537,83 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     const note = "slack-owner-notification-posted notification_key=" + key + " level=ALERT kind=unclassified message_ts=333.44 thread_ts=333.44";
     h.repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: note });
     expect(h.repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key), "the receipt suppresses the repeat").toBe(true);
+  });
+});
+
+// #1029 — the single-row read carries the resolver's own routing decision, so a reader such as
+// `rig queue create --verify` never has to guess a registered person's alias from its
+// spelling, even when no wake result exists yet (--no-nudge). getById itself stays unchanged.
+describe("GET /api/queue/:qitemId carries the destination class", () => {
+  const MIKE = { ...FOUNDER_FRAGMENT, entityId: "mike", displayName: "Mike", address: "mike@external" } as unknown as HumanFragment;
+
+  it.each([
+    ["dev-a@rig1", "pane-bound"],
+    ["mike@kernel", "gateway-routable"],
+    ["human-founder@kernel", "gateway-routable"],
+    ["founder@external", "gateway-routable"],
+    ["revieweer@rig1", "unroutable"],
+  ] as const)("%s reads as %s on a --no-nudge row", async (destinationSession, destinationClass) => {
+    const h = makeHarness({ entities: () => [FOUNDER_FRAGMENT, MIKE] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
+    app.route("/api/queue", queueRoutes());
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession, nudge: false,
+      summary: "Routing", evidenceRef: EVIDENCE, body: "b",
+    });
+    const res = await app.request(`/api/queue/${item.qitemId}`);
+    expect(res.status).toBe(200);
+    const row = await res.json() as Record<string, unknown>;
+    expect(row.lastNudgeResult).toBeNull();
+    expect(row.destinationClass).toBe(destinationClass);
+    expect(h.repo.getById(item.qitemId)).not.toHaveProperty("destinationClass");
+    expect(h.sends).toHaveLength(0);
+    h.db.close();
+  });
+});
+
+// #1029 follow-up — the single-row read also carries the owner-notification level the Slack
+// selector keys on, so `--verify` keeps the Slack wait for a registered person who also has a pane.
+describe("GET /api/queue/:qitemId carries the owner notification level", () => {
+  const PANE_PERSON = { ...FOUNDER_FRAGMENT, entityId: "dev-a", displayName: "Dev A", address: "dev-a@external" } as unknown as HumanFragment;
+
+  it.each([
+    ["a registered person with a pane", "dev-a@rig1", [FOUNDER_FRAGMENT, PANE_PERSON], "pane-bound", "ALERT"],
+    ["a seat with a pane and no registration", "dev-a@rig1", [FOUNDER_FRAGMENT], "pane-bound", null],
+    ["a registered person's alias", "human-founder@kernel", [FOUNDER_FRAGMENT], "gateway-routable", "ALERT"],
+  ] as const)("%s reads level %s", async (_label, destinationSession, entities, destinationClass, level) => {
+    const h = makeHarness({ entities: () => [...entities] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
+    app.route("/api/queue", queueRoutes());
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession, nudge: false,
+      summary: "Routing", evidenceRef: EVIDENCE, body: "b",
+    });
+    const row = await (await app.request(`/api/queue/${item.qitemId}`)).json() as Record<string, unknown>;
+    expect(row.destinationClass).toBe(destinationClass);
+    expect(row.ownerNotificationLevel).toBe(level);
+    expect(h.repo.getById(item.qitemId)).not.toHaveProperty("ownerNotificationLevel");
+    h.db.close();
+  });
+  it("a pane-bound registered person's row reaches the Slack selector, and its receipt shows on the row read", async () => {
+    const h = makeHarness({ entities: () => [FOUNDER_FRAGMENT, PANE_PERSON] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
+    app.route("/api/queue", queueRoutes());
+    const item = await h.repo.create({
+      sourceSession: "s@r", destinationSession: "dev-a@rig1", nudge: false,
+      summary: "Decide", evidenceRef: EVIDENCE, body: "b",
+    });
+    const alerts = await makeQueuePorts(h.repo, { loadHumanRegistry: () => ({ ok: true, entities: [FOUNDER_FRAGMENT, PANE_PERSON] }) }).listHumanAlerts({});
+    expect(alerts.map((a) => a.qitemId)).toContain(item.qitemId);
+    const owner = h.repo.transitionLog.latestOwnerNotificationForQitem(item.qitemId)!;
+    h.repo.update({
+      qitemId: item.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${item.qitemId}:${owner.transitionId} level=ALERT kind=unclassified message_ts=1.1 thread_ts=1.1`,
+    });
+    const row = await (await app.request(`/api/queue/${item.qitemId}`)).json() as Record<string, unknown>;
+    expect(row).toMatchObject({ destinationClass: "pane-bound", ownerNotificationLevel: "ALERT", deliveryOutcome: "posted" });
+    h.db.close();
   });
 });
