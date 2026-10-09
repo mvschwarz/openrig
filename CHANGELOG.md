@@ -11,9 +11,10 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 ## [0.6.9]
 
 0.6.9 is a quick fix release for what people meet in their first hour and in
-the Slack channel: a typed Slack answer is kept, Slack status shows what waits
-to be retried, a kernel that recovered reads ready, and a cross-host send or a
-long chatroom wait no longer reports failure when the work went through. It is
+the Slack channel: a Slack connection that stops delivering is caught and
+replaced, a typed Slack answer is kept, Slack status shows what waits to be
+retried, a kernel that recovered reads ready, and a cross-host send or a long
+chatroom wait no longer reports failure when the work went through. It is
 built from the commit tagged `v0.6.9`. The changes since 0.6.8:
 
 ### Before you upgrade
@@ -41,6 +42,11 @@ built from the commit tagged `v0.6.9`. The changes since 0.6.8:
 - Drop a retained Slack alert, replayed at gateway start, whose row has left
   the active states, and record why on the row; open rows' alerts,
   decision-resolved notices and digests still post ([#1051](https://github.com/mvschwarz/openrig/pull/1051)).
+- Detect a Slack Socket Mode connection that stays open while events stop,
+  by server pings and by the echo of OpenRig's own posts, and replace it,
+  opening the new connection first and at most once every 5 minutes. Name the
+  delivery state beside "connected" in `rig slack status` and the connections
+  view ([#1052](https://github.com/mvschwarz/openrig/pull/1052)).
 - Report a kernel ready once every declared seat recovered from a failed start,
   with the earlier failure on its own line in `rig status` and as
   `last_boot_failure` from `/api/kernel/status`; list each kernel seat once

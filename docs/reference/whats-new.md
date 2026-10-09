@@ -21,6 +21,16 @@ after an upgrade it can still hold the previous version's note.
   next starts. If the row has left the active states by then, the alert is dropped and the row records
   `slack-owner-notification-dropped … reason=row-not-active`. Alerts for rows still open, decision-resolved notices and
   digests still post. `rig slack enable` says how many earlier undelivered posts wait to be retried.
+- **"Connected" is no longer the only word about the Slack connection.** OpenRig now notices a connection that stays
+  open while Slack stops delivering events to it, and replaces it: a new connection opens first, then the old one
+  closes. Two signals catch it, each counted only once the connection has shown it: Slack's server pings stopping for
+  30 seconds, and two of OpenRig's own posts not coming back as events within a minute. Automatic replacements are at
+  most one every 5 minutes; Slack's own refresh requests are exempt.
+- **Read delivery beside the socket state.** `rig slack status` adds a `Delivery:` line (`delivering`, `not yet
+  confirmed`, `events missing since …`, `no server pings since …`, or Socket Mode disabled), the last automatic
+  reconnect and why, a held-back reconnect and until when, and Slack's connection count when it's more than ours. The
+  connections view shows `connected; delivering` or `connected; delivery not yet confirmed`. Report "not yet
+  confirmed" as that, never as working.
 
 ## Sends and waits
 
