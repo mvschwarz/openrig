@@ -217,6 +217,63 @@ describe("resolveMissionsRoot", () => {
     }
   });
 
+  it("createMissing makes a named workspace's first missions/ instead of falling back (#70)", () => {
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const project = mktemp();
+
+    const resolved = resolveMissionsRoot({ override: project, configPath, strictOverride: true, createMissing: true });
+    expect(resolved).toBe(path.join(project, "missions"));
+    expect(fs.statSync(resolved).isDirectory()).toBe(true);
+  });
+
+  it("createMissing still refuses a named workspace that does not exist", () => {
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const typo = path.join(mktemp(), "no-such-project");
+
+    const create = () => resolveMissionsRoot({ override: typo, configPath, strictOverride: true, createMissing: true });
+    expect(create).toThrow("named by --workspace has no missions tree");
+    expect(fs.existsSync(typo)).toBe(false);
+  });
+
+  it("honors project.yaml missions.root in a named workspace", () => {
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const project = mktemp();
+    fs.writeFileSync(path.join(project, "project.yaml"), "missions:\n  root: work/missions\n");
+    const declared = path.join(project, "work", "missions");
+
+    expect(resolveMissionsRoot({ override: project, configPath, strictOverride: true, createMissing: true })).toBe(declared);
+    expect(fs.statSync(declared).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(project, "missions"))).toBe(false);
+    // A read then resolves the same declared tree.
+    expect(resolveMissionsRoot({ override: project, configPath })).toBe(declared);
+  });
+
+  it("ignores a project.yaml missions.root that escapes the workspace", () => {
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const project = mktemp();
+    fs.writeFileSync(path.join(project, "project.yaml"), "missions:\n  root: ../elsewhere\n");
+
+    expect(resolveMissionsRoot({ override: project, configPath, strictOverride: true, createMissing: true }))
+      .toBe(path.join(project, "missions"));
+    expect(fs.existsSync(path.join(path.dirname(project), "elsewhere"))).toBe(false);
+  });
+
   it("uses the typed workspace.slices_root setting instead of walking cwd", () => {
     const root = mktemp();
     const missions = path.join(root, "declared-missions");

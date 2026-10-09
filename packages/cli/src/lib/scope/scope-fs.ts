@@ -205,6 +205,27 @@ export function configuredMissionsRoot(configPath?: string): string | null {
   return null;
 }
 
+/** The missions root a workspace's project.yaml declares (`missions.root`),
+ * resolved inside the workspace; null when there is no project.yaml, it does
+ * not parse, or the declared path is absolute or escapes the workspace. */
+function declaredMissionsRoot(workspace: string): string | null {
+  const manifestPath = path.join(workspace, "project.yaml");
+  if (!fs.existsSync(manifestPath)) return null;
+  let manifest: unknown;
+  try {
+    manifest = YAML.parse(fs.readFileSync(manifestPath, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (!manifest || typeof manifest !== "object") return null;
+  const missions = (manifest as Record<string, unknown>)["missions"];
+  if (!missions || typeof missions !== "object") return null;
+  const root = (missions as Record<string, unknown>)["root"];
+  if (typeof root !== "string" || !root.trim() || path.isAbsolute(root) || root.split(/[\\/]/).includes("..")) return null;
+  const resolved = path.resolve(workspace, root);
+  return resolved === workspace ? null : resolved;
+}
+
 /** Locate the missions root from an explicit workspace override or the typed
  * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
  * candidates, but selection comes from configuration. */
@@ -219,6 +240,13 @@ export function resolveMissionsRoot(opts: {
    * fallback would operate on a tree the caller never named (#995).
    */
   strictOverride?: boolean;
+  /**
+   * For a command that creates the first mission: an explicit override that
+   * names an existing workspace is authoritative, so its missions directory
+   * (project.yaml `missions.root`, else `missions/`) is created when missing
+   * instead of falling back to the configured root (#70).
+   */
+  createMissing?: boolean;
 } = {}): string {
   const cwd = opts.cwd ?? process.cwd();
   // Which one named it matters for the refusal below: dropping --workspace does
@@ -227,9 +255,16 @@ export function resolveMissionsRoot(opts: {
   const fromOverride = fromFlag ?? process.env.OPENRIG_WORK_ROOT;
   if (fromOverride) {
     const candidate = path.isAbsolute(fromOverride) ? fromOverride : path.resolve(cwd, fromOverride);
+    const declared = declaredMissionsRoot(candidate);
+    if (declared && fs.existsSync(declared) && fs.statSync(declared).isDirectory()) return declared;
     const missions = path.join(candidate, "missions");
     if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
+    if (opts.createMissing && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      const created = declared ?? missions;
+      fs.mkdirSync(created, { recursive: true });
+      return created;
+    }
     if (opts.strictOverride) {
       const source = fromFlag === null ? "OPENRIG_WORK_ROOT" : "--workspace";
       throw new ScopeCliError({

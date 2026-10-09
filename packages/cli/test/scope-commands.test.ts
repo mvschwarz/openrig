@@ -713,6 +713,18 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(parsed.mission.template).toBe("release");
   });
 
+  it("#70: creates the first mission in a named workspace with no missions/ yet", async () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "scope-first-mission-"));
+    try {
+      const r = await run(["mission", "create", "first-mission", "--json"], path.join(project, "missions"));
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout).mission.path).toBe(path.join(project, "missions", "first-mission"));
+      expect(fs.existsSync(path.join(env.missionsRoot, "first-mission"))).toBe(false);
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("HG-15: created mission frontmatter has a conformant dot-ID per §1", async () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
