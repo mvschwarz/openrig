@@ -79,6 +79,14 @@ describe("ChatRepository", () => {
     expect(chatRepo.history(rigId, { after: sent[0]!.id, limit: 2 }).map((m) => m.body)).toEqual(["msg 2", "msg 3"]);
   });
 
+  it("history with --since pages forward from the starting point", () => {
+    const sent = [1, 2, 3, 4, 5].map((i) => chatRepo.send(rigId, "alice", `msg ${i}`));
+    const stamp = db.prepare("UPDATE chat_messages SET created_at = ? WHERE id = ?");
+    sent.forEach((m, i) => stamp.run(`2026-09-30 11:00:0${i}`, m.id));
+
+    expect(chatRepo.history(rigId, { since: "2026-09-30T11:00:01Z", limit: 2 }).map((m) => m.body)).toEqual(["msg 2", "msg 3"]);
+  });
+
   it("history --topic returns messages between topic marker and next topic marker", () => {
     chatRepo.send(rigId, "alice", "before topic");
     chatRepo.sendTopic(rigId, "alice", "deploy", "starting deploy");
