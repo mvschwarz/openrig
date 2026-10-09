@@ -331,7 +331,7 @@ For the first desktop handoff, use `--window`. Only if the window cannot open,
 For an explicitly requested manual attachment, inspect the current bindings:
 
 ```sh
-rig ps --nodes --rig kernel --json
+rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand
 ```
 
 Find `logicalId: operator.agent` and run its `tmuxAttachCommand`, after `env -u TMUX`, in a new

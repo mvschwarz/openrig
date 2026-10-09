@@ -68,7 +68,8 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
     and ends with `run:` and a command (the `error` field with `--json`). That command already names the installed
     herdr binary and the daemon's socket, or the conversation to attach. Relay it exactly rather than composing one.
     If a note asks you to place the view once Herdr starts, run that `rig terminal open` yourself after they start it.
-  - **If it printed no command:** find `operator.agent` in `rig ps --nodes --rig kernel --json` and give
+  - **If it printed no command:** find `operator.agent` in
+    `rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand` and give
     `env -u TMUX` followed by its `tmuxAttachCommand`, exactly as listed (never a guessed name), for the operator's
     conversation. That command names the daemon's tmux server when it isn't the default one.
 
