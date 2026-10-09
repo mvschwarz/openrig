@@ -3314,6 +3314,21 @@ export class QueueRepository {
     return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
   }
 
+  /** Current explicit human FYIs; delivery receipts are not required for local visibility.
+   * Filter before the bounded window so agent and malformed destinations cannot hide updates. */
+  listOpenHumanUpdates(opts: { limit?: number } = {}): QueueItem[] {
+    if (!this.hasHumanIntentColumn) return [];
+    const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(1001, Math.floor(opts.limit!))) : 100;
+    const rows = this.db.prepare(`
+      SELECT * FROM queue_items
+      WHERE state IN ('pending', 'in-progress', 'blocked')
+        AND human_intent = 'update'
+        AND is_human_seat_session(destination_session) = 1
+      ORDER BY (priority = 'urgent') DESC, ts_created DESC, qitem_id DESC LIMIT ?
+    `).all(limit) as QueueItemRow[];
+    return rows.map(row => this.rowToItem(row));
+  }
+
   listAttention(opts?: {
     limit?: number;
     state?: QueueState | QueueState[];

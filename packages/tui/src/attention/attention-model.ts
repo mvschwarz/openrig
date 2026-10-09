@@ -25,15 +25,15 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
       recipient: q.destinationSession, urgency: "update", unblocks: null, at: q.deliveredAt,
       scope: projects.length === 1 ? `project ${projects[0]} (queue tag)` : "instance · project unknown", project: null,
       source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
-    read.items.push(item);
-    if (wanted === item.id) {
+    if (!read.items.some(current => current.id === `queue-update:${q.qitemId}`)) read.items.push(item);
+    if (wanted === item.id && read.detail?.item.id !== item.id) {
       read.detailError = null;
       read.detail = { item, lines: [q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
         `From: ${q.sourceSession}`, `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
         files: q.evidenceRef?.startsWith("/") ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
     }
   }
-  read.items.sort((a, b) => a.kind.localeCompare(b.kind) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
+  read.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? Number(b.urgency === "urgent") - Number(a.urgency === "urgent") : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
   if (wanted?.startsWith("human-update:") && read.detail?.item.id !== wanted) {
     read.detail = null;
     read.detailError = "Selected delivered update is unavailable or outside the retained window. Return to Feed and refresh.";
@@ -53,7 +53,7 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       const title = read.items.some(i => i.id === d.item.id) ? d.item.kind === "action" ? "Human requests" : "Update" : "Source record";
       lines.push({ text: `${title} · ${d.item.urgency}` }, { text: d.item.summary });
       if (d.item.recipient) lines.push({ text: `To: ${d.item.recipient}` });
-      if (d.item.id.startsWith("human-update:")) lines.push({ text: "No action needed" });
+      if (d.item.id.startsWith("human-update:") || d.item.id.startsWith("queue-update:")) lines.push({ text: "No action needed" });
       if (d.item.unblocks) lines.push({ text: `Unblocks: ${d.item.unblocks}` });
       lines.push({ text: `Scope: ${d.item.scope}` }, { text: `Observed: ${d.item.at ?? "unknown"}` });
       lines.push(...d.lines.map(text => ({ text })));
@@ -71,7 +71,7 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
       for (const i of items) {
         lines.push(listItem(`[${i.urgency}] ${i.summary}`, { type: "attention-open", id: i.id }));
         if (i.recipient) lines.push({ text: `    To: ${i.recipient}` });
-        if (i.id.startsWith("human-update:")) lines.push({ text: "    No action needed" });
+        if (i.id.startsWith("human-update:") || i.id.startsWith("queue-update:")) lines.push({ text: "    No action needed" });
         if (i.unblocks) lines.push({ text: `    Unblocks: ${i.unblocks}` });
         lines.push({ text: `    ${i.scope} · ${i.at ?? "time unknown"}` });
       }

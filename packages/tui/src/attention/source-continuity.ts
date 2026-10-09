@@ -3,6 +3,7 @@ import type { AttentionItem, AttentionRead } from "@openrig/daemon/attention";
 /** The aggregate's declared dependencies, not a classification of queue intent. */
 function dependsOn(item: AttentionItem, source: string): boolean {
   if (source === "queue") return item.id.startsWith("queue:");
+  if (source === "queue updates") return item.id.startsWith("queue-update:");
   if (source === "health") return item.id.startsWith("health:");
   if (source === "mission outcomes") return item.id.startsWith("workflow:");
   if (source === "project catalog") return item.id.startsWith("proof:") || item.id.startsWith("workflow:");
