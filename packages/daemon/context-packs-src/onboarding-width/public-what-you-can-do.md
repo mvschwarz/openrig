@@ -186,7 +186,8 @@ your context, your compaction and your replacement — and it is the only thing 
   receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
   pickup, not proof the body was read. For a row the seat already claimed, `outcome` can read
   `indeterminate` while `claim` is accurate: read `claim`. It isn't a failed handoff, so don't
-  re-run the create.
+  re-run the create. For a registered person who is also a seat with a pane, it also waits,
+  bounded, for the Slack receipt and reports it on its own.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.
