@@ -107,7 +107,12 @@ export function queueRoutes(): Hono {
     const parsedSource = parseSessionName(sourceSession);
     if (parsedSource.kind !== "canonical") return { ok: true };
     const rigName = parsedSource.rig;
-    const rigs = rigRepo.findRigsByName(rigName);
+    let rigs = rigRepo.findRigsByName(rigName);
+    if (rigs.length > 1) {
+      // An archived rig of the same name counts only when no active one has it
+      const activeRigs = rigRepo.findUnarchivedRigsByName(rigName);
+      if (activeRigs.length > 0) rigs = activeRigs;
+    }
     if (rigs.length === 0) return { ok: true };
     const rigId = rigs[0]!.id;
     const ws = rigRepo.getRigWorkspace(rigId);
