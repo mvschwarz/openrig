@@ -879,7 +879,7 @@ export class RestoreCheckService {
       check: `seat.${session}.resume-path`, status: "yellow",
       evidence: "No attach command available",
       // Whether restore resumes, starts fresh or stops for a decision is per seat; the plan says which.
-      remediation: `No live session to attach. Preview what restore would do for this seat with: rig up ${rigName} --existing --plan`,
+      remediation: `No live session to attach. Preview what restore would do for this seat with: rig up ${shellQuote(rigName)} --existing --plan`,
       remediationSafe: true,
     };
   }

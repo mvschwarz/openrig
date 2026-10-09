@@ -124,3 +124,53 @@ describe("stopped-seat restore contract", () => {
     expect(h.tmux.createSession).not.toHaveBeenCalled();
   });
 });
+
+describe("stopped-seat history and guidance", () => {
+  // The seat's newest row carries its current restore policy; a token may come from any row.
+  it.each([
+    ["older resume token, newer relaunch_fresh row", "relaunch_fresh", "resume_if_possible", "fresh-primed"],
+    ["older relaunch_fresh row, newer resume token", "resume_if_possible", "relaunch_fresh", "awaiting-decision"],
+  ] as const)("%s", async (_label, newerPolicy, olderPolicy, expected) => {
+    const h = fixture({ policy: olderPolicy === "resume_if_possible" ? undefined : olderPolicy });
+    const later = h.sessionRegistry.registerSession(h.node.id, "dev-worker@stopped-review");
+    h.sessionRegistry.updateStatus(later.id, "exited");
+    h.sessionRegistry.updateResumeToken(later.id, "claude_id", "00000000-0000-4000-8000-000000000006", "hook");
+    if (newerPolicy !== "resume_if_possible") h.db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?").run(newerPolicy, later.id);
+    h.snapshotCapture.captureSnapshot(h.rig.id, "manual");
+    const plan = await (await h.post(`/api/rigs/${h.rig.id}/launch-plan`)).json();
+    const applied = await (await h.post(`/api/rigs/${h.rig.id}/up`)).json();
+    expect(plan.nodes[0].intendedAction).toBe(expected);
+    expect(applied.nodes[0].status).toBe(expected);
+    expect(h.tmux.createSession).toHaveBeenCalledTimes(expected === "fresh-primed" ? 1 : 0);
+  });
+
+  it("--fresh overrides the decision in forecast and apply", async () => {
+    const h = fixture();
+    const body = { freshLogicalIds: ["dev.worker"] };
+    const plan = await (await h.post(`/api/rigs/${h.rig.id}/launch-plan`, body)).json();
+    const applied = await (await h.post(`/api/rigs/${h.rig.id}/up`, body)).json();
+    expect(plan.nodes[0].intendedAction).toBe("fresh-primed");
+    expect(applied.nodes[0].status).toBe("fresh-primed");
+  });
+
+  it.each(["no-token", "relaunch-policy", "never-occupied", "legacy-zero"])("forecast keeps the fresh control: %s", async (mode) => {
+    const h = fixture(mode === "no-token" ? { token: null } : mode === "relaunch-policy" ? { policy: "relaunch_fresh" } : { noRow: true });
+    if (mode === "legacy-zero") {
+      const data = structuredClone(h.snapshot.data);
+      delete data.activeOccupantsByNode;
+      delete data.activeSessionIdByNode;
+      h.db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), h.snapshot.id);
+    }
+    const plan = await (await h.post(`/api/rigs/${h.rig.id}/launch-plan`)).json();
+    expect(plan.nodes[0].intendedAction).toBe("fresh-primed");
+    expect(h.tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("quotes the rig name in restore-check's preview command", async () => {
+    const h = fixture();
+    h.db.prepare("UPDATE rigs SET name = 'stopped review' WHERE id = ?").run(h.rig.id);
+    const check = await (await h.app.request("/api/restore-check?rig=stopped%20review&no_queue=true&no_hooks=true")).json();
+    const hint = check.checks.find((item: { check: string }) => item.check.endsWith(".resume-path")).remediation;
+    expect(hint).toContain("rig up 'stopped review' --existing --plan");
+  });
+});
