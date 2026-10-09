@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AttentionRead, AttentionItem } from "../attention-surface.js";
+import { compareAttentionItems, type AttentionRead, type AttentionItem } from "../attention-surface.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { isHumanSeatSessionRef } from "../domain/session-name.js";
 import type { HealthProjectionService } from "../domain/health-detectors.js";
@@ -31,28 +31,31 @@ export function attentionRoutes(): Hono {
     try {
       if (!queue) throw new Error("Queue repository unavailable");
       const rows = queue.listAttention({ limit: 1001 });
-      result.sources.push({ source: "queue", state: rows.length >= 1001 ? "partial" : "available", detail: rows.length >= 1001 ? "Attention query reached 1001 rows; showing at most 1000." : "Open human-addressed requests and explicit human blockers; a human-gate tier alone is insufficient." });
-      const current = rows.slice(0, 1000).filter(q => isHumanSeatSessionRef(q.destinationSession) || q.state === "blocked" && isHumanSeatSessionRef(q.blockedOn ?? ""));
-      // Keep an opened request inspectable after its source is resolved, without
-      // retaining it in the current Action required feed or inventing an inbox.
+      const updates = queue.listOpenHumanUpdates({ limit: 1001 });
+      const truncated = rows.length >= 1001 || updates.length >= 1001;
+      result.sources.push({ source: "queue", state: truncated ? "partial" : "available", detail: "Open human-addressed requests, explicit human blockers and FYI updates, including undelivered updates; a human-gate tier alone is insufficient. " + (truncated ? "A query reached 1001 rows; showing at most 1000 requests and 1000 updates." : "Requests and updates each have a 1000-row window.") });
+      const current = [...rows.slice(0, 1000), ...updates.slice(0, 1000)].filter(q => isHumanSeatSessionRef(q.destinationSession) || q.state === "blocked" && isHumanSeatSessionRef(q.blockedOn ?? ""));
+      // Keep an opened queue record inspectable after its source is resolved,
+      // without retaining it in the current feed or inventing an inbox.
       const opened = wanted?.startsWith("queue:") ? queue.getById(wanted.slice(6)) : null;
       const detailOnly = opened && !current.some(q => q.qitemId === opened.qitemId) ? opened : null;
       for (const q of [...current, ...(detailOnly ? [detailOnly] : [])]) {
+        const isUpdate = q.humanIntent === "update";
         const tags = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
         const p = tags.length === 1 ? projects.find(p => p.id === tags[0] && !p.error) : undefined;
-        const deps = queue.db.prepare("SELECT summary, qitem_id FROM queue_items WHERE blocked_on = ? AND state IN ('pending','in-progress','blocked') ORDER BY ts_created DESC LIMIT 101").all(q.qitemId) as Array<{ summary: string | null; qitem_id: string }>;
-        const unblocks = isHumanSeatSessionRef(q.blockedOn ?? "") ? q.summary || "The blocked task (inspect the request)" : deps.length ? deps.slice(0, 100).map(d => d.summary || "An unnamed dependent task").join("; ") + (deps.length > 100 ? "; more dependents omitted" : "") : "No dependent task recorded; inspect the request for its intended outcome.";
-        const item: AttentionItem = { id: `queue:${q.qitemId}`, kind: "action", recipient: isHumanSeatSessionRef(q.destinationSession) ? q.destinationSession : q.blockedOn, summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
+        const deps = isUpdate ? [] : queue.db.prepare("SELECT summary, qitem_id FROM queue_items WHERE blocked_on = ? AND state IN ('pending','in-progress','blocked') ORDER BY ts_created DESC LIMIT 101").all(q.qitemId) as Array<{ summary: string | null; qitem_id: string }>;
+        const unblocks = isUpdate ? null : isHumanSeatSessionRef(q.blockedOn ?? "") ? q.summary || "The blocked task (inspect the request)" : deps.length ? deps.slice(0, 100).map(d => d.summary || "An unnamed dependent task").join("; ") + (deps.length > 100 ? "; more dependents omitted" : "") : "No dependent task recorded; inspect the request for its intended outcome.";
+        const item: AttentionItem = { id: `queue:${q.qitemId}`, kind: isUpdate ? "update" : "action", recipient: isHumanSeatSessionRef(q.destinationSession) ? q.destinationSession : q.blockedOn, summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || (isUpdate ? "Update summary unavailable" : "Request summary unavailable"), urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
         add(item, () => {
           const mode = posture?.resolve({ qitemId: q.qitemId });
-          return ["Request:", q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []), `State: ${q.state}`, `To: ${q.destinationSession}`, `From: ${q.sourceSession}`, `Blocked on: ${q.blockedOn ?? "none"}`, `Posture: ${mode?.posture ?? "unknown"} · ${mode?.reason ?? "posture source unavailable"}`, `Evidence reference: ${q.evidenceRef ?? "none recorded"}`, `Decision route: follow the correlated human request in Slack. Inspect: rig queue show ${q.qitemId} --full`, "Queue history (read/delivery is not approval):", ...queue.listTransitions(q.qitemId).map(t => JSON.stringify(t))];
+          return [isUpdate ? "Update (FYI; no action needed):" : "Request:", q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []), `State: ${q.state}`, `To: ${q.destinationSession}`, `From: ${q.sourceSession}`, `Blocked on: ${q.blockedOn ?? "none"}`, `Posture: ${mode?.posture ?? "unknown"} · ${mode?.reason ?? "posture source unavailable"}`, `Evidence reference: ${q.evidenceRef ?? "none recorded"}`, isUpdate ? `Inspect: rig queue show ${q.qitemId} --full` : `Decision route: follow the correlated human request in Slack. Inspect: rig queue show ${q.qitemId} --full`, "Queue history (read/delivery is not approval):", ...queue.listTransitions(q.qitemId).map(t => JSON.stringify(t))];
         }, () => {
           if (!q.evidenceRef || !path.isAbsolute(q.evidenceRef) && (!p || /^[a-z][a-z\d+.-]*:/i.test(q.evidenceRef))) return [];
           const hash = q.evidenceRef.indexOf("#"), anchor = hash < 0 ? "" : q.evidenceRef.slice(hash);
           let file = hash < 0 ? q.evidenceRef : q.evidenceRef.slice(0, hash);
           file = path.isAbsolute(file) ? file : path.resolve(p!.root, file);
           try { file = fs.realpathSync(file); } catch { /* The file reader reports the unavailable source. */ }
-          return [{ label: "Request evidence", path: file + anchor }];
+          return [{ label: isUpdate ? "Update evidence" : "Request evidence", path: file + anchor }];
         });
         if (q === detailOnly) result.items = result.items.filter(i => i.id !== item.id);
       }
@@ -121,7 +124,7 @@ export function attentionRoutes(): Hono {
         add(item, () => [`Status: ${r.status}; first observed ${r.startedAt ?? "unknown"}; last observed ${r.lastObservedAt ?? "unknown"}`, `Freshness: ${r.freshness.state}; ${r.indeterminateReason ?? ""}`, `Posture: ${r.operatingPosture?.posture ?? "unknown"} · ${r.operatingPosture?.reason ?? "not supplied by source"}`, r.explanation, r.suggestedInspection, `Threshold: ${r.threshold}`, "Canonical source and bounded evidence:", JSON.stringify(r, null, 2)]);
       }
     } catch (e) { unavailable("health", e); }
-    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
+    result.items.sort(compareAttentionItems);
     if (wanted && !result.detail) result.detailError = "Selected source is unavailable or outside the current source window. Return to Attention to refresh; absence is not resolution.";
     return c.json(result);
   });

@@ -71,6 +71,17 @@ clears a filter, then goes back. On long spec pages,
 Up/Down scroll by default; Right enters links, then Up/Down and Enter follow them.
 `rig tui commands --json` lists the shared command registry.
 
+Feed (`:feed`, also `:needs` or `:attention`) separates **Human requests** from
+**Updates**. Open human-addressed FYIs now appear under Updates even without a
+Slack receipt or human registration; previously only confirmed delivered FYIs
+were shown. They carry **No action needed**, their priority, body and evidence.
+Critical and urgent items precede routine items within each category. Requests
+and open FYIs each have a 1000-item window, and the source footer reports a full
+window as partial. Confirmed delivered FYIs retain their separate receipt history
+after closure; an item visible in both sources appears once. If the queue source
+is unavailable, an empty Updates section is marked unknown. Reading the feed
+does not acknowledge an update, change its state or send it to Slack.
+
 Agents: `tmux send-keys` of any command is the always-available floor; the
 control socket is the addressable-screen API — one command per line, one JSON
 reply per line, plus two read-only queries, `state` and `commands` (the command
@@ -92,3 +103,9 @@ default runtime dir.
 
     npm test          # vitest: grammar, state, parity (mouse/kbd/command), hydration
                       # fixtures, socket contract, §4.A route audit, --demo gate
+
+The Feed regression tests in `packages/daemon/test/attention.test.ts` and
+`test/feed-system.test.ts` cover undelivered FYIs, priority before the query limit,
+unchanged queue state and decision filtering, receipt deduplication, narrow and
+wide rendering, and an unavailable queue source. They use SQLite and local
+HTTP/render fixtures, not a live Slack workspace or a provider session.

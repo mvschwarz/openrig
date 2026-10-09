@@ -25,5 +25,12 @@ export interface AttentionRead {
   detailError: string | null;
 }
 
+/** Keep priority ordering when clients compose queue, delivery and outcome sources. */
+export function compareAttentionItems(a: AttentionItem, b: AttentionItem): number {
+  const rank = (urgency: string) => urgency === "critical" ? 0 : urgency === "urgent" ? 1 : 2;
+  return a.kind.localeCompare(b.kind) || rank(a.urgency) - rank(b.urgency)
+    || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id);
+}
+
 // Consumers must use the same lexical human classification as queue selection.
 export { isHumanSeatSessionRef } from "./domain/session-name.js";

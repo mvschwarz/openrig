@@ -1,4 +1,4 @@
-import type { AttentionItem, AttentionRead } from "@openrig/daemon/attention";
+import { compareAttentionItems, type AttentionItem, type AttentionRead } from "@openrig/daemon/attention";
 
 /** The aggregate's declared dependencies, not a classification of queue intent. */
 function dependsOn(item: AttentionItem, source: string): boolean {
@@ -21,12 +21,14 @@ export function retainAttentionSources(read: AttentionRead, prior?: AttentionRea
   const affected = (item: AttentionItem) => failed.some(s => dependsOn(item, s.source));
   // An unavailable aggregate can still supply fresh items from its working readers.
   const currentIds = new Set(read.items.map(item => item.id));
-  const retained = prior?.items.filter(item => affected(item) && !currentIds.has(item.id)) ?? [];
+  const currentUpdates = new Set(read.items.filter(item => item.kind === "update" && item.source.startsWith("/api/queue/")).map(item => item.source));
+  const retained = prior?.items.filter(item => affected(item) && !currentIds.has(item.id)
+    && !(item.kind === "update" && currentUpdates.has(item.source))) ?? [];
   const detail = !read.detail && prior?.detail && affected(prior.detail.item) ? prior.detail : null;
   const didRetain = retained.length > 0 || detail !== null;
   return {
     read: !prior || !failed.length ? read : { ...read,
-      items: [...read.items, ...retained],
+      items: [...read.items, ...retained].sort(compareAttentionItems),
       ...(detail ? { detail, detailError: null } : {}),
     },
     errors: failed.map(s => `Feed ${s.source}: ${s.detail}`),

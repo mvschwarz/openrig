@@ -508,8 +508,12 @@ scheme, and nothing downstream can see it.
   **Instance / All humans**. Explorer lists these categories; their entries appear in the
   content pane. Human destinations and explicit human blockers show the recipient,
   relevant project, needed decision and work it unblocks; agent priority alone is not a human
-  request. Confirmed delivered quiet FYIs remain in a bounded update window after their delivery
-  obligation closes, with a receipt and **No action needed**. Failed or ambiguous delivery is not
+  request. Open human-addressed FYIs appear under **Updates** with **No action needed**, even
+  before human registration or Slack delivery. Requests and open FYIs each have a 1000-item
+  window; critical and urgent updates come before routine updates. Confirmed delivered quiet
+  FYIs remain in a separate bounded history after their delivery obligation closes, with a
+  receipt. A row present in both sources is shown once. An empty Updates section is marked
+  unknown when the queue source is unavailable. Failed or ambiguous delivery is not
   delivered history. Existing outcome and health updates retain their source and history.
   Open detail and evidence, then Back. Reading does not approve or deliver a request, and queue
   closure alone does not accept an outcome. Direct `attention`, `needs` and `feed` commands remain.

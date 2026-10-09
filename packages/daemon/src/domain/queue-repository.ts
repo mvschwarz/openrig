@@ -3314,6 +3314,21 @@ export class QueueRepository {
     return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
   }
 
+  /** Open FYIs are local feed records even before a human registry or delivery receipt
+   * exists. Filter and prioritize before LIMIT so routine traffic cannot hide an alert. */
+  listOpenHumanUpdates(opts: { limit?: number } = {}): QueueItem[] {
+    if (!this.hasHumanIntentColumn) return [];
+    const rows = this.db.prepare(`
+      SELECT * FROM queue_items
+      WHERE human_intent = 'update' AND is_human_seat_session(destination_session) = 1
+        AND state IN ('pending', 'in-progress', 'blocked')
+      ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 ELSE 2 END,
+        ts_updated DESC, qitem_id ASC
+      LIMIT ?
+    `).all(opts.limit ?? 100) as QueueItemRow[];
+    return rows.map((row) => this.rowToItem(row));
+  }
+
   listAttention(opts?: {
     limit?: number;
     state?: QueueState | QueueState[];
