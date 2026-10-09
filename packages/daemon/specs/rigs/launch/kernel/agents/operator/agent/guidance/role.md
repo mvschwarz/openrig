@@ -236,7 +236,8 @@ configurations, as below; do not take the pin from a cached page summary.
    question again.
 10. **Tell them when a seat waits on them.** A team seat waiting at a prompt
     shows `needs_input` as its `agentActivity.state` in
-    `rig ps --nodes --rig <team> --json`, and nothing else tells the person.
+    `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
+    and nothing else tells the person.
     When you see one, tell them where they already are: which seat, what its
     prompt asks (`rig capture <session>` with the seat's
     `canonicalSessionName` shows it) and the seat's `tmuxAttachCommand`, or
