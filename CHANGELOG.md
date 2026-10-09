@@ -19,7 +19,8 @@ built from the commit tagged `v0.6.9`. The changes since 0.6.8:
 ### Before you upgrade
 
 - Restart the daemon after upgrading the CLI (`rig daemon stop`, then `rig
-  daemon start`). There are no migrations, and openrig-core stays at 0.1.8.
+  daemon start`). One migration adds an index to the queue's transition
+  history, and openrig-core stays at 0.1.8.
 - Stamp the work tree named by `rig scope <tier> approve --workspace <path>`,
   and refuse a named workspace with no `missions/` folder instead of stamping
   the configured one ([#997](https://github.com/mvschwarz/openrig/pull/997)).
@@ -37,6 +38,9 @@ built from the commit tagged `v0.6.9`. The changes since 0.6.8:
   and closing still isn't approval ([#1045](https://github.com/mvschwarz/openrig/pull/1045)).
 - Show in `rig slack status` how many inbound messages, reactions and click
   answers wait to be retried, or that the count is unknown and why ([#1036](https://github.com/mvschwarz/openrig/pull/1036)).
+- Drop a retained Slack alert, replayed at gateway start, whose row has left
+  the active states, and record why on the row; open rows' alerts,
+  decision-resolved notices and digests still post ([#1051](https://github.com/mvschwarz/openrig/pull/1051)).
 - Report a kernel ready once every declared seat recovered from a failed start,
   with the earlier failure on its own line in `rig status` and as
   `last_boot_failure` from `/api/kernel/status`; list each kernel seat once
@@ -53,6 +57,11 @@ built from the commit tagged `v0.6.9`. The changes since 0.6.8:
 
 - Recognise a Nix-wrapped Claude Code as the seat runtime, so its seats read
   `running` ([#1053](https://github.com/mvschwarz/openrig/pull/1053)).
+
+### Off by default
+
+- Add the refocus work packet, off by default; no change unless enabled
+  ([#1043](https://github.com/mvschwarz/openrig/pull/1043)).
 
 ### Docs
 

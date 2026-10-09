@@ -17,6 +17,10 @@ after an upgrade it can still hold the previous version's note.
 - **`rig slack status` shows the inbound retry backlog:** how many inbound messages, reactions and click answers are
   waiting to be retried, kept across restarts. If those records can't be read, the line says the count is unknown and
   why; it never reads as an empty backlog.
+- **An alert retried after its row closed isn't posted.** A Slack post that failed is kept and retried when the gateway
+  next starts. If the row has left the active states by then, the alert is dropped and the row records
+  `slack-owner-notification-dropped … reason=row-not-active`. Alerts for rows still open, decision-resolved notices and
+  digests still post. `rig slack enable` says how many earlier undelivered posts wait to be retried.
 
 ## Sends and waits
 

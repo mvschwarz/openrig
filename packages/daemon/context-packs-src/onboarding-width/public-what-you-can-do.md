@@ -154,7 +154,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   setup or verification is not an outbound human message. After a connection gap the daemon
   catches up on missed channel messages and marks them late; `rig slack status` shows the
   connection, the catch-up state, and how many inbound messages, reactions and click answers wait
-  to be retried (kept across restarts). **`rig slack channel-map list` / `set <match> <channel>` /
+  to be retried (kept across restarts). A retained alert whose row closed before its retry isn't
+  posted; the row says why. **`rig slack channel-map list` / `set <match> <channel>` /
   `remove <match>`** sends a rig's or seat's human-bound posts to its own channel (a seat match
   beats a rig match; the rest use the default channel). After a change, invite the app to each
   channel, run `rig slack verify`, and rewire the connector (`rig slack disable` then `enable`, or
