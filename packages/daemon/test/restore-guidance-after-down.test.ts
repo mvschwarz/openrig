@@ -26,7 +26,8 @@ import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
-import { mergeManagedBlock, MANAGED_BLOCK_START } from "../src/domain/managed-blocks.js";
+import { mergeManagedBlock, MANAGED_BLOCK_START, MANAGED_BLOCK_END } from "../src/domain/managed-blocks.js";
+import { appendIsCleanupSafe } from "../src/domain/restore-guidance.js";
 import type { ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -350,7 +351,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(lead?.status).toBe("resumed");
     expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
     expect(result.rigResult).toBe("partially_restored");
-    expect(result.warnings.join("\n")).toMatch(/unmatched OpenRig managed-block marker/);
+    expect(result.warnings.join("\n")).toMatch(/would strip together with other text/);
     // And the next rig down leaves the notes alone (on the base this file was never written either).
     await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
     expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes, written after that stray marker.");
@@ -385,12 +386,9 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.warnings.join("\n")).toMatch(/can't be read/);
   });
 
-  it.each([
-    { form: "current", marker: "<!-- BEGIN OpenRig MANAGED BLOCK: " },
-    { form: "legacy", marker: "<!-- BEGIN RIGGED MANAGED BLOCK: " },
-  ])("a truncated $form BEGIN (no closing -->), then notes: nothing written, the notes survive the next rig down", async ({ marker }) => {
+  it("a truncated current BEGIN (no closing -->), then notes: nothing written, the notes survive the next rig down", async () => {
     const { rigId, guidanceFile } = launchedSeat();
-    const truncated = `# Preface\n${marker}\nMy own notes after a marker cut short.\n`;
+    const truncated = `# Preface\n<!-- BEGIN OpenRig MANAGED BLOCK: \nMy own notes after a marker cut short.\n`;
     const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
       betweenDownAndUp: () => fs.writeFileSync(guidanceFile, truncated),
     });
@@ -401,5 +399,59 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.rigResult).toBe("partially_restored");
     await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
     expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes after a marker cut short.");
+  });
+
+  it("a truncated legacy BEGIN, then notes: the current-form blocks come back, and the notes still survive the next rig down", async () => {
+    // Decided by effect: the blocks added are in the current form, and cleanup's legacy pattern
+    // strips only up to a legacy END, so adding them can't make the next rig down take the notes.
+    const { rigId, guidanceFile } = launchedSeat();
+    const truncated = `# Preface\n<!-- BEGIN RIGGED MANAGED BLOCK: \nMy own notes after a legacy marker cut short.\n`;
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
+      betweenDownAndUp: () => fs.writeFileSync(guidanceFile, truncated),
+    });
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(result.rigResult).toBe("fully_restored");
+    await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
+    const after = fs.readFileSync(guidanceFile, "utf-8");
+    expect(after).toContain("My own notes after a legacy marker cut short.");
+    expect(after).not.toContain(MANAGED_BLOCK_START("lead-role"));
+  });
+
+  it("an END marker with text after it on the same line, then notes: nothing written, the notes survive the next rig down", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const tricky = `# Preface\n${MANAGED_BLOCK_START("a")}\nblock a\n${MANAGED_BLOCK_END("a")} my note on the same line\nMy own notes below it.\n`;
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
+      betweenDownAndUp: () => fs.writeFileSync(guidanceFile, tricky),
+    });
+    expect(fileAtHarnessStart).toBe(tricky);
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
+    expect(result.rigResult).toBe("partially_restored");
+    await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes below it.");
+  });
+
+  it("decides by cleanup's own effect: refuses every hazard shape, allows ordinary files", () => {
+    const add = [{ blockId: "lead-role", content: "You lead this team." }];
+    const legacyBegin = "<!-- BEGIN RIGGED MANAGED BLOCK: old -->";
+    const legacyEnd = "<!-- END RIGGED MANAGED BLOCK: old -->";
+    const unsafe = {
+      "truncated BEGIN": "# P\n<!-- BEGIN OpenRig MANAGED BLOCK: \nnotes\n",
+      "stray BEGIN for another id": `# P\n${MANAGED_BLOCK_START("x")}\nnotes\n`,
+      "END with text after it": `${MANAGED_BLOCK_START("a")}\nA\n${MANAGED_BLOCK_END("a")} note\nnotes\n`,
+    };
+    for (const [name, content] of Object.entries(unsafe)) expect(appendIsCleanupSafe(content, add), name).toBe(false);
+    const safe = {
+      "plain notes": "# My notes\nKeep tests fast.\n",
+      "an existing complete block": `# N\n${MANAGED_BLOCK_START("SOP.md")}\nS\n${MANAGED_BLOCK_END("SOP.md")}\nmore\n`,
+      "a punctuated id": `${MANAGED_BLOCK_START("openrig-onboarding-01.md")}\nO\n${MANAGED_BLOCK_END("openrig-onboarding-01.md")}\n`,
+      "a complete legacy block": `# N\n${legacyBegin}\nL\n${legacyEnd}\n`,
+      "an empty file": "",
+      "no trailing newline": "# My notes",
+      // The added blocks are in the current form; cleanup strips a legacy BEGIN only up to a legacy END.
+      "a truncated legacy BEGIN": "# P\n<!-- BEGIN RIGGED MANAGED BLOCK: \nnotes\n",
+    };
+    for (const [name, content] of Object.entries(safe)) expect(appendIsCleanupSafe(content, add), name).toBe(true);
   });
 });

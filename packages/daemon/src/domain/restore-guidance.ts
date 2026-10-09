@@ -19,6 +19,7 @@ import {
   MANAGED_BLOCK_END,
   DEFAULT_CLAUDE_MANAGED_BLOCK_FILE,
   mergeManagedBlock,
+  stripManagedBlocks,
   type ManagedBlockMergeFsOps,
 } from "./managed-blocks.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
@@ -101,34 +102,6 @@ function blockState(content: string, blockId: string): BlockState {
   return "absent";
 }
 
-// A complete marker: the id may not span a line or contain ">".
-const ANY_MARKER = /<!-- (BEGIN|END) (OpenRig|RIGGED) MANAGED BLOCK: ([^>\n]*?) -->/g;
-// What cleanup (stripManagedBlocks) starts and ends on: the bare prefix, complete or not.
-const ANY_PREFIX = /<!-- (BEGIN|END) (OpenRig|RIGGED) MANAGED BLOCK: /g;
-
-/** True when every managed-block marker in the file (any id, current or legacy form) is complete and
- *  pairs up as BEGIN ... END of the same id, unnested. Cleanup strips from ANY BEGIN prefix to the next
- *  END, whatever the id and whether or not the marker is complete, so writing a block into a file with
- *  an unmatched or truncated marker could make the next `rig down` delete the text in between,
- *  including a person's own notes. */
-export function managedMarkersPaired(content: string): boolean {
-  // Every prefix cleanup would act on must belong to a complete marker.
-  const complete = [...content.matchAll(ANY_MARKER)];
-  if ([...content.matchAll(ANY_PREFIX)].length !== complete.length) return false;
-  let open: string | null = null;
-  for (const m of complete) {
-    const key = `${m[2]}:${m[3]}`;
-    if (m[1] === "BEGIN") {
-      if (open !== null) return false;
-      open = key;
-    } else {
-      if (open !== key) return false;
-      open = null;
-    }
-  }
-  return open === null;
-}
-
 function blockStates(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): Map<string, BlockState> {
   const content = fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : "";
   return new Map(guidance.items.map((item) => [item.blockId, blockState(content, item.blockId)]));
@@ -148,26 +121,42 @@ export interface GuidanceRepair {
 
 /** Put back only the missing managed guidance blocks. Existing blocks and any other text in the
  *  file are left exactly as they are. Never throws: a failure becomes a reported gap. */
+/** Would appending these blocks to `content` be safe for the next `rig down`? Decided by effect,
+ *  with cleanup itself: safe only when stripping the new file gives exactly what stripping the
+ *  current one gives, so the added blocks strip away cleanly and take nothing else with them. A
+ *  stray, truncated or misplaced marker (cleanup strips from any BEGIN to the next END that ends a
+ *  line) makes the two differ. No second marker grammar to keep in step with cleanup. */
+export function appendIsCleanupSafe(content: string, blocks: Array<{ blockId: string; content: string }>): boolean {
+  let candidate = content;
+  const memory: ManagedBlockMergeFsOps = {
+    exists: () => true,
+    readFile: () => candidate,
+    writeFile: (_path, next) => { candidate = next; },
+  };
+  for (const block of blocks) mergeManagedBlock(memory, "(in memory)", block.blockId, block.content);
+  return stripManagedBlocks(candidate) === stripManagedBlocks(content);
+}
+
+/** Put back only the missing managed guidance blocks. Existing blocks and any other text in the
+ *  file are left exactly as they are, and nothing is written unless cleanup would later remove
+ *  exactly what was added. Never throws: a failure becomes a reported gap. */
 export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps): GuidanceRepair {
   const repair: GuidanceRepair = { restored: [], gaps: [] };
   let states: Map<string, BlockState>;
-  let paired: boolean;
+  let existing: string | null;
   try {
     states = blockStates(guidance, fs);
-    paired = managedMarkersPaired(fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : "");
+    existing = fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : null;
   } catch (err) {
     repair.gaps.push(`could not read ${guidance.targetPath}: ${(err as Error).message}`);
     return repair;
   }
+  const toWrite: Array<{ blockId: string; content: string }> = [];
   for (const item of guidance.items) {
     const state = states.get(item.blockId);
     if (state === "complete") continue;
     if (state === "incomplete") {
       repair.gaps.push(`${item.blockId}: ${guidance.targetPath} holds only part of this block (one marker); left as it is`);
-      continue;
-    }
-    if (!paired) {
-      repair.gaps.push(`${item.blockId}: not written, because ${guidance.targetPath} has an unmatched OpenRig managed-block marker and writing could cost the text after it at the next rig down`);
       continue;
     }
     if (item.unresolved) {
@@ -179,10 +168,26 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
         repair.gaps.push(`${item.blockId}: its source ${item.sourcePath} no longer exists`);
         continue;
       }
-      mergeManagedBlock(fs, guidance.targetPath, item.blockId, fs.readFile(item.sourcePath));
-      repair.restored.push(item.blockId);
+      toWrite.push({ blockId: item.blockId, content: fs.readFile(item.sourcePath) });
     } catch (err) {
       repair.gaps.push(`${item.blockId}: ${(err as Error).message}`);
+    }
+  }
+  if (toWrite.length === 0) return repair;
+  // A file that doesn't exist yet holds no text to lose. An existing one is written only if the
+  // next rig down would remove exactly what is added.
+  if (existing !== null && !appendIsCleanupSafe(existing, toWrite)) {
+    for (const block of toWrite) {
+      repair.gaps.push(`${block.blockId}: not written, because ${guidance.targetPath} has a managed-block marker that the next rig down would strip together with other text, so adding blocks there could cost that text`);
+    }
+    return repair;
+  }
+  for (const block of toWrite) {
+    try {
+      mergeManagedBlock(fs, guidance.targetPath, block.blockId, block.content);
+      repair.restored.push(block.blockId);
+    } catch (err) {
+      repair.gaps.push(`${block.blockId}: ${(err as Error).message}`);
     }
   }
   return repair;
