@@ -35,6 +35,9 @@ const NEVER_MERGED = new Set(["rig-role"]);
 export interface GuidanceItem {
   blockId: string;
   sourcePath: string;
+  /** An older "auto" startup file whose source can't be read, so it can't be classified. If its
+   *  block isn't in the file, that's reported as a gap; nothing is written for it. */
+  unresolved?: boolean;
 }
 
 export interface SeatGuidance {
@@ -61,16 +64,21 @@ export function seatGuidance(
     const e = reanchorShippedProjectionEntry(saved, undefined, exists);
     items.set(e.effectiveId, { blockId: e.effectiveId, sourcePath: e.absolutePath });
   }
+  // Every guidance startup file the last launch merged, whatever its appliesOn: a fresh-start-only
+  // file (onboarding, an agent starter) was merged at that launch and stayed in the file until
+  // `rig down` stripped it, so it is part of what the resumed conversation had.
   for (const saved of startupCtx.resolvedStartupFiles) {
-    if (!saved.appliesOn.includes("restore")) continue;
     const f = reanchorBuiltinStartupFile(saved, undefined, undefined, exists);
     // An "auto" file is classified from its content, as at launch (a `# SKILL` file is a skill,
-    // not guidance). If the source can't be read, it can't be classified, so it is left out.
+    // not guidance). If the source can't be read it can't be classified: it is reported, not dropped.
     let hint: string = f.deliveryHint;
     if (hint === "auto") {
       try {
         hint = resolveConcreteHint(f.path, readFile(f.absolutePath));
       } catch {
+        if (f.path.endsWith(".md") && !f.path.endsWith("SKILL.md")) {
+          items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath, unresolved: true });
+        }
         continue;
       }
     }
@@ -91,6 +99,27 @@ function blockState(content: string, blockId: string): BlockState {
   if ((current[0] && current[1]) || (legacy[0] && legacy[1])) return "complete";
   if (current[0] || current[1] || legacy[0] || legacy[1]) return "incomplete";
   return "absent";
+}
+
+const ANY_MARKER = /<!-- (BEGIN|END) (OpenRig|RIGGED) MANAGED BLOCK: ([^>]*?) -->/g;
+
+/** True when every managed-block marker in the file (any id, current or legacy form) pairs up as
+ *  BEGIN ... END of the same id, unnested. Cleanup strips from ANY BEGIN to the next END whatever
+ *  its id, so writing a block into a file with an unmatched marker could make the next `rig down`
+ *  delete the text in between, including a person's own notes. */
+export function managedMarkersPaired(content: string): boolean {
+  let open: string | null = null;
+  for (const m of content.matchAll(ANY_MARKER)) {
+    const key = `${m[2]}:${m[3]}`;
+    if (m[1] === "BEGIN") {
+      if (open !== null) return false;
+      open = key;
+    } else {
+      if (open !== key) return false;
+      open = null;
+    }
+  }
+  return open === null;
 }
 
 function blockStates(guidance: SeatGuidance, fs: Pick<ManagedBlockMergeFsOps, "exists" | "readFile">): Map<string, BlockState> {
@@ -115,8 +144,10 @@ export interface GuidanceRepair {
 export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps): GuidanceRepair {
   const repair: GuidanceRepair = { restored: [], gaps: [] };
   let states: Map<string, BlockState>;
+  let paired: boolean;
   try {
     states = blockStates(guidance, fs);
+    paired = managedMarkersPaired(fs.exists(guidance.targetPath) ? fs.readFile(guidance.targetPath) : "");
   } catch (err) {
     repair.gaps.push(`could not read ${guidance.targetPath}: ${(err as Error).message}`);
     return repair;
@@ -126,6 +157,14 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
     if (state === "complete") continue;
     if (state === "incomplete") {
       repair.gaps.push(`${item.blockId}: ${guidance.targetPath} holds only part of this block (one marker); left as it is`);
+      continue;
+    }
+    if (!paired) {
+      repair.gaps.push(`${item.blockId}: not written, because ${guidance.targetPath} has an unmatched OpenRig managed-block marker and writing could cost the text after it at the next rig down`);
+      continue;
+    }
+    if (item.unresolved) {
+      repair.gaps.push(`${item.blockId}: its source ${item.sourcePath} can't be read, so this older startup file can't be classified or put back`);
       continue;
     }
     try {

@@ -948,8 +948,14 @@ export class RestoreOrchestrator {
   ): RestoreNodeResult {
     // Every status with a live session; attention_required keeps its status and gains the disclosure.
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
-    const guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
-      this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+    let guidance: ReturnType<typeof seatGuidance>;
+    try {
+      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
+        this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+    } catch (err) {
+      warnings?.push(`Restore: ${node.logicalId}: could not check its guidance: ${(err as Error).message}`);
+      return { ...result, guidanceGaps: ["(guidance check failed)"] };
+    }
     if (!guidance || guidance.items.length === 0) return result;
     let missing: string[];
     try {
@@ -1060,7 +1066,13 @@ export class RestoreOrchestrator {
     // seat came back with no role, culture or SOP. Existing blocks are never refreshed; nothing
     // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
     if (resumeRequested && resumeToken && launchResult) {
-      const guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+      let guidance: ReturnType<typeof seatGuidance> = null;
+      try {
+        guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+      } catch (err) {
+        // Guidance never blocks the exact resume; the post-launch check discloses the gap.
+        warnings?.push(`Restore guidance: ${node.logicalId}: could not read its saved guidance selection: ${(err as Error).message}`);
+      }
       if (guidance && guidance.items.length > 0) {
         const repair = restoreMissingGuidance(guidance, {
           exists: existsSync,

@@ -65,6 +65,10 @@ interface SeatOptions {
   userText?: string;
   /** An extra "auto" startup file whose content marks it as a skill. */
   autoSkillFile?: boolean;
+  /** An extra guidance startup file that applies on fresh start only (like the onboarding files). */
+  freshOnlyFile?: boolean;
+  /** An extra older "auto" .md startup file (classified from its content). */
+  autoGuidanceFile?: boolean;
 }
 
 describe("a seat's guidance across rig down then rig up --existing (exact resume)", () => {
@@ -134,6 +138,16 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       path: "SOP.md", absolutePath: path.join(spec, "SOP.md"), ownerRoot: spec,
       deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"],
     }];
+    if (opts.freshOnlyFile) {
+      fs.writeFileSync(path.join(spec, "onboarding.md"), "Onboarding: how this world works.");
+      files.push({ path: "onboarding.md", absolutePath: path.join(spec, "onboarding.md"), ownerRoot: spec,
+        deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start"] });
+    }
+    if (opts.autoGuidanceFile) {
+      fs.writeFileSync(path.join(spec, "NOTES.md"), "Team notes, an older auto startup file.");
+      files.push({ path: "NOTES.md", absolutePath: path.join(spec, "NOTES.md"), ownerRoot: spec,
+        deliveryHint: "auto", required: false, appliesOn: ["fresh_start", "restore"] });
+    }
     if (opts.autoSkillFile) {
       fs.writeFileSync(path.join(spec, "helper.md"), "# SKILL\nA skill, never merged into guidance.");
       files.push({ path: "helper.md", absolutePath: path.join(spec, "helper.md"), ownerRoot: spec,
@@ -146,6 +160,8 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     if (opts.userText) fs.writeFileSync(guidanceFile, opts.userText);
     mergeManagedBlock(nodeFs, guidanceFile, "lead-role", "You lead this team.");
     mergeManagedBlock(nodeFs, guidanceFile, "SOP.md", "How work flows here.");
+    if (opts.freshOnlyFile) mergeManagedBlock(nodeFs, guidanceFile, "onboarding.md", "Onboarding: how this world works.");
+    if (opts.autoGuidanceFile) mergeManagedBlock(nodeFs, guidanceFile, "NOTES.md", "Team notes, an older auto startup file.");
     return { rigId: rig.id, guidanceFile };
   }
 
@@ -296,18 +312,18 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.rigResult).toBe("fully_restored"); // a skill is not a guidance gap
   });
 
-  it("a block with only one marker is reported, not written next to: the file is left as it is", async () => {
+  it("a block with only one marker is reported, and nothing is written to that file", async () => {
     const { rigId, guidanceFile } = launchedSeat();
     const halfBlock = `# Notes\n${MANAGED_BLOCK_START("SOP.md")}\nhalf of an old block, its END marker lost\n`;
     const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
       betweenDownAndUp: () => fs.writeFileSync(guidanceFile, halfBlock),
     });
-    expect(fileAtHarnessStart).toContain(halfBlock.trim()); // untouched apart from the missing role block
-    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("lead-role"));
-    expect(fileAtHarnessStart!.split(MANAGED_BLOCK_START("SOP.md")).length - 1).toBe(1);
+    // Appending even the other missing block would let the next rig down strip from the lone BEGIN
+    // to that block's END (review50-r2, round 1 F1), so the file is left exactly as it is.
+    expect(fileAtHarnessStart).toBe(halfBlock);
     const lead = result.nodes.find((n) => n.logicalId === "lead");
     expect(lead?.status).toBe("resumed");
-    expect(lead?.guidanceGaps).toEqual(["SOP.md"]);
+    expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
     expect(result.rigResult).toBe("partially_restored");
     expect(result.warnings.join("\n")).toMatch(/only part of this block/);
   });
@@ -321,5 +337,51 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const lead = result.nodes.find((n) => n.logicalId === "lead");
     expect(lead?.status).toBe("attention_required");
     expect(lead?.guidanceGaps).toEqual(["SOP.md"]);
+  });
+
+  it("an unmatched marker anywhere in the file: nothing is written, so the next rig down can't take the person's notes", async () => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const stray = `# Preface\n<!-- BEGIN OpenRig MANAGED BLOCK: someone-elses-block -->\nMy own notes, written after that stray marker.\n`;
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
+      betweenDownAndUp: () => fs.writeFileSync(guidanceFile, stray),
+    });
+    expect(fileAtHarnessStart).toBe(stray); // not written at all
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
+    expect(result.rigResult).toBe("partially_restored");
+    expect(result.warnings.join("\n")).toMatch(/unmatched OpenRig managed-block marker/);
+    // And the next rig down leaves the notes alone (on the base this file was never written either).
+    await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes, written after that stray marker.");
+  });
+
+  it("guidance merged at a fresh start only (like onboarding) is put back too: it was in the file until rig down", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ freshOnlyFile: true });
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile);
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("onboarding.md"));
+    expect(fileAtHarnessStart).toContain("Onboarding: how this world works.");
+    expect(result.rigResult).toBe("fully_restored");
+  });
+
+  it("an older auto startup file is put back when readable, and disclosed when its source can't be read", async () => {
+    const readable = launchedSeat({ autoGuidanceFile: true });
+    const first = await downThenUpExisting(readable.rigId, readable.guidanceFile);
+    expect(first.fileAtHarnessStart).toContain(MANAGED_BLOCK_START("NOTES.md"));
+    expect(first.result.rigResult).toBe("fully_restored");
+  });
+
+  it("an older auto startup file whose source is gone is a disclosed gap, never a silent fully_restored", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ autoGuidanceFile: true });
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
+      betweenDownAndUp: () => fs.rmSync(path.join(spec, "NOTES.md")),
+    });
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md")); // the rest still comes back
+    expect(fileAtHarnessStart).not.toContain(MANAGED_BLOCK_START("NOTES.md"));
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect(lead?.guidanceGaps).toEqual(["NOTES.md"]);
+    expect(result.rigResult).toBe("partially_restored");
+    expect(result.warnings.join("\n")).toMatch(/can't be read/);
   });
 });
