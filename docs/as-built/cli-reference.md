@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
-last-updated: 2026-10-08
+last-verified-against-source: d35d2d89651daed1d1bab0ef2068a49ccc1d5c0e
+last-updated: 2026-10-09
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `e8f0ab340db773392ec8be75b072d1c0f3068a50`.
+Verified against source commit `d35d2d89651daed1d1bab0ef2068a49ccc1d5c0e`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
 There are **87 top-level registrations**, **356 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,082 explicitly registered option objects**, including the root version
+**1,085 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are source counts, not a claim about a deployed release.
@@ -458,9 +458,12 @@ Root: `rig`; declared option: `-V, --version`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal status` | — | `--provider <name>`<br>`--json` |
+| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+
+See [named terminal sessions](../reference/terminal-sessions.md) to select a
+Herdr session per request, including session-bound previews and window reuse.
 
 ### watchdog
 

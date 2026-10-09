@@ -137,6 +137,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   the failure. `--provider herdr` or `--provider cmux` adds tiles inside a workspace that is
   already visible, without opening a window; in `--json` output, `reusedWorkspace` with no new
   tiles means an existing view was reused, which is success.
+  Add `--session <name>` to select a Herdr session for that request; `--session default`
+  explicitly selects its default session. `rig terminal status --session <name>` inspects
+  the same endpoint. Omitting the flag keeps the daemon's configured endpoint.
   In the TUI, **TERMINALS** keeps Saved views prominent and Derived groups collapsed until
   expanded. Names load before detailed readiness. Select a view to inspect its members,
   layout and pages; preview is passive. Saved membership requires deliberate setup.

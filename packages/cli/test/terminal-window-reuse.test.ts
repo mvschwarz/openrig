@@ -13,16 +13,17 @@ const planId = "0123456789abcdef".repeat(4);
 const label = (id = "kernel", token = "l1") => `openrig:${id}#${planId.slice(0, 16)}#${token}`;
 interface Tab { workspace_id: string; tab_id: string; label: string }
 const spaceLabels: Record<string, string> = { "openrig-kernel": "openrig kernel", "old-name": "switchboard" };
-function fixture(tabs: Tab[] = [], id = "kernel") {
+function fixture(tabs: Tab[] = [], id = "kernel", session?: string) {
+  const socketPath = session === undefined ? "/daemon home/herdr.sock" : `/daemon home/sessions/${session}/herdr.sock`;
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach -t 'fixture-${seat}'` }));
   const composed = { id, opened: panes, pages: [panes], absent: [] as Array<{ seat: string; host: string | null; reason: string }>, degraded: [] as Array<{ seat: string; host: string; reason: string }> };
   const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("preview") ? {
-    planId, composed,
-    status: { launch: { socketPath: "/daemon home/herdr.sock" } },
-  } : { providers: [{ liveness: { alive: true } }] } }));
+    planId, composed, ...(session !== undefined ? { session } : {}),
+    status: { launch: { socketPath, ...(session !== undefined ? { session } : {}) } },
+  } : { ...(session !== undefined ? { session } : {}), providers: [{ liveness: { alive: true }, ...(session !== undefined ? { status: { launch: { socketPath, session } } } : {}) }] } }));
   const post = vi.fn(async () => {
     tabs.push({ workspace_id: `ws-${tabs.length}`, tab_id: `tab-${tabs.length}`, label: label(id) });
-    return { status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } };
+    return { status: 200, data: { provider: "herdr", ...(session !== undefined ? { session } : {}), ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } };
   });
   const workspaces = vi.fn(async () => JSON.stringify({ result: { workspaces: [...new Set(tabs.map(tab => tab.workspace_id))].map(workspace_id => ({ workspace_id, label: spaceLabels[workspace_id] })) } }));
   const list = vi.fn(async (workspace: string) => JSON.stringify({ id: "cli:tab:list", result: { tabs: tabs.filter(tab => tab.workspace_id === workspace) } }));
@@ -55,7 +56,7 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
     clientFactory: () => ({ baseUrl: "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
   };
-  return { tabs, composed, workspaces, list, focus, paneList, processInfo, clients, exec, post, windowDeps, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
+  return { tabs, composed, workspaces, list, focus, paneList, processInfo, clients, exec, post, get, socketPath, windowDeps, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
 }
 
 describe("reopening a Herdr view in a desktop window", () => {
@@ -68,6 +69,25 @@ describe("reopening a Herdr view in a desktop window", () => {
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
   });
   afterEach(() => { process.exitCode = originalExit; vi.restoreAllMocks(); });
+
+  it("a named session scopes every reuse inventory and focus command to the selected socket", async () => {
+    const f = fixture([{ workspace_id: "existing", tab_id: "existing-tab", label: label() }], "kernel", "prod");
+    await f.run(["--session", "prod", "--json"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("existing-tab"); expect(f.post).not.toHaveBeenCalled();
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: true, session: "prod", reusedWorkspace: { id: "existing" } });
+    for (const [, args] of f.exec.mock.calls.filter(([file]) => file === "/usr/bin/env")) expect(args).toContain(`HERDR_SOCKET_PATH=${f.socketPath}`);
+    expect(f.get.mock.calls.every(([url]) => url.includes("session=prod"))).toBe(true);
+  });
+
+  it("stale-view cleanup guidance names the selected socket and never closes another workspace", async () => {
+    const f = fixture([{ workspace_id: "old", tab_id: "old-tab", label: label() }], "kernel", "prod");
+    f.processInfo.mockResolvedValue(JSON.stringify({ result: { process_info: { pane_id: "unrelated", foreground_processes: [] } } }));
+    await f.run(["--session", "prod", "--json"]);
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", session: "prod", expectedPlan: planId }, { timeoutMs: 45_000 });
+    expect(JSON.parse(logs[0]!).notes.join("\n")).toContain(`env -u HERDR_SESSION HERDR_SOCKET_PATH='${f.socketPath}' '/fixture/bin/herdr' workspace close 'old'`);
+    expect(f.exec.mock.calls.some(([, args]) => args.includes("close"))).toBe(false);
+  });
 
 
   it.each(["plain shells", "detached clients", "wrong session", "read-only mismatch"])("recomposes a matching saved plan with %s", async state => {

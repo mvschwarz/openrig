@@ -29,6 +29,7 @@ function getService(c: { get(key: string): unknown }): TerminalService | null {
 function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 | 409 {
   if (ok) return 200;
   if (code === "view_required" || code === "unknown_provider") return 400;
+  if (code === "invalid_terminal_session" || code === "unsupported_terminal_session") return 400;
   if (code === "view_not_found") return 404;
   if (code === "preview_changed") return 409;
   // provider-unavailable / layout-unsupported / honest-partial: a truthful 200 body.
@@ -36,14 +37,15 @@ function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 |
 }
 
 /** Parse the `{ provider?, view }` open body honestly (a non-object / missing view → structured 400 upstream). */
-function readOpenBody(raw: unknown): { provider?: string; view?: string; expectedPlan?: string; viewportColumns?: number } {
+function readOpenBody(raw: unknown): { provider?: string; session?: string; view?: string; expectedPlan?: string; viewportColumns?: number } | { error: string } {
   if (raw === null || typeof raw !== "object") return {};
   const obj = raw as Record<string, unknown>;
+  if (obj["session"] !== undefined && typeof obj["session"] !== "string") return { error: "session must be a session name string." };
   const provider = typeof obj["provider"] === "string" ? (obj["provider"] as string) : undefined;
   const view = typeof obj["view"] === "string" ? (obj["view"] as string) : undefined;
   const expectedPlan = typeof obj["expectedPlan"] === "string" ? obj["expectedPlan"] : undefined;
   const viewportColumns = typeof obj["viewportColumns"] === "number" ? obj["viewportColumns"] : undefined;
-  return { ...(provider !== undefined ? { provider } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}) };
+  return { ...(provider !== undefined ? { provider } : {}), ...(obj["session"] !== undefined ? { session: obj["session"] as string } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}) };
 }
 
 /** The canonical, non-rig-scoped terminal route family. Mounted at `/api/terminal`. */
@@ -59,8 +61,9 @@ export function terminalRoutes(): Hono {
     } catch {
       return c.json({ error: "body_invalid", hint: "expected a JSON object { provider?, view }" }, 400);
     }
-    const { provider, view, expectedPlan, viewportColumns } = readOpenBody(raw);
-    const result = await svc.openView({ ...(provider !== undefined ? { provider } : {}), view: view ?? "", ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}) });
+    const body = readOpenBody(raw);
+    if ("error" in body) return c.json({ code: "invalid_terminal_session", error: body.error }, 400);
+    const result = await svc.openView({ ...body, view: body.view ?? "" });
     return c.json(result, statusForOpen(result.ok, result.code));
   });
 
@@ -74,7 +77,8 @@ export function terminalRoutes(): Hono {
     const svc = getService(c);
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
     const width = c.req.query("viewportColumns");
-    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(width !== undefined ? { viewportColumns: Number(width) } : {}) });
+    const session = c.req.query("session");
+    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(session !== undefined ? { session } : {}), ...(width !== undefined ? { viewportColumns: Number(width) } : {}) });
     return c.json(result, "planId" in result ? 200 : statusForOpen(result.ok, result.code));
   });
 
@@ -82,7 +86,9 @@ export function terminalRoutes(): Hono {
     const svc = getService(c);
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
     const provider = c.req.query("provider");
-    return c.json(await svc.status(provider));
+    const session = c.req.query("session");
+    const result = session === undefined ? await svc.status(provider) : await svc.status(provider, session);
+    return c.json(result, result.code ? statusForOpen(false, result.code) : 200);
   });
 
   return app;
@@ -101,15 +107,14 @@ rigTerminalRoutes.post("/open", async (c) => {
   if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
   const rigId = c.req.param("rigId");
   if (!rigId) return c.json({ error: "rig_id_required" }, 400);
-  let provider: string | undefined;
+  let raw: unknown;
   try {
-    const raw = (await c.req.json()) as unknown;
-    if (raw && typeof raw === "object" && typeof (raw as Record<string, unknown>)["provider"] === "string") {
-      provider = (raw as Record<string, unknown>)["provider"] as string;
-    }
+    raw = await c.req.json();
   } catch {
     // An empty/absent body is fine for the alias — the view is the rig itself.
   }
-  const result = await svc.openView({ ...(provider !== undefined ? { provider } : {}), view: `rig:${rigId}` });
+  const body = readOpenBody(raw);
+  if ("error" in body) return c.json({ code: "invalid_terminal_session", error: body.error }, 400);
+  const result = await svc.openView({ ...body, view: `rig:${rigId}` });
   return c.json(result, statusForOpen(result.ok, result.code));
 });

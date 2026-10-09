@@ -323,6 +323,11 @@ rig terminal open saved:kernel --provider cmux --json
 ```
 
 Use `rig terminal status --json` to inspect provider availability and liveness.
+To keep rigs in separate Herdr sessions, select one explicitly:
+`rig terminal open future-prod-rig --provider herdr --session future-prod`.
+`--session default` selects Herdr's default session; omitting the option keeps
+the daemon's configured endpoint. See [named terminal sessions](terminal-sessions.md)
+for desktop windows, previews and session-specific status.
 For the first desktop handoff, use `--window`. Only if the window cannot open,
 `rig tui --shared` is the dashboard-only fallback, not the operator's conversation.
 

@@ -1784,10 +1784,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // built, those scopes honestly return not-found rather than throwing.
   {
     const { TerminalService } = await import("./domain/terminal/terminal-service.js");
-    const { HerdrAdapter } = await import("./domain/terminal/herdr-adapter.js");
-    const { createHerdrSocketRpc, createHerdrSocketTransport, resolveHerdrSocketPath } = await import(
-      "./domain/terminal/herdr-transport.js"
-    );
+    const { createHerdrProviders } = await import("./domain/terminal/herdr-sessions.js");
     const { CmuxProviderAdapter } = await import("./domain/terminal/cmux-provider-adapter.js");
     const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
@@ -1813,12 +1810,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logicalId: e.logicalId,
     });
 
-    const herdrSocketPath = resolveHerdrSocketPath();
-    const herdrProvider = new HerdrAdapter({
-      // FB4: herdr speaks its unix control socket (there is no `layout` CLI).
-      transportFactory: createHerdrSocketTransport(createHerdrSocketRpc(herdrSocketPath)),
-      launch: { socketPath: herdrSocketPath, ...(process.env["HERDR_SESSION"] ? { session: process.env["HERDR_SESSION"] } : {}) },
-    });
+    const { defaultProvider: herdrProvider, sessionProvider: herdrSessionProvider } = createHerdrProviders();
     const cmuxProvider = new CmuxProviderAdapter({
       cmuxAdapter,
       // One gridded workspace per composed page — the same grid machinery as
@@ -1832,6 +1824,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
     deps.terminalService = new TerminalService({
       resolveProvider: (name) => providerMap[name] ?? null,
+      resolveSessionProvider: (name, session) => name === "herdr" ? herdrSessionProvider(session) : null,
       viewsStore: new TerminalViewsStore(),
       listRigSeatsBatch: (names) => {
         const rigs = rigRepo.listRigs();
