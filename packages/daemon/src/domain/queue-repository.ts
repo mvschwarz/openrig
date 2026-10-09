@@ -535,10 +535,18 @@ const COMPACT_ELIDED_FIELDS = [
   "body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers",
 ] as const;
 
-function compactRow(item: QueueItem): QueueItem {
+/** A compact listing row: the elided fields are absent, not empty, and `fieldsElided` names them. */
+export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[number] | "fieldsElided"> & {
+  fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
+};
+
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean };
+
+function compactRow(item: QueueItem): CompactQueueItem {
   const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
   for (const field of COMPACT_ELIDED_FIELDS) delete row[field];
-  return row as unknown as QueueItem;
+  return row as unknown as CompactQueueItem;
 }
 
 const COMPACT_QUEUE_COLUMNS =
@@ -3255,7 +3263,10 @@ export class QueueRepository {
     return choice?.kind === "fallback" ? describeReplyToFallback(choice) : null;
   }
 
-  list(opts?: QueueListOptions): QueueItem[] {
+  list(opts: QueueListOptions & { compact: true }): CompactQueueItem[];
+  list(opts?: QueueListOptions & { compact?: false }): QueueItem[];
+  list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem>;
+  list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem> {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -3442,7 +3453,10 @@ export class QueueRepository {
     return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
   }
 
-  findOverdue(opts?: { now?: string; rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
+  findOverdue(opts: FindOverdueOptions & { compact: true }): CompactQueueItem[];
+  findOverdue(opts?: FindOverdueOptions & { compact?: false }): QueueItem[];
+  findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem>;
+  findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem> {
     const cutoff = opts?.now ?? new Date().toISOString();
     const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
     const params: unknown[] = [cutoff];
@@ -3522,7 +3536,10 @@ export class QueueRepository {
    * A generic null nudge is still excluded; only a structured OWNER episode
    * makes that absence meaningful. READ only — no retry or unwind.
    */
-  findUndelivered(opts?: { rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
+  findUndelivered(opts: FindUndeliveredOptions & { compact: true }): CompactQueueItem[];
+  findUndelivered(opts?: FindUndeliveredOptions & { compact?: false }): QueueItem[];
+  findUndelivered(opts?: FindUndeliveredOptions): Array<QueueItem | CompactQueueItem>;
+  findUndelivered(opts?: FindUndeliveredOptions): Array<QueueItem | CompactQueueItem> {
     // OPR.0.5.6.14 — delivery truth belongs to the CURRENT human-notification
     // episode, not to the row's whole history. Pull every active row that can
     // carry a current episode or a legacy nudge/receipt, then derive/filter in
