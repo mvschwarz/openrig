@@ -195,6 +195,22 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(result.errors[0]).toMatch(/duplicate member id "impl"/);
   });
 
+  it("members in different pods that derive the same session name fail", () => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods[0]!.id = "dev-impl";
+    rig.pods[0]!.members[0]!.id = "main";
+    rig.pods[0]!.edges[0]!.to = "main";
+    rig.edges[0]!.from = "dev-impl.main";
+    rig.pods[1]!.id = "dev";
+    rig.pods[1]!.members[0]!.id = "impl-main";
+    rig.edges[0]!.to = "dev.impl-main";
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual([
+      'pods[1].members[0].id: session name "dev-impl-main@dev-rig" is already used by member "dev-impl.main"',
+    ]);
+  });
+
   // T9: dot in pod id or member id fails
   it("dot in pod id or member id fails", () => {
     const rig1 = structuredClone(VALID_RIG);
