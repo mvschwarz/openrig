@@ -99,6 +99,16 @@ clicks arrive over the same socket, so no request URL is needed. An app created 
 manifest has Interactivity off: turn it on under **Interactivity & Shortcuts**, or the buttons
 will do nothing. A typed reply in the thread still answers the decision either way.
 
+In the decision's `humanAnswers`, clicked answers remain option-id strings. A whole typed reply
+is stored as `{kind: "typed-reply", text: "…", placement: "first-unanswered", unansweredCount: N}`
+under the first unanswered question. That placement is automatic; it does not mean the person
+selected that question. `N` counts the other question slots still empty in `humanAnswers` after
+that placement. Earlier button answers are preserved; no other questions are filled in.
+Read `text` as the person's words,
+even when it equals an option id. The reply still closes the decision, so `done` is not approval.
+A file-only reply closes the decision without recording a typed answer. If all button answers were
+already recorded, they stay final and the typed reply remains in the correlated reply row.
+
 ## What the connector does with the tokens
 
 The tokens stay in the env file you created. The connector reads them from that file and uses them
@@ -195,6 +205,9 @@ outside this recovery scope; global chronological order is not promised.
 snapshot: socket state/generation, last event, recovery interval/state/reason,
 retry time and accepted/dead-lettered recovery counts since the connector last
 started (they reset when it is enabled or disabled, and when the daemon restarts).
+It also reports the durable dead-letter backlog: the retained records for inbound messages,
+reactions and click answers that await retry, counted from both dead-letter files so the number
+survives a restart, and shown as unknown with a reason (and no count) when a file cannot be read.
 Human-readable coverage and pending bounds use ISO timestamps; JSON keeps Slack timestamps.
 The status read calls no Slack API and starts no scan. If the daemon cannot be
 observed, local configuration remains visible and live state is unknown. A

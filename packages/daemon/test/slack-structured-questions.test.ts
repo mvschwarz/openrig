@@ -22,6 +22,7 @@ import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { InboundReceiptStore } from "../src/domain/gateway/slack/state-store.js";
+import { formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
 
 const human = "human-founder@external";
 const registry = { ok: true as const, entities: [{ entityId: "human-founder", class: "human" as const, displayName: "Founder", address: human, connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "UFOUNDER" }], prefs: { deliveryClass: "A" as const } }] };
@@ -30,6 +31,9 @@ const questions = [
   { id: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres", recommended: true }, { id: "sqlite", label: "SQLite" }] },
   { id: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
 ];
+const typedReply = (text: string, unansweredCount: number) => ({
+  kind: "typed-reply", text, placement: "first-unanswered", unansweredCount,
+});
 
 describe("structured human questions (#193)", () => {
   let home: string;
@@ -222,6 +226,27 @@ describe("structured human questions (#193)", () => {
     }
     const repliesToSeat = () => repo.list({ limit: 100 }).filter((q) => q.destinationSession === "author@rig");
 
+    async function postDecision(humanQuestions?: typeof questions): Promise<{ id: string; root: string }> {
+      const item = await repo.create({ ...request, humanIntent: "decision", humanQuestions });
+      const alert = async () => (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({}))
+        .find((q) => q.qitemId === item.qitemId);
+      const root = `${posts.length + 1}.1`;
+      wire.dispatcher.dispatch("post_message", human, await alert());
+      await vi.waitFor(async () => expect(await alert()).toBeUndefined());
+      return { id: item.qitemId, root };
+    }
+
+    async function typeReply(text: string, opts: { root?: string; ts?: string; files?: unknown[] } = {}): Promise<void> {
+      const ts = opts.ts ?? "3000.1";
+      const envelopeId = `e-typed-${ts}`;
+      const before = finals(envelopeId).length;
+      socket.onmessage?.({ data: JSON.stringify({ envelope_id: envelopeId, type: "events_api", payload: { event: {
+        type: "message", user: "UFOUNDER", text, ts, thread_ts: opts.root ?? "1.1", channel: "C-TEST",
+        ...(opts.files ? { subtype: "file_share", files: opts.files } : {}),
+      } } }) });
+      await vi.waitFor(() => expect(finals(envelopeId).length).toBe(before + 1));
+    }
+
     it("posts the buttons, records each click, and resolves back to the seat once every question is answered", async () => {
       expect(JSON.stringify(posts[0]?.blocks)).toContain("or-opt:pg");
 
@@ -319,10 +344,112 @@ describe("structured human questions (#193)", () => {
       expect(threadAcks().some((t) => t.startsWith("All answered"))).toBe(false);
     });
 
-    it("still resolves on a typed reply in the thread (the \"Other\" answer)", async () => {
-      socket.onmessage?.({ data: JSON.stringify({ envelope_id: "e-typed", type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "Neither — use DuckDB", ts: "3000.1", thread_ts: "1.1", channel: "C-TEST" } } }) });
-      await vi.waitFor(() => expect(repo.getById(decisionId)?.state).toBe("done"));
-      expect(repliesToSeat()[0]?.body).toContain("Neither — use DuckDB");
+    it("keeps a single-question typed correction on the decision before notifying its subscribers (#1037)", async () => {
+      const { id, root } = await postDecision([questions[1]!]);
+      const text = "Not yet — change X first.\nThen ask again.";
+      const observed: unknown[] = [];
+      const unsubscribe = bus.subscribe((event) => {
+        if (event.type === "queue.updated" && event.qitemId === id && event.toState === "done") {
+          observed.push(repo.getById(id)?.humanAnswers);
+        }
+      });
+      stops.push(unsubscribe);
+      await typeReply(text, { root });
+      const item = repo.getById(id)!;
+      expect(item).toMatchObject({ state: "done", closureReason: "no-follow-on", humanAnswers: { ship: typedReply(text, 0) } });
+      expect(formatHumanAnswers(item.humanQuestions!, item.humanAnswers!)).toEqual([
+        `Whole typed reply, automatically placed under first unanswered question "Ship this week?"; 0 questions left unanswered: ${text}`,
+      ]);
+      expect(observed).toEqual([{ ship: typedReply(text, 0) }]);
+      expect(repliesToSeat()[0]?.body).toContain(text);
+    });
+
+    it("records a multi-question typed reply only for the first unanswered question, including after replay", async () => {
+      const text = "Neither — use DuckDB";
+      await typeReply(text);
+      await typeReply(text); // Socket Mode redelivery must not fill the next question.
+      const item = repo.getById(decisionId)!;
+      expect(item).toMatchObject({ state: "done", humanAnswers: { db: typedReply(text, 1) } });
+      expect(unansweredQuestions(item.humanQuestions!, item.humanAnswers!)).toEqual([questions[1]]);
+      expect(formatHumanAnswers(item.humanQuestions!, item.humanAnswers!)).toEqual([
+        `Whole typed reply, automatically placed under first unanswered question "Which database?"; 1 question left unanswered: ${text}`,
+      ]);
+      expect(repo.transitionLog.listForQitem(decisionId).at(-1)?.transitionNote).toBe(
+        'direct human reply received; Whole typed reply, automatically placed under first unanswered question "Which database?"; 1 question left unanswered',
+      );
+      expect(repliesToSeat()).toHaveLength(1);
+      expect(repliesToSeat()[0]?.body).toContain(text);
+    });
+
+    it("preserves a previous button answer when the remaining question gets a typed reply", async () => {
+      await click("db", "pg");
+      const text = "Not this week — wait for the migration.";
+      await typeReply(text);
+      expect(repo.getById(decisionId)).toMatchObject({ state: "done", humanAnswers: { db: "pg", ship: typedReply(text, 0) } });
+      expect(repliesToSeat()).toHaveLength(1);
+    });
+
+    it("distinguishes a typed option id from a clicked choice on the HTTP row and in its formatter", async () => {
+      const collision = [{ id: "approval", question: "May we publish?", options: [
+        { id: "later", label: "Approve publication now" }, { id: "stop", label: "Decline" },
+      ] }];
+      const { id, root } = await postDecision(collision);
+      await typeReply("later", { root });
+      const app = new Hono();
+      app.use("*", async (c, next) => { (c.set as (k: string, v: unknown) => void)("queueRepo", repo); await next(); });
+      app.route("/api/queue", queueRoutes());
+      const response = await app.request(`/api/queue/${id}`);
+      expect(response.status).toBe(200);
+      const row = await response.json();
+      expect(row.humanAnswers).toEqual({ approval: typedReply("later", 0) });
+      const formatted = formatHumanAnswers(row.humanQuestions, row.humanAnswers);
+      expect(formatted).toEqual([
+        'Whole typed reply, automatically placed under first unanswered question "May we publish?"; 0 questions left unanswered: later',
+      ]);
+      expect(formatted.join("\n")).not.toContain("Approve publication now");
+      expect(repliesToSeat()[0]?.body).toContain("later");
+
+      const clicked = await postDecision(collision);
+      await click("approval", "later", { root: clicked.root });
+      const clickedRow = repo.getById(clicked.id)!;
+      expect(clickedRow.humanAnswers).toEqual({ approval: "later" });
+      expect(formatHumanAnswers(clickedRow.humanQuestions!, clickedRow.humanAnswers!)).toEqual(["May we publish?: Approve publication now"]);
+    });
+
+    it("keeps plain-decision text replies on their existing path", async () => {
+      const { id, root } = await postDecision();
+      await typeReply("Not yet, change X first", { root });
+      expect(repo.getById(id)).toMatchObject({ state: "done", humanAnswers: null });
+      expect(repo.transitionLog.listForQitem(id).at(-1)).toMatchObject({
+        transitionNote: "direct human reply received", ownerNotificationKind: "human-decision-resolved",
+      });
+      expect(repliesToSeat()[0]?.body).toContain("Not yet, change X first");
+    });
+
+    it("does not store the file-only marker as an answer", async () => {
+      // The inert file has no download URL; transfer failure is separately retained in the reply row.
+      await typeReply("", { files: [{ id: "F1", name: "feedback.txt" }] });
+      expect(repo.getById(decisionId)).toMatchObject({ state: "done", humanAnswers: null });
+      expect(repliesToSeat()).toHaveLength(1);
+      expect(repliesToSeat()[0]?.body).toContain("feedback.txt");
+    });
+
+    it("rolls back the typed answer with a failed close, then records it once on retry", async () => {
+      const realAppend = repo.transitionLog.append.bind(repo.transitionLog);
+      const append = vi.spyOn(repo.transitionLog, "append").mockImplementation((input) => {
+        if (input.qitemId === decisionId && input.state === "done") throw new Error("injected close failure");
+        return realAppend(input);
+      });
+      const resolver = makeHumanReplyResolver(repo, new MissionControlWriteContract({
+        db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db),
+      }));
+      const input = { qitemId: decisionId, actorSession: human, decision: "Neither — use DuckDB" };
+      await expect(resolver(input)).rejects.toThrow("injected close failure");
+      expect(repo.getById(decisionId)).toMatchObject({ state: "pending", humanAnswers: null });
+      append.mockRestore();
+      expect(await resolver(input)).toBe("resolved");
+      expect(await resolver(input)).toBe("already-resolved");
+      expect(repo.getById(decisionId)?.humanAnswers).toEqual({ db: typedReply(input.decision, 1) });
     });
   });
 });
