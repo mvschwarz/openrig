@@ -3439,6 +3439,11 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r));
   }
 
+  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
+  private compactColumns(): string {
+    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
+  }
+
   /**
    * Find qitems whose `closure_required_at` is past now. Used by watchdog;
    * does NOT itself emit events — callers decide whether to nudge or escalate.
@@ -3448,11 +3453,6 @@ export class QueueRepository {
    * dumping every rig's full qitem bodies to a single caller. No args = the prior
    * behavior (all overdue, full rows) for the watchdog.
    */
-  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
-  private compactColumns(): string {
-    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
-  }
-
   findOverdue(opts: FindOverdueOptions & { compact: true }): CompactQueueItem[];
   findOverdue(opts?: FindOverdueOptions & { compact?: false }): QueueItem[];
   findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem>;
