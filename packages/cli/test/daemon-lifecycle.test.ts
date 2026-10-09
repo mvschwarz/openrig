@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { createServer } from "node:net";
+import { realDeps } from "../src/commands/daemon.js";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -42,6 +46,7 @@ function mockDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
     acquireStartLock: () => ({ recordChild: vi.fn(), release: vi.fn() }),
     spawn: vi.fn(() => child as unknown as ChildProcess),
     fetch: vi.fn(async () => ({ ok: true })),
+    isPortOccupied: vi.fn(async () => false),
     kill: vi.fn(() => { child.exitCode = 0; child.emit("exit", 0, "SIGTERM"); return true; }),
     readFile: vi.fn(() => null),
     writeFile: vi.fn(),
@@ -215,6 +220,48 @@ describe("Daemon Lifecycle", () => {
     expect(deps.kill).not.toHaveBeenCalled();
   });
 
+  it("start: a timed-out no-state probe on an occupied port refuses before any initialization", async () => {
+    vi.useFakeTimers();
+    const deps = mockDeps({ fetch: vi.fn(neverFetch), isPortOccupied: vi.fn(async () => true) });
+    const pending = startDaemon({ port: 17433, host: "127.0.0.2" }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    expect((await pending).message).toMatch(/EADDRINUSE.*port 17433/);
+    expect((await pending).message).toContain("--port <unused-port>");
+    expect(deps.isPortOccupied).toHaveBeenCalledWith("127.0.0.2", 17433);
+    expect(deps.spawn).not.toHaveBeenCalled();
+    expect(deps.mkdirp).not.toHaveBeenCalled();
+    expect(deps.writeFile).not.toHaveBeenCalled();
+    expect(deps.openForAppend).not.toHaveBeenCalled();
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start: an immediate connection refusal does not bind-probe the port", async () => {
+    const deps = startableDeps();
+    await startDaemon({}, deps);
+    expect(deps.isPortOccupied).not.toHaveBeenCalled();
+    expect(deps.spawn).toHaveBeenCalledOnce();
+  });
+
+  it("start: reads only this launch's log bytes when its child exits", async () => {
+    vi.useFakeTimers();
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      fileSize: vi.fn(() => 1_000_000),
+      readFile: vi.fn((p: string) => { if (p === LOG_FILE) throw new Error("whole log read"); return null; }),
+      readFileFrom: vi.fn(() => "Error: listen EADDRINUSE\n"),
+      spawn: vi.fn(() => {
+        setTimeout(() => { child.exitCode = 1; child.emit("exit", 1, null); }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({}, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    expect((await pending).message).toContain("EADDRINUSE");
+    expect(deps.fileSize).toHaveBeenCalledWith(LOG_FILE);
+    expect(deps.readFileFrom).toHaveBeenCalledWith(LOG_FILE, 1_000_000);
+  });
+
   it("start: a bind failure after a hanging initial probe reports the occupied port without publishing state", async () => {
     vi.useFakeTimers();
     let log = "Earlier daemon log\n";
@@ -260,6 +307,70 @@ describe("Daemon Lifecycle", () => {
     expect(error.message).toMatch(/exited before startup completed/);
     expect(error.message).not.toContain("EADDRINUSE");
     expect(error.message).toContain(LOG_FILE);
+  });
+
+  it("start: a real held loopback port prevents spawning after the no-state timeout", async () => {
+    const listener = createServer();
+    await new Promise<void>((resolve, reject) => {
+      listener.once("error", reject);
+      listener.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const port = (listener.address() as { port: number }).port;
+      const deps = startableDeps({
+        fetch: vi.fn().mockImplementationOnce(neverFetch).mockResolvedValue(startupHealth()),
+        isPortOccupied: realDeps().isPortOccupied,
+      });
+      await expect(startDaemon({ port }, deps)).rejects.toThrow(/EADDRINUSE/);
+      expect(deps.spawn).not.toHaveBeenCalled();
+      expect(deps.mkdirp).not.toHaveBeenCalled();
+      expect(deps.writeFile).not.toHaveBeenCalled();
+      expect(listener.listening).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("exclusive bind releases a free port and treats other bind failures as indeterminate", async () => {
+    const deps = realDeps();
+    const listener = createServer();
+    await new Promise<void>((resolve, reject) => {
+      listener.once("error", reject);
+      listener.listen(0, "127.0.0.1", resolve);
+    });
+    const port = (listener.address() as { port: number }).port;
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    expect(await deps.isPortOccupied!("127.0.0.1", port)).toBe(false);
+    await new Promise<void>((resolve, reject) => {
+      listener.once("error", reject);
+      listener.listen(port, "127.0.0.1", resolve);
+    });
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    expect(await deps.isPortOccupied!("203.0.113.1", port)).toBe(false); // EADDRNOTAVAIL
+    expect(await deps.isPortOccupied!("127.0.0.1", -1)).toBe(false); // synchronous bind error
+  });
+
+  it("production log reads use a byte offset, preserve old-error absence and handle truncation", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-start-log-"));
+    const log = path.join(root, "daemon.log");
+    const deps = realDeps();
+    try {
+      fs.writeFileSync(log, "Older 🐢 EADDRINUSE\n".repeat(10_000));
+      const offset = deps.fileSize!(log);
+      expect(offset).toBe(fs.statSync(log).size);
+      expect(deps.readFileFrom!(log, offset)).toBe("");
+      const appended = "New 🐢 unrelated failure\n";
+      fs.appendFileSync(log, appended);
+      const read = vi.spyOn(fs, "readSync");
+      try {
+        expect(deps.readFileFrom!(log, offset)).toBe(appended);
+        expect(read).toHaveBeenCalledWith(expect.any(Number), expect.any(Buffer), 0, Buffer.byteLength(appended), offset);
+      } finally { read.mockRestore(); }
+      fs.writeFileSync(log, "New EADDRINUSE\n");
+      expect(deps.readFileFrom!(log, offset)).toBe("New EADDRINUSE\n");
+      expect(deps.fileSize!(path.join(root, "absent"))).toBe(0);
+      expect(deps.readFileFrom!(path.join(root, "absent"), 0)).toBeNull();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   // Test 5: stop reads pid from daemon.json, sends SIGTERM, removes daemon.json
