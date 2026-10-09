@@ -135,11 +135,15 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   let lastAutoReplaceAt = 0;
   const conns = new Set<Conn>();
   let current: Conn | undefined;
-  /** Our posts waiting for their echo: Slack ts → when we posted it. */
-  const expected = new Map<string, number>();
-  /** Event ts seen in the last few minutes, with the connection that received it: an echo can
-   *  arrive before the post's ts is registered, and it counts only for that connection. */
-  const recentEvents = new Map<string, { at: number; conn: Conn }>();
+  /** Our posts waiting for their echo: Slack ts → when we posted it (for its age) and its place
+   *  in the order of registration (for which misses an echo forgives: several posts can register
+   *  in the same millisecond). */
+  const expected = new Map<string, { at: number; seq: number }>();
+  let registrations = 0;
+  /** Event ts seen in the last few minutes, with the connection that received it and how many
+   *  posts had registered when it arrived: an echo can arrive before the post's ts is
+   *  registered, and it counts only for that connection. */
+  const recentEvents = new Map<string, { at: number; conn: Conn; seq: number }>();
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
   let openTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setInterval> | undefined;
@@ -152,13 +156,13 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   /** While a replacement is opening, the old connection may still be up: status follows it. */
   const oldStillOpen = (): boolean => replacing && !!current && !current.closed;
   /** A post of ours came back on `conn`. On the current connection it is delivering, and misses
-   *  older than this post end the failure episode, so only consecutive misses count. An echo the
-   *  draining old connection received says nothing about the current one. Once Slack disables
-   *  Socket Mode, status keeps saying so. */
-  const echoed = (conn: Conn, postedAt: number): void => {
+   *  registered up to `throughSeq` end the failure episode, so only consecutive misses count. An
+   *  echo the draining old connection received says nothing about the current one. Once Slack
+   *  disables Socket Mode, status keeps saying so. */
+  const echoed = (conn: Conn, throughSeq: number): void => {
     conn.echoArmed = true;
     if (conn !== current || disabledBySlack) return;
-    for (const [ts, at] of expected) if (at <= postedAt) expected.delete(ts);
+    for (const [ts, post] of expected) if (post.seq <= throughSeq) expected.delete(ts);
     status.delivery = "delivering";
     status.eventsMissingSince = undefined;
   };
@@ -236,8 +240,8 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       replace("no-server-pings");
       return;
     }
-    for (const [ts, at] of expected) if (now - at > 10 * echoTimeoutMs) expected.delete(ts); // bound the map
-    const overdue = [...expected.values()].filter((at) => now - at > echoTimeoutMs).sort((a, b) => a - b);
+    for (const [ts, post] of expected) if (now - post.at > 10 * echoTimeoutMs) expected.delete(ts); // bound the map
+    const overdue = [...expected.values()].map((post) => post.at).filter((at) => now - at > echoTimeoutMs).sort((a, b) => a - b);
     status.unechoedPosts = overdue.length;
     if (conn.echoArmed && overdue.length >= 2) {
       status.delivery = "events-missing";
@@ -379,12 +383,12 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         }
         if (ev?.ts) {
           const now = Date.now();
-          recentEvents.set(ev.ts, { at: now, conn });
+          recentEvents.set(ev.ts, { at: now, conn, seq: registrations });
           for (const [ts, seen] of recentEvents) if (now - seen.at > 5 * 60_000) recentEvents.delete(ts);
-          const postedAt = expected.get(ev.ts);
-          if (postedAt !== undefined) {
+          const post = expected.get(ev.ts);
+          if (post !== undefined) {
             expected.delete(ev.ts);
-            echoed(conn, postedAt);
+            echoed(conn, post.seq);
           }
         }
         void handleEnvelope(
@@ -484,8 +488,8 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       const early = recentEvents.get(messageTs);
       // The echo beat the registration: it counts for the connection that received it, and
       // forgives only posts registered before it arrived, not ones registered since.
-      if (early) return echoed(early.conn, early.at);
-      expected.set(messageTs, Date.now());
+      if (early) return echoed(early.conn, early.seq);
+      expected.set(messageTs, { at: Date.now(), seq: ++registrations });
     },
   };
 }

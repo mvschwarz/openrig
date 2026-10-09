@@ -194,6 +194,28 @@ describe("Socket Mode liveness", () => {
     expect(replacements()).toEqual([expect.objectContaining({ reason: "events-missing" })]);
   });
 
+  it("still counts a post registered in the same millisecond as an echoed one as a miss", async () => {
+    const first = await openSocket(1);
+    handle!.expectEcho("560.000001");
+    handle!.expectEcho("560.000002"); // the same millisecond (the clock is frozen), and never echoed
+    handle!.expectEcho("560.000003");
+    message(first, botEcho("560.000001"));
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(handle!.status().delivery).toBe("events-missing");
+    expect(replacements()).toEqual([expect.objectContaining({ reason: "events-missing" })]);
+  });
+
+  it("still counts a post registered in the same millisecond as an early echo's arrival as a miss", async () => {
+    const first = await openSocket(1);
+    message(first, botEcho("570.000001")); // the echo beats its registration
+    handle!.expectEcho("570.000002"); // the same millisecond, after it arrived, and never echoed
+    handle!.expectEcho("570.000003");
+    handle!.expectEcho("570.000001"); // the early echo's own registration
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(handle!.status().delivery).toBe("events-missing");
+    expect(replacements()).toEqual([expect.objectContaining({ reason: "events-missing" })]);
+  });
+
   it("does not credit an unnamed ping to either connection while a refresh overlaps them", async () => {
     const first = await openSocket(1);
     message(first, { envelope_id: "d-3", type: "disconnect", reason: "refresh_requested" });
