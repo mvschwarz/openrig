@@ -165,6 +165,9 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
     for (const [ts, post] of expected) if (post.seq <= throughSeq) expected.delete(ts);
     status.delivery = "delivering";
     status.eventsMissingSince = undefined;
+    // Delivery recovered, so a held-back reconnect is no longer pending. If pings are still
+    // stale, the next liveness check holds it back again and says so.
+    status.autoReconnectSuppressedUntil = undefined;
   };
   const receipt = (entry: Parameters<InboundReceiptStore["append"]>[0]): void => {
     try {
@@ -331,6 +334,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         status.delivery = "unknown";
         status.eventsMissingSince = undefined;
         status.unechoedPosts = 0;
+        status.autoReconnectSuppressedUntil = undefined; // a new connection: nothing is held back for it
         receipt({ generation: conn.generation, status: "connected" });
         // A connection replaced for a failed signal is presumed broken: close it now. One Slack
         // asked to refresh stays open so it drains what it is handed, until Slack closes it.

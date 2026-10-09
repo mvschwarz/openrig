@@ -316,6 +316,38 @@ describe("Socket Mode liveness", () => {
     expect(handle!.status().delivery).toBe("unknown");
   });
 
+  /** Two ping failures inside five minutes: the second replacement is held back on socket 2. */
+  async function holdBackOnSecondSocket(): Promise<FakeWs> {
+    await openSocket(1);
+    for (let i = 0; i < 2; i++) { ping(); await vi.advanceTimersByTimeAsync(10_000); }
+    await vi.advanceTimersByTimeAsync(40_000);
+    const second = await openSocket(2);
+    for (let i = 0; i < 2; i++) { ping(); await vi.advanceTimersByTimeAsync(10_000); }
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(handle!.status().autoReconnectSuppressedUntil).toBeDefined();
+    return second;
+  }
+
+  it("drops the held-back line once delivery recovers by an echo and then a ping", async () => {
+    const second = await holdBackOnSecondSocket();
+    handle!.expectEcho("990.000001");
+    message(second, botEcho("990.000001")); // the echo first: delivering
+    ping(); // then a credited ping
+    expect(handle!.status().delivery).toBe("delivering");
+    expect(handle!.status().autoReconnectSuppressedUntil).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(handle!.status().autoReconnectSuppressedUntil).toBeUndefined();
+  });
+
+  it("drops the held-back line when a plain reconnect opens a new connection", async () => {
+    const second = await holdBackOnSecondSocket();
+    second.ws.onclose!(); // Slack closes it: an ordinary reconnect, not a replacement
+    await vi.advanceTimersByTimeAsync(2_000); // the reconnect backoff
+    await openSocket(3);
+    expect(handle!.status()).toMatchObject({ state: "connected", generation: 3 });
+    expect(handle!.status().autoReconnectSuppressedUntil).toBeUndefined();
+  });
+
   it("stops reconnecting when Slack reports link_disabled, and says why", async () => {
     const first = await openSocket(1);
     message(first, { envelope_id: "d-2", type: "disconnect", reason: "link_disabled" });
