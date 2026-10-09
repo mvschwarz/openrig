@@ -8,6 +8,57 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.9]
+
+0.6.9 is a quick fix release for what people meet in their first hour and in
+the Slack channel: a typed Slack answer is kept, Slack status shows what waits
+to be retried, a kernel that recovered reads ready, and a cross-host send or a
+long chatroom wait no longer reports failure when the work went through. It is
+built from the commit tagged `v0.6.9`. The changes since 0.6.8:
+
+### Before you upgrade
+
+- Restart the daemon after upgrading the CLI (`rig daemon stop`, then `rig
+  daemon start`). There are no migrations, and openrig-core stays at 0.1.8.
+- Stamp the work tree named by `rig scope <tier> approve --workspace <path>`,
+  and refuse a named workspace with no `missions/` folder instead of stamping
+  the configured one ([#997](https://github.com/mvschwarz/openrig/pull/997)).
+- Wait up to 30 seconds for a cross-host `rig send --host` to an
+  http-registered host, and report a send that may have arrived as
+  `remote-outcome-unknown` ("Delivery UNCONFIRMED", exit 1) with the check to
+  run before any resend; only a host never reached reads as unreachable
+  ([#1048](https://github.com/mvschwarz/openrig/pull/1048)).
+
+### Highlights
+
+- Keep a typed Slack reply to a decision with structured questions in
+  `humanAnswers`, as a tagged typed reply placed under the first unanswered
+  question; typed text that matches an option's ID is never read as a click,
+  and closing still isn't approval ([#1045](https://github.com/mvschwarz/openrig/pull/1045)).
+- Show in `rig slack status` how many inbound messages, reactions and click
+  answers wait to be retried, or that the count is unknown and why ([#1036](https://github.com/mvschwarz/openrig/pull/1036)).
+- Report a kernel ready once every declared seat recovered from a failed start,
+  with the earlier failure on its own line in `rig status` and as
+  `last_boot_failure` from `/api/kernel/status`; list each kernel seat once
+  ([#1044](https://github.com/mvschwarz/openrig/pull/1044)).
+- Keep a long `rig chatroom wait` going through a slow or restarting daemon
+  until its `--timeout` ([#1047](https://github.com/mvschwarz/openrig/pull/1047)).
+
+### Dependency and install-script changes
+
+- No npm dependency or lockfile change beyond OpenRig's own version, the same
+  `postinstall`, and the same `node >=22`.
+
+### Seats
+
+- Recognise a Nix-wrapped Claude Code as the seat runtime, so its seats read
+  `running` ([#1053](https://github.com/mvschwarz/openrig/pull/1053)).
+
+### Docs
+
+- Say that `rig launch` takes a rig ID, from `rig ps --json`, in the capability
+  map and the what-changed note.
+
 ## [0.6.8]
 
 0.6.8 is mostly fixes, most of them from the community: one skill being edited
