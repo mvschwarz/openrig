@@ -271,32 +271,63 @@ describe("Codex behind a spawning launcher", () => {
   });
 });
 
-// #1088 follow-up: Claude's strict finder must not prove a shim's token over an opaque child,
-// matching observeClaudeDelivery's policy that a shim's token is never inherited.
-describe("Claude exact-resume finder behind a spawning shim", () => {
-  const shimRows = (child: string): NativeProcessRow[] => [
+// #1091: Claude's strict finder rejects a shallower token only when a deeper, verified Claude
+// runtime in the same chain positively names another conversation (Root's option (b)).
+describe("Claude exact-resume finder behind a spawning launcher", () => {
+  const other = "00000000-0000-7000-8000-00000000000f";
+  const find = (rows: NativeProcessRow[]) => findExactNativeResumeProcess(rows, 10, "claude-code", token)?.pid ?? null;
+  // A verified Claude binary (argv0 and OS name claude) on the token, over one child.
+  const realRows = (child: string, childName = "claude"): NativeProcessRow[] => [
     { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "zsh", command: "-zsh", startedAt },
     { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "claude", command: `claude --resume ${token} --name dev@rig`, startedAt },
-    { pid: 12, ppid: 11, pgid: 11, tpgid: 11, executableName: "claude", command: `claude ${child}`, startedAt },
+    { pid: 12, ppid: 11, pgid: 11, tpgid: 11, executableName: childName, command: child, startedAt },
+  ];
+  // A script launcher: ps shows the interpreter as argv0, so it is not a verified Claude runtime.
+  const scriptRows = (child: string) => realRows(child).map(r => r.pid === 11
+    ? { ...r, command: `/bin/sh /shim/claude --resume ${token} --name dev@rig` } : r);
+  // #563/#567 company-launcher model: three claude processes; the real Claude names no token.
+  const companyRows = (): NativeProcessRow[] => [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
+    { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /fixture/launch", startedAt },
+    { pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude --permission-mode auto --session-id ${token} --name test-c@native-test`, startedAt },
+    { pid: 104, ppid: 102, pgid: 101, tpgid: 101, executableName: "claude", command: `/shim/bin/claude --permission-mode auto --session-id ${token} --name test-c@native-test`, startedAt },
+    { pid: 105, ppid: 104, pgid: 101, tpgid: 101, executableName: "claude", command: "/shim/claude --settings /shim/settings.json --permission-mode auto", startedAt },
   ];
 
+  it("keeps main's proof for the company-launcher model (opaque real Claude)", () => {
+    // Proved as on main; the evidence names 104, the deepest link that names the token.
+    expect(findExactNativeResumeProcess(companyRows(), 100, "claude-code", token)?.pid).toBe(104);
+  });
   it.each([
-    ["an opaque child", "--permission-mode auto"],
-    ["a child on a fresh conversation", "--session-id 00000000-0000-7000-8000-00000000000f"],
-  ])("does not prove the shim's token over %s", (_name, child) => {
-    expect(findExactNativeResumeProcess(shimRows(child), 10, "claude-code", token)).toBeNull();
+    ["ripgrep with a claude pattern", "rg", "rg -n claude src"],
+    ["ugrep with a token-like argument", "ugrep", `ugrep -n claude --session-id ${other} file.ts`],
+    ["claude mcp serve", "claude", "claude mcp serve"],
+  ])("a helper child (%s) neither suppresses nor becomes the proof", (_name, comm, command) => {
+    expect(find(realRows(command, comm))).toBe(11);
   });
-  it("proves a child that names the token itself", () => {
-    expect(findExactNativeResumeProcess(shimRows(`--resume ${token}`), 10, "claude-code", token)?.pid).toBe(12);
+  it("refuses a script launcher's token over a verified child on another conversation", () => {
+    expect(find(scriptRows(`claude --session-id ${other}`))).toBeNull();
   });
-  it("keeps main's proof when the deeper Claude is not a spawned runtime", () => {
-    // A tool command run through a shell by the real Claude.
-    const toolChild = shimRows("-p summarise").flatMap(r => r.pid === 12
-      ? [{ ...r, pid: 13, ppid: 11, executableName: "bash", command: "/bin/bash -c claude -p summarise" }, { ...r, ppid: 13 }] : [r]);
-    expect(findExactNativeResumeProcess(toolChild, 10, "claude-code", token)?.pid).toBe(11);
-    // A Claude in another process group.
-    expect(findExactNativeResumeProcess(shimRows("-p x").map(r => r.pid === 12 ? { ...r, pgid: 99 } : r), 10, "claude-code", token)?.pid).toBe(11);
-    // Older callers without process groups.
-    expect(findExactNativeResumeProcess(shimRows("--permission-mode auto").map(({ pid, ppid, command }) => ({ pid, ppid, command })), 10, "claude-code", token)?.pid).toBe(11);
+  it("keeps main's proof for an opaque child under a script launcher", () => {
+    expect(find(scriptRows("claude --settings /shim/settings.json"))).toBe(11);
+  });
+  it("attributes proof to a child that names the token", () => {
+    expect(find(realRows(`claude --session-id ${token}`))).toBe(12);
+    expect(find(scriptRows(`claude --resume ${token}`))).toBe(12);
+  });
+  // Limit: ps cannot tell a launcher binary over the real Claude on Y from a real Claude on X
+  // that started a child Claude on Y, so a verified Claude on the token keeps main's proof.
+  it("keeps a verified Claude's proof when it starts a child Claude on another conversation", () => {
+    expect(find(realRows(`claude --session-id ${other}`))).toBe(11);
+  });
+  it("keeps main's result without process groups, through a shell, or in another group", () => {
+    expect(find(scriptRows(`claude --session-id ${other}`).map(({ pid, ppid, command, executableName }) => ({ pid, ppid, command, executableName })))).toBe(11);
+    const viaShell = scriptRows(`claude --session-id ${other}`).flatMap(r => r.pid === 12
+      ? [{ ...r, pid: 13, executableName: "bash", command: `/bin/bash -c claude --session-id ${other}` }, { ...r, ppid: 13 }] : [r]);
+    expect(find(viaShell)).toBe(11);
+    expect(find(scriptRows(`claude --session-id ${other}`).map(r => r.pid === 12 ? { ...r, pgid: 99 } : r))).toBe(11);
+  });
+  it("leaves --fork-session children as on main (separate follow-up)", () => {
+    expect(find(scriptRows(`claude --resume ${token} --fork-session`))).toBe(11);
   });
 });

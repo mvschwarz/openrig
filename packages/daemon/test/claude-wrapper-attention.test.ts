@@ -221,17 +221,24 @@ describe("Claude wrapper manual attention recovery", () => {
     expect((await fixture("review-token").verify(true)).ok).toBe(true);
   });
 
-  // #1088 follow-up: a shim's --resume over an opaque Claude child is not exact restore proof.
+  // #1091: strict restore rejects a shallower token only when a deeper verified Claude in the
+  // same chain positively names another conversation; otherwise it keeps main's result.
+  const real = (args: string) => ({ ...root, executableName: "claude", command: `claude ${args}` });
+  const script = { ...root, executableName: "claude", command: "/bin/sh /shim/claude --resume review-token" };
+  const kid = (pid: number, ppid: number, executableName: string, command: string) => ({ ...child, pid, ppid, executableName, command });
   it.each([
-    ["an opaque child", "--permission-mode auto", false],
-    ["a child that names the token", "--resume review-token", true],
-  ] as const)("strict restore behind a spawning Claude shim with %s", async (_name, childArgs, proved) => {
+    ["the company-launcher model (opaque real Claude)", [real("--session-id review-token --name worker@review197"),
+      kid(101, 100, "claude", "/shim/bin/claude --session-id review-token --name worker@review197"),
+      kid(102, 101, "claude", "/shim/claude --settings /shim/settings.json --permission-mode auto")], true],
+    ["a ripgrep helper whose argv mentions claude", [real("--resume review-token"), kid(101, 100, "rg", "rg -n claude src")], true],
+    ["a claude mcp serve child", [real("--resume review-token"), kid(101, 100, "claude", "claude mcp serve")], true],
+    ["a script launcher over a child on another conversation", [script, kid(101, 100, "claude", "claude --session-id different")], false],
+    ["a child that names the token", [script, kid(101, 100, "claude", "claude --resume review-token")], true],
+    ["a verified Claude that starts a child Claude on another conversation", [real("--resume review-token"), kid(101, 100, "claude", "claude --session-id different")], true],
+  ] as const)("strict restore with %s", async (_name, rows, proved) => {
     const f = fixture("review-token");
     f.tmux.getPaneCommand.mockResolvedValue("claude");
-    f.listProcesses.mockResolvedValue([
-      { ...root, executableName: "claude", command: "claude --resume review-token --name worker@review197" },
-      { ...child, executableName: "claude", command: `claude ${childArgs}` },
-    ]);
+    f.listProcesses.mockResolvedValue([...rows]);
     expect((await f.verify(true)).ok).toBe(proved);
   });
 
