@@ -593,9 +593,11 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
  */
 export function goldenPathNextSteps(): string[] {
   return [
-    "Next steps (guidance only; full reference: rig context get reference/getting-started.md):",
+    "Finish installing (full reference: rig context get reference/getting-started.md). Once setup has applied, steps 2 to 5 are",
+    "  part of the install, not extras: do them without stopping to ask whether to go on",
     "  1. Check only selected logins: claude auth status or codex login status; one working provider is enough",
-    "  2. rig daemon start                 If stopped; a fresh instance also starts the kernel, including operator and advisor",
+    "  2. rig daemon start                 If stopped. Starting OpenRig finishes the install; it is not a step beyond setup",
+    "     A fresh instance also starts the kernel, including operator and advisor",
     "     The kernel is part of installation. Keep it for normal setup; --no-kernel is for automation or when requested",
     "  3. rig status                       Read the kernel boot state; rig ps --nodes --rig kernel checks its seats",
     "     Started is not ready. The view may open while agents finish starting; report their actual state",
