@@ -126,16 +126,10 @@ export function updateFrontmatter(
 // Mission discovery
 // ---------------------------------------------------------------------
 
-/** Locate the missions root from an explicit workspace override or the typed
- * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
- * candidates, but selection comes from configuration. */
 /**
- * The `workspace.slices_root` from the config the daemon reads, when it is a
- * readable directory; null when it is unset or unreadable.
- *
- * This is the root the daemon resolves its own writes against, so a command
- * whose write happens in the daemon can compare it with the root the caller
- * asked for.
+ * The typed `workspace.slices_root` setting, when it is a readable directory;
+ * null when it is unset or unreadable. The fallback every command resolves to
+ * when the caller names no workspace of its own.
  */
 export function configuredMissionsRoot(configPath?: string): string | null {
   const configured = new ConfigStore(configPath).get("workspace.slices_root") as string;
@@ -143,6 +137,9 @@ export function configuredMissionsRoot(configPath?: string): string | null {
   return null;
 }
 
+/** Locate the missions root from an explicit workspace override or the typed
+ * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
+ * candidates, but selection comes from configuration. */
 export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
@@ -156,17 +153,23 @@ export function resolveMissionsRoot(opts: {
   strictOverride?: boolean;
 } = {}): string {
   const cwd = opts.cwd ?? process.cwd();
-  const fromOverride = opts.override ?? process.env.OPENRIG_WORK_ROOT;
+  // Which one named it matters for the refusal below: dropping --workspace does
+  // not clear OPENRIG_WORK_ROOT, so the two need different remedies.
+  const fromFlag = opts.override ?? null;
+  const fromOverride = fromFlag ?? process.env.OPENRIG_WORK_ROOT;
   if (fromOverride) {
     const candidate = path.isAbsolute(fromOverride) ? fromOverride : path.resolve(cwd, fromOverride);
     const missions = path.join(candidate, "missions");
     if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
     if (opts.strictOverride) {
+      const source = fromFlag === null ? "OPENRIG_WORK_ROOT" : "--workspace";
       throw new ScopeCliError({
-        fact: `The workspace you named has no missions tree: neither ${missions} nor ${candidate} is a readable directory.`,
+        fact: `The workspace named by ${source} has no missions tree: neither ${missions} nor ${candidate} is a readable directory.`,
         consequence: "Nothing was written; the configured workspace was NOT used as a fallback.",
-        action: "Point --workspace at a workspace whose missions/ directory exists, or drop the flag to use the configured one.",
+        action: fromFlag === null
+          ? "Correct OPENRIG_WORK_ROOT to a workspace whose missions/ directory exists, or unset it to use the configured workspace."
+          : "Point --workspace at a workspace whose missions/ directory exists, or drop the flag — note that an OPENRIG_WORK_ROOT in the environment still applies once the flag is gone.",
       });
     }
   }
