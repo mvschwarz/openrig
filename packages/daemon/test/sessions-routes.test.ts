@@ -5,6 +5,7 @@ import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
 import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 
 function unavailableCmux() {
   const factory: CmuxTransportFactory = async () => {
@@ -102,6 +103,40 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body).toHaveLength(1);
     expect(body[0].sessionName).toBe("r01-dev1-impl");
+  });
+
+  it("list and detail do not revive a confirmed missing session from a fresh running hook", async () => {
+    const tmux = { ...mockTmuxAdapter(), capturePaneContent: vi.fn(async () => "working") } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry, agentActivityStore } = createTestApp(db, { tmux });
+    const rig = rigRepo.createRig("missing-seat");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@missing-seat");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%1", attachmentType: "tmux" });
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: session.sessionName, hookEvent: "UserPromptSubmit",
+      occurredAt: new Date().toISOString(),
+      generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null,
+    });
+    new SeatIdentityStore(db).upsert({
+      nodeId: node.id, sessionName: session.sessionName,
+      verdict: "pane_missing", reason: "session_missing", evidenceSource: "tmux_session",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      observedAt: new Date(Date.now() + 1).toISOString(),
+    });
+    for (const suffix of ["", "?full=true", "/dev.impl"]) {
+      const res = await app.request(`/api/rigs/${rig.id}/nodes${suffix}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body) ? body[0] : body).toMatchObject({
+        sessionStatus: "detached", storedSessionStatus: "running", lifecycleState: "detached",
+        terminalActive: false, activityState: null,
+        agentActivity: { state: "unknown", reason: "session_missing" },
+      });
+    }
+    expect(tmux.capturePaneContent).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "running" });
   });
 
   it("POST clear-attention re-scopes a legacy attempt-zero reconciliation to the real restore attempt", async () => {

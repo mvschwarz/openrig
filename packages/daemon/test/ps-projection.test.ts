@@ -680,16 +680,12 @@ describe("PsProjectionService", () => {
 
 // ===================================================================
 // SLICE-05 item-5 (D5) — ps must not fabricate a dead seat as running.
-// runningCount/status are raw `sessions.status='running'` SQL (verdict-blind);
-// the SeatIdentityReconciler writes a session_missing verdict to a separate table
-// that runningCount never reads. After an out-of-band tmux teardown the persisted
-// status stays 'running', so ps fabricates running. RED pins that effective
-// runningCount/status must exclude a seat with a session_missing identity verdict.
-// Production seam UNDECIDED (ps consumes verdict, or adapter/verdict demotion) —
-// this asserts the OUTCOME, not the mechanism. self-contained (own db).
+// The persisted status stays running after an out-of-band tmux teardown.
+// Effective counts and lifecycle must honor the applicable absence verdict
+// while keeping the registration intact. Self-contained (own db).
 // ===================================================================
 describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () => {
-  it("RED: a running session with an APPLICABLE session_missing verdict is NOT counted running", () => {
+  it("a running session with an applicable session_missing verdict is not counted running", () => {
     const db = createFullTestDb();
     try {
       db.prepare("INSERT INTO rigs (id, name) VALUES ('r-d5','d5')").run();
@@ -713,11 +709,11 @@ describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () =
         observedAt: "2026-07-02T12:00:00.000Z",
       });
       const entry = new PsProjectionService({ db }).getEntries()[0]!;
-      // The verdict IS applicable: the lifecycle axis already honors it (down-ranked).
-      expect(entry.lifecycleState).toBe("attention_required");
-      // ...but the running axis is verdict-blind — the exact inconsistency this RED pins.
-      expect(entry.runningCount).toBe(0); // <-- RED: currently 1 (raw sessions.status, verdict-blind)
-      expect(entry.status).not.toBe("running"); // <-- RED: currently "running"
+      expect(entry.lifecycleState).toBe("stopped");
+      expect(entry.runningCount).toBe(0);
+      expect(entry.activeCount).toBe(0);
+      expect(entry.status).toBe("stopped");
+      expect(db.prepare("SELECT status FROM sessions WHERE id = 's-d5'").get()).toEqual({ status: "running" });
     } finally {
       db.close();
     }

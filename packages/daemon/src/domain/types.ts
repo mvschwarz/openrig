@@ -599,6 +599,12 @@ export interface SeatIdentityVerdict {
   observedAt: string;
 }
 
+/** Only a confirmed missing session proves the seat is no longer running.
+ * Callers must first gate the verdict to the current session and binding. */
+export function identityVerdictConfirmsSessionMissing(verdict: SeatIdentityVerdict | null | undefined): boolean {
+  return verdict?.reason === "session_missing";
+}
+
 /**
  * OPR.0.4.3.19 — the two verdict kinds that down-rank a `running`/`active`
  * projection to a non-green state. `verified`, `tmux_unavailable`, and an
@@ -637,7 +643,10 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Effective current status; confirmed session absence projects as detached. */
   sessionStatus: string | null;
+  /** Persisted session status, retained for history and registry-based rollups. */
+  storedSessionStatus?: string | null;
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
