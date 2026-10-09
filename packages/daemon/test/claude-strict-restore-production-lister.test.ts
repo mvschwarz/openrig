@@ -11,6 +11,10 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 
 const processMocks = vi.hoisted(() => ({ execFile: vi.fn() }));
 vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal<object>()), execFile: processMocks.execFile }));
+// The executable-path witness is unavailable (as for exited or unreadable pids), so
+// no fake pid here can resolve to a real process on the test host.
+vi.mock("node:fs/promises", async (importOriginal) => ({ ...(await importOriginal<object>()),
+  readlink: vi.fn(async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }) }));
 
 const startedAt = "Fri Oct  2 20:00:00 2026";
 type Row = { pid: number; ppid: number; pgid: number; tpgid: number; ucomm: string; command: string };
@@ -65,5 +69,39 @@ describe("strict restore reads full process rows from the production lister", ()
       { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "node", command: "node /usr/local/bin/claude --resume review-token" },
       { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
     ])).toMatchObject({ ok: true });
+  });
+
+  // #1091 round 6: native Claude processes may report a version string (or a Nix wrapper
+  // name) as their OS name, with no executable-path witness.
+  const shellPane = { pid: 90, ppid: 1, pgid: 90, tpgid: 100, ucomm: "bash", command: "-bash" };
+  const script = { pid: 100, ppid: 90, pgid: 100, tpgid: 100, ucomm: "claude", command: "/bin/sh /shim/claude --resume review-token" };
+  const version = (pid: number, ppid: number, args: string) =>
+    ({ pid, ppid, pgid: 100, tpgid: 100, ucomm: "2.1.286", command: `claude ${args}` });
+  it.each([["version-titled", "2.1.286"], ["Nix-wrapped", ".claude-unwrapp"]])(
+    "F1: a %s Claude parent over a child Claude on another conversation keeps main's proof", async (_name, ucomm) => {
+      expect(await strictRestore([
+        { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm, command: "claude --resume review-token" },
+        { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
+      ])).toMatchObject({ ok: true, observedPid: 100 });
+    });
+  it("N1: a script launcher over a version-titled child on another conversation is refused", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: false });
+  });
+  it("N1: a script and a helper on the token over a version-titled child on another conversation are refused", async () => {
+    expect(await strictRestore([shellPane, script,
+      { pid: 99, ppid: 100, pgid: 100, tpgid: 100, ucomm: "ugrep", command: "ugrep -n claude --session-id review-token file.ts" },
+      version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: false });
+  });
+  it("N1: a version-titled child naming the token is the proof process", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id review-token")], 90)).toMatchObject({ ok: true, observedPid: 101 });
+  });
+  it("N1: a version-titled opaque intermediate owns its own child, so the launcher keeps main's proof", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--settings /shim/settings.json"),
+      version(102, 101, "--session-id different")], 90)).toMatchObject({ ok: true, observedPid: 100 });
+  });
+  it("a helper with a version-shaped OS name is never a runtime", async () => {
+    expect(await strictRestore([shellPane,
+      { pid: 100, ppid: 90, pgid: 100, tpgid: 100, ucomm: "2.1.286", command: "rg claude --resume review-token" },
+      version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: false });
   });
 });

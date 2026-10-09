@@ -211,10 +211,19 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   return token;
 }
 
+/** A Claude runtime by OS evidence: a verified Claude process, or a native or Nix
+ * Claude whose argv0 is claude and whose OS name is a version string or a Nix
+ * wrapper name, when the executable-path witness is unavailable (unreadable,
+ * exited or over budget). A path that is present but does not match stays
+ * unverified. A helper or shell never qualifies: its argv0 is not claude. */
+function claudeRuntimeRow(row: NativeProcessRow): boolean {
+  return claudeProcess(row) || (needsClaudeExecutablePath(row) && row.executablePath === undefined);
+}
+
 /** Verified Claude runtimes that `parent` starts directly (same process group,
  * no shell or other Claude runtime between), keyed by the conversation each
  * names. A runtime counts only on executable, argv0 and path evidence
- * (`claudeProcess`), never on an argument that mentions claude, and only an
+ * (`claudeRuntimeRow`), never on an argument that mentions claude, and only an
  * explicitly parsed `--session-id`/`--resume` names one: an opaque or unparsed
  * child names nothing. The lowest pid wins, so row order cannot change it. */
 function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcessRow[], byPid: Map<number, NativeProcessRow>): Map<string, NativeProcessRow> {
@@ -222,7 +231,7 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
   if (parent.pgid === undefined) return children;
   const isShell = (row: NativeProcessRow) => isShellForeground(executableName(tokens(row.command)[0]?.replace(/^-/, "") ?? ""));
   for (const row of processes) {
-    if (row === parent || row.pgid !== parent.pgid || !claudeProcess(row)) continue;
+    if (row === parent || row.pgid !== parent.pgid || !claudeRuntimeRow(row)) continue;
     const identity = claudeSessionIdentity(tokens(row.command).slice(1));
     if (typeof identity !== "string") continue;
     const seen = new Set<number>();
@@ -234,7 +243,7 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
         break;
       }
       // A child of an intermediate runtime belongs to that runtime, not to parent.
-      if (isShell(current) || claudeProcess(current)) break;
+      if (isShell(current) || claudeRuntimeRow(current)) break;
       seen.add(current.pid);
       current = byPid.get(current.ppid);
     }
@@ -248,7 +257,7 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
  * whose argv0 is claude. A shell script launcher and a helper whose argv merely
  * mentions claude are not runtimes. */
 function claudeRuntimeParent(row: NativeProcessRow): boolean {
-  if (claudeProcess(row)) return true;
+  if (claudeRuntimeRow(row)) return true;
   const argv = tokens(row.command);
   if (executableName(argv[0] ?? "") === "node" && claudeExecutable(argv[1] ?? "")
     && (row.executableName === undefined || executableName(row.executableName) === "node")) return true;
