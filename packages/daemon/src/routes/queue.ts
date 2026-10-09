@@ -1071,7 +1071,13 @@ export function queueRoutes(): Hono {
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
-    return c.json({ ...item, destinationClass: repo.classifyDestinationOf(item.destinationSession).class });
+    // The owner notification level is what the Slack selector keys on: a registered person who
+    // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
+    return c.json({
+      ...item,
+      destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
+      ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
+    });
   });
 
   // ---- Inbox routes (mailbox) ----

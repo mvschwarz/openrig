@@ -433,9 +433,10 @@ describe("rig queue CLI", () => {
     });
   });
 
-  // A terminal (pane-bound) destination never gets a gateway receipt: its receipt is the
-  // row's wake result (lastNudgeResult) and its pickup is the claim. Keep persistence,
-  // terminal receipt, claim and human readership apart, and never call a saved row failed.
+  // A terminal (pane-bound) destination's receipt is the row's wake result (lastNudgeResult) and
+  // its pickup is the claim; a registered person with a pane may also get a gateway receipt (see
+  // the nested describe). Keep persistence, terminal receipt, claim, Slack and human readership
+  // apart, and never call a saved row failed.
   describe("--verify for a terminal destination", () => {
     const ROW = { qitemId: "qitem-t", state: "pending", claimedAt: null, lastNudgeResult: null, deliveryOutcome: null, pickup: { state: "unclaimed" } };
     // Each poll reads the next row; the last row repeats. The caller's array is not mutated.
@@ -605,6 +606,81 @@ describe("rig queue CLI", () => {
       const { result, reads } = await verify([{ destinationClass: "pane-bound" }], { destinationSession: "human-founder@kernel", nudge: false });
       expect(result).toMatchObject({ receiptSource: "terminal", destinationKind: "human", outcome: "not-requested", humanReadership: "unknown" });
       expect(reads).toBe(1);
+    });
+
+    // A registered person who is also a seat with its own pane: the gateway may post the row to
+    // Slack too (the row's owner notification level is what its selector keys on), so --verify
+    // keeps a bounded wait for that receipt and reports both sides separately.
+    describe("a pane-bound registered person (owner notification level set)", () => {
+      const PANE_PERSON = { destinationClass: "pane-bound", ownerNotificationLevel: "ALERT" };
+      const target = { destinationSession: "dev-a@rig1" };
+
+      it("waits for the Slack receipt after the terminal receipt and reports both", async () => {
+        const { result, reads } = await verify([
+          PANE_PERSON,
+          { ...PANE_PERSON, lastNudgeResult: "verified" },
+          { ...PANE_PERSON, lastNudgeResult: "verified", deliveryOutcome: "posted" },
+        ], target);
+        expect(reads).toBe(3);
+        expect(result).toMatchObject({
+          receiptSource: "terminal", destinationKind: "human", humanReadership: "unknown",
+          outcome: "verified", wakeResult: "verified",
+          gateway: { outcome: "posted", connectorAccepted: true },
+        });
+        expect(result.detail).toContain("Slack receipt: posted.");
+      });
+
+      it("keeps the bounded wait when Slack has not posted, without failing the terminal side", async () => {
+        const { result, reads } = await verify([{ ...PANE_PERSON, lastNudgeResult: "verified" }], target);
+        expect(reads).toBeGreaterThan(1);
+        expect(result).toMatchObject({ outcome: "verified", gateway: { outcome: "still-pending", connectorAccepted: null }, nextAction: "rig queue show qitem-t --json" });
+        expect(result.detail).toContain("No Slack receipt within 10ms.");
+      });
+
+      it("reports a Slack transport failure on its own side", async () => {
+        const { result } = await verify([{ ...PANE_PERSON, lastNudgeResult: "delivered-ack-pending", deliveryOutcome: "transport-failed", deliveryFailureDetail: "slack 500" }], target);
+        expect(result).toMatchObject({ outcome: "delivered-ack-pending", gateway: { outcome: "transport-failed", connectorAccepted: false, detail: "slack 500" } });
+        expect(result.detail).not.toContain("not a failed handoff");
+      });
+
+      it("with --no-nudge, reports no terminal wake and still waits for Slack", async () => {
+        const { result } = await verify([PANE_PERSON, { ...PANE_PERSON, deliveryOutcome: "posted" }], { ...target, nudge: false });
+        expect(result).toMatchObject({ outcome: "not-requested", gateway: { outcome: "posted", connectorAccepted: true } });
+      });
+
+      it("a pane-bound seat with no owner notification level is unchanged: no Slack side, settles at once", async () => {
+        const { result, reads } = await verify([{ destinationClass: "pane-bound", ownerNotificationLevel: null, lastNudgeResult: "verified" }], target);
+        expect(reads).toBe(1);
+        expect(result).toMatchObject({ receiptSource: "terminal", destinationKind: "agent", outcome: "verified" });
+        expect(result).not.toHaveProperty("gateway");
+        expect(result).not.toHaveProperty("humanReadership");
+      });
+
+      it("a Slack receipt that lands before the wake result keeps waiting on the terminal side", async () => {
+        const { result, reads } = await verify([
+          { ...PANE_PERSON, deliveryOutcome: "posted" },
+          { ...PANE_PERSON, deliveryOutcome: "posted", lastNudgeResult: "delivered-ack-pending" },
+        ], target);
+        expect(reads).toBe(2);
+        expect(result).toMatchObject({ outcome: "delivered-ack-pending", gateway: { outcome: "posted" } });
+      });
+
+      it("a claim with Slack still pending keeps the bounded Slack wait", async () => {
+        const { result, reads } = await verify([{ ...PANE_PERSON, state: "in-progress", claimedAt: "2026-10-08T10:00:02.000Z" }], target);
+        expect(reads).toBeGreaterThan(1);
+        expect(result).toMatchObject({ claim: { observed: true }, gateway: { outcome: "still-pending" }, nextAction: "rig queue show qitem-t --json" });
+      });
+
+      it("a recorded terminal wake still wins over a gateway-routable class read later (#1029 order)", async () => {
+        const { result, reads } = await verify([{ destinationClass: "gateway-routable", ownerNotificationLevel: "ALERT", lastNudgeResult: "verified", deliveryOutcome: "posted" }], target);
+        expect(reads).toBe(1);
+        expect(result).toMatchObject({ receiptSource: "terminal", outcome: "verified", wakeResult: "verified", gateway: { outcome: "posted" } });
+      });
+
+      it("an older daemon's posted receipt beside a terminal wake reports both sides", async () => {
+        const { result } = await verify([{ lastNudgeResult: "verified", deliveryOutcome: "posted" }], target);
+        expect(result).toMatchObject({ receiptSource: "terminal", destinationKind: "human", outcome: "verified", gateway: { outcome: "posted" } });
+      });
     });
 
     it("--no-nudge to a human-seat address on a daemon without destinationClass keeps the bounded gateway wait", async () => {

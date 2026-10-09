@@ -571,3 +571,49 @@ describe("GET /api/queue/:qitemId carries the destination class", () => {
     h.db.close();
   });
 });
+
+// #1029 follow-up — the single-row read also carries the owner-notification level the Slack
+// selector keys on, so `--verify` keeps the Slack wait for a registered person who also has a pane.
+describe("GET /api/queue/:qitemId carries the owner notification level", () => {
+  const PANE_PERSON = { ...FOUNDER_FRAGMENT, entityId: "dev-a", displayName: "Dev A", address: "dev-a@external" } as unknown as HumanFragment;
+
+  it.each([
+    ["a registered person with a pane", "dev-a@rig1", [FOUNDER_FRAGMENT, PANE_PERSON], "pane-bound", "ALERT"],
+    ["a seat with a pane and no registration", "dev-a@rig1", [FOUNDER_FRAGMENT], "pane-bound", null],
+    ["a registered person's alias", "human-founder@kernel", [FOUNDER_FRAGMENT], "gateway-routable", "ALERT"],
+  ] as const)("%s reads level %s", async (_label, destinationSession, entities, destinationClass, level) => {
+    const h = makeHarness({ entities: () => [...entities] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
+    app.route("/api/queue", queueRoutes());
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession, nudge: false,
+      summary: "Routing", evidenceRef: EVIDENCE, body: "b",
+    });
+    const row = await (await app.request(`/api/queue/${item.qitemId}`)).json() as Record<string, unknown>;
+    expect(row.destinationClass).toBe(destinationClass);
+    expect(row.ownerNotificationLevel).toBe(level);
+    expect(h.repo.getById(item.qitemId)).not.toHaveProperty("ownerNotificationLevel");
+    h.db.close();
+  });
+  it("a pane-bound registered person's row reaches the Slack selector, and its receipt shows on the row read", async () => {
+    const h = makeHarness({ entities: () => [FOUNDER_FRAGMENT, PANE_PERSON] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
+    app.route("/api/queue", queueRoutes());
+    const item = await h.repo.create({
+      sourceSession: "s@r", destinationSession: "dev-a@rig1", nudge: false,
+      summary: "Decide", evidenceRef: EVIDENCE, body: "b",
+    });
+    const alerts = await makeQueuePorts(h.repo, { loadHumanRegistry: () => ({ ok: true, entities: [FOUNDER_FRAGMENT, PANE_PERSON] }) }).listHumanAlerts({});
+    expect(alerts.map((a) => a.qitemId)).toContain(item.qitemId);
+    const owner = h.repo.transitionLog.latestOwnerNotificationForQitem(item.qitemId)!;
+    h.repo.update({
+      qitemId: item.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${item.qitemId}:${owner.transitionId} level=ALERT kind=unclassified message_ts=1.1 thread_ts=1.1`,
+    });
+    const row = await (await app.request(`/api/queue/${item.qitemId}`)).json() as Record<string, unknown>;
+    expect(row).toMatchObject({ destinationClass: "pane-bound", ownerNotificationLevel: "ALERT", deliveryOutcome: "posted" });
+    h.db.close();
+  });
+});
