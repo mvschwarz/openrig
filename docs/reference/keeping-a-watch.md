@@ -54,7 +54,7 @@ rig queue block <task> --on external:<what you check> --wake-after 1h \
   --continuation "check <what>; tell <person> if met, else re-arm 1h"
 ```
 
-`--on` is always required; `external:<what>` names the outside thing you're waiting on. The first wake comes after
+`--on` is always required; `external:<what>` names the outside thing you're waiting on. The timer first fires after
 the interval, not now.
 
 **4. Say back what you set, in one or two plain lines:** what you'll check, how often, how they'll be told, and when
@@ -63,10 +63,10 @@ it stops. For example: "I'll check the release PR every hour and message you her
 A plain reminder ("remind me in 20 minutes to look at the release notes") is the same with no condition. Set it aside
 with `--wake-after 20m`, and when it fires, tell them and close it.
 
-## Every wake: read the record first
+## Every time the timer fires: read the record first
 
-When a wake arrives, **run `rig queue show <task> --full --json` before doing anything.** A wake already on its way can
-still arrive after the watch was stopped or changed. If the task is no longer set aside (done, canceled, or replaced),
+When the timer's message arrives, **run `rig queue show <task> --full --json` before doing anything.** A message already
+on its way can still arrive after the watch was stopped or changed. If the task is no longer set aside (done, canceled, or replaced),
 do nothing.
 
 Otherwise, check the condition, then do exactly one of these:
@@ -86,6 +86,9 @@ rig queue block <task> --on external:<what> --wake-after 1h --note "checked <tim
 
 A new set-aside replaces the old one and retires any earlier timer, so a task never carries two live timers.
 
+**Put what changed in `--note` or `--continuation`, not both.** When `rig queue block` gets `--continuation`, that is
+the note it records, and `--note` is dropped.
+
 Each check costs one of your turns on the person's subscription. **Use the longest interval that serves the ask.**
 
 ## Telling the person
@@ -98,7 +101,7 @@ rig queue create --destination <entityId>@external --human-intent update \
 - `--evidence-ref` is required for anything sent to a person. The watch task's ID is a durable pointer.
 - Later messages about the same watch can thread with `--reply-to <earlier message's id>`.
 - **`posted` means the connector posted it, not that they read it.** Don't say they saw it.
-- **If delivery fails or is indeterminate,** inspect that row before anything else. Never resend blindly.
+- **If delivery fails or is indeterminate,** inspect that task before anything else. Never resend blindly.
 
 ## "What are you watching for me?"
 
@@ -109,9 +112,9 @@ pending:
 rig queue list --owned --state pending,in-progress,blocked --full --limit 200 -o json
 ```
 
-Then keep the rows tagged `watch`. Two rules:
+Then keep the tasks tagged `watch`. Two rules:
 
-- **Check that the number of rows returned is below the limit.** The limit applies before you filter by tag. If you got
+- **Check that the number of tasks returned is below the limit.** The limit applies before you filter by tag. If you got
   exactly the limit, raise it and list again. **Never report "no watch" from a page that was cut off.**
 - **Use `--full`.** Compact output leaves out the body and the waiting view.
 
@@ -133,12 +136,12 @@ Tell the person in one line what changed. After a stop, take no further action f
 
 ## Across a restart or handover
 
-A set-aside watch's current timer is **kept** when the operator seat changes hands, and it fires at whoever holds the
-seat next. That's why the body must stand alone.
+A set-aside watch's current timer is **kept** when the operator is restarted or replaced, and it fires at whoever is
+the operator next. That's why the body must stand alone.
 
-**One gap:** a timer fires once. If the seat changes hands **after a fire and before the re-arm**, the successor
-inherits a set-aside watch with no live timer. A parked-owner check may wake the new operator once, but only under
-some conditions, with no delay guarantee. So:
+**One gap:** a timer fires once. If the operator is replaced **after a fire and before the re-arm**, the successor
+inherits a set-aside watch with no live timer. OpenRig's idle-owner check may remind the new operator once, but only
+under some conditions, with no delay guarantee. So:
 
 - **Re-arm promptly** after every fire.
 - **After a restart or handover, list your watches** (above) and re-arm any that show no timed backstop.
@@ -146,6 +149,6 @@ some conditions, with no delay guarantee. So:
 ## What not to use
 
 - **`rig watchdog register --policy periodic-reminder` for a person's watch.** It fires on the first scheduler tick,
-  repeats forever, and stops when the seat that registered it is handed over. It's fine for agent-to-agent reminders.
-- **Transcript bytes as "usage".** `context-usage-threshold` measures a seat's transcript, not an account's
+  repeats forever, and stops when the agent that registered it is replaced. It's fine for agent-to-agent reminders.
+- **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance.
