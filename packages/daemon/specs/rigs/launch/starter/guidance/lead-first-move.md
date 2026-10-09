@@ -34,7 +34,8 @@ alongside the goal, and never replace one that exists:
 1. Take the rig's name from `rig whoami --json` (`identity.rigName`). It is `starter` unless this team was launched
    under another name; `<rig>` below means that name. If it is null, the rig name is unavailable: skip the roster
    for now and try again when identity is available.
-2. Run `rig roster list`. If it shows a roster with id `<rig>`, stop here.
+2. Run `rig roster list`. If it shows a roster with id `<rig>`, or warns about `<rig>.json` (a roster file it
+   couldn't read), stop here: never replace that file.
 3. The file is `<workspace.root>/rosters/<rig>.json`; `rig config get workspace.root` gives the root. Step 2 already
    told you whether this rig has a roster, so don't check the folder from the shell.
 4. Run `rig ps --nodes --rig <rig> --json --fields canonicalSessionName,hostSelfId`. It gives each seat's exact address
