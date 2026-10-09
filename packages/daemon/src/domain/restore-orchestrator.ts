@@ -887,6 +887,21 @@ export class RestoreOrchestrator {
           error: `Original session unresumable: ${sourceNote}. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
         };
       }
+      // The same rule for a seat with no occupant at capture (it was stopped, or a reboot found
+      // nothing to resume) whose earlier occupant left a resume token: it HAD a session, so a fresh
+      // launch would silently replace that conversation. Which earlier conversation to resume is not
+      // the restore's to guess.
+      const priorWithToken = occupantResolution.kind === "none" && !freshRequested
+        ? latestRowWithResumeToken(data.sessions, nodeId)
+        : null;
+      if (priorWithToken && (priorWithToken.restorePolicy ?? "resume_if_possible") === "resume_if_possible") {
+        return {
+          nodeId,
+          logicalId: node.logicalId,
+          status: "awaiting-decision",
+          error: `Original session not resumed: the seat had no running occupant when this snapshot was taken, but an earlier occupant left a '${priorWithToken.resumeType}' resume token. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
+        };
+      }
     }
 
     // Capture prior state for compensation
@@ -1903,4 +1918,14 @@ export class RestoreOrchestrator {
 
 interface PlanEntry {
   node: NodeWithBinding;
+}
+
+/** The newest of a node's snapshot session rows that carries a usable resume token. */
+function latestRowWithResumeToken(sessions: SnapshotData["sessions"], nodeId: string): SnapshotData["sessions"][number] | null {
+  let latest: SnapshotData["sessions"][number] | null = null;
+  for (const session of sessions) {
+    if (session.nodeId !== nodeId || !session.resumeToken?.trim() || !session.resumeType || session.resumeType === "none") continue;
+    if (!latest || session.createdAt > latest.createdAt || (session.createdAt === latest.createdAt && session.id > latest.id)) latest = session;
+  }
+  return latest;
 }
