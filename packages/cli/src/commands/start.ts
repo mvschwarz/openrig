@@ -156,6 +156,10 @@ Examples:
   rig start --last                  Headless: restore everything that was running
   rig start --all                   Headless: restore all rigs with restore-usable snapshots
   rig start --rigs prod-rig dev-rig Headless: restore only the named rigs
+
+When the daemon is restoring a kernel a reboot left down, rig start goes on to
+your other rigs. Exit 0 then does not mean the kernel is ready (check rig
+status); a restore that returned without a ready kernel exits 1.
 `);
   const getDepsF = (): StartDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -237,7 +241,23 @@ Examples:
       // ---- PHASE 2: kernel invariant — verify/await kernel readiness ----
       if (!opts.json) console.log("Waiting for kernel...");
       const kernelResult = await waitForKernelReady(baseUrl, KERNEL_WAIT_MS);
-      if (!kernelResult.ok) {
+      // Restoring an existing kernel a reboot left down: before that restore existed the kernel read
+      // `skipped` here and start went on to the other rigs, so it still does, saying what it saw.
+      let kernelRestore: { state: "restoring" | "failed"; kernelState: string | null; detail: string | null } | undefined;
+      if (!kernelResult.ok && kernelResult.existingRestore) {
+        // The restore returned without a ready kernel (errors, or seats that did not come up).
+        const failed = kernelResult.existingRestore === "finished" || kernelResult.kernelState === "bootstrap_failed";
+        kernelRestore = { state: failed ? "failed" : "restoring", kernelState: kernelResult.kernelState, detail: kernelResult.detail };
+        if (failed) {
+          console.error(`Kernel restore did not bring the kernel up: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
+          console.error("Recover it with: rig up kernel --existing");
+          process.exitCode = 1;
+        } else if (!opts.json) {
+          // Not a failure: --json carries it as kernelRestore.
+          console.error(`Kernel is still restoring and not ready yet (state=${kernelResult.kernelState ?? "unknown"}). Check it with: rig status`);
+        }
+        if (!opts.json) console.log("Continuing with your other rigs.");
+      } else if (!kernelResult.ok) {
         if (kernelResult.kernelState === "skipped") {
           if (!opts.json) console.log("Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
         } else {
@@ -333,12 +353,13 @@ Examples:
             candidates: [],
             restoredRigs: [],
             previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
+            kernelRestore,
           }));
         } else {
           if (previewErrors.length > 0) {
             console.error(`${previewErrors.length} rig(s) failed preview (see errors above). Some candidates may be missing.`);
           } else {
-            console.log("Daemon and kernel are up. No rigs to restore.");
+            console.log(kernelRestore ? "Daemon is up. No other rigs to restore." : "Daemon and kernel are up. No rigs to restore.");
           }
         }
         if (previewErrors.length > 0) process.exitCode = 1;
@@ -364,7 +385,7 @@ Examples:
         if (!interactive) {
           console.error("No TTY available. Use --last, --all, or --rigs <names> for headless mode.");
           if (opts.json) {
-            console.log(JSON.stringify({ status: "started", candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })), restoredRigs: [] }));
+            console.log(JSON.stringify({ status: "started", candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })), restoredRigs: [], kernelRestore }));
           }
           process.exitCode = 1;
           return;
@@ -530,6 +551,7 @@ Examples:
           candidates: candidates.map((c) => ({ rigName: c.rigName, lifecycleState: c.lifecycleState })),
           restoredRigs: results,
           previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
+          kernelRestore,
         }));
       }
 

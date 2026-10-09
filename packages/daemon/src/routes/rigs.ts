@@ -9,6 +9,7 @@ import type { EventBus } from "../domain/event-bus.js";
 import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
+import { joinAutomaticRestore, JOINED_AUTOMATIC_RESTORE_WARNING } from "../domain/existing-rig-restore.js";
 import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
 import {
   getNodeInventory,
@@ -32,7 +33,7 @@ import type { KernelBootTracker, KernelState } from "../domain/kernel-boot-track
 import type { RecoveryPlan } from "../domain/restore-check-service.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
-import type { Pod, ExpansionPodFragment } from "../domain/types.js";
+import type { Pod, ExpansionPodFragment, RestoreOutcome, Snapshot } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { convergeOp } from "../domain/topology-converge.js";
@@ -650,6 +651,15 @@ rigsRoutes.post("/:id/up", async (c) => {
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
   const snapshotCapture = c.get("snapshotCapture" as never) as SnapshotCapture;
+  // The same restore daemon start is running, or has just run, for a kernel a reboot left down: its
+  // outcome, as `rig up <rig> --existing` reports it (routes/up.ts).
+  if (!plan && !freshLogicalIds?.length) {
+    const joined = await joinAutomaticRestore({ rigRepo: repo, snapshotRepo }, rigId);
+    if (joined) {
+      if (!joined.ok) return c.json(joined.choice.body, joined.choice.status);
+      return renderExplorerRestore(c, repo, rig.rig.name, rigId, joined.snapshot, joined.capturedCurrentState, joined.staleSnapshot, joined.result, true);
+    }
+  }
   const automaticSelection = snapshotRepo.selectRestoreUsable(rigId);
   let snapshot = automaticSelection.ok ? automaticSelection.snapshot : null;
   let snapshotSelection = automaticSelection.ok ? automaticSelection.selection : undefined;
@@ -701,12 +711,22 @@ rigsRoutes.post("/:id/up", async (c) => {
     freshLogicalIds,
     snapshotSelection,
   });
+  return renderExplorerRestore(c, repo, rig.rig.name, rigId, snapshot, capturedCurrentState, staleSnapshot, result, false);
+});
+
+async function renderExplorerRestore(
+  c: { json: (data: unknown, status?: number) => Response },
+  repo: RigRepository, rigName: string, rigId: string, snapshot: Snapshot, capturedCurrentState: boolean, staleSnapshot: boolean,
+  result: RestoreOutcome | { ok: false; code: "restore_unavailable"; message: string }, joined: boolean,
+) {
+  const joinedWarning = joined ? [JOINED_AUTOMATIC_RESTORE_WARNING] : [];
   if (!result.ok) {
+    if (result.code === "restore_unavailable") return c.json({ error: result.message }, 500);
     if (result.code === "pre_restore_validation_failed") {
       return c.json({
         status: "not_attempted",
         rigId,
-        rigName: rig.rig.name,
+        rigName,
         error: result.message,
         code: result.code,
         snapshotKind: snapshot.kind,
@@ -714,7 +734,7 @@ rigsRoutes.post("/:id/up", async (c) => {
         remediation: result.result.blockers?.map((blocker) => blocker.remediation) ?? [],
       }, 409);
     }
-    return c.json({ error: result.message, code: result.code }, result.code === "rig_not_stopped" ? 409 : 400);
+    return c.json({ error: result.message, code: result.code, ...(joined ? { warnings: joinedWarning } : {}) }, result.code === "rig_not_stopped" ? 409 : 400);
   }
 
   // Compute attach command from first running/resumed node (same logic as /api/up)
@@ -726,19 +746,19 @@ rigsRoutes.post("/:id/up", async (c) => {
   return c.json({
     status: "restored",
     rigId,
-    rigName: rig.rig.name,
+    rigName,
     snapshotId: snapshot.id,
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
-    warnings: capturedCurrentState
+    warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery."
           : "No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
-      : result.result.warnings,
+      : result.result.warnings)],
     attachCommand,
   }, 200);
-});
+}
 
 // POST /api/rigs/:rigId/expand — dynamic rig expansion
 rigsRoutes.post("/:rigId/expand", async (c) => {

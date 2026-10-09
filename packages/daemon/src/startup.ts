@@ -169,6 +169,7 @@ import type { NotificationAdapter } from "./domain/mission-control/notification-
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
+import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -1041,6 +1042,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // observability. The kernel rig is still the only rig the daemon
   // auto-boots; other rigs require explicit operator-initiated
   // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
+  const runtimeAdapters = { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() };
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
@@ -1061,6 +1063,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // workspace.root setting as the per-operator default.
       cwdOverride: runtimeSettings.workspaceRoot,
       degradedTimeoutMs,
+      // A kernel a reboot left down comes back the way `rig up kernel --existing` brings it back.
+      // Synchronous, so the restore is registered before any request can ask for the same one.
+      restoreLostKernel: (rigId) =>
+        restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters, tmuxAdapter }, rigId, (p) => fs.existsSync(p)),
     });
     try {
       // eslint-disable-next-line no-console
@@ -1256,7 +1262,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     }),
     podInstantiator,
     podBundleSourceResolver,
-    runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
+    runtimeAdapters,
     transcriptStore,
     sessionTransport: (() => {
       const t = new SessionTransport({

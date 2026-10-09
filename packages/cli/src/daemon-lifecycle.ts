@@ -1231,6 +1231,9 @@ export interface KernelReadyResult {
   kernelState: string | null;
   variant: string | null;
   detail: string | null;
+  /** The daemon is restoring an existing kernel a reboot left down, not booting a first one:
+   *  whether that restore is still running or has returned. */
+  existingRestore?: "in_progress" | "finished";
 }
 
 export async function waitForKernelReady(
@@ -1251,14 +1254,19 @@ export async function waitForKernelReady(
           kernel_state?: string;
           variant?: string | null;
           detail?: string | null;
+          existing_restore?: string;
         };
         last = {
           ok: body.kernel_state === "ready" || body.kernel_state === "partial_ready",
           kernelState: body.kernel_state ?? null,
           variant: body.variant ?? null,
           detail: body.detail ?? null,
+          ...(body.existing_restore === "in_progress" || body.existing_restore === "finished"
+            ? { existingRestore: body.existing_restore } : {}),
         };
         if (last.ok) return last;
+        // A restore of an existing kernel that has returned without a ready kernel won't change.
+        if (last.existingRestore === "finished") return last;
         // Terminal non-ready states: don't keep polling.
         if (
           body.kernel_state === "auth_blocked" ||

@@ -231,6 +231,8 @@ export class RestoreOrchestrator {
      * continues in the background.
      */
     onAttemptStarted?: (attemptId: number) => void;
+    /** Told each session this restore launches, as soon as its row is committed. */
+    onSessionLaunched?: (nodeId: string, sessionId: string) => void;
   }): Promise<RestoreOutcome> {
     // 1. Load snapshot
     const snapshot = this.snapshotRepo.getSnapshot(snapshotId);
@@ -759,7 +761,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
@@ -908,7 +910,9 @@ export class RestoreOrchestrator {
     }
 
     // Attempt launch — compensate ONLY if launch itself fails
-    const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, launchOpts);
+    const onSessionLaunched = opts?.onSessionLaunched;
+    const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId,
+      onSessionLaunched ? { ...launchOpts, onSessionRegistered: (sessionId) => onSessionLaunched(nodeId, sessionId) } : launchOpts);
     if (!launchResult.ok) {
       // Launch failed — restore prior state (compensating action)
       this.restoreNodeState(nodeId, priorState);

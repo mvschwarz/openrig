@@ -176,9 +176,34 @@ A missing or unknown readiness signal is not proof of readiness. Follow
 startup or missing-seat problems.
 
 `rig setup` itself does not start the daemon. Preserve a daemon and kernel that
-already exist: ordinary daemon startup skips a managed kernel, and
-`OPENRIG_NO_KERNEL=1` skips automatic kernel startup. If neither runtime is
-authenticated, kernel boot reports `auth_blocked`. Do not restart or recreate an
+already exist: daemon startup does not boot a second kernel when one is managed,
+and `OPENRIG_NO_KERNEL=1` (`--no-kernel`) skips automatic kernel startup,
+including the restore below. If neither runtime is authenticated, kernel boot
+reports `auth_blocked`.
+
+Daemon startup restores one existing kernel by itself: a managed kernel whose
+seats are all `detached` and still bound to their newest session, which is what
+startup reconcile leaves when every kernel terminal is gone, for example after a
+reboot. It does not detect a reboot as such. It uses the same restore as
+`rig up kernel --existing`, and `rig status` reports it as `Kernel: booting`
+until the seats are ready. A kernel stopped with `rig down kernel`, including
+one whose seats were already detached, stays down on later starts. So do a kernel
+with only some seats stopped and seats you unclaimed. Start one again with
+`rig up kernel --existing`.
+
+While that automatic restore runs, `rig start` continues to your other rigs and
+says the kernel is still restoring (`kernelRestore.state: "restoring"` with
+`--json`). Its exit status 0 then does not mean the kernel is ready; check
+`rig status`. When the restore has returned without a ready kernel, `rig start`
+still goes on to your other rigs but exits 1 (`kernelRestore.state: "failed"`),
+so `rig start && next` does not run `next`. A `rig down kernel` made during the
+restore waits for it to return and then stops the kernel, which stays down on
+later starts. A `rig up kernel --existing` with no other options, made during
+the restore, or after it restored every seat while those seats still run the
+sessions it started, reports that restore's outcome instead of starting another;
+one with other options is not merged into it.
+
+Do not restart or recreate an
 existing kernel merely to open its view. The startup TUI (`rig`) offers its own
 kernel setup and individual-seat recovery; it does not automatically boot agents
 when it starts the daemon.
@@ -590,7 +615,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
-| Host reboot lost tmux sessions | Open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when all of its seats were lost; check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
 
@@ -621,8 +646,9 @@ This recovery is for the case the reporter hit: the kernel's seats failed and no
 IDs, for example `advisor.lead operator.agent operator.human queue.worker` when all four failed. `--fresh` starts a
 new conversation for each seat you name. Seats you don't name follow their normal recovery policy and may remain
 awaiting a decision if their old conversation can't be resumed. A later `rig daemon start` doesn't retry the failed
-seats by itself: once a kernel exists, startup skips the built-in kernel boot, and `rig status` then reads
-`Kernel: skipped` whatever its seats' state, so check `rig ps --nodes --rig kernel --full`.
+seats by itself: once a kernel exists, startup skips the built-in kernel boot and restores only a kernel whose seats
+were all lost, not seats that failed. `rig status` then reads `Kernel: skipped` unless some of its seats are running
+and ready, so check `rig ps --nodes --rig kernel --full`.
 
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a
