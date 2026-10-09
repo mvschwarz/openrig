@@ -1052,8 +1052,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show the caller's queue position from the daemon's perspective")
     .option("--session <session>", "Caller's session name (defaults to OPENRIG_SESSION_NAME)")
     .option("--recent-limit <n>", "How many recent active qitems to include", "25")
+    .option("--work-candidates", "Also list labelled work candidates (tags, handoff ancestry, held and next work) for the refocus packet")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { session?: string; recentLimit: string; json?: boolean }) => {
+    .action(async (opts: { session?: string; recentLimit: string; workCandidates?: boolean; json?: boolean }) => {
       const session = resolveCurrentSession(opts.session, "session");
       if (!session) return;
       const deps = getDeps();
@@ -1061,6 +1062,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         session,
         recentLimit: opts.recentLimit,
       });
+      if (opts.workCandidates) params.set("candidates", "1");
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);

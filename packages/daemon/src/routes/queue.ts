@@ -20,7 +20,7 @@ import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-re
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork, deriveRole, type RoleOrientation } from "../domain/current-work.js";
+import { deriveCurrentWork, deriveRole, deriveWorkCandidates, type RoleOrientation } from "../domain/current-work.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import type { HumanQuestion } from "../domain/human-questions.js";
@@ -39,6 +39,8 @@ import type { HumanQuestion } from "../domain/human-questions.js";
 // (same class as mission-control's REMOTE_ACTION_TIMEOUT_MS). remoteJsonRequest
 // never hangs — a timeout surfaces as a structured host-named failure.
 const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
+/** OPR.0.7.0.12 — held and next rows listed in a refocus packet; past this the packet says the list was cut. */
+const WORK_CANDIDATE_LIST_LIMIT = 50;
 
 // OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
 // FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
@@ -846,13 +848,30 @@ export function queueRoutes(): Hono {
     // projection, so a second in-progress baton past the cap would be invisible and the
     // ambiguity refusal would degrade into a confident wrong answer. The derivation reads
     // the unbounded in-progress set, which makes it independent of recentLimit.
-    const derived = deriveCurrentWork(repo.listInProgressForDestination(session), missionsRoot);
+    const inProgress = repo.listInProgressForDestination(session);
+    const derived = deriveCurrentWork(inProgress, missionsRoot);
     let role: RoleOrientation = { state: "unknown", reason: "calling node unavailable", files: [] };
     try {
       const identity = (c.get("whoamiService" as never) as WhoamiService | undefined)
         ?.resolve({ sessionName: transportSenderSession(c) ?? session, compact: true });
       role = deriveRole(c.get("db" as never) as Database.Database | undefined, identity?.identity.nodeId ?? null);
     } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
+    // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
+    // default answer is unchanged. In-progress rows are the candidate evidence, so they come
+    // from the same unbounded read as the derivation; held/next work is a bounded display list.
+    if (c.req.query("candidates") === "1") {
+      const heldAndNext = repo.list({ destinationSession: session, state: ["pending", "blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const workCandidates = deriveWorkCandidates(
+        [...inProgress, ...heldAndNext.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
+        missionsRoot,
+        {
+          getRow: (qitemId) => repo.getById(qitemId) ?? null,
+          continuationOf: (qitemId) => repo.currentParkContinuation(qitemId),
+        },
+      );
+      return c.json({ ...position, ...derived, role,
+        workCandidates: { ...workCandidates, heldAndNextTruncated: heldAndNext.length > WORK_CANDIDATE_LIST_LIMIT } });
+    }
     return c.json({ ...position, ...derived, role });
   });
 

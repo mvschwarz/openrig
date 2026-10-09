@@ -104,10 +104,18 @@ a JSON array of 1–4 questions, each
 options (labels up to 75 characters, at most one recommended). Slack shows each
 question as a row of buttons. Each click records that answer on the item, and
 the decision resolves once every question has one. You then receive one reply
-row listing the answers, and the item's `humanAnswers` holds the option ids. The
-human may instead type a reply in the thread; that resolves the decision as
-usual, so read the reply rather than assuming an option was picked. Keep the
-brief complete: the questions add buttons, they do not replace the explanation.
+row listing the answers. In `humanAnswers`, clicked answers are option-id strings.
+A whole typed reply is an object:
+`{kind: "typed-reply", text: "…", placement: "first-unanswered", unansweredCount: N}`.
+It is placed automatically under the first unanswered question; the person did
+not select that question. `N` counts the other question slots still empty in
+`humanAnswers` after that placement.
+Earlier button answers stay intact. Read `text` as the person's words, never as
+an option id even if the strings match. The typed reply still closes the decision
+with the other questions unanswered; `done` is not approval. If every button
+answer was already recorded, that final answer set stays intact and the typed
+reply remains in its correlated reply row. Keep the brief complete: the questions
+add buttons, they do not replace the explanation.
 
 If an existing agent-owned row must wait for a **decision**, block it on the **new live qitem ID**
 (`rig queue block <work-id> --on <human-qitem-id> ...`), not on the human address.

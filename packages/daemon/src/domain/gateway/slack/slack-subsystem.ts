@@ -18,6 +18,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
+import { DispatchBuffer } from "../dispatch-buffer.js";
 import { downloadPrivateFile, isSlackHost, postChatMessage } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
@@ -32,7 +33,7 @@ import { makeThreadRouteResolver } from "./thread-routing.js";
 import { resolveOutboundChannel, unsupportedChannelMapFields } from "./channel-map.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
-import { hasLiveHumanGate, type QueueRepository } from "../../queue-repository.js";
+import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
 import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
@@ -97,23 +98,7 @@ export function makeHumanReplyResolver(
       // correlated inbound row. Closing the request here records the durable
       // disposition; the inbound create is already the one wake back to the
       // source, so a second nudge here would duplicate attention.
-      const direct = queueRepo.getById(input.qitemId);
-      if (
-        direct?.state !== "pending" ||
-        direct.destinationSession !== input.actorSession ||
-        parseSessionName(direct.destinationSession).kind !== "external"
-      ) {
-        return "not-applicable";
-      }
-      queueRepo.update({
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        state: "done",
-        closureReason: "no-follow-on",
-        transitionNote: "direct human reply received",
-        ownerNotificationKind: "human-decision-resolved",
-      });
-      return "resolved";
+      return queueRepo.resolveDirectHumanReply(input) ? "resolved" : "not-applicable";
     }
   };
 }
@@ -569,8 +554,34 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       transitionNote: formatDeliveryTermination(decision.termination, key),
     });
   };
+  // Decisions already in the dispatch buffer when this wire is built are retained from an earlier
+  // run: posts that failed or never finished, which startServices() replays.
+  const replayedAtStart = new Set(new DispatchBuffer(opts.home).pending().map((d) => d.decisionId));
+  // A replayed notification for a row that has since left the active states is history, not news
+  // (a post that failed, retried a day later): it posts nothing, and the row says why, unless the
+  // episode already has its posted receipt. Returning ok drains it from the dispatch buffer.
+  const dropStaleNotification = (p: OutboundPostPayload, state: string): void => {
+    const key = p.notificationKey ?? p.qitemId;
+    const notes = opts.queueRepo.transitionLog.listForQitem(p.qitemId).map((t) => t.transitionNote ?? "");
+    const posted = notes.some((n) => n.startsWith("slack-owner-notification-posted ") && n.split(/\s+/).includes(`notification_key=${key}`));
+    const note = `slack-owner-notification-dropped notification_key=${key} reason=row-not-active state=${state}`;
+    if (!posted && !notes.includes(note)) {
+      opts.queueRepo.update({ qitemId: p.qitemId, actorSession: "daemon@kernel", transitionNote: note });
+    }
+    outboundSeen.mark(key, "dropped-row-not-active");
+    releaseRef(key);
+  };
   const engineDeliver: SubsystemDeliverFn = async (decision) => {
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
+    // The decision-resolved notice is written at closure, so a closed row is its normal case.
+    if (replayedAtStart.has(decision.decisionId) && p.qitemId && p.ownerNotificationKind !== "human-decision-resolved"
+      && !(p as { deliveryDigestPost?: boolean }).deliveryDigestPost) {
+      const state = opts.queueRepo.getById(p.qitemId)?.state;
+      if (state && !isBlockerLive(state)) {
+        dropStaleNotification(p, state);
+        return { ok: true as const };
+      }
+    }
     // The T+30 deferral FIRE executes an already-made decision — never re-consult
     // (a re-consult would re-defer: the immediate-plus-deferred shape AM-F3 forbids).
     // R2 B-3 belt: an episode that already carries its posted receipt (a replayed

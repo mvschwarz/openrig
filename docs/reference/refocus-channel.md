@@ -89,6 +89,39 @@ reports broken links as gaps rather than following pointers.
 This automatic hook path is additive to one-shot manual injection through
 `rig send --context`; neither mode substitutes for the other.
 
+## The work packet (switched off by default)
+
+Set `OPENRIG_REFOCUS_WORK_PACKET=1` in a seat's harness environment so its
+refocus carries the work it is actually doing as text rather than as pointers.
+With the switch on:
+
+- The hook asks `rig queue whoami --work-candidates` for labelled evidence.
+  That is each in-progress row's own `mission:` tag (a slice tag is optional),
+  or for an untagged row the nearest local handoff ancestor's mission, plus
+  blocked rows as held work and pending rows as possible next work. The
+  strict `currentWork` derivation is unchanged.
+- One direct, resolved tag is shown as the work, labelled with its source so
+  the agent can correct a stale tag. Anything less certain lists every
+  candidate's one-line intent and asks the agent to name its mission (or to say
+  it has no current work), giving the `--work-start` route that then shows
+  that mission's intent as text. The project-level chain appears only as
+  labelled orientation.
+- A tag that does not resolve on this host is named, never replaced. A
+  retargeted handoff or a remote ancestor gives no assumed mission. A mission
+  named only in body text is not evidence.
+- The seat's `LEARNED.md` contributes its `MY JOB HERE` and `STANDING DUTIES`
+  sections, and notes and each node's `PROGRESS.md` contribute their
+  `Current state` section. When a file has
+  no such heading, the packet says so and shows a bounded excerpt. No heading
+  is required.
+- A notes or `LEARNED.md` file older than
+  `OPENRIG_REFOCUS_NOTES_MAX_AGE_DAYS` (default 14) is named with its age, the
+  age's source (`updated:` frontmatter, else mtime) and the threshold: a cue
+  for judgment, not a staleness verdict.
+
+`trace-to-root.py --packet --work-candidates <path|->` renders the same packet
+by hand.
+
 ## Relation to chain files
 
 The chain files are the durable, altitude-addressed home of orientation
