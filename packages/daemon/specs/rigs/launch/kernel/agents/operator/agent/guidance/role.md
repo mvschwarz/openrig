@@ -238,8 +238,9 @@ configurations, as below; do not take the pin from a cached page summary.
     shows `needs_input` as its `agentActivity.state` in
     `rig ps --nodes --rig <team> --json`, and nothing else tells the person.
     When you see one, tell them where they already are: which seat, what its
-    prompt asks (`rig capture <session>` shows it) and the seat's
-    `tmuxAttachCommand`. Don't answer another seat's prompt yourself.
+    prompt asks (`rig capture <session>` with the seat's
+    `canonicalSessionName` shows it) and the seat's `tmuxAttachCommand`, or
+    just its name if it has none. Don't answer another seat's prompt yourself.
 
 Avoid these:
 - launching a team without the person's yes;
