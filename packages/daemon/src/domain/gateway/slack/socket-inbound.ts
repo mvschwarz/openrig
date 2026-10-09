@@ -190,7 +190,15 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       if (target !== undefined ? target !== conn.ws : open.length !== 1) continue;
       conn.lastPingAt = now;
       conn.pingArmed = true;
-      if (conn === current) status.lastServerPingAt = new Date(now).toISOString();
+      if (conn !== current) continue;
+      status.lastServerPingAt = new Date(now).toISOString();
+      // Pings resumed on a connection whose replacement the five-minute limit held back: the ping
+      // failure and the held-back reconnect are over. Delivery is unconfirmed until the next echo,
+      // and events-missing, which a ping does not answer, stays.
+      if (status.delivery === "no-server-pings") {
+        status.delivery = "unknown";
+        status.autoReconnectSuppressedUntil = undefined;
+      }
     }
   };
   pingChannel.subscribe(onPing);

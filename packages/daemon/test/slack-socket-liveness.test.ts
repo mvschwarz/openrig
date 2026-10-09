@@ -278,6 +278,22 @@ describe("Socket Mode liveness", () => {
     expect(handle!.status().delivery).toBe("no-server-pings");
   });
 
+  it("clears the ping failure when pings resume on a connection the five-minute limit kept", async () => {
+    await openSocket(1);
+    for (let i = 0; i < 2; i++) { ping(); await vi.advanceTimersByTimeAsync(10_000); }
+    await vi.advanceTimersByTimeAsync(40_000); // first replacement: pings stopped
+    await openSocket(2);
+    for (let i = 0; i < 2; i++) { ping(); await vi.advanceTimersByTimeAsync(10_000); }
+    await vi.advanceTimersByTimeAsync(40_000); // stalls again inside five minutes: held back
+    expect(handle!.status().delivery).toBe("no-server-pings");
+    ping(); // pings resume
+    expect(handle!.status().delivery).toBe("unknown");
+    expect(handle!.status().autoReconnectSuppressedUntil).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sockets).toHaveLength(2);
+    expect(handle!.status().delivery).toBe("unknown");
+  });
+
   it("stops reconnecting when Slack reports link_disabled, and says why", async () => {
     const first = await openSocket(1);
     message(first, { envelope_id: "d-2", type: "disconnect", reason: "link_disabled" });
