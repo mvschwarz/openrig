@@ -75,10 +75,15 @@ const RIG_NOT_FOUND_RESPONSE = {
 const ALPHA_ID = "01KALPHA0000000000000000AA";
 const DUPE_ID_1 = "01KDUPE10000000000000000AA";
 const DUPE_ID_2 = "01KDUPE20000000000000000AA";
+const ARCHIVED_ID = "01KARCH00000000000000000AA";
+const COLLIDE_ID = "01KCOLLIDE00000000000000AA";
 const RIG_SUMMARIES = [
-  { id: ALPHA_ID, name: "alpha", nodeCount: 2 },
-  { id: DUPE_ID_1, name: "dupe", nodeCount: 1 },
-  { id: DUPE_ID_2, name: "dupe", nodeCount: 1 },
+  { id: ALPHA_ID, name: "alpha", nodeCount: 2, archivedAt: null },
+  { id: DUPE_ID_1, name: "dupe", nodeCount: 1, archivedAt: null },
+  { id: DUPE_ID_2, name: "dupe", nodeCount: 1, archivedAt: null },
+  // An archived rig, plus an ACTIVE rig whose name is that archived rig's id.
+  { id: ARCHIVED_ID, name: "old-team", nodeCount: 1, archivedAt: "2026-06-01T00:00:00Z" },
+  { id: COLLIDE_ID, name: ARCHIVED_ID, nodeCount: 1, archivedAt: null },
 ];
 
 const FAILED_LAUNCH_RESPONSE = {
@@ -104,7 +109,10 @@ describe("rig add", () => {
     server = http.createServer((req, res) => {
       if (req.method === "GET" && req.url?.startsWith("/api/rigs/summary")) {
         res.writeHead(summaryStatus, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(summaryStatus === 200 ? RIG_SUMMARIES : { error: "unavailable" }));
+        // Mirrors the route: archived rigs only with ?includeArchived=true.
+        const includeArchived = new URL(req.url, "http://x").searchParams.get("includeArchived") === "true";
+        const rigs = includeArchived ? RIG_SUMMARIES : RIG_SUMMARIES.filter((r) => r.archivedAt == null);
+        res.end(JSON.stringify(summaryStatus === 200 ? rigs : { error: "unavailable" }));
       } else if (req.method === "POST" && req.url?.includes("/members")) {
         capturedUrl = req.url;
         let body = "";
@@ -317,6 +325,20 @@ describe("rig add", () => {
       expect(capturedUrl).toBe(`/api/rigs/${DUPE_ID_2}/pods/infra/members`);
     });
 
+    it("an archived rig's exact id wins over an active rig with that name", async () => {
+      await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "add", ARCHIVED_ID, "infra", fragmentPath]);
+      });
+      expect(capturedUrl).toBe(`/api/rigs/${ARCHIVED_ID}/pods/infra/members`);
+    });
+
+    it("an archived rig's name does not resolve (posted as typed)", async () => {
+      await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "add", "old-team", "infra", fragmentPath]);
+      });
+      expect(capturedUrl).toBe("/api/rigs/old-team/pods/infra/members");
+    });
+
     it("a missing name keeps the daemon's rig_not_found (exit 1)", async () => {
       const { logs, exitCode } = await captureLogs(async () => {
         await makeCmd().parseAsync(["node", "rig", "add", "ghost", "infra", fragmentPath]);
@@ -413,6 +435,14 @@ describe("rig add", () => {
           await makeCmd().parseAsync(["node", "rig", "add", ALPHA_ID, "infra", fragmentPath]);
         });
         expect(capturedUrl).toBe(`/api/rigs/${ALPHA_ID}/pods/infra/members`);
+      });
+
+      it("an archived rig's exact id is posted unchanged, not refused as a name", async () => {
+        const { exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "add", ARCHIVED_ID, "infra", fragmentPath]);
+        });
+        expect(exitCode).toBeUndefined();
+        expect(capturedUrl).toBe(`/api/rigs/${ARCHIVED_ID}/pods/infra/members`);
       });
 
       it("an unknown handle keeps the daemon's rig_not_found", async () => {

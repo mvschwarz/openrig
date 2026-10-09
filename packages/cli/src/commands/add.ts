@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { DaemonClient } from "../client.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { readSelectedHost } from "../host-selection.js";
+import { resolveRigHandle } from "../rig-handle.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -20,49 +21,6 @@ interface AddMemberResponse {
   message?: string;
   errors?: string[];
   error?: string;
-}
-
-interface RigSummaryEntry {
-  id: string;
-  name: string;
-}
-
-/**
- * Outcome of resolving a `rig add <rig>` handle (rig name OR id), with the
- * same kinds as `rig down`. Only `resolved`/`passthrough` reach the POST.
- */
-type HandleResolution =
-  | { kind: "resolved"; id: string; byName: boolean }
-  | { kind: "ambiguous"; ids: string[] }
-  | { kind: "not_found" }
-  // Summary unavailable: post the raw handle as today. The members route
-  // matches exact ids only, so a name posted this way cannot reach a rig.
-  | { kind: "passthrough" };
-
-/**
- * Resolve a `rig add <rig>` handle to the id the add-member route takes.
- * `rig whoami --json` reports the rig by name, so the name must work here too.
- *  - exact id match -> that id;
- *  - exactly one active rig with that name -> its id;
- *  - more than one -> ambiguous: refuse, never pick one;
- *  - no match -> not_found (the raw handle is still posted, so the daemon's
- *    existing rig_not_found answers, or it resolves an id we could not list,
- *    e.g. an archived rig).
- */
-async function resolveRigHandle(client: DaemonClient, handle: string): Promise<HandleResolution> {
-  let summaries: RigSummaryEntry[];
-  try {
-    const res = await client.get<RigSummaryEntry[]>("/api/rigs/summary");
-    if (res.status !== 200 || !Array.isArray(res.data)) return { kind: "passthrough" };
-    summaries = res.data;
-  } catch {
-    return { kind: "passthrough" };
-  }
-  if (summaries.some((r) => r.id === handle)) return { kind: "resolved", id: handle, byName: false };
-  const nameMatches = summaries.filter((r) => r.name === handle);
-  if (nameMatches.length === 1) return { kind: "resolved", id: nameMatches[0]!.id, byName: true };
-  if (nameMatches.length > 1) return { kind: "ambiguous", ids: nameMatches.map((r) => r.id) };
-  return { kind: "not_found" };
 }
 
 /** Quote a shell argument only when it needs it, so plain suggestions stay readable. */
