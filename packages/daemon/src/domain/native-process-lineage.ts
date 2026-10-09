@@ -242,6 +242,18 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
   return children;
 }
 
+/** Parents main already accepts as a Claude runtime, for keeping main's result
+ * when a child names another conversation: a verified Claude binary, a
+ * Node-hosted Claude (`node <claude path>`), or an older row with no OS name
+ * whose argv0 is claude. A shell script launcher and a helper whose argv merely
+ * mentions claude are not runtimes. */
+function claudeRuntimeParent(row: NativeProcessRow): boolean {
+  if (claudeProcess(row)) return true;
+  const argv = tokens(row.command);
+  if (executableName(argv[0] ?? "") === "node" && claudeExecutable(argv[1] ?? "")) return true;
+  return row.executableName === undefined && claudeExecutable(argv[0] ?? "");
+}
+
 /** Require a live process in the pane's own lineage whose argv names both the
  * declared runtime and the exact native resume identity. */
 export function findExactNativeResumeProcess(
@@ -273,12 +285,12 @@ export function findExactNativeResumeProcess(
       // the descent never stops at a helper. The pane root keeps its own row: pane
       // identity stays the root, as on main.
       if (exact) return pid === panePid ? process : exact;
-      // A launcher that is not itself a verified Claude runtime is refused only
-      // when a deeper runtime positively names another conversation; its subtree
+      // A launcher that is not itself a Claude runtime is refused only when a
+      // deeper runtime positively names another conversation; its subtree
       // is that runtime chain, so nothing below it is searched. A verified Claude
       // on the token keeps its proof: ps cannot tell a launcher binary over the
       // real Claude from a real Claude that started a child Claude.
-      if (claudeProcess(process) || deeper.size === 0) return process;
+      if (claudeRuntimeParent(process) || deeper.size === 0) return process;
       continue;
     }
     for (const child of byParent.get(pid) ?? []) queue.push(child.pid);

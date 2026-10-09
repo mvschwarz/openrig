@@ -240,6 +240,8 @@ describe("Claude wrapper manual attention recovery", () => {
       [script, kid(101, 100, "claude", "claude --settings /shim/settings.json"), kid(102, 101, "claude", "claude --session-id different")], true],
     ["a script and a helper on the token over a real Claude on another conversation",
       [script, kid(101, 100, "ugrep", "ugrep -n claude --session-id review-token file.ts"), kid(102, 100, "claude", "claude --session-id different")], false],
+    ["a Node-run Claude on the token over a child Claude on another conversation",
+      [{ ...root, executableName: "node", command: "node /usr/local/bin/claude --resume review-token" }, kid(101, 100, "claude", "claude --session-id different")], true],
   ] as const)("strict restore with %s", async (_name, rows, proved) => {
     const f = fixture("review-token");
     f.tmux.getPaneCommand.mockResolvedValue("claude");

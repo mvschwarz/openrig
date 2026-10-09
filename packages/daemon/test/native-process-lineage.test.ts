@@ -351,6 +351,23 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
     const rows = realRows(`claude --session-id ${token}`);
     expect(findExactNativeResumeProcess(rows, 11, "claude-code", token)?.pid).toBe(11);
   });
+  // #1091 round 4: parents main already accepts as Claude keep main's result.
+  it("keeps main's proof for a Node-run Claude or an older Claude row over a child on another conversation", () => {
+    const nodeRun = realRows(`claude --session-id ${other}`).map(r => r.pid === 11
+      ? { ...r, executableName: "node", command: `node /usr/local/bin/claude --resume ${token}` } : r);
+    expect(find(nodeRun)).toBe(11);
+    const older = realRows(`claude --session-id ${other}`).map(r => r.pid === 11
+      ? { pid: r.pid, ppid: r.ppid, pgid: r.pgid, tpgid: r.tpgid, command: r.command, startedAt } : r);
+    expect(find(older)).toBe(11);
+    expect(find(scriptRows(`claude --session-id ${other}`))).toBeNull();
+  });
+  it.each([
+    ["ugrep", `ugrep -n claude --session-id ${token} file.ts`],
+    ["rg", `rg claude --resume ${token}`],
+  ])("never treats a token-shaped helper (%s) as a runtime parent", (comm, command) => {
+    const rows = realRows(`claude --session-id ${other}`).map(r => r.pid === 11 ? { ...r, executableName: comm, command } : r);
+    expect(find(rows)).toBeNull();
+  });
   it("leaves --fork-session children as on main (separate follow-up)", () => {
     expect(find(scriptRows(`claude --resume ${token} --fork-session`))).toBe(11);
   });
