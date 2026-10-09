@@ -23,6 +23,8 @@ describe("the daemon's tmux server", () => {
     const standard = join(realpathSync("/tmp"), "tmux-501");
     expect(tmuxServerArgs({}, 501)).toEqual([]);
     expect(tmuxServerArgs({ TMUX: "" }, 501)).toEqual([]);
+    // Outside tmux the daemon shares the TMUX_TMPDIR of the shell that started it: today's form.
+    expect(tmuxServerArgs({ TMUX_TMPDIR: base }, 501)).toEqual([]);
     expect(tmuxServerArgs({ TMUX: `${standard}/default,123,0` }, 501)).toEqual([]);
     expect(tmuxServerArgs({ TMUX: `${standard}/default,123,0`, TMUX_TMPDIR: "/tmp" }, 501)).toEqual([]);
   });
@@ -35,8 +37,6 @@ describe("the daemon's tmux server", () => {
   it("names a socket by its path when TMUX_TMPDIR moved it, because -L resolves in the attaching terminal", () => {
     expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/person,123,0`, TMUX_TMPDIR: base }, 501)).toEqual(["-S", `${base}/tmux-501/person`]);
     expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/default,123,0`, TMUX_TMPDIR: base }, 501)).toEqual(["-S", `${base}/tmux-501/default`]);
-    // Outside tmux, a custom TMUX_TMPDIR still moves the daemon's default server.
-    expect(tmuxServerArgs({ TMUX_TMPDIR: base }, 501)).toEqual(["-S", join(base, "tmux-501", "default")]);
   });
 
   it("names a socket anywhere else, or another user's, with -S", () => {

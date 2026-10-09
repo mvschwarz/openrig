@@ -20,15 +20,14 @@ function realpath(p: string): string {
  * The tmux server flags for an environment. `-L <name>` and the bare form resolve under the attaching
  * terminal's own TMUX_TMPDIR, so they're used only for tmux's standard directory (`/tmp/tmux-<uid>`)
  * with no custom TMUX_TMPDIR in play: nothing for its `default` socket, `-L <name>` for another.
- * Every other socket is named by its path, `-S <path>`, including a daemon outside tmux whose
- * TMUX_TMPDIR moves its default server.
+ * Every other socket is named by its path, `-S <path>`. Outside tmux (no $TMUX), nothing: the daemon
+ * shares the TMUX_TMPDIR of the shell that started it, so the default form stays as it was.
  */
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
+  const socket = env["TMUX"]?.split(",")[0]?.trim();
+  if (!socket) return [];
   const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
-  const socket = env["TMUX"]?.split(",")[0]?.trim()
-    || (customTmpdir && uid !== undefined ? path.join(tmpdir, `tmux-${uid}`, "default") : "");
-  if (!socket) return [];
   if (!customTmpdir && uid !== undefined) {
     const standardDirs = [path.join("/tmp", `tmux-${uid}`), path.join(realpath("/tmp"), `tmux-${uid}`)];
     const socketDirs = [path.dirname(socket), realpath(path.dirname(socket))];
