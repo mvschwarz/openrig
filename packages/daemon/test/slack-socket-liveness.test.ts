@@ -237,6 +237,18 @@ describe("Socket Mode liveness", () => {
     expect(handle!.status().otherConnections).toBe(1);
   });
 
+  it("says a count above ours may be the connection a failure replacement just closed", async () => {
+    await openSocket(1);
+    for (let i = 0; i < 2; i++) { ping(); await vi.advanceTimersByTimeAsync(10_000); }
+    await vi.advanceTimersByTimeAsync(40_000); // pings stopped: a failure replacement
+    const second = await openSocket(2); // the failed connection is closed as this one opens
+    message(second, { type: "hello", num_connections: 2 }); // Slack may still count the closed one
+    expect(handle!.status()).toMatchObject({ numConnections: 2, otherConnections: 1, otherConnectionsMayBeOurs: true });
+    await vi.advanceTimersByTimeAsync(15_000);
+    message(second, { type: "hello", num_connections: 2 }); // well after the close
+    expect(handle!.status()).toMatchObject({ otherConnections: 1, otherConnectionsMayBeOurs: false });
+  });
+
   it("does not arm the new connection with an echo the draining one received", async () => {
     const first = await openSocket(1);
     message(first, { envelope_id: "d-5", type: "disconnect", reason: "refresh_requested" });
@@ -375,6 +387,7 @@ describe("Socket Mode liveness", () => {
     message(first, { type: "hello", num_connections: 2 });
     await vi.advanceTimersByTimeAsync(10);
     expect(handle!.status().numConnections).toBe(2);
+    expect(handle!.status().otherConnectionsMayBeOurs, "a loop's first connection follows a restart or re-enable").toBe(true);
     expect(receipts.readAll()).toEqual(expect.arrayContaining([expect.objectContaining({ status: "received", connections: 2 })]));
   });
 });

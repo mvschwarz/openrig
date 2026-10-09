@@ -92,8 +92,11 @@ export interface SocketInboundStatus {
   autoReconnectSuppressedUntil?: string;
   /** Slack's `hello` count of this app's open connections, ours included. */
   numConnections?: number;
-  /** Connections in `numConnections` that are not ours: above 0 means another consumer. */
+  /** Connections in `numConnections` that are not open on our side: above 0 means another consumer. */
   otherConnections?: number;
+  /** Those may be ours instead: Slack counted just after we closed a connection, or on this loop's
+   *  first connection, which follows a restart or re-enable. */
+  otherConnectionsMayBeOurs?: boolean;
 }
 
 interface Conn {
@@ -116,6 +119,9 @@ const defaultPingChannel = (): PingChannel => ({
 });
 /** How long a connection Slack asked to refresh may keep draining before we close it ourselves. */
 const REFRESH_DRAIN_MS = 30_000;
+/** How long after we close a connection Slack's count may still include it. Whether Slack drops a
+ *  closed connection from `num_connections` at once is not established. */
+const JUST_CLOSED_MS = 10_000;
 
 /** Start the Socket Mode loop (the shipped runner's exact shape, service-ified with a stop()). */
 export function startSocketInbound(appToken: string, router: InboundRouter, deps: SocketInboundDeps = {}): SocketInboundHandle {
@@ -133,6 +139,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   let disabledBySlack = false;
   let replacing = false;
   let lastAutoReplaceAt = 0;
+  let lastClosedByUsAt = 0;
   const conns = new Set<Conn>();
   let current: Conn | undefined;
   /** Our posts waiting for their echo: Slack ts → when we posted it (for its age) and its place
@@ -258,6 +265,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
     conn.ws.onopen = conn.ws.onmessage = conn.ws.onclose = conn.ws.onerror = null;
     conn.closed = true;
     conns.delete(conn);
+    lastClosedByUsAt = Date.now();
     try {
       conn.ws.close();
     } catch {
@@ -364,12 +372,18 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         status.lastEventTs = ev?.ts;
         const helloCount = env.type === "hello" ? (env as { num_connections?: unknown }).num_connections : undefined;
         if (typeof helloCount === "number") {
-          // During a refresh our own draining connection is still open, and Slack counts it.
+          // During a refresh our own draining connection is still open, and Slack counts it. One we
+          // closed moments ago (a failure replacement closes the old one as the new one opens), or
+          // the one a restart or re-enable just closed, may still be counted too.
           const ours = [...conns].filter((c) => c.opened && !c.closed).length;
           status.numConnections = helloCount;
           status.otherConnections = Math.max(0, helloCount - ours);
+          status.otherConnectionsMayBeOurs = status.otherConnections > 0 &&
+            (conn.generation === 1 || Date.now() - lastClosedByUsAt <= JUST_CLOSED_MS);
           if (status.otherConnections > 0) {
-            log(`Slack reports ${helloCount} open connections for this app, ${ours} of them ours; another consumer may be taking events`);
+            log(`Slack reports ${helloCount} open connections for this app, ${ours} of them ours; ${status.otherConnectionsMayBeOurs
+              ? "the rest may be a connection of ours closed moments ago, or another consumer"
+              : "another consumer may be taking events"}`);
           }
         }
         if (env.type === "disconnect") {

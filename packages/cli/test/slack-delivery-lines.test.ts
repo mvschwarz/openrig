@@ -23,4 +23,10 @@ describe("socketDeliveryLines", () => {
     expect(socketDeliveryLines({ numConnections: 2, otherConnections: 0 })).toEqual([]);
     expect(socketDeliveryLines({ numConnections: 3, otherConnections: 1 })).toEqual(["Slack reports 3 open connections for this app, 1 not ours: another consumer may be taking events."]);
   });
+
+  it("says the extra connection may be one of ours just after we closed one", () => {
+    expect(socketDeliveryLines({ numConnections: 2, otherConnections: 1, otherConnectionsMayBeOurs: true })).toEqual([
+      "Slack reports 2 open connections for this app, 1 more than we have open: possibly one we closed moments before Slack counted (Slack may not have dropped it yet), or another consumer taking events.",
+    ]);
+  });
 });

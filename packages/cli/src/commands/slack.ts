@@ -41,8 +41,8 @@ const SECRET_APP = "SLACK_APP_TOKEN";
 /** The socket's delivery health, as the daemon reports it beside the socket state. */
 export interface InboundDeliveryStatus {
   delivery?: string; eventsMissingSince?: string; lastServerPingAt?: string; unechoedPosts?: number;
-  numConnections?: number; otherConnections?: number; lastAutoReconnect?: { at?: string; reason?: string };
-  autoReconnectSuppressedUntil?: string;
+  numConnections?: number; otherConnections?: number; otherConnectionsMayBeOurs?: boolean;
+  lastAutoReconnect?: { at?: string; reason?: string }; autoReconnectSuppressedUntil?: string;
 }
 
 /** Lines that keep "connected" from being the only word about inbound delivery. */
@@ -65,7 +65,9 @@ export function socketDeliveryLines(inbound: InboundDeliveryStatus | undefined):
     lines.push(`Automatic reconnect held back until ${inbound.autoReconnectSuppressedUntil} (at most one every 5 minutes).`);
   }
   if ((inbound.otherConnections ?? 0) > 0) {
-    lines.push(`Slack reports ${inbound.numConnections ?? "several"} open connections for this app, ${inbound.otherConnections} not ours: another consumer may be taking events.`);
+    lines.push(inbound.otherConnectionsMayBeOurs
+      ? `Slack reports ${inbound.numConnections ?? "several"} open connections for this app, ${inbound.otherConnections} more than we have open: possibly one we closed moments before Slack counted (Slack may not have dropped it yet), or another consumer taking events.`
+      : `Slack reports ${inbound.numConnections ?? "several"} open connections for this app, ${inbound.otherConnections} not ours: another consumer may be taking events.`);
   }
   return lines;
 }
