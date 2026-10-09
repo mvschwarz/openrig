@@ -217,3 +217,45 @@ describe("observeClaudeDelivery's idle-shell policy: delivery versus launch", ()
     expect((await observeClaudeDelivery(input([shell], [shell]), { unknownKeepsIdle: false })).state).toBe("idle_shell");
   });
 });
+
+// #1079: a `codex` launcher that spawns (not execs) Codex, which spawns its native
+// child, as in the report: pane -> sh -> codex (launcher) -> codex -> codex (native).
+describe("Codex behind a spawning launcher", () => {
+  const launcherRows = (launcher = "", middle = "", native = ""): NativeProcessRow[] => [
+    { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "zsh", command: "-zsh", startedAt },
+    { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "sh", command: "sh /tmp/openrig-tmux-send.txt", startedAt },
+    { pid: 12, ppid: 11, pgid: 11, tpgid: 11, executableName: "codex", command: `codex ${launcher}--no-daemon -s workspace-write -c check_for_update_on_startup=false`, startedAt },
+    { pid: 13, ppid: 12, pgid: 11, tpgid: 11, executableName: "codex", command: `codex ${middle}--no-daemon -s workspace-write`, startedAt },
+    { pid: 14, ppid: 13, pgid: 11, tpgid: 11, executableName: "codex", command: `codex ${native}-c model_provider=local`, startedAt },
+  ];
+  const resume = `resume ${token} `;
+
+  it("resolves the reporter's fresh three-level chain to the deepest Codex", async () => {
+    expect((await check(() => launcherRows(), { requireResume: false }))?.process.pid).toBe(14);
+    expect((await check(() => launcherRows(), { requireResume: false, expectedToken: null }))?.process.pid).toBe(14);
+  });
+  it("takes the resume identity from an ancestor when the native child's argv lacks it", async () => {
+    expect((await check(() => launcherRows(resume, resume)))?.process.pid).toBe(14);
+    expect((await check(() => launcherRows(resume)))?.process.pid).toBe(14);
+    expect(findExactNativeResumeProcess(launcherRows(resume), 10, "codex", token)?.pid).toBe(14);
+    expect(await check(() => launcherRows(resume), { expectedToken: "different" })).toBeNull();
+  });
+  it("keeps exact resume strict across the chain", async () => {
+    expect(await check(() => launcherRows())).toBeNull();
+    expect(await check(() => launcherRows(resume, "resume other "))).toBeNull();
+    expect(await check(() => launcherRows(resume, "", "resume --last "))).toBeNull();
+  });
+  it("still refuses Codex processes on different branches", async () => {
+    const siblings = (r: NativeProcessRow[]) => [...r, { ...r[4]!, pid: 15 }];
+    expect(await check(() => siblings(launcherRows()), { requireResume: false })).toBeNull();
+    const twoNatives = launcherRows().filter(r => r.pid !== 14).concat({ ...launcherRows()[3]!, pid: 15, ppid: 12 });
+    expect(await check(() => twoNatives, { requireResume: false })).toBeNull();
+  });
+  it("still refuses a non-Codex foreground", async () => {
+    expect(await check(() => launcherRows().map(r => r.pid >= 12 ? { ...r, executableName: "node" } : r), { requireResume: false })).toBeNull();
+  });
+  it("refuses when a launcher link changes between observations", async () => {
+    const changed = launcherRows().map(r => r.pid === 12 ? { ...r, startedAt: "Sat Jan  1 12:00:01 2000" } : r);
+    expect(await check(vi.fn().mockResolvedValueOnce(launcherRows()).mockResolvedValueOnce(changed), { requireResume: false })).toBeNull();
+  });
+});
