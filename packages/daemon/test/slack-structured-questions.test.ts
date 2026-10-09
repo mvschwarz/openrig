@@ -126,6 +126,15 @@ describe("structured human questions (#193)", () => {
       expect(answer(qitemId, "db", "pg")).toMatchObject({ status: "not-applicable", reason: "state-done" });
       expect(repo.getById(qitemId)?.humanAnswers).toBeNull();
     });
+    it("once the decision is closed, tells only the asked human whether a click's answer is the one on record", async () => {
+      const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: questions });
+      answer(qitemId, "db", "pg");
+      answer(qitemId, "ship", "yes");
+      repo.update({ qitemId, actorSession: human, state: "done", closureReason: "no-follow-on", transitionNote: "answered" });
+      expect(answer(qitemId, "ship", "yes")).toEqual({ status: "not-applicable", reason: "state-done", answerOnRecord: true });
+      expect(answer(qitemId, "ship", "no")).toEqual({ status: "not-applicable", reason: "state-done" });
+      expect(answer(qitemId, "ship", "yes", "someone-else@external")).toEqual({ status: "not-applicable", reason: "state-done" });
+    });
   });
 
   describe("rendering", () => {
@@ -385,6 +394,20 @@ describe("structured human questions (#193)", () => {
       await vi.waitFor(() => expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]));
       await click("db", "pg", { user: "USTRANGER", actionTs: "2100.1" }); // and once posted, never again
       expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]);
+    });
+    it("tells the person their answer is recorded when Slack redelivers the closing click whose confirmation failed", async () => {
+      await click("db", "pg");
+      expect(threadAcks()).toHaveLength(1); // Recorded …
+      failThreadPosts = 1; // the final click's "All answered" doesn't post
+      await click("ship", "yes", { actionTs: "2200.1" });
+      expect(repo.getById(decisionId)).toMatchObject({ state: "done", humanAnswers: { db: "pg", ship: "yes" } });
+      expect(threadAcks()).toHaveLength(1);
+      await click("ship", "yes", { actionTs: "2200.1" }); // Socket Mode redelivery of that click
+      await vi.waitFor(() => expect(threadAcks()).toHaveLength(2));
+      expect(threadAcks()[1]).toBe(CLICK_REPLIES.onRecord);
+      await click("ship", "yes", { actionTs: "2200.1" }); // and once posted, never again
+      expect(threadAcks()).toHaveLength(2);
+      expect(repliesToSeat()).toHaveLength(1);
     });
 
     it("says the answers were sent back when the decision itself didn't close", async () => {

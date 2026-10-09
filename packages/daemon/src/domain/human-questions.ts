@@ -30,7 +30,8 @@ export type HumanAnswers = Record<string, string | TypedHumanReply>;
 /** The outcome of recording one clicked answer (QueueRepository.recordHumanAnswer). */
 export type RecordHumanAnswerResult =
   | { status: "recorded"; answers: HumanAnswers; complete: boolean; questions: HumanQuestion[] }
-  | { status: "not-applicable"; reason: string };
+  /** answerOnRecord: the decision is no longer pending, and this asked human's clicked answer is the one it holds. */
+  | { status: "not-applicable"; reason: string; answerOnRecord?: true };
 
 export const MAX_HUMAN_QUESTIONS = 4;
 export const MIN_OPTIONS = 2;

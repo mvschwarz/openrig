@@ -58,6 +58,7 @@ export const CLICK_REPLIES = {
   unregistered: "This click wasn't recorded: only the person this decision was sent to can answer it, and your Slack account isn't registered with this OpenRig.",
   unmapped: "This click wasn't recorded: OpenRig can't find the decision this message belongs to. Reply in this thread in words instead.",
   closed: "This decision is already closed, so this click wasn't recorded.",
+  onRecord: "Your answer is recorded, and this decision is closed.",
   someoneElse: "This click wasn't recorded: this decision was sent to someone else, and only they can answer it.",
   stale: "This click wasn't recorded: the button no longer matches this decision's questions. Reply in this thread in words instead.",
   unavailable: "This click wasn't recorded: OpenRig couldn't record a button answer here. Reply in this thread in words instead.",
@@ -396,7 +397,9 @@ export class InboundRouter {
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
-      if (live) await acknowledge(clickNotRecordedReply(reason));
+      // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
+      // it, after that click's own confirmation failed to post. It was recorded, so say that.
+      if (live) await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord : clickNotRecordedReply(reason));
       return { status: "ignored", reason };
     }
     const lines = formatHumanAnswers(recorded.questions, recorded.answers);

@@ -3177,7 +3177,11 @@ export class QueueRepository {
     return this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
-      if (item.state !== "pending") return { status: "not-applicable" as const, reason: `state-${item.state}` };
+      if (item.state !== "pending") {
+        // Slack can redeliver the click that closed it. Only to the asked human, say whether this answer is on record.
+        const onRecord = item.destinationSession === input.actorSession && item.humanAnswers?.[input.questionId] === input.optionId;
+        return { status: "not-applicable" as const, reason: `state-${item.state}`, ...(onRecord ? { answerOnRecord: true as const } : {}) };
+      }
       if (item.destinationSession !== input.actorSession) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
