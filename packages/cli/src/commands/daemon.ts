@@ -163,8 +163,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .action(async (opts: { port?: string; host?: string; db?: string; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
       try {
         const { ConfigStore } = await import("../config-store.js");
-        const { SystemPreflight } = await import("../system-preflight.js");
-        const { execSync } = await import("node:child_process");
+        const { SystemPreflight, quietPreflightExec } = await import("../system-preflight.js");
         const configStore = new ConfigStore();
         const config = configStore.resolve();
         const effectivePort = opts.port ? parseInt(opts.port, 10) : config.daemon.port;
@@ -189,7 +188,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
 
         // Run preflight before starting
           const preflight = new SystemPreflight({
-            exec: async (cmd) => execSync(cmd, { encoding: "utf-8" }),
+            exec: quietPreflightExec,
             configStore,
             getDaemonStatus: () => getDaemonStatus(getDeps()),
             openrigHome: OPENRIG_DIR,
