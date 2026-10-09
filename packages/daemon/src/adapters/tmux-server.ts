@@ -24,8 +24,9 @@ function realpath(p: string): string {
  * shares the TMUX_TMPDIR of the shell that started it, so the default form stays as it was.
  */
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
-  const socket = env["TMUX"]?.split(",")[0]?.trim();
-  if (!socket) return [];
+  // tmux puts the socket path first, as is: keep any whitespace in it.
+  const socket = env["TMUX"]?.split(",")[0];
+  if (!socket?.trim()) return [];
   const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
   if (!customTmpdir && uid !== undefined) {
