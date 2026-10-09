@@ -16,6 +16,7 @@ export function scopeApproveRoutes(): Hono {
     const body = await c.req.json<{
       scopeTier?: string;
       scopePath?: string;
+      missionsRoot?: string;
       approvalScope?: string;
       actorSession?: string;
       onBehalfOf?: string | null;
@@ -55,6 +56,9 @@ export function scopeApproveRoutes(): Hono {
       const result = service.approve({
         scopeTier: body.scopeTier as ScopeTier,
         scopePath: body.scopePath,
+        // #995 — the tree the CALLER named, when it sent one; the service
+        // validates it and falls back to the daemon's own root otherwise.
+        missionsRoot: typeof body.missionsRoot === "string" ? body.missionsRoot : null,
         approvalScope,
         actorSession: identity.session, // transport-derived, authoritative
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)

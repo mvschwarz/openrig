@@ -184,6 +184,33 @@ describe("rig status", () => {
       }
     });
 
+    it("shows a recovered boot failure as history under a ready kernel (#1042)", async () => {
+      const recovered = createDaemonServer([], { available: false }, {
+        code: 200,
+        body: {
+          kernel_state: "ready",
+          last_boot_failure: { state: "bootstrap_failed", detail: "startup gate timed out after 30s", at: "2026-10-08T12:00:00.000Z" },
+        },
+      });
+      const recoveredPort = await recovered.listen();
+      try {
+        const program = new Command();
+        program.addCommand(statusCommand({
+          lifecycleDeps: mockLifecycleDeps({
+            exists: vi.fn((p: string) => p === STATE_FILE),
+            readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(recoveredPort)) : null)),
+            fetch: vi.fn(async () => ({ ok: true })),
+          }),
+          clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+        }));
+        const output = (await captureLogs(() => program.parseAsync(["node", "rig", "status"]))).join("\n");
+        expect(output).toContain("Kernel: ready");
+        expect(output).toContain("  Recovered from an earlier boot failure (bootstrap_failed at 2026-10-08T12:00:00.000Z): startup gate timed out after 30s");
+      } finally {
+        await recovered.close();
+      }
+    });
+
     it("marks the workspace root as an override when OPENRIG_WORKSPACE_ROOT is set", async () => {
       const prev = process.env.OPENRIG_WORKSPACE_ROOT;
       process.env.OPENRIG_WORKSPACE_ROOT = process.cwd(); // a real existing dir

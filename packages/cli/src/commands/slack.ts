@@ -171,6 +171,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
         log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
         const connector = observation.connector as { configurationDigest?: string;
+          deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string;
           inbound?: { state?: string; generation?: number; lastEventAt?: string };
           recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
@@ -186,6 +187,16 @@ export function slackCommand(deps: SlackDeps = {}): Command {
             if (coverage.nextRetryAt) log(`  Retry after: ${new Date(coverage.nextRetryAt).toISOString()}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);
+          if (connector.deadLetterBacklogState !== undefined) {
+            const scope = "inbound messages, reactions and click answers";
+            if (connector.deadLetterBacklogState === "unknown") {
+              // The daemon publishes null rather than a number when a dead-letter file could
+              // not be read, so the line must not read as an empty backlog.
+              log(`  Inbound dead-letter backlog: unknown (could not read the ${scope} dead-letter records: ${connector.deadLetterBacklogReason ?? "unreadable"})`);
+            } else {
+              log(`  Inbound dead-letter backlog: ${connector.deadLetterBacklog ?? 0} retained record(s) awaiting retry (${scope}; durable, kept across restarts)`);
+            }
+          }
           if (connector.configurationDigest) log(`  Observed configuration digest: ${connector.configurationDigest} (local configuration above)`);
           for (const limit of recovery?.limits ?? []) log(`  Limit: ${limit}`);
         }
