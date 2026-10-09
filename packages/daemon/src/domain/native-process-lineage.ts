@@ -244,13 +244,14 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
 
 /** Parents main already accepts as a Claude runtime, for keeping main's result
  * when a child names another conversation: a verified Claude binary, a
- * Node-hosted Claude (`node <claude path>`), or an older row with no OS name
+ * Node-hosted Claude (`node <claude path>`, OS name node when known), or an older row with no OS name
  * whose argv0 is claude. A shell script launcher and a helper whose argv merely
  * mentions claude are not runtimes. */
 function claudeRuntimeParent(row: NativeProcessRow): boolean {
   if (claudeProcess(row)) return true;
   const argv = tokens(row.command);
-  if (executableName(argv[0] ?? "") === "node" && claudeExecutable(argv[1] ?? "")) return true;
+  if (executableName(argv[0] ?? "") === "node" && claudeExecutable(argv[1] ?? "")
+    && (row.executableName === undefined || executableName(row.executableName) === "node")) return true;
   return row.executableName === undefined && claudeExecutable(argv[0] ?? "");
 }
 

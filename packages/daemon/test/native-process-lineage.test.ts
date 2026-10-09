@@ -360,6 +360,8 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
       ? { pid: r.pid, ppid: r.ppid, pgid: r.pgid, tpgid: r.tpgid, command: r.command, startedAt } : r);
     expect(find(older)).toBe(11);
     expect(find(scriptRows(`claude --session-id ${other}`))).toBeNull();
+    // A Node-shaped argv whose OS executable is a shell is not Node-hosted Claude.
+    expect(find(nodeRun.map(r => r.pid === 11 ? { ...r, executableName: "bash" } : r))).toBeNull();
   });
   it.each([
     ["ugrep", `ugrep -n claude --session-id ${token} file.ts`],
