@@ -368,7 +368,7 @@ export class InboundRouter {
     // posted is held in memory, so a redelivery arriving meanwhile is skipped. A reply that failed to post isn't
     // recorded, so a later redelivery can still tell the person.
     const acknowledge = async (text: string) => {
-      if (!rootTs) return;
+      if (!rootTs || !this.deps.acknowledgeAnswer) return; // nothing can post (no bot token): record no reply either
       const key = live ? this.clickReplyKey(payload) : undefined;
       if (key && (this.replyingTo.has(key) || this.deps.seen.load().has(key))) return;
       if (key) this.replyingTo.add(key);

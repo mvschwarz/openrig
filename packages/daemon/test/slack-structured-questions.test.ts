@@ -17,12 +17,12 @@ import { buildOutboundMessage } from "../src/domain/gateway/slack/message.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import type { WsLike } from "../src/domain/gateway/slack/socket-inbound.js";
-import { CLICK_REPLIES, clickNotRecordedReply } from "../src/domain/gateway/slack/inbound.js";
+import { CLICK_REPLIES, clickNotRecordedReply, InboundRouter } from "../src/domain/gateway/slack/inbound.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
-import { InboundReceiptStore } from "../src/domain/gateway/slack/state-store.js";
+import { DeadLetterStore, InboundReceiptStore, SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { formatHumanAnswers, unansweredQuestions } from "../src/domain/human-questions.js";
 
 const human = "human-founder@external";
@@ -521,5 +521,25 @@ describe("the reply to a click that wasn't recorded", () => {
     expect(clickNotRecordedReply("unknown-option")).toBe(CLICK_REPLIES.stale);
     expect(clickNotRecordedReply("no-questions")).toBe(CLICK_REPLIES.stale);
     expect(clickNotRecordedReply("schema")).toBe(CLICK_REPLIES.unavailable);
+  });
+});
+
+describe("a click reply with nothing to post it", () => {
+  it("records no reply when no bot token can post one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "click-no-bot-"));
+    try {
+      const seen = new SeenStore(join(dir, "seen.jsonl"));
+      const router = new InboundRouter({
+        queue: { createQitem: async () => "qitem-x" }, seen, deadLetter: new DeadLetterStore(join(dir, "dead.jsonl")),
+        destination: "operator-agent@kernel", resolveSender: () => ({ admitted: false, teaching: "not registered" }),
+      });
+      const strangerClick = { type: "block_actions", user: { id: "USTRANGER" }, channel: { id: "C1" },
+        container: { message_ts: "1.1" }, message: { ts: "1.1" },
+        actions: [{ block_id: "or-q:db", action_id: "or-opt:pg", action_ts: "5.5" }] };
+      expect(await router.routeAction(strangerClick)).toMatchObject({ status: "refused", reason: "unregistered" });
+      expect([...seen.load()].some((id) => id.startsWith("click-reply:"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
