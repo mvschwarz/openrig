@@ -92,6 +92,25 @@ export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string)
   return resolveActiveOccupantRow(data.sessions, data.activeSessionIdByNode, nodeId);
 }
 
+/** A seat with no occupant (none) whose history still carries a resume token. Execution and the
+ *  plan preview both stop such a seat for a decision rather than fresh-priming it: it HAD a session,
+ *  and which earlier conversation to resume is not theirs to guess. Shared so the two cannot drift.
+ *  Returns the first row for the node with a usable token under a resume policy, or null. */
+export function absentSeatResumeHistory<T extends { nodeId: string; resumeType: string | null; resumeToken: string | null; restorePolicy?: string | null }>(
+  sessions: T[],
+  nodeId: string,
+): T | null {
+  return sessions.find((session) => session.nodeId === nodeId
+    && !!session.resumeToken?.trim()
+    && !!session.resumeType && session.resumeType !== "none"
+    && (session.restorePolicy ?? "resume_if_possible") === "resume_if_possible") ?? null;
+}
+
+/** The stop-for-decision explanation for such a seat, worded once for apply and preview. */
+export function absentSeatResumeHistoryError(logicalId: string, resumeType: string | null): string {
+  return `Original session not resumed: the seat had no running occupant when this snapshot was taken, but an earlier occupant left a '${resumeType}' resume token. No session was started. Re-run with --fresh ${logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`;
+}
+
 /** One wording for the loud failure everywhere — divergent phrasings would be
  *  a second copy of the truth. */
 export function activeOccupantAmbiguityError(candidateIds: string[], detail?: string): string {

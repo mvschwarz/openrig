@@ -75,7 +75,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
-import { resolveActiveSnapshotSession, activeOccupantAmbiguityError } from "./active-occupant.js";
+import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError } from "./active-occupant.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -892,15 +892,10 @@ export class RestoreOrchestrator {
       // launch would silently replace that conversation. Which earlier conversation to resume is not
       // the restore's to guess.
       const priorWithToken = occupantResolution.kind === "none" && !freshRequested
-        ? latestRowWithResumeToken(data.sessions, nodeId)
+        ? absentSeatResumeHistory(data.sessions, nodeId)
         : null;
-      if (priorWithToken && (priorWithToken.restorePolicy ?? "resume_if_possible") === "resume_if_possible") {
-        return {
-          nodeId,
-          logicalId: node.logicalId,
-          status: "awaiting-decision",
-          error: `Original session not resumed: the seat had no running occupant when this snapshot was taken, but an earlier occupant left a '${priorWithToken.resumeType}' resume token. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
-        };
+      if (priorWithToken) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType) };
       }
     }
 
@@ -1920,12 +1915,3 @@ interface PlanEntry {
   node: NodeWithBinding;
 }
 
-/** The newest of a node's snapshot session rows that carries a usable resume token. */
-function latestRowWithResumeToken(sessions: SnapshotData["sessions"], nodeId: string): SnapshotData["sessions"][number] | null {
-  let latest: SnapshotData["sessions"][number] | null = null;
-  for (const session of sessions) {
-    if (session.nodeId !== nodeId || !session.resumeToken?.trim() || !session.resumeType || session.resumeType === "none") continue;
-    if (!latest || session.createdAt > latest.createdAt || (session.createdAt === latest.createdAt && session.id > latest.id)) latest = session;
-  }
-  return latest;
-}

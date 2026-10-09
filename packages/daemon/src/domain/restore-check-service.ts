@@ -383,7 +383,7 @@ export class RestoreCheckService {
         checks.push(transcriptCheck);
         rigChecks.push(transcriptCheck);
 
-        const resumeCheck = this.checkResumePath(node);
+        const resumeCheck = this.checkResumePath(node, rig.name);
         checks.push(resumeCheck);
         rigChecks.push(resumeCheck);
 
@@ -870,7 +870,7 @@ export class RestoreCheckService {
     };
   }
 
-  private checkResumePath(node: NodeInventoryEntry): CheckEntry {
+  private checkResumePath(node: NodeInventoryEntry, rigName: string): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
     if (node.tmuxAttachCommand) {
       return { check: `seat.${session}.resume-path`, status: "green", evidence: node.tmuxAttachCommand, remediation: "" };
@@ -878,7 +878,8 @@ export class RestoreCheckService {
     return {
       check: `seat.${session}.resume-path`, status: "yellow",
       evidence: "No attach command available",
-      remediation: "Session will be created fresh on restore",
+      // Whether restore resumes, starts fresh or stops for a decision is per seat; the plan says which.
+      remediation: `No live session to attach. Preview what restore would do for this seat with: rig up ${rigName} --existing --plan`,
       remediationSafe: true,
     };
   }

@@ -11,7 +11,7 @@
 // only reported as would-happen), no projection writes.
 
 import type Database from "better-sqlite3";
-import { resolveActiveOccupantRow, resolveActiveSnapshotSession, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, type ActiveOccupantResolution } from "./active-occupant.js";
+import { resolveActiveOccupantRow, resolveActiveSnapshotSession, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 
@@ -127,7 +127,11 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
  *  classification (OPR.0.3.4.2) without touching anything. A fresh-listed
  *  seat (operation B, `--fresh <seat>`) forecasts `fresh-primed` BEFORE any
  *  resume-token logic, exactly as apply mode deliberately skips the resume. */
-function intendedActionFor(resolution: ActiveOccupantResolution<PreviewSessionRow>, freshRequested: boolean): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
+function intendedActionFor(
+  resolution: ActiveOccupantResolution<PreviewSessionRow>,
+  freshRequested: boolean,
+  absentHistory: { logicalId: string; row: PreviewSessionRow | null },
+): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
   // OPR.0.5.7.1 — a broken authoritative relation beats --fresh, exactly as
   // execution fails loudly before its fresh check: --fresh cannot override
   // A1 ambiguity.
@@ -141,6 +145,13 @@ function intendedActionFor(resolution: ActiveOccupantResolution<PreviewSessionRo
     return {
       intendedAction: "fresh-primed",
       reason: "listed in --fresh — apply would deliberately skip the resume (operation B)",
+    };
+  }
+  // No occupant, but an earlier one left a resume token: apply stops for the same decision.
+  if (resolution.kind === "none" && absentHistory.row) {
+    return {
+      intendedAction: "awaiting-decision",
+      reason: absentSeatResumeHistoryError(absentHistory.logicalId, absentHistory.row.resumeType),
     };
   }
   const occupant = resolution.kind === "resolved" ? resolution.session : null;
@@ -222,7 +233,8 @@ export function buildRestorePlanPreview(
       : sessionRows.some((row) => row.nodeId === node.id)
         ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
         : { kind: "none" as const };
-    const { intendedAction, reason } = intendedActionFor(resolution, freshRequested);
+    const { intendedAction, reason } = intendedActionFor(resolution, freshRequested,
+      { logicalId: node.logicalId, row: absentSeatResumeHistory(sessionRows, node.id) });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;
