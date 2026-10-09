@@ -270,3 +270,33 @@ describe("Codex behind a spawning launcher", () => {
     expect(await check(vi.fn().mockResolvedValueOnce(launcherRows()).mockResolvedValueOnce(changed), { requireResume: false })).toBeNull();
   });
 });
+
+// #1088 follow-up: Claude's strict finder must not prove a shim's token over an opaque child,
+// matching observeClaudeDelivery's policy that a shim's token is never inherited.
+describe("Claude exact-resume finder behind a spawning shim", () => {
+  const shimRows = (child: string): NativeProcessRow[] => [
+    { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "zsh", command: "-zsh", startedAt },
+    { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "claude", command: `claude --resume ${token} --name dev@rig`, startedAt },
+    { pid: 12, ppid: 11, pgid: 11, tpgid: 11, executableName: "claude", command: `claude ${child}`, startedAt },
+  ];
+
+  it.each([
+    ["an opaque child", "--permission-mode auto"],
+    ["a child on a fresh conversation", "--session-id 00000000-0000-7000-8000-00000000000f"],
+  ])("does not prove the shim's token over %s", (_name, child) => {
+    expect(findExactNativeResumeProcess(shimRows(child), 10, "claude-code", token)).toBeNull();
+  });
+  it("proves a child that names the token itself", () => {
+    expect(findExactNativeResumeProcess(shimRows(`--resume ${token}`), 10, "claude-code", token)?.pid).toBe(12);
+  });
+  it("keeps main's proof when the deeper Claude is not a spawned runtime", () => {
+    // A tool command run through a shell by the real Claude.
+    const toolChild = shimRows("-p summarise").flatMap(r => r.pid === 12
+      ? [{ ...r, pid: 13, ppid: 11, executableName: "bash", command: "/bin/bash -c claude -p summarise" }, { ...r, ppid: 13 }] : [r]);
+    expect(findExactNativeResumeProcess(toolChild, 10, "claude-code", token)?.pid).toBe(11);
+    // A Claude in another process group.
+    expect(findExactNativeResumeProcess(shimRows("-p x").map(r => r.pid === 12 ? { ...r, pgid: 99 } : r), 10, "claude-code", token)?.pid).toBe(11);
+    // Older callers without process groups.
+    expect(findExactNativeResumeProcess(shimRows("--permission-mode auto").map(({ pid, ppid, command }) => ({ pid, ppid, command })), 10, "claude-code", token)?.pid).toBe(11);
+  });
+});

@@ -221,6 +221,20 @@ describe("Claude wrapper manual attention recovery", () => {
     expect((await fixture("review-token").verify(true)).ok).toBe(true);
   });
 
+  // #1088 follow-up: a shim's --resume over an opaque Claude child is not exact restore proof.
+  it.each([
+    ["an opaque child", "--permission-mode auto", false],
+    ["a child that names the token", "--resume review-token", true],
+  ] as const)("strict restore behind a spawning Claude shim with %s", async (_name, childArgs, proved) => {
+    const f = fixture("review-token");
+    f.tmux.getPaneCommand.mockResolvedValue("claude");
+    f.listProcesses.mockResolvedValue([
+      { ...root, executableName: "claude", command: "claude --resume review-token --name worker@review197" },
+      { ...child, executableName: "claude", command: `claude ${childArgs}` },
+    ]);
+    expect((await f.verify(true)).ok).toBe(proved);
+  });
+
   it("keeps full restore outcome reconciliation ahead of runtime occupancy", async () => {
     const f = fixture();
     f.bus.emit({ type: "restore.started", rigId: f.rig.id, snapshotId: "snapshot" } as never);

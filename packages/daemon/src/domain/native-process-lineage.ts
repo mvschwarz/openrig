@@ -211,6 +211,28 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   return token;
 }
 
+/** A shim that spawns Claude directly (no shell between, same process group) is
+ * not the runtime, so its argv cannot prove the conversation: a shim's token is
+ * never inherited by an opaque child. A deeper Claude must name the token itself.
+ * Claude's own tool children run through a shell and do not count. */
+function spawnsClaudeChild(shim: NativeProcessRow, processes: NativeProcessRow[], byPid: Map<number, NativeProcessRow>): boolean {
+  if (shim.pgid === undefined) return false;
+  const isShell = (row: NativeProcessRow) => isShellForeground(executableName(tokens(row.command)[0]?.replace(/^-/, "") ?? ""));
+  return processes.some((row) => {
+    if (row === shim || row.pgid !== shim.pgid || isShell(row)
+      || !tokens(row.command).some((token) => claudeExecutable(token))) return false;
+    const seen = new Set<number>();
+    let current = byPid.get(row.ppid);
+    while (current && !seen.has(current.pid)) {
+      if (current.pid === shim.pid) return true;
+      seen.add(current.pid);
+      if (isShell(current)) return false;
+      current = byPid.get(current.ppid);
+    }
+    return false;
+  });
+}
+
 /** Require a live process in the pane's own lineage whose argv names both the
  * declared runtime and the exact native resume identity. */
 export function findExactNativeResumeProcess(
@@ -235,7 +257,8 @@ export function findExactNativeResumeProcess(
     if (visited.has(pid)) continue;
     visited.add(pid);
     const process = byPid.get(pid);
-    if (process && commandUsesExpectedToken(process.command, runtime, expectedToken)) return process;
+    if (process && commandUsesExpectedToken(process.command, runtime, expectedToken)
+      && !spawnsClaudeChild(process, processes, byPid)) return process;
     for (const child of byParent.get(pid) ?? []) queue.push(child.pid);
   }
   return null;
