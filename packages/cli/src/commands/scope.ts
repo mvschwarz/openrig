@@ -1988,7 +1988,15 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         }
         // Resolve the scope target LOCALLY (rich NN-slug resolution), then
         // send the canonical missions-root-relative path to the daemon.
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        // #995 — approve is the one scope write that happens inside the DAEMON.
+        // The resolved root travels WITH the request so the daemon stamps the
+        // tree the caller named instead of its own; strictOverride stops a
+        // named workspace without a missions/ directory from falling back to
+        // the configured root, which would stamp a tree nobody named.
+        const missionsRoot = resolveMissionsRoot({
+          override: getOpts(command).workspace,
+          strictOverride: true,
+        });
         let scopeAbsPath: string;
         if (tier === "slice") {
           const slice = findSlice(missionsRoot, target, opts.mission ?? null);
@@ -2012,6 +2020,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         const res = await client.post<Record<string, unknown>>("/api/scope/approve", {
           scopeTier: tier,
           scopePath,
+          missionsRoot,
           approvalScope: opts.scope,
           // P21: no body actorSession — the daemon derives the approver from the transport header.
           onBehalfOf: opts.onBehalfOf ?? null,

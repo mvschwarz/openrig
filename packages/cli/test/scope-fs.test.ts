@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import {
+  configuredMissionsRoot,
   ensureMissionId,
   findMission,
   findSlice,
@@ -179,6 +180,43 @@ describe("resolveMissionsRoot", () => {
     expect(resolve).toThrow(`Configured workspace.slices_root is not a readable directory: ${missingMissions}.`);
   });
 
+  it("strictOverride refuses an explicit override with no missions tree instead of falling back", () => {
+    // #995: the silent fallback let a command operate on the configured tree
+    // while the caller had named another one.
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const namedWithoutMissions = mktemp();
+
+    expect(resolveMissionsRoot({ override: namedWithoutMissions, configPath })).toBe(configuredMissions);
+
+    const strict = () => resolveMissionsRoot({ override: namedWithoutMissions, configPath, strictOverride: true });
+    expect(strict).toThrow(ScopeCliError);
+    expect(strict).toThrow("named by --workspace has no missions tree");
+    // Dropping the flag does not clear the variable, so the flag's remedy says so.
+    expect(strict).toThrow(/OPENRIG_WORK_ROOT in the environment still applies/);
+  });
+
+  it("strictOverride names OPENRIG_WORK_ROOT, and how to clear it, when the override came from the env", () => {
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const prior = process.env.OPENRIG_WORK_ROOT;
+    process.env.OPENRIG_WORK_ROOT = mktemp();
+    try {
+      const strict = () => resolveMissionsRoot({ configPath, strictOverride: true });
+      expect(strict).toThrow("named by OPENRIG_WORK_ROOT has no missions tree");
+      expect(strict).toThrow(/unset it to use the configured workspace/);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_WORK_ROOT;
+      else process.env.OPENRIG_WORK_ROOT = prior;
+    }
+  });
+
   it("uses the typed workspace.slices_root setting instead of walking cwd", () => {
     const root = mktemp();
     const missions = path.join(root, "declared-missions");
@@ -186,6 +224,34 @@ describe("resolveMissionsRoot", () => {
     const configPath = path.join(root, "config.json");
     fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
     expect(resolveMissionsRoot({ override: root, cwd: root, configPath })).toBe(missions);
+  });
+});
+
+describe("configuredMissionsRoot", () => {
+  it("returns the configured slices root when it is a readable directory", () => {
+    const root = mktemp();
+    const missions = path.join(root, "declared-missions");
+    fs.mkdirSync(missions);
+    const configPath = path.join(root, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
+    expect(configuredMissionsRoot(configPath)).toBe(missions);
+  });
+
+  it("returns null when the setting is unset or not a readable directory", () => {
+    const root = mktemp();
+    const unsetPath = path.join(root, "unset.json");
+    fs.writeFileSync(unsetPath, JSON.stringify({}));
+    expect(configuredMissionsRoot(unsetPath)).toBeNull();
+
+    const missingPath = path.join(root, "missing.json");
+    fs.writeFileSync(missingPath, JSON.stringify({ workspace: { slicesRoot: path.join(root, "nope") } }));
+    expect(configuredMissionsRoot(missingPath)).toBeNull();
+
+    const filePath = path.join(root, "a-file");
+    fs.writeFileSync(filePath, "not a directory");
+    const fileConfig = path.join(root, "file.json");
+    fs.writeFileSync(fileConfig, JSON.stringify({ workspace: { slicesRoot: filePath } }));
+    expect(configuredMissionsRoot(fileConfig)).toBeNull();
   });
 });
 

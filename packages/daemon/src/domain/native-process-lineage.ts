@@ -69,22 +69,45 @@ function claudeExecutable(token: string, selectedExecutable?: string): boolean {
     && /\/\.local\/share\/claude\/versions\/\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(token);
 }
 
+// Nixpkgs packages Claude as a wrapper that execs its sibling `.claude-unwrapped`
+// (wrapProgram: `.claude-wrapped`) with argv[0] inherited. Linux truncates that OS
+// name to 15 bytes, so ucomm reads `.claude-unwrapp`.
+const NIX_WRAPPED_CLAUDE_NAMES = [".claude-unwrapped", ".claude-wrapped"];
+const TASK_COMM_LENGTH = 15;
+
+function osNameIs(osName: string, name: string): boolean {
+  return osName === name || (osName.length === TASK_COMM_LENGTH && name.startsWith(osName));
+}
+
+// Only the wrapped binary inside a claude-code store output, and when a launch froze
+// its executable, only the sibling of that wrapper.
+function nixWrappedClaudeExecutable(path: string, selectedExecutable?: string): boolean {
+  const match = path.match(/^(\/nix\/store\/[0-9a-df-np-sv-z]{32}-claude-code(?:-[^/]+)?\/bin)\/\.claude-(?:un)?wrapped$/);
+  if (!match || path.split("/").some(part => part === "." || part === "..")) return false;
+  return !selectedExecutable || selectedExecutable === `${match[1]}/claude`;
+}
+
 function claudeProcess(row: NativeProcessRow, selectedExecutable?: string): boolean {
   const argv0 = tokens(row.command)[0] ?? "";
   if (!claudeExecutable(argv0, selectedExecutable)) return false;
-  if (executableName(row.executableName ?? "") === executableName(argv0)) return true;
+  const osName = row.executableName ?? "";
+  if (executableName(osName) === executableName(argv0)) return true;
   // Native Claude can retain its versioned OS name while rewriting argv[0] to
-  // claude. A version only selects candidates for an OS path read; it is not proof.
-  return needsClaudeExecutablePath(row) && !!row.executablePath
-    && claudeExecutable(row.executablePath, selectedExecutable)
-    && executableName(row.executablePath) === executableName(row.executableName ?? "");
+  // claude, and a Nix wrapper leaves its wrapped OS name. Either name only selects
+  // candidates for an OS path read; it is not proof.
+  const path = row.executablePath;
+  if (!needsClaudeExecutablePath(row) || !path) return false;
+  if (claudeExecutable(path, selectedExecutable) && executableName(path) === executableName(osName)) return true;
+  return nixWrappedClaudeExecutable(path, selectedExecutable) && osNameIs(osName, path.split("/").pop()!);
 }
 
 function needsClaudeExecutablePath(row: NativeProcessRow): boolean {
   const argv0 = tokens(row.command)[0] ?? "";
+  const osName = row.executableName ?? "";
   return claudeExecutable(argv0)
-    && executableName(row.executableName ?? "") !== executableName(argv0)
-    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(row.executableName ?? "");
+    && executableName(osName) !== executableName(argv0)
+    && (/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(osName)
+      || NIX_WRAPPED_CLAUDE_NAMES.some(name => osNameIs(osName, name)));
 }
 
 function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expectedToken: string): boolean {

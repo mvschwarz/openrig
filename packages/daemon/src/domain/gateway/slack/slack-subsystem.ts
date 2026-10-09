@@ -177,6 +177,30 @@ function stateDir(home: string): string {
   return path.join(home, "state");
 }
 
+/** The status fields for the retry pass's durable custody. Counts RECORDS across the
+ *  inbound-event and click dead-letter files — the event file also carries reactions,
+ *  and a message that left more than one record is counted once per record, so the
+ *  retry pass owns exactly these records. When any file cannot be read the count is
+ *  `null`, not 0: a number (or a zero) beside an unknown state still reads as "nothing
+ *  stuck" to a consumer that only looks at the count, so the state and the reason tell
+ *  the truth and the number says it does not know. Absent when inbound is not configured
+ *  (no stores), keeping an inert connector silent. */
+function deadLetterBacklogFields(
+  dead: DeadLetterStore<SlackEvent> | undefined,
+  deadActions: DeadLetterStore<SlackBlockActions> | undefined,
+): Record<string, unknown> {
+  if (!dead || !deadActions) return {};
+  let records = 0;
+  let reason: string | undefined;
+  for (const store of [dead, deadActions] as DeadLetterStore<unknown>[]) {
+    const result = store.readResult();
+    if (result.ok) records += result.entries.length;
+    else reason = reason ?? result.reason;
+  }
+  if (reason !== undefined) return { deadLetterBacklog: null, deadLetterBacklogState: "unknown", deadLetterBacklogReason: reason };
+  return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
+}
+
 /** Build the production Slack gateway wire from config + secrets. Never throws on a missing
  *  configuration — that is an honest inert wire, not a boot failure. */
 export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
@@ -624,9 +648,18 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     stops.push(() => driver.stop());
   }
 
+  // Hoisted out of the inbound block so status() can report the durable backlog.
+  // Both files are the retry pass's custody: the event dead-letter
+  // (`slack-inbound-deadletter.jsonl`) and the click dead-letter
+  // (`slack-inbound-action-deadletter.jsonl`), which retryActionDeadLetters owns.
+  // An inert wire omits the fields rather than inventing a count for a connector
+  // that is not running.
+  let dead: DeadLetterStore<SlackEvent> | undefined;
+  let deadActions: DeadLetterStore<SlackBlockActions> | undefined;
+
   if (inboundReady) {
     const inboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-inbound-seen.jsonl"));
-    const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
+    dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
     const receipts = new InboundReceiptStore(path.join(stateDir(opts.home), "slack-inbound-receipts.jsonl"));
     const registry: RegistrySurface = registrySurface;
     const router = new InboundRouter({
@@ -643,7 +676,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // a failed hand-back is retried with the event dead-letters, and each click is confirmed
       // in the decision's thread (a bot post, so inbound never ingests it).
       recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
-      actionDeadLetter: new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl")),
+      actionDeadLetter: (deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"))),
       ...(bot ? {
         acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
           const target = channel ?? cfg.channel;
@@ -705,6 +738,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       inboundReady,
       recovery: recovery?.status() ?? { state: "unavailable", reason: "inbound-not-configured" },
       inbound: inboundHandle?.status() ?? { state: inboundReady ? "not-started" : "not-configured", generation: 0, reconnects: 0 },
+      // The retry pass's durable custody, counted from both dead-letter files:
+      // inbound events plus click answers. Records, not distinct messages — a
+      // message that left more than one record is counted once per record, which
+      // is why the field is named for records. Present iff inbound is configured;
+      // an unreadable file reports state "unknown" with a reason instead of a
+      // false zero.
+      ...deadLetterBacklogFields(dead, deadActions),
     }),
   };
 }

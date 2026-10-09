@@ -54,6 +54,12 @@ export interface ScopeApproveInput {
   reApprove?: boolean;
   /** REQUIRED with reApprove (a reasoned deliberate act, never an accident). */
   reason?: string | null;
+  /** The missions root the CALLER named (`rig scope --workspace`), absolute and
+   *  already resolved client-side. When given it is the tree this approval
+   *  stamps, so a second worktree of the same repo is stamped where the caller
+   *  asked instead of in the daemon's own workspace (#995). Omitted (the TUI,
+   *  MCP and pre-#995 clients) ⇒ the daemon's own root, as before. */
+  missionsRoot?: string | null;
   /** PLAN-LOCK ONLY — the stamper's EXPLICIT locked-artifact set (slice-relative paths). When
    *  present it REPLACES the derived default entirely: the set is chosen, not inherited. Each path
    *  must exist in the slice directory. Ignored for delivery/mission approvals. */
@@ -100,6 +106,10 @@ export interface ScopeApprovalAuditNotes extends Record<string, unknown> {
   scope_tier: ScopeTier;
   scope_id: string;
   scope_path: string;
+  /** The missions root this stamp was written under: the caller's named root
+   *  when the request carried one, else the daemon's own (#995). scope_path is
+   *  relative to it, so the pair names the file that was stamped. */
+  missions_root: string;
   approval_scope: ApprovalScope;
   on_behalf_of: string | null;
 }
@@ -108,6 +118,19 @@ const STAMP_FIELDS: Record<ApprovalScope, { by: string; at: string; priors: stri
   delivery: { by: "approved-by", at: "approved-at", priors: "approved-priors" },
   spec: { by: "approved-spec-by", at: "approved-spec-at", priors: "approved-spec-priors" },
 };
+
+/**
+ * A directory path with symlinks resolved when it exists, else resolved
+ * lexically. Two spellings of the same directory — a worktree reached through
+ * a link and the directory itself — canonicalize to one string.
+ */
+function canonicalDirectory(dir: string): string {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
 
 interface ScopeApproveDeps {
   /** Resolves the live missions root (SliceIndexer.slicesRoot), or null when
@@ -124,14 +147,56 @@ export class ScopeApproveService {
     this.deps = deps;
   }
 
-  approve(input: ScopeApproveInput): ScopeApproveResult {
-    const missionsRoot = this.deps.missionsRoot();
-    if (!missionsRoot) {
+  /**
+   * The missions root this approval writes under: the caller's named root when
+   * the request carried one, else the daemon's own (#995).
+   *
+   * A named root is accepted only as an absolute path to an existing
+   * directory, and is canonicalized, so a worktree reached through a symlink
+   * names the same root as its target. Every later check — path containment,
+   * the node file and its frontmatter id, the no-half-stamp ordering — then
+   * applies to that tree unchanged.
+   */
+  private resolveMissionsRoot(named: string | null | undefined): string {
+    if (named === null || named === undefined || named === "") {
+      const own = this.deps.missionsRoot();
+      if (!own) {
+        throw new ScopeApproveError(
+          "workspace_not_configured",
+          "The daemon has no missions root configured; scope approve needs the workspace primitive.",
+        );
+      }
+      return canonicalDirectory(own);
+    }
+    if (!path.isAbsolute(named)) {
       throw new ScopeApproveError(
-        "workspace_not_configured",
-        "The daemon has no missions root configured; scope approve needs the workspace primitive.",
+        "missions_root_invalid",
+        `missionsRoot '${named}' is not an absolute path; the caller resolves the workspace before sending it.`,
+        { missionsRoot: named },
       );
     }
+    let isDirectory = false;
+    try {
+      isDirectory = fs.statSync(named).isDirectory();
+    } catch {
+      throw new ScopeApproveError(
+        "missions_root_invalid",
+        `missionsRoot '${named}' does not exist; nothing was written.`,
+        { missionsRoot: named },
+      );
+    }
+    if (!isDirectory) {
+      throw new ScopeApproveError(
+        "missions_root_invalid",
+        `missionsRoot '${named}' is not a directory; nothing was written.`,
+        { missionsRoot: named },
+      );
+    }
+    return canonicalDirectory(named);
+  }
+
+  approve(input: ScopeApproveInput): ScopeApproveResult {
+    const missionsRoot = this.resolveMissionsRoot(input.missionsRoot);
 
     // Path containment: the scope path must resolve INSIDE the missions root
     // (content-surfaces discipline — no ../ escapes).
@@ -268,6 +333,7 @@ export class ScopeApproveService {
       scope_tier: input.scopeTier,
       scope_id: scopeId,
       scope_path: scopePathCanonical,
+      missions_root: missionsRoot,
       approval_scope: input.approvalScope,
       on_behalf_of: input.onBehalfOf ?? null,
       // OPR.0.5.0.18 — the amendment row makes the supersession explicit
