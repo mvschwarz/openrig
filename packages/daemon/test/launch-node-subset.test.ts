@@ -368,7 +368,13 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     tmux.getPaneCommand.mockResolvedValue("bash" as never);
     tmux.getPanePid.mockResolvedValue(10 as never);
     processes = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "/bin/bash", executableName: "bash", startedAt: "Fri Oct 9 07:00:00 2026" }];
-    return { rigId, nodeIds, session };
+    return { rigId, nodeIds, session, snapshotId };
+  }
+
+  function setSavedSession(snapshotId: string, fields: Record<string, unknown>) {
+    const data = JSON.parse((db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapshotId) as { data: string }).data);
+    Object.assign(data.sessions[0], fields);
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshotId);
   }
 
   it.each(["claude-code", "codex", "pi", "omp"])("reports an exited %s agent without replacing its preserved shell", async (runtime) => {
@@ -386,12 +392,21 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === session.id)?.status).toBe("running");
   });
 
-  it("names the managed ways back: resume, a fresh occupant, or the pane by hand", async () => {
-    const { rigId, session } = seedPreservedShell();
-    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
-    const error = result.launched![0].error!;
-    expect(error).toContain(`rig seat stop ${session.sessionName} --reason`);
-    expect(error).toContain(`rig launch ${rigId} dev.driver`);
+  it.each([
+    ["a resumable saved session", { restorePolicy: "resume_if_possible", resumeType: "claude_id", resumeToken: "token-1" }, "launch resumes from that snapshot's resume token"],
+    ["a relaunch_fresh policy", { restorePolicy: "relaunch_fresh", resumeType: "claude_id", resumeToken: "token-1" }, "restore policy 'relaunch_fresh', so launch would start a fresh conversation"],
+    ["a missing resume token", { restorePolicy: "resume_if_possible", resumeType: "claude_id", resumeToken: null }, "has no resume token for this seat, so launch would start nothing and ask for a decision"],
+  ])("with %s, says what stopping and launching would actually do", async (saved, fields, says) => {
+    const { rigId, session, snapshotId } = seedPreservedShell();
+    setSavedSession(snapshotId, fields);
+    const error = (await orchestrator.launchNodeSubset(rigId, ["dev.driver"])).launched![0].error!;
+    expect(error).toContain(says);
+    const resumable = saved === "a resumable saved session";
+    // The resume route is offered only when it can resume, and it pins the snapshot that was checked.
+    expect(error.includes(`rig seat stop ${session.sessionName} --reason`)).toBe(resumable);
+    expect(error.includes(`rig launch ${rigId} dev.driver --snapshot-id ${snapshotId}`)).toBe(resumable);
+    if (!resumable) expect(error).toContain(`launching from snapshot ${snapshotId} won't resume this conversation`);
+    // The fresh route and the pane by hand are always there.
     expect(error).toContain(`rig seat launch ${session.sessionName} --fresh --stop --reason`);
     expect(error).toContain(`attach to tmux session '${session.sessionName}'`);
   });
