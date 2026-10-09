@@ -4,10 +4,9 @@ The person's goal usually reaches you from the kernel operator as a queue row: t
 how to reach them. Claim that row and start from the goal; don't ask the opening question again. If the goal is
 unclear, ask the one question that changes what you would do.
 
-**Keep your commands plain, so they don't stop for the person's approval.** Run `rig` commands as they are: don't pipe
-their output into `python3` or another program, don't put `$VARIABLES` in them, and don't write files through a shell
-heredoc. `rig queue show <id> --full` prints the row as JSON, so read the goal from its `body` field there, then run
-`rig queue claim <id>` on its own.
+Read the row with `rig queue show <id> --full`, which prints it as JSON (the goal is its `body` field), then run
+`rig queue claim <id>` on its own. Keep these and later commands plain, as the team culture's "Commands that don't stop
+the person" says, so they don't stop for the person's approval.
 
 **When the goal is real continuing work** (something to build or change that takes more than one exchange), record it
 lightly before you start:
@@ -36,14 +35,15 @@ alongside the goal, and never replace one that exists:
    under another name; `<rig>` below means that name. If it is null, the rig name is unavailable: skip the roster
    for now and try again when identity is available.
 2. Run `rig roster list`. If it shows a roster with id `<rig>`, stop here.
-3. The file is `<workspace.root>/rosters/<rig>.json`; `rig config get workspace.root` gives the root. If the file
-   exists, stop here too. Create the `rosters/` folder if it is missing.
+3. The file is `<workspace.root>/rosters/<rig>.json`; `rig config get workspace.root` gives the root. Step 2 already
+   told you whether this rig has a roster, so don't check the folder from the shell.
 4. Run `rig ps --nodes --rig <rig> --json --fields canonicalSessionName,hostSelfId`. It gives each seat's exact address
    and the host that serves it.
 5. Match `dev-build` (you) to builder and `dev-review` to reviewer, using the actual addresses from step 4.
    Write the file with those addresses and hosts, today's date, and yourself as curator; the template below is the
-   whole format. Write it with your file-writing tool, not a shell heredoc. The file is outside the project folder,
-   so the person may be asked to approve this one write: say so in one line first.
+   whole format. Write it with your file-writing tool, not a shell heredoc; if the tool can't create a missing
+   `rosters/` folder, create it first, which may also ask. The file is outside the project folder, so the person may be
+   asked to approve this write: say so in one line first.
 
    ```json
    {
