@@ -133,3 +133,27 @@ it("keeps the delivery-history endpoint receipt based and permits closed deliver
     expect(f.db.serialize()).toEqual(before);
   } finally { await f.close(); }
 });
+
+
+it("ranks older critical updates before urgent and routine rows at the repository limit", async () => {
+  const f = await fixture();
+  try {
+    for (let i = 0; i < 1001; i++) f.row("routine-" + i, { at: "2026-10-08T12:00:00Z" });
+    f.row("urgent", { priority: "urgent", at: "2026-10-07T12:00:00Z" });
+    f.row("critical", { priority: "critical", at: "2026-10-01T12:00:00Z" });
+    expect(f.queue.listOpenHumanUpdates({ limit: 1 }).map(q => q.qitemId)).toEqual(["critical"]);
+    expect(f.queue.listOpenHumanUpdates({ limit: 2 }).map(q => q.qitemId)).toEqual(["critical", "urgent"]);
+  } finally { await f.close(); }
+});
+
+it("keeps critical, urgent then routine updates in the actual HTTP attention response", async () => {
+  const f = await fixture();
+  try {
+    f.row("routine", { at: "2026-10-08T12:00:00Z" });
+    f.row("urgent", { priority: "urgent", at: "2026-10-07T12:00:00Z" });
+    f.row("critical", { priority: "critical", at: "2026-10-01T12:00:00Z" });
+    const before = f.db.serialize();
+    expect((await f.read()).items.map(i => i.id)).toEqual(["queue-update:critical", "queue-update:urgent", "queue-update:routine"]);
+    expect(f.db.serialize()).toEqual(before);
+  } finally { await f.close(); }
+});

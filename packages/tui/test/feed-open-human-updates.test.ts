@@ -57,3 +57,66 @@ it("does not retain delivered history beyond a successful empty receipt window w
   const emptyHistory = composeHumanUpdates(failed, { limit: 20, truncated: false, items: [] })!;
   expect(retainAttentionSources(emptyHistory, prior).read.items).toEqual([]);
 });
+
+
+import { PageRead } from "../src/page-read.js";
+import { createServer } from "node:http";
+import { once } from "node:events";
+
+it("keeps critical current updates ahead of urgent, routine and newer delivered history", () => {
+  const rows = [
+    { ...current("routine"), urgency: "routine", at: "2026-10-07T12:00:00Z" },
+    { ...current("urgent"), at: "2026-10-06T12:00:00Z" },
+    { ...current("critical"), urgency: "critical" },
+  ];
+  expect(composeHumanUpdates(read(rows), delivered("other"))!.items.map(i => i.id))
+    .toEqual(["queue-update:critical", "queue-update:urgent", "human-update:other", "queue-update:routine"]);
+});
+
+async function refreshHistoryControl(updates: DeliveredHumanUpdates, expected: string[]) {
+  let attention = read([current()]);
+  let receipts: DeliveredHumanUpdates = { limit: 20, truncated: false, items: [] };
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify(request.url === "/api/attention" ? attention : receipts));
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Owned HTTP fixture did not bind");
+  const origin = "http://127.0.0.1:" + address.port;
+  const cache = new PageRead(() => 1000), signal = new AbortController().signal;
+  async function refresh() {
+    cache.begin(); const request = cache.fetch(fetch, signal);
+    const [a, h] = await Promise.all([
+      request(origin + "/api/attention").then(r => r.json()) as Promise<AttentionRead>,
+      request(origin + "/api/queue/human-updates").then(r => r.json()) as Promise<DeliveredHumanUpdates>,
+    ]);
+    cache.end(); return composeHumanUpdates(a, h)!;
+  }
+  try {
+    expect((await refresh()).items.map(i => i.id)).toEqual(["queue-update:fyi"]);
+    attention = read([]); attention.sources[1] = { source: "queue updates", state: "unavailable", detail: "Owned reader unavailable" };
+    receipts = updates;
+    expect((await refresh()).items.map(i => i.id)).toEqual(expected);
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
+}
+
+it("applies actual page continuity before composition without duplicating same-qitem history", async () => {
+  await refreshHistoryControl(delivered(), ["queue-update:fyi"]);
+});
+
+it("retains failed current coverage alongside successful unrelated history", async () => {
+  await refreshHistoryControl(delivered("other"), ["queue-update:fyi", "human-update:other"]);
+});
+
+it("retains failed current coverage with a successful empty receipt window", async () => {
+  await refreshHistoryControl({ limit: 20, truncated: false, items: [] }, ["queue-update:fyi"]);
+});
+
+it("preserves action date ordering regardless of critical and routine priorities", () => {
+  const rows: AttentionItem[] = [
+    { ...current("old"), id: "queue:old", kind: "action", urgency: "critical" },
+    { ...current("new"), id: "queue:new", kind: "action", urgency: "routine", at: "2026-10-08T12:00:00Z" },
+  ];
+  expect(composeHumanUpdates(read(rows), { limit: 20, truncated: false, items: [] })!.items.map(i => i.id)).toEqual(["queue:new", "queue:old"]);
+});
