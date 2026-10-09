@@ -307,15 +307,15 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   if (runtime === "claude-code") {
     if (!expectedToken || claudeSessionToken(tokens(process.command).slice(1)) !== expectedToken) return null;
   } else {
-    // The deepest link that states a resume identity speaks for the chain; a
-    // launcher's argv may carry it when its child's does not. Links naming
-    // different conversations stay refused.
+    // Every link that names a conversation must name the expected one, and
+    // links naming different conversations stay refused. Exact resume proof
+    // needs the deepest process's own argv: a launcher's token is never
+    // inherited by a child that names nothing, which stays deliverable but unproved.
     const identities = chain.map((link) => codexResumeToken(tokens(link.process.command).slice(1)));
     if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return null;
-    const resumeToken = identities.find((value) => value !== undefined);
-    if (requireResume && !expectedToken) return null;
-    if ((requireResume || (expectedToken !== undefined && resumeToken !== undefined))
-      && (!expectedToken || resumeToken !== expectedToken)) return null;
+    if (requireResume && (!expectedToken || identities[0] !== expectedToken)) return null;
+    if (expectedToken !== undefined && identities.some((value) => value !== undefined
+      && (!expectedToken || value !== expectedToken))) return null;
   }
   return observation;
 }
@@ -456,7 +456,9 @@ export async function observeClaudeDelivery(
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
           : { ...unknown, fingerprint };
       }
-      const other = selectNativeProcess(rows, pid);
+      // Main's rule here: only a single Codex process is a conflicting runtime.
+      // A Codex launcher chain in a Claude seat keeps warn-and-send (#1088 review).
+      const other = nativeProcessCandidates(rows, pid, "codex").length === 1 ? selectNativeProcess(rows, pid) : null;
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
       const root = rows.find(row => row.pid === pid);
       // A wrapper's label is not an idle shell. Positive shell proof requires

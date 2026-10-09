@@ -234,11 +234,18 @@ describe("Codex behind a spawning launcher", () => {
     expect((await check(() => launcherRows(), { requireResume: false }))?.process.pid).toBe(14);
     expect((await check(() => launcherRows(), { requireResume: false, expectedToken: null }))?.process.pid).toBe(14);
   });
-  it("takes the resume identity from an ancestor when the native child's argv lacks it", async () => {
-    expect((await check(() => launcherRows(resume, resume)))?.process.pid).toBe(14);
-    expect((await check(() => launcherRows(resume)))?.process.pid).toBe(14);
-    expect(findExactNativeResumeProcess(launcherRows(resume), 10, "codex", token)?.pid).toBe(14);
-    expect(await check(() => launcherRows(resume), { expectedToken: "different" })).toBeNull();
+  it("delivers to a child that names no identity under a launcher's resume, but never proves it", async () => {
+    expect((await check(() => launcherRows(resume), { requireResume: false }))?.process.pid).toBe(14);
+    expect(await check(() => launcherRows(resume))).toBeNull();
+    expect(await check(() => launcherRows(resume, resume))).toBeNull();
+    expect(findExactNativeResumeProcess(launcherRows(resume), 10, "codex", token)).toBeNull();
+    expect(await check(() => launcherRows(resume), { requireResume: false, expectedToken: "different" })).toBeNull();
+    expect(await check(() => launcherRows(resume), { requireResume: false, expectedToken: null })).toBeNull();
+  });
+  it("proves a chain whose deepest Codex names the expected conversation", async () => {
+    expect((await check(() => launcherRows(resume, resume, resume)))?.process.pid).toBe(14);
+    expect((await check(() => launcherRows("", "", resume)))?.process.pid).toBe(14);
+    expect(findExactNativeResumeProcess(launcherRows(resume, resume, resume), 10, "codex", token)?.pid).toBe(14);
   });
   it("keeps exact resume strict across the chain", async () => {
     expect(await check(() => launcherRows())).toBeNull();

@@ -281,6 +281,15 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendKeys).toHaveBeenCalledTimes(conflict ? 0 : 1);
   });
 
+  it("#1088 a Codex launcher chain in a Claude seat keeps main's warn-and-send", async () => {
+    const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () => launcherProcesses()));
+    const result = await transport.send("dev-check@my-rig", "existing review");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("without verified native identity");
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+  });
+
   it("#197 still refuses native approval after proving the Claude wrapper", async () => {
     const { transport, tmux, sendText, sendKeys } = wrappedClaude();
     tmux.capturePaneContent = async () => "Would you like to run the following command?\n› 1. Yes, proceed (y)\n2. No\nPress enter to confirm or esc to cancel";
