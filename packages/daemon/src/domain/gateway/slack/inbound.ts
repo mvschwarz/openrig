@@ -57,8 +57,8 @@ export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string;
 export const CLICK_REPLIES = {
   unregistered: "This click wasn't recorded: only the person this decision was sent to can answer it, and your Slack account isn't registered with this OpenRig.",
   unmapped: "This click wasn't recorded: OpenRig can't find the decision this message belongs to. Reply in this thread in words instead.",
-  closed: "This decision is already closed, so this click wasn't recorded.",
-  onRecord: "Your answer is recorded, and this decision is closed.",
+  closed: "This decision is no longer waiting for answers, so this click wasn't recorded.",
+  onRecord: "Your answer is recorded, and this decision is no longer waiting for answers.",
   someoneElse: "This click wasn't recorded: this decision was sent to someone else, and only they can answer it.",
   stale: "This click wasn't recorded: the button no longer matches this decision's questions. Reply in this thread in words instead.",
   unavailable: "This click wasn't recorded: OpenRig couldn't record a button answer here. Reply in this thread in words instead.",

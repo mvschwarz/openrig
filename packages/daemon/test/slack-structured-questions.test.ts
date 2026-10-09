@@ -376,7 +376,7 @@ describe("structured human questions (#193)", () => {
       expect(repo.getById(decisionId)?.humanAnswers).toBeNull();
     });
 
-    it("says a decision is already closed, once, and never answers Slack's redelivery of a click it already handled", async () => {
+    it("says a decision is no longer waiting for answers, once, and never answers Slack's redelivery of a click it already handled", async () => {
       await click("db", "pg");
       await click("ship", "no", { actionTs: "2000.1" });
       await vi.waitFor(() => expect(threadAcks()).toHaveLength(2)); // Recorded …, All answered …

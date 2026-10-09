@@ -100,10 +100,10 @@ manifest has Interactivity off: turn it on under **Interactivity & Shortcuts**, 
 will do nothing. A typed reply in the thread still answers the decision either way.
 Each click gets one short reply in the decision's thread: what was recorded, or, when OpenRig
 refuses the click or can't record it, why and what to do instead (the sender isn't registered, the
-decision is already closed or was sent to someone else, the button no longer matches its questions,
-or the message can't be matched to a decision). Slack's redelivery of a click OpenRig already
-handled gets no second reply. The reply is best effort: while Slack is rate-limiting OpenRig's
-posts it may not be posted, and the click is handled the same either way.
+decision is no longer waiting for answers or was sent to someone else, the button no longer
+matches its questions, or the message can't be matched to a decision). Slack's redelivery of a
+click OpenRig already handled gets no second reply. The reply is best effort: while Slack is
+rate-limiting OpenRig's posts it may not be posted, and the click is handled the same either way.
 
 In the decision's `humanAnswers`, clicked answers remain option-id strings. A whole typed reply
 is stored as `{kind: "typed-reply", text: "…", placement: "first-unanswered", unansweredCount: N}`
