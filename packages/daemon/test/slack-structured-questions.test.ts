@@ -126,6 +126,7 @@ describe("structured human questions (#193)", () => {
       expect(answer(qitemId, "db", "pg")).toMatchObject({ status: "not-applicable", reason: "state-done" });
       expect(repo.getById(qitemId)?.humanAnswers).toBeNull();
     });
+
     it("once the decision is closed, tells only the asked human whether a click's answer is the one on record", async () => {
       const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: questions });
       answer(qitemId, "db", "pg");
@@ -179,7 +180,11 @@ describe("structured human questions (#193)", () => {
     const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     let posts: Array<Record<string, unknown>>;
     let failThreadPosts = 0; // the next N thread posts fail at Slack (ok: false)
+    let rateLimitThreadPosts = 0; // the next N thread posts get a 429 asking for a one-second pause
+    let rateLimited = 0;
+    let sockets: WsLike[];
     let socket: WsLike;
+    let wireOpts: Parameters<typeof buildSlackGatewayWire>[0];
     let wire: ReturnType<typeof buildSlackGatewayWire>;
     beforeEach(async () => {
       const secrets = join(home, "fake.env");
@@ -187,11 +192,13 @@ describe("structured human questions (#193)", () => {
       saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets, minimumLevelThatInterrupts: "NOTICE" }, home);
       posts = [];
       failThreadPosts = 0;
-      const sockets: WsLike[] = [];
+      rateLimitThreadPosts = 0;
+      rateLimited = 0;
+      sockets = [];
       const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
       const realResolve = makeHumanReplyResolver(repo, contract);
       resolveOverride = undefined;
-      wire = buildSlackGatewayWire({
+      wire = buildSlackGatewayWire(wireOpts = {
         home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
         resolveHumanReply: (input) => (resolveOverride ?? realResolve)(input),
         wsFactory: () => { const ws: WsLike = { send: () => {}, close: () => {}, onopen: null, onmessage: null, onclose: null, onerror: null }; sockets.push(ws); return ws; },
@@ -201,6 +208,10 @@ describe("structured human questions (#193)", () => {
           if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
           const body = JSON.parse(String(init?.body));
           if (body.thread_ts && failThreadPosts > 0) { failThreadPosts -= 1; return reply({ ok: false, error: "internal_error" }); }
+          if (body.thread_ts && rateLimitThreadPosts > 0) {
+            rateLimitThreadPosts -= 1; rateLimited += 1;
+            return new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { status: 429, headers: { "retry-after": "1" } });
+          }
           posts.push(body); return reply({ ok: true, ts: `${posts.length}.1` });
         },
       });
@@ -395,6 +406,7 @@ describe("structured human questions (#193)", () => {
       await click("db", "pg", { user: "USTRANGER", actionTs: "2100.1" }); // and once posted, never again
       expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]);
     });
+
     it("tells the person their answer is recorded when Slack redelivers the closing click whose confirmation failed", async () => {
       await click("db", "pg");
       expect(threadAcks()).toHaveLength(1); // Recorded …
@@ -408,6 +420,27 @@ describe("structured human questions (#193)", () => {
       await click("ship", "yes", { actionTs: "2200.1" }); // and once posted, never again
       expect(threadAcks()).toHaveLength(2);
       expect(repliesToSeat()).toHaveLength(1);
+    });
+
+    it("replies once to a click across a wire restart inside the reply's rate-limit wait", async () => {
+      const strangerClick = (actionTs: string) => JSON.stringify({ envelope_id: `e-${actionTs}`, type: "interactive", payload: {
+        type: "block_actions", user: { id: "USTRANGER" }, channel: { id: "C-TEST" },
+        container: { type: "message", message_ts: "1.1", channel_id: "C-TEST" }, message: { ts: "1.1" },
+        actions: [{ type: "button", block_id: "or-q:db", action_id: "or-opt:pg", value: "pg", action_ts: actionTs }],
+      } });
+      rateLimitThreadPosts = 1;
+      socket.onmessage?.({ data: strangerClick("2300.1") });
+      await vi.waitFor(() => expect(rateLimited, "the reply hit the 429 and is waiting").toBe(1));
+      // The restart: stop this run inside the wait, start the next, and Slack redelivers the click to it.
+      wire.stop();
+      const restarted = buildSlackGatewayWire(wireOpts);
+      stops.push(() => restarted.stop()); restarted.startServices?.();
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      sockets[1]!.onopen?.();
+      sockets[1]!.onmessage?.({ data: strangerClick("2300.1") });
+      await vi.waitFor(() => expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]));
+      await new Promise((resolve) => setTimeout(resolve, 1_300)); // the stopped run's old retry window
+      expect(threadAcks(), "the stopped run never posts its retry").toEqual([CLICK_REPLIES.unregistered]);
     });
 
     it("says the answers were sent back when the decision itself didn't close", async () => {

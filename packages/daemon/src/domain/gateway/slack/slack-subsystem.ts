@@ -25,7 +25,7 @@ import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
-import { subsystemSlackDeliver } from "./slack-delivery.js";
+import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
@@ -709,10 +709,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
       actionDeadLetter: (deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"))),
       ...(bot ? {
+        // A stopped run posts nothing, and its rate-limit wait ends with the run: after a restart the click's
+        // redelivery belongs to the new router, which must not race a stale retry from this one.
         acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
           const target = channel ?? cfg.channel;
-          if (!target) return false;
-          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl);
+          if (!target || runCtl.signal.aborted) return false;
+          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl, undefined,
+            (ms) => abortableSleep(ms, runCtl.signal));
           if (!r.ok) log(`answer acknowledgement not posted thread=${threadTs}: ${r.error}`);
           return r.ok;
         },
