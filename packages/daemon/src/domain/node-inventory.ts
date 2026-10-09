@@ -235,6 +235,10 @@ export function deriveNodeLifecycleState(input: {
   return "detached";
 }
 
+/**
+ * Project occupant lifecycle using a verdict already gated to the current binding.
+ * Confirmed session absence suppresses stored active state without rewriting it.
+ */
 function deriveOccupantLifecycle(
   row: InventoryRow,
   identityVerdict: SeatIdentityVerdict | null,
@@ -615,6 +619,11 @@ interface InventoryBuildContext {
   orienteds: Map<string, NodeOriented>;
 }
 
+/**
+ * Build the shared inventory projection from a registration and its rig context.
+ * Apply only current-occupant identity evidence and retain stored status alongside
+ * effective status so readers can distinguish absence from registration history.
+ */
 function buildInventoryEntry(
   db: Database.Database,
   row: InventoryRow,

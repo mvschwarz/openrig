@@ -17,7 +17,10 @@ const require = createRequire(join(root, 'package.json'));
 const Database = require('better-sqlite3');
 const rigBin = resolve(process.argv[2] ?? join(root, 'packages/cli/dist/bin-wrapper.js'));
 const expected = process.argv[3] ?? 'detached';
-assert.ok(rigBin && ['running', 'detached'].includes(expected));
+assert.ok(
+  rigBin && ['running', 'detached'].includes(expected),
+  `Invalid expected status ${JSON.stringify(expected)}. Usage: node --import tsx packages/daemon/scripts/smoke-missing-session.mjs [rig-bin] [running|detached]`,
+);
 const scaffold = prepareHermeticEnv({ baseEnv: { PATH: process.env.PATH, TERM: 'xterm-256color' } });
 let daemon;
 let db;
@@ -25,6 +28,7 @@ const launched = [];
 try {
   daemon = await spawnScenarioDaemon(scaffold, { rigBin });
   console.log('Private daemon:', daemon.baseUrl, 'private tmux socket:', scaffold.tmuxSocketPath);
+  /** Run a CLI command against this smoke's private daemon and require success. */
   const cli = async (args) => {
     const result = await runRig(args, daemon.readEnv, rigBin, 120000);
     assert.equal(result.code, 0, JSON.stringify({ args, ...result }));
