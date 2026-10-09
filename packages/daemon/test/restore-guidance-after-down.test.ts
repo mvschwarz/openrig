@@ -384,4 +384,22 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.rigResult).toBe("partially_restored");
     expect(result.warnings.join("\n")).toMatch(/can't be read/);
   });
+
+  it.each([
+    { form: "current", marker: "<!-- BEGIN OpenRig MANAGED BLOCK: " },
+    { form: "legacy", marker: "<!-- BEGIN RIGGED MANAGED BLOCK: " },
+  ])("a truncated $form BEGIN (no closing -->), then notes: nothing written, the notes survive the next rig down", async ({ marker }) => {
+    const { rigId, guidanceFile } = launchedSeat();
+    const truncated = `# Preface\n${marker}\nMy own notes after a marker cut short.\n`;
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, {
+      betweenDownAndUp: () => fs.writeFileSync(guidanceFile, truncated),
+    });
+    expect(fileAtHarnessStart).toBe(truncated);
+    const lead = result.nodes.find((n) => n.logicalId === "lead");
+    expect(lead?.status).toBe("resumed");
+    expect([...(lead?.guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "lead-role"]);
+    expect(result.rigResult).toBe("partially_restored");
+    await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(rigId);
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toContain("My own notes after a marker cut short.");
+  });
 });

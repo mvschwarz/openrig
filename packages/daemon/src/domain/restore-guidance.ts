@@ -101,15 +101,22 @@ function blockState(content: string, blockId: string): BlockState {
   return "absent";
 }
 
-const ANY_MARKER = /<!-- (BEGIN|END) (OpenRig|RIGGED) MANAGED BLOCK: ([^>]*?) -->/g;
+// A complete marker: the id may not span a line or contain ">".
+const ANY_MARKER = /<!-- (BEGIN|END) (OpenRig|RIGGED) MANAGED BLOCK: ([^>\n]*?) -->/g;
+// What cleanup (stripManagedBlocks) starts and ends on: the bare prefix, complete or not.
+const ANY_PREFIX = /<!-- (BEGIN|END) (OpenRig|RIGGED) MANAGED BLOCK: /g;
 
-/** True when every managed-block marker in the file (any id, current or legacy form) pairs up as
- *  BEGIN ... END of the same id, unnested. Cleanup strips from ANY BEGIN to the next END whatever
- *  its id, so writing a block into a file with an unmatched marker could make the next `rig down`
- *  delete the text in between, including a person's own notes. */
+/** True when every managed-block marker in the file (any id, current or legacy form) is complete and
+ *  pairs up as BEGIN ... END of the same id, unnested. Cleanup strips from ANY BEGIN prefix to the next
+ *  END, whatever the id and whether or not the marker is complete, so writing a block into a file with
+ *  an unmatched or truncated marker could make the next `rig down` delete the text in between,
+ *  including a person's own notes. */
 export function managedMarkersPaired(content: string): boolean {
+  // Every prefix cleanup would act on must belong to a complete marker.
+  const complete = [...content.matchAll(ANY_MARKER)];
+  if ([...content.matchAll(ANY_PREFIX)].length !== complete.length) return false;
   let open: string | null = null;
-  for (const m of content.matchAll(ANY_MARKER)) {
+  for (const m of complete) {
     const key = `${m[2]}:${m[3]}`;
     if (m[1] === "BEGIN") {
       if (open !== null) return false;
