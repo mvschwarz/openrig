@@ -48,6 +48,7 @@ import {
   moveSlice,
   rollbackMovedSlice,
   nextSliceNN,
+  withSliceCreationGuard,
   NOTES_FILE_PRECEDENCE,
   pad2,
   readFrontmatter,
@@ -334,100 +335,103 @@ function buildSliceCreateCommand(): Command {
           });
         }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
-        const mission = findMission(missionsRoot, missionName);
-        const nn = nextSliceNN(mission.absPath);
-        const sliceFolder = `${pad2(nn)}-${slug}`;
-        const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
-        if (fs.existsSync(sliceAbs)) {
-          throw new ScopeCliError({
-            fact: `Slice folder ${sliceAbs} already exists.`,
-            consequence: "Refusing to overwrite.",
-            action: "Pick a different slug, or rm -rf the existing folder first.",
-          });
-        }
-        const title = opts.title ?? titleFromSlug(slug);
-        const intent = opts.intent ?? title;
-        const compositionEdit = planMissionMembershipAdd(
-          mission.absPath,
-          `slices/${sliceFolder}/slice.yaml`,
-          nextMissionMembershipOrder(mission.absPath),
-        );
-        const missionId = ensureMissionId(mission, missionsRoot);
-        const id = sliceIdFromMission(missionId, nn);
-        const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
-        for (const dependency of dependsOn) {
-          if (dependency === id) {
+        const missionPath = findMission(missionsRoot, missionName).absPath;
+        const payload = withSliceCreationGuard(missionPath, () => {
+          const mission = findMission(missionsRoot, missionName);
+          const nn = nextSliceNN(mission.absPath);
+          const sliceFolder = `${pad2(nn)}-${slug}`;
+          const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
+          if (fs.existsSync(sliceAbs)) {
             throw new ScopeCliError({
-              fact: `Slice ${id} cannot depend on itself.`,
-              consequence: "Slice not created.",
-              action: "Use a different sibling slice ID, or omit --depends-on.",
+              fact: `Slice folder ${sliceAbs} already exists.`,
+              consequence: "Refusing to overwrite.",
+              action: "Pick a different slug, or rm -rf the existing folder first.",
             });
           }
-          if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
-            throw new ScopeCliError({
-              fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
-              consequence: "Slice not created.",
-              action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
-            });
+          const title = opts.title ?? titleFromSlug(slug);
+          const intent = opts.intent ?? title;
+          const compositionEdit = planMissionMembershipAdd(
+            mission.absPath,
+            `slices/${sliceFolder}/slice.yaml`,
+            nextMissionMembershipOrder(mission.absPath),
+          );
+          const missionId = ensureMissionId(mission, missionsRoot);
+          const id = sliceIdFromMission(missionId, nn);
+          const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+          for (const dependency of dependsOn) {
+            if (dependency === id) {
+              throw new ScopeCliError({
+                fact: `Slice ${id} cannot depend on itself.`,
+                consequence: "Slice not created.",
+                action: "Use a different sibling slice ID, or omit --depends-on.",
+              });
+            }
+            if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
+              throw new ScopeCliError({
+                fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
+                consequence: "Slice not created.",
+                action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
+              });
+            }
           }
-        }
-        const createdDate = todayDateISO();
-        const body = renderSliceTemplate(kind, {
-          id,
-          slice_number: pad2(nn),
-          slug,
-          mission: mission.name,
-          title,
-          created_date: createdDate,
-          intent,
-          depends_on: dependsOn,
-        });
-        const proofBody = renderSliceProofTemplate({ id, title });
-        const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
-        const readmePath = path.join(sliceAbs, "SPEC.md");
-        try {
-          // Persist the parent id in the same rollback boundary as the child
-          // and composition membership. Validation above performs no writes.
-          ensureMissionIdPersisted(mission, missionsRoot);
-          fs.mkdirSync(sliceAbs, { recursive: true });
-          fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
-          // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
-          const readmeOnly = Boolean(opts.readmeOnly);
-          if (readmeOnly) {
-            const markerBody = body.replace(
-              /^(---\n)/,
-              `---\nprogress_rail: readme-only\n`,
-            );
-            fs.writeFileSync(readmePath, markerBody, "utf8");
-          } else {
-            fs.writeFileSync(readmePath, body, "utf8");
-            const progressPath = path.join(sliceAbs, "PROGRESS.md");
-            fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
-          }
-          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
-          fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
-          applyMissionCompositionEdits(compositionEdit ? [compositionEdit] : []);
-        } catch (error) {
-          fs.rmSync(sliceAbs, { recursive: true, force: true });
-          if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
-          throw error;
-        }
-        const payload = {
-          ok: true,
-          slice: {
-            mission: mission.name,
-            name: sliceFolder,
+          const createdDate = todayDateISO();
+          const body = renderSliceTemplate(kind, {
             id,
-            path: sliceAbs,
-            readmePath,
-            template: kind,
-          },
-        };
+            slice_number: pad2(nn),
+            slug,
+            mission: mission.name,
+            title,
+            created_date: createdDate,
+            intent,
+            depends_on: dependsOn,
+          });
+          const proofBody = renderSliceProofTemplate({ id, title });
+          const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
+          const readmePath = path.join(sliceAbs, "SPEC.md");
+          try {
+            // Persist the parent id in the same rollback boundary as the child
+            // and composition membership. Validation above performs no writes.
+            ensureMissionIdPersisted(mission, missionsRoot);
+            fs.mkdirSync(sliceAbs, { recursive: true });
+            fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
+            // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
+            const readmeOnly = Boolean(opts.readmeOnly);
+            if (readmeOnly) {
+              const markerBody = body.replace(
+                /^(---\n)/,
+                `---\nprogress_rail: readme-only\n`,
+              );
+              fs.writeFileSync(readmePath, markerBody, "utf8");
+            } else {
+              fs.writeFileSync(readmePath, body, "utf8");
+              const progressPath = path.join(sliceAbs, "PROGRESS.md");
+              fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
+            }
+            fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
+            fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
+            applyMissionCompositionEdits(compositionEdit ? [compositionEdit] : []);
+          } catch (error) {
+            fs.rmSync(sliceAbs, { recursive: true, force: true });
+            if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
+            throw error;
+          }
+          return {
+            ok: true,
+            slice: {
+              mission: mission.name,
+              name: sliceFolder,
+              id,
+              path: sliceAbs,
+              readmePath,
+              template: kind,
+            },
+          };
+        });
         emit(out, payload, json, [
-          `Created ${mission.name}/slices/${sliceFolder}`,
-          `  id: ${id}`,
+          `Created ${payload.slice.mission}/slices/${payload.slice.name}`,
+          `  id: ${payload.slice.id}`,
           `  template: ${kind}`,
-          `  path: ${sliceAbs}`,
+          `  path: ${payload.slice.path}`,
         ]);
       } catch (err) {
         fail(err, json, out);

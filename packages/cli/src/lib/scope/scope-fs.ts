@@ -498,6 +498,34 @@ function findOwningMission(missionsRoot: string, slicePath: string): string | nu
 // Auto-numbering
 // ---------------------------------------------------------------------
 
+/** Prevent overlapping slice creates in one mission from reusing an ordinal.
+ *  Only an acquired guard is removed; interrupted creators require inspection,
+ *  never automatic stale-lock stealing. This does not serialize ship or move. */
+export function withSliceCreationGuard<T>(missionAbsPath: string, create: () => T): T {
+  const guard = path.join(missionAbsPath, ".openrig-slice-create-lock");
+  try {
+    fs.mkdirSync(guard);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    throw new ScopeCliError({
+      fact: `A slice creation guard already exists for ${missionAbsPath}.`,
+      consequence: "Slice not created; existing work was not changed.",
+      action: "Retry after the other create finishes. If it was interrupted, inspect the guard before removing it.",
+    });
+  }
+  // Release before the command's outer error handler can call process.exit.
+  try {
+    return create();
+  } finally {
+    try {
+      fs.rmdirSync(guard);
+    } catch (releaseError) {
+      const detail = releaseError instanceof Error ? releaseError.message : String(releaseError);
+      process.stderr.write(`Warning: could not remove slice creation guard ${guard}: ${detail}. Inspect the guard before retrying.\n`);
+    }
+  }
+}
+
 /** Find the next available NN for a mission's slices/ folder. Scans
  *  BOTH slices/ AND closed/ so numbers are never reused (§3.2). */
 export function nextSliceNN(missionAbsPath: string): number {
