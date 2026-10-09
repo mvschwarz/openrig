@@ -148,7 +148,7 @@ describe("OPR.0.4.0.32 — queue list grammar revision", () => {
     seed(db, "q-1", { source: "a@rig", destination: "b@rig", body: "Big body here" });
     const compact = repo.list({ compact: true });
     expect(compact[0]!).not.toHaveProperty("body");
-    expect(compact[0]!.chainOfRecord).toBeNull();
+    expect(compact[0]!).not.toHaveProperty("chainOfRecord");
   });
 
   // -- AC-4: axes compose --

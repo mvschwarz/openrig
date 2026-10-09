@@ -181,7 +181,7 @@ export interface QueueItem {
   evidenceRef: string | null;
   /** Present only on compact list rows, which omit these fields entirely so omitted content
    *  can't be mistaken for an empty value. Full reads never carry this marker. */
-  fieldsElided?: Array<"body" | "evidenceRef" | "humanDetail" | "waiting">;
+  fieldsElided?: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
   closureReason: ClosureReason | null;
   closureTarget: string | null;
   /** Reporting only: local absence never proves a foreign successor is missing.
@@ -527,9 +527,20 @@ function detectTable(db: Database.Database, tableName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
-// Reduced column set for compact list rows (body/summary/evidence_ref omitted →
-// rowToItem backfills them empty). Shared by `list` and `findOverdue` (Slice 15)
-// so the compact projection cannot drift between the two.
+// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` all select it
+// (plus summary, through QueueRepository.compactColumns) and pass each row through compactRow, so
+// the compact projection is one thing: present text is shown, and what isn't selected is left out
+// and named in fieldsElided, never backfilled as empty.
+const COMPACT_ELIDED_FIELDS = [
+  "body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers",
+] as const;
+
+function compactRow(item: QueueItem): QueueItem {
+  const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
+  for (const field of COMPACT_ELIDED_FIELDS) delete row[field];
+  return row as unknown as QueueItem;
+}
+
 const COMPACT_QUEUE_COLUMNS =
   "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo";
 
@@ -3285,10 +3296,7 @@ export class QueueRepository {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    // The compact list keeps the summary: it's short, and it's what people search the listing for.
-    const columns = opts?.compact
-      ? COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
-      : "*";
+    const columns = opts?.compact ? this.compactColumns() : "*";
     const useActiveFirst = !!(opts?.rig || opts?.asSession || opts?.activeOnly);
     const orderBy = useActiveFirst
       ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
@@ -3309,15 +3317,7 @@ export class QueueRepository {
         ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
       };
     });
-    // Elided fields are left out, not sent as null or empty, so a listing never makes present text look absent.
-    const elided = ["body", "evidenceRef", "humanDetail", "waiting"] as const;
-    return opts?.compact
-      ? items.map((item) => {
-          const row: Record<string, unknown> = { ...item, fieldsElided: [...elided] };
-          for (const field of elided) delete row[field];
-          return row as unknown as QueueItem;
-        })
-      : items;
+    return opts?.compact ? items.map(compactRow) : items;
   }
 
   /**
@@ -3437,6 +3437,11 @@ export class QueueRepository {
    * dumping every rig's full qitem bodies to a single caller. No args = the prior
    * behavior (all overdue, full rows) for the watchdog.
    */
+  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
+  private compactColumns(): string {
+    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
+  }
+
   findOverdue(opts?: { now?: string; rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
     const cutoff = opts?.now ?? new Date().toISOString();
     const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
@@ -3446,14 +3451,15 @@ export class QueueRepository {
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
       params.push(`%@${escaped}`, `%@${escaped}`);
     }
-    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS + (this.hasHumanIntentColumn ? ", human_intent" : "") : "*";
+    const columns = opts?.compact ? this.compactColumns() : "*";
     let sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY closure_required_at ASC`;
     if (opts?.limit !== undefined) {
       sql += " LIMIT ?";
       params.push(opts.limit);
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    return rows.map((r) => this.rowToItem(r, !opts?.compact));
+    const items = rows.map((r) => this.rowToItem(r, !opts?.compact));
+    return opts?.compact ? items.map(compactRow) : items;
   }
 
   /**
@@ -3544,7 +3550,7 @@ export class QueueRepository {
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
       params.push(`%@${escaped}`, `%@${escaped}`);
     }
-    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS + (this.hasHumanIntentColumn ? ", human_intent" : "") : "*";
+    const columns = opts?.compact ? this.compactColumns() : "*";
     const sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY ts_created ASC`;
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const out: QueueItem[] = [];
@@ -3577,7 +3583,7 @@ export class QueueRepository {
       }
       if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
-    return out;
+    return opts?.compact ? out.map(compactRow) : out;
   }
 
   /** OPR.0.5.6.14 — terminal transport is a CAPABILITY, not topology presence.
