@@ -4,7 +4,7 @@
     "canonical": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
       "core/agent-startup-and-context-ingestion/SKILL.md": "347f28a9567b4b8d8669aff6946229f53144e0c139aca2cbe77e0eb93a87f1b1",
-      "core/cross-host-rig-commands/SKILL.md": "844a578d0f51cf8f02f8bfd7ffb3bbd6a37d511f721266c0d758c49157c1447a",
+      "core/cross-host-rig-commands/SKILL.md": "79ee21fa7da143aa4c3defa8fbb78c0a87ae822c69f1a99cd1acf50a9931ce4d",
       "core/human-in-the-loop/SKILL.md": "14cf0c4a0dc89179121465d4b8d81d40406427351adcdc34f875097d1e6e9ab2",
       "core/messaging-the-human/SKILL.md": "fd2453f9c1346c6946bbf530587b435fce355c66bbaa820a7a10059e9c771063",
       "core/openrig-architect/SKILL.md": "51b65d2e878eeaf2af2f23974677d6a3272728024f3a6854bf3a646567fd3ae6",
@@ -101,7 +101,7 @@
     "spec": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
       "core/agent-startup-and-context-ingestion/SKILL.md": "347f28a9567b4b8d8669aff6946229f53144e0c139aca2cbe77e0eb93a87f1b1",
-      "core/cross-host-rig-commands/SKILL.md": "844a578d0f51cf8f02f8bfd7ffb3bbd6a37d511f721266c0d758c49157c1447a",
+      "core/cross-host-rig-commands/SKILL.md": "79ee21fa7da143aa4c3defa8fbb78c0a87ae822c69f1a99cd1acf50a9931ce4d",
       "core/human-in-the-loop/SKILL.md": "14cf0c4a0dc89179121465d4b8d81d40406427351adcdc34f875097d1e6e9ab2",
       "core/messaging-the-human/SKILL.md": "fd2453f9c1346c6946bbf530587b435fce355c66bbaa820a7a10059e9c771063",
       "core/openrig-architect/SKILL.md": "51b65d2e878eeaf2af2f23974677d6a3272728024f3a6854bf3a646567fd3ae6",
