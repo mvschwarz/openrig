@@ -153,10 +153,11 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   const oldStillOpen = (): boolean => replacing && !!current && !current.closed;
   /** A post of ours came back on `conn`. On the current connection it is delivering, and misses
    *  older than this post end the failure episode, so only consecutive misses count. An echo the
-   *  draining old connection received says nothing about the current one. */
+   *  draining old connection received says nothing about the current one. Once Slack disables
+   *  Socket Mode, status keeps saying so. */
   const echoed = (conn: Conn, postedAt: number): void => {
     conn.echoArmed = true;
-    if (conn !== current) return;
+    if (conn !== current || disabledBySlack) return;
     for (const [ts, at] of expected) if (at <= postedAt) expected.delete(ts);
     status.delivery = "delivering";
     status.eventsMissingSince = undefined;
@@ -220,7 +221,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
 
   const livenessTimer = setInterval(() => {
     const conn = current;
-    if (stopped || !conn || conn.closed || !conn.opened || conn.retired) return;
+    if (stopped || disabledBySlack || !conn || conn.closed || !conn.opened || conn.retired) return;
     const now = Date.now();
     if (conn.pingArmed && now - conn.lastPingAt > serverPingTimeoutMs) {
       status.delivery = "no-server-pings";

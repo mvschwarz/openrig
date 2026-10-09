@@ -288,6 +288,18 @@ describe("Socket Mode liveness", () => {
     expect(handle!.status().delivery).toBe("socket-mode-disabled");
   });
 
+  it("keeps saying Socket Mode is disabled while the open socket still echoes and then its pings stop", async () => {
+    const first = await openSocket(1);
+    for (let i = 0; i < 2; i++) { ping(); await vi.advanceTimersByTimeAsync(10_000); } // ping rule armed
+    message(first, { envelope_id: "d-10", type: "disconnect", reason: "link_disabled" });
+    handle!.expectEcho("950.000001");
+    message(first, botEcho("950.000001")); // an echo after the disable
+    expect(handle!.status().delivery).toBe("socket-mode-disabled");
+    await vi.advanceTimersByTimeAsync(60_000); // and then the pings stop
+    expect(handle!.status().delivery).toBe("socket-mode-disabled");
+    expect(replacements()).toEqual([]);
+  });
+
   it("keeps hello's count of open connections and records it on the receipt", async () => {
     const first = await openSocket(1);
     message(first, { type: "hello", num_connections: 2 });
