@@ -181,6 +181,19 @@ describe("Socket Mode liveness", () => {
     expect(handle!.status()).toMatchObject({ delivery: "delivering", unechoedPosts: 1 });
   });
 
+  it("an early echo forgives only the posts registered before it arrived", async () => {
+    const first = await openSocket(1);
+    message(first, botEcho("550.000001")); // the echo beats its registration
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle!.expectEcho("550.000002"); // posted after that echo arrived, and never echoed
+    handle!.expectEcho("550.000003");
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle!.expectEcho("550.000001"); // the early echo's own registration, late
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(handle!.status().delivery).toBe("events-missing");
+    expect(replacements()).toEqual([expect.objectContaining({ reason: "events-missing" })]);
+  });
+
   it("does not credit an unnamed ping to either connection while a refresh overlaps them", async () => {
     const first = await openSocket(1);
     message(first, { envelope_id: "d-3", type: "disconnect", reason: "refresh_requested" });

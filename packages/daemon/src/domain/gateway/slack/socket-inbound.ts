@@ -473,8 +473,9 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
     expectEcho: (messageTs: string) => {
       if (stopped || !/^\d+\.\d+$/.test(messageTs)) return;
       const early = recentEvents.get(messageTs);
-      // The echo beat the registration: it counts for the connection that received it.
-      if (early) return echoed(early.conn, Date.now());
+      // The echo beat the registration: it counts for the connection that received it, and
+      // forgives only posts registered before it arrived, not ones registered since.
+      if (early) return echoed(early.conn, early.at);
       expected.set(messageTs, Date.now());
     },
   };
