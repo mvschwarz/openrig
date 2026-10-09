@@ -179,9 +179,9 @@ export interface QueueItem {
    *  (convention C3). NULL for all non-human-routed items (BR-1); required
    *  at the domain write path only when the §5 predicate is true. */
   evidenceRef: string | null;
-  /** Present only on compact list rows so omitted content cannot be mistaken
-   *  for an author-supplied empty value. Full reads never carry this marker. */
-  fieldsElided?: Array<"body" | "summary" | "evidenceRef" | "humanDetail" | "waiting">;
+  /** Present only on compact list rows, which omit these fields entirely so omitted content
+   *  can't be mistaken for an empty value. Full reads never carry this marker. */
+  fieldsElided?: Array<"body" | "evidenceRef" | "humanDetail" | "waiting">;
   closureReason: ClosureReason | null;
   closureTarget: string | null;
   /** Reporting only: local absence never proves a foreign successor is missing.
@@ -3285,7 +3285,10 @@ export class QueueRepository {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS + (this.hasHumanIntentColumn ? ", human_intent" : "") : "*";
+    // The compact list keeps the summary: it's short, and it's what people search the listing for.
+    const columns = opts?.compact
+      ? COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "")
+      : "*";
     const useActiveFirst = !!(opts?.rig || opts?.asSession || opts?.activeOnly);
     const orderBy = useActiveFirst
       ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
@@ -3306,11 +3309,14 @@ export class QueueRepository {
         ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
       };
     });
+    // Elided fields are left out, not sent as null or empty, so a listing never makes present text look absent.
+    const elided = ["body", "evidenceRef", "humanDetail", "waiting"] as const;
     return opts?.compact
-      ? items.map((item) => ({
-          ...item,
-          fieldsElided: ["body", "summary", "evidenceRef", "humanDetail", "waiting"],
-        }))
+      ? items.map((item) => {
+          const row: Record<string, unknown> = { ...item, fieldsElided: [...elided] };
+          for (const field of elided) delete row[field];
+          return row as unknown as QueueItem;
+        })
       : items;
   }
 

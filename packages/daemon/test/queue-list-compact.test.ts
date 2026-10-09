@@ -169,12 +169,12 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(owned.map((item) => item.qitemId)).toEqual(["q-to-me"]);
   });
 
-  it("AC-4: compact marks content fields as elided instead of posing as empty content", () => {
+  it("AC-4: compact keeps the summary and leaves elided fields out instead of posing as empty content", () => {
     seedItem(db, "q-1", {
       source: "a@rig",
       destination: "b@rig",
       body: "This body should be excluded in compact mode",
-      summary: "This summary should be excluded in compact mode",
+      summary: "round-2 test, searchable in compact mode",
       evidenceRef: "proof/PROOF.md",
       tags: ["slice:OPR.0.4.0.28"],
     });
@@ -189,12 +189,16 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(item.priority).toBeDefined();
     expect(item.tier).toBeDefined();
     expect(item.tags).toBeDefined();
-    // Compact excludes heavy fields
-    expect(item.body).toBe("");
-    expect(item.summary).toBeNull();
-    expect(item.evidenceRef).toBeNull();
+    // The summary is present text, so it's kept: a grep of the listing finds the row by it.
+    expect(item.summary).toBe("round-2 test, searchable in compact mode");
+    expect(JSON.stringify(compact)).toContain("round-2 test");
+    // Heavy fields are left out entirely, never sent as null or empty.
+    expect(item).not.toHaveProperty("body");
+    expect(item).not.toHaveProperty("evidenceRef");
+    expect(item).not.toHaveProperty("humanDetail");
+    expect(JSON.stringify(compact)).not.toContain("excluded in compact mode");
     expect(item.chainOfRecord).toBeNull();
-    expect(item.fieldsElided).toEqual(["body", "summary", "evidenceRef", "humanDetail", "waiting"]);
+    expect(item.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting"]);
   });
 
   it("distinguishes a genuinely empty full item from an elided compact item", () => {
@@ -209,7 +213,9 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     const compact = repo.list({ compact: true })[0]!;
     const full = repo.list({})[0]!;
 
-    expect(compact.fieldsElided).toEqual(["body", "summary", "evidenceRef", "humanDetail", "waiting"]);
+    expect(compact.fieldsElided).toEqual(["body", "evidenceRef", "humanDetail", "waiting"]);
+    expect(compact).not.toHaveProperty("body");
+    expect(compact.summary).toBeNull(); // a genuinely absent summary stays null
     expect(full.body).toBe("");
     expect(full.summary).toBeNull();
     expect(full.evidenceRef).toBeNull();
