@@ -644,10 +644,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     try {
       await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
-    } catch (err) {
-      if (err instanceof HealthProbeTimeoutError) {
-        throw new Error(`Daemon on port ${port} is unresponsive, and daemon state is missing — recover it before starting a new daemon.`);
-      }
+    } catch {
+      // With no recorded daemon, a timeout is not evidence of an occupant (for
+      // example, WSL2 can silently drop connections to an unused loopback port).
+      // Let the child bind; startup still verifies its PID and required listeners.
     }
     if (recoveredRunning) {
       throw new Error(`Daemon already running on port ${port}, but daemon state is missing`);
@@ -667,6 +667,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
   }
 
+  const priorLog = deps.readFile(LOG_FILE) ?? "";
   const logFd = deps.openForAppend(LOG_FILE);
 
   let child: ChildProcess;
@@ -699,7 +700,12 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     rejectExit(childFailure);
   };
   const onExit = (code: number | null, signal: string | null): void => {
-    childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"})`);
+    const log = deps.readFile(LOG_FILE) ?? "";
+    const startupLog = log.startsWith(priorLog) ? log.slice(priorLog.length) : log;
+    const guidance = /\bEADDRINUSE\b/.test(startupLog)
+      ? ` Address already in use (EADDRINUSE) on port ${port}. Inspect the listener before stopping it, or run 'rig daemon start --port <unused-port>'.`
+      : ` See ${LOG_FILE} for details.`;
+    childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);
     rejectExit(childFailure);
     resolveExit();
   };

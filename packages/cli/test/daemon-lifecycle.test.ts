@@ -202,6 +202,66 @@ describe("Daemon Lifecycle", () => {
     expect(deps.spawn).not.toHaveBeenCalled();
   });
 
+  it("start: no state and a hanging initial probe still starts and verifies its own child", async () => {
+    vi.useFakeTimers();
+    const deps = startableDeps({ fetch: vi.fn().mockImplementationOnce(neverFetch).mockResolvedValue(startupHealth()) });
+    const pending = startDaemon({ port: 7433 }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+
+    expect(await pending).toMatchObject({ pid: 12345, port: 7433 });
+    expect(deps.spawn).toHaveBeenCalledOnce();
+    expect(deps.fetch).toHaveBeenCalledTimes(3); // initial probe, child identity, listener
+    expect(writtenState(deps).pid).toBe(12345);
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start: a bind failure after a hanging initial probe reports the occupied port without publishing state", async () => {
+    vi.useFakeTimers();
+    let log = "Earlier daemon log\n";
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn(neverFetch),
+      readFile: vi.fn((p: string) => p === LOG_FILE ? log : null),
+      spawn: vi.fn(() => {
+        setTimeout(() => {
+          log += "Error: listen EADDRINUSE: address already in use 127.0.0.1:7433\n";
+          child.exitCode = 1;
+          child.emit("exit", 1, null);
+        }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({ port: 7433 }, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/EADDRINUSE.*port 7433/);
+    expect(error.message).toContain("--port <unused-port>");
+    expect(deps.writeFile).not.toHaveBeenCalledWith(STATE_FILE, expect.anything());
+    expect(deps.kill).not.toHaveBeenCalled();
+  });
+
+  it("start: an old bind error is not attributed to a new child's unrelated exit", async () => {
+    vi.useFakeTimers();
+    const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
+    const deps = mockDeps({
+      fetch: vi.fn().mockRejectedValue(new Error("refused")),
+      readFile: vi.fn((p: string) => p === LOG_FILE ? "Old error: EADDRINUSE\n" : null),
+      spawn: vi.fn(() => {
+        setTimeout(() => { child.exitCode = 1; child.emit("exit", 1, null); }, 1);
+        return child as unknown as ChildProcess;
+      }),
+    });
+    const pending = startDaemon({}, deps).catch((error) => error as Error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
+
+    expect(error.message).toMatch(/exited before startup completed/);
+    expect(error.message).not.toContain("EADDRINUSE");
+    expect(error.message).toContain(LOG_FILE);
+  });
+
   // Test 5: stop reads pid from daemon.json, sends SIGTERM, removes daemon.json
   it("stop: reads pid, sends SIGTERM, removes daemon.json", async () => {
     const state: DaemonState = { pid: 555, port: 7433, db: "openrig.sqlite", startedAt: "2026-01-01T00:00:00Z" };
