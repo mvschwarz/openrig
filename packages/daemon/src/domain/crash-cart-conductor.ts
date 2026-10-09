@@ -326,9 +326,11 @@ export function attentionRowsFromNodes(rigId: string, nodes: RestoreNodeLite[]):
       rows.push({
         rigId,
         seat: n.logicalId,
+        // Prefer the node's exact need, as awaiting-decision does (BLOCKER 3): an exited agent in a preserved pane
+        // carries its text in `error`, and calling it a live prompt would send the operator to the wrong fix.
         need: n.attentionEvidence
           ? `live runtime prompt — ${n.attentionEvidence}`
-          : "live runtime prompt (resume selection / auth) — needs operator",
+          : n.error || "live runtime prompt (resume selection / auth) — needs operator",
       });
     } else if (n.status === "awaiting-decision") {
       // BLOCKER 3 — preserve the shipped orchestrator's EXACT error/remediation (it carries the concrete
