@@ -169,6 +169,7 @@ describe("structured human questions (#193)", () => {
   describe("answering through the real Slack wire", () => {
     const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     let posts: Array<Record<string, unknown>>;
+    let failThreadPosts = 0; // the next N thread posts fail at Slack (ok: false)
     let socket: WsLike;
     let wire: ReturnType<typeof buildSlackGatewayWire>;
     beforeEach(async () => {
@@ -176,6 +177,7 @@ describe("structured human questions (#193)", () => {
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets, minimumLevelThatInterrupts: "NOTICE" }, home);
       posts = [];
+      failThreadPosts = 0;
       const sockets: WsLike[] = [];
       const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
       const realResolve = makeHumanReplyResolver(repo, contract);
@@ -188,7 +190,9 @@ describe("structured human questions (#193)", () => {
         inboundRetryIntervalMs: 50, // dead-lettered clicks retry promptly
         fetchImpl: async (url, init) => {
           if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
-          posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` });
+          const body = JSON.parse(String(init?.body));
+          if (body.thread_ts && failThreadPosts > 0) { failThreadPosts -= 1; return reply({ ok: false, error: "internal_error" }); }
+          posts.push(body); return reply({ ok: true, ts: `${posts.length}.1` });
         },
       });
       stops.push(() => wire.stop()); wire.startServices?.();
@@ -371,6 +375,16 @@ describe("structured human questions (#193)", () => {
       await click("db", "pg", { root: "9.9" }); // a message with no decision mapped to it
       await vi.waitFor(() => expect(posts.filter((p) => p.thread_ts === "9.9").map((p) => String(p.text))).toEqual([CLICK_REPLIES.unmapped]));
       expect(repo.getById(decisionId)?.humanAnswers).toBeNull();
+    });
+
+    it("still replies to Slack's redelivery of a click whose first reply failed to post", async () => {
+      failThreadPosts = 1;
+      await click("db", "pg", { user: "USTRANGER", actionTs: "2100.1" });
+      expect(threadAcks()).toEqual([]);
+      await click("db", "pg", { user: "USTRANGER", actionTs: "2100.1" }); // Socket Mode redelivery
+      await vi.waitFor(() => expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]));
+      await click("db", "pg", { user: "USTRANGER", actionTs: "2100.1" }); // and once posted, never again
+      expect(threadAcks()).toEqual([CLICK_REPLIES.unregistered]);
     });
 
     it("says the answers were sent back when the decision itself didn't close", async () => {

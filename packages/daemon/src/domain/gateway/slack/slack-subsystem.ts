@@ -711,9 +711,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       ...(bot ? {
         acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
           const target = channel ?? cfg.channel;
-          if (!target) return;
+          if (!target) return false;
           const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl);
           if (!r.ok) log(`answer acknowledgement not posted thread=${threadTs}: ${r.error}`);
+          return r.ok;
         },
       } : {}),
       // OPR.0.5.6.2 — inbound file transfer: wired only when the bot token exists

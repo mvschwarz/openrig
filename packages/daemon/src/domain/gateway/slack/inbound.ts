@@ -160,8 +160,8 @@ export interface InboundDeps {
   /** #193 — clicks whose continuation (reply row + resolve) failed; retried with the event
    *  dead-letters. Absent → a failed click is only logged. */
   actionDeadLetter?: DeadLetterStore<SlackBlockActions>;
-  /** #193 — tell the human in the decision's thread what a click did. Best-effort. */
-  acknowledgeAnswer?: (input: { channel?: string; threadTs: string; text: string }) => Promise<void>;
+  /** #193 — tell the human in the decision's thread what a click did. Best-effort; false when the post failed. */
+  acknowledgeAnswer?: (input: { channel?: string; threadTs: string; text: string }) => Promise<boolean | void>;
   /** OPR.0.5.6.2 — inbound file transfer. Absent with a file-bearing event →
    *  every file is a NAMED failure on the row ("transfer unavailable"), never
    *  a silent drop of message or file. */
@@ -172,6 +172,7 @@ export interface InboundDeps {
 
 export class InboundRouter {
   private readonly inflight = new Set<string>(); // same-channel message identity double-dispatch guard
+  private readonly replyingTo = new Set<string>(); // click replies being posted now
   private retryPass: Promise<{ retried: number; landed: number }> | undefined;
   constructor(private readonly deps: InboundDeps) {}
 
@@ -349,17 +350,12 @@ export class InboundRouter {
     return r;
   }
 
-  /** A live click claims its one thread reply: Slack can redeliver an envelope we already handled, and the person must
-   *  not read a second reply, such as "already closed" after "All answered". Keyed by the click (its user and
-   *  action_ts) in the durable seen store, so a restart doesn't reopen it. A click without an action_ts can't be told
-   *  from its redelivery, so it replies as before. */
-  private claimClickReply(payload: SlackBlockActions): boolean {
+  /** The key a live click's one thread reply is recorded under: Slack can redeliver an envelope we already handled, and
+   *  the person must not read a second reply, such as "already closed" after "All answered". The click's user and
+   *  action_ts identify it; a click without an action_ts can't be told from its redelivery, so it replies as before. */
+  private clickReplyKey(payload: SlackBlockActions): string | undefined {
     const actionTs = payload.actions?.[0]?.action_ts;
-    if (!actionTs) return true;
-    const key = `click-reply:${payload.user?.id ?? "-"}:${actionTs}`;
-    if (this.deps.seen.load().has(key)) return false;
-    this.deps.seen.mark(key, "click-reply");
-    return true;
+    return actionTs ? `click-reply:${payload.user?.id ?? "-"}:${actionTs}` : undefined;
   }
 
   private async attemptAction(payload: SlackBlockActions, live: boolean): Promise<{ status: InboundDisposition; reason?: string }> {
@@ -368,12 +364,21 @@ export class InboundRouter {
     if (!picked) return { status: "ignored", reason: "not-a-question-button" };
     const rootTs = clickedRootTs(payload);
     // A thread reply about this click: once per live click; the dead-letter retry (live false) only confirms success.
+    // A posted reply is recorded in the durable seen store, so a redelivery or a restart doesn't repeat it; one being
+    // posted is held in memory, so a redelivery arriving meanwhile is skipped. A reply that failed to post isn't
+    // recorded, so a later redelivery can still tell the person.
     const acknowledge = async (text: string) => {
-      if (!rootTs || (live && !this.claimClickReply(payload))) return;
+      if (!rootTs) return;
+      const key = live ? this.clickReplyKey(payload) : undefined;
+      if (key && (this.replyingTo.has(key) || this.deps.seen.load().has(key))) return;
+      if (key) this.replyingTo.add(key);
       try {
-        await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
+        const posted = await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
+        if (key && posted !== false) this.deps.seen.mark(key, "click-reply");
       } catch (e) {
         this.deps.log?.(`click reply failed thread=${rootTs}: ${(e as Error).message}`);
+      } finally {
+        if (key) this.replyingTo.delete(key);
       }
     };
     const who = this.deps.resolveSender(payload.user?.id ?? "");
