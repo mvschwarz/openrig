@@ -531,7 +531,10 @@ export class RestoreOrchestrator {
         // Choosing a fresh versus resumed conversation belongs to the person.
         launched.push({
           nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
-          error: `Session alive, agent not running for '${node.logicalId}'. Attach to tmux session '${idleSession}' and restart the agent there; the pane and its history have been preserved.`,
+          error: `Session alive, agent not running for '${node.logicalId}': tmux session '${idleSession}' holds an idle shell, and its pane and history are preserved. `
+            + `The person chooses how to bring the agent back. To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then rig launch ${rigId} ${node.logicalId} (this closes the pane and resumes from the rig's snapshot). `
+            + `To start a blank occupant: rig seat launch ${idleSession} --fresh --stop --reason "<why>". `
+            + `To keep the pane: attach to tmux session '${idleSession}' and restart the agent there by hand.`,
         });
         continue;
       }

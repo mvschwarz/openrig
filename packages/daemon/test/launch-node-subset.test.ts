@@ -386,6 +386,16 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === session.id)?.status).toBe("running");
   });
 
+  it("names the managed ways back: resume, a fresh occupant, or the pane by hand", async () => {
+    const { rigId, session } = seedPreservedShell();
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    const error = result.launched![0].error!;
+    expect(error).toContain(`rig seat stop ${session.sessionName} --reason`);
+    expect(error).toContain(`rig launch ${rigId} dev.driver`);
+    expect(error).toContain(`rig seat launch ${session.sessionName} --fresh --stop --reason`);
+    expect(error).toContain(`attach to tmux session '${session.sessionName}'`);
+  });
+
   it.each(["subset", "single-seat"])("%s launch leaves an agent starting between the two samples running, not told to restart", async (route) => {
     const { rigId } = seedPreservedShell();
     const startedAt = "Fri Oct 9 07:00:01 2026";
