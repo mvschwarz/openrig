@@ -13,6 +13,7 @@ import { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unknown>>) {
   return {
@@ -21,6 +22,7 @@ function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unk
     sendKeys: vi.fn(async () => {}),
     capturePaneContent: vi.fn(async () => ""),
     getPaneCommand: vi.fn(async () => null),
+    getPanePid: vi.fn(async () => null),
     getSessionStatus: vi.fn(async () => null),
     waitForReady: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
@@ -52,6 +54,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
   let snapshotRepo: SnapshotRepository;
   let tmux: ReturnType<typeof makeTmux>;
   let orchestrator: RestoreOrchestrator;
+  let processes: NativeProcessRow[];
+  let listProcesses: ReturnType<typeof vi.fn<() => Promise<NativeProcessRow[]>>>;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -60,6 +64,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     eventBus = new EventBus(db);
     snapshotRepo = new SnapshotRepository(db);
     tmux = makeTmux();
+    processes = [];
+    listProcesses = vi.fn(async () => processes);
     const checkpointStore = new CheckpointStore(db);
     const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux as any });
@@ -68,6 +74,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       checkpointStore, nodeLauncher, tmuxAdapter: tmux as any,
       claudeResume: new ClaudeResumeAdapter(tmux as any),
       codexResume: new CodexResumeAdapter(tmux as any),
+      listProcesses,
     });
   });
 
@@ -344,6 +351,85 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(result.alreadyRunning).toHaveLength(1);
     expect(result.alreadyRunning![0].logicalId).toBe("dev.driver");
     expect(result.launched).toHaveLength(0);
+  });
+
+  function seedPreservedShell(runtime = "claude-code") {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds);
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, nodeIds[0]);
+    const data = JSON.parse((db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapshotId) as { data: string }).data);
+    data.nodes[0].runtime = runtime;
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshotId);
+    const session = sessionRegistry.registerSession(nodeIds[0]!, "dev-driver@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(nodeIds[0]!, { tmuxSession: session.sessionName, tmuxPane: "%1" });
+    tmux.hasSession.mockResolvedValue(true);
+    tmux.getPaneCommand.mockResolvedValue("bash" as never);
+    tmux.getPanePid.mockResolvedValue(10 as never);
+    processes = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "/bin/bash", executableName: "bash", startedAt: "Fri Oct 9 07:00:00 2026" }];
+    return { rigId, nodeIds, session };
+  }
+
+  it.each(["claude-code", "codex", "pi", "omp"])("reports an exited %s agent without replacing its preserved shell", async (runtime) => {
+    const { rigId, nodeIds, session } = seedPreservedShell(runtime);
+    const before = sessionRegistry.getBindingForNode(nodeIds[0]!);
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toEqual([]);
+    expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "attention_required", error: expect.stringContaining("Session alive, agent not running") })]);
+    expect(result.launched![0].error).toContain(session.sessionName);
+    expect(result.launched![0].error).toContain("restart the agent");
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(sessionRegistry.getBindingForNode(nodeIds[0]!)).toEqual(before);
+    expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === session.id)?.status).toBe("running");
+  });
+
+  it("single-seat launch also reports the stopped agent", async () => {
+    const { rigId } = seedPreservedShell();
+    const result = await orchestrator.launchSingleNode(rigId, "dev.driver");
+    expect(result.alreadyRunning).toEqual([]);
+    expect(result.launched![0].error).toContain("Session alive, agent not running");
+    expect(result.nonTargetEffects).toEqual({ mode: "unchanged", reason: null, affected: [] });
+  });
+
+  it("preserves a live child behind a shell wrapper", async () => {
+    const { rigId } = seedPreservedShell();
+    processes.push({ pid: 11, ppid: 10, pgid: 10, tpgid: 10, command: "node agent.js", executableName: "node", startedAt: "Fri Oct 9 07:00:01 2026" });
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(result.launched).toEqual([]);
+  });
+
+  it("does not classify an intentional terminal shell as an exited agent", async () => {
+    const { rigId } = seedPreservedShell("terminal");
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(listProcesses).not.toHaveBeenCalled();
+  });
+
+  it("does not replace a live session when process inspection fails", async () => {
+    const { rigId } = seedPreservedShell();
+    listProcesses.mockRejectedValue(new Error("ps unavailable"));
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("uses the current terminal runtime even when the selected snapshot named an agent", async () => {
+    const { rigId, nodeIds } = seedPreservedShell();
+    db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = ?").run(nodeIds[0]);
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(listProcesses).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newly resumed foreground agent running", async () => {
+    const { rigId } = seedPreservedShell();
+    tmux.getPaneCommand.mockResolvedValueOnce("bash" as never).mockResolvedValue("claude" as never);
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(result.launched).toEqual([]);
   });
 
   it("does not emit node.held for running non-targets", async () => {

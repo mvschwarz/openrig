@@ -18,7 +18,7 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { verifyClaudePaneProcess } from "./native-process-lineage.js";
+import { observeClaudeDelivery, verifyClaudePaneProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
@@ -492,11 +492,28 @@ export class RestoreOrchestrator {
 
       let isLive = false;
       let isUnknown = false;
+      let idleSession: string | undefined;
 
       for (const session of sessions) {
         try {
           const alive = await this.tmuxAdapter.hasSession(session.sessionName);
-          if (alive) { isLive = true; break; }
+          if (alive) {
+            // A preserved shell is not a running agent. Reuse the process-lineage
+            // check's positive idle-shell evidence; opaque wrappers stay untouched.
+            isLive = true;
+            const binding = this.sessionRegistry.getBindingForNode(node.id);
+            const pane = binding?.tmuxSession === session.sessionName ? binding.tmuxPane : null;
+            const runtime = allNodes.find(current => current.id === node.id)?.runtime ?? node.runtime;
+            if (pane && ["claude-code", "codex", "pi", "omp"].includes(runtime ?? "")
+              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
+              && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses })).state === "idle_shell"
+              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")) {
+              idleSession = session.sessionName;
+              isLive = false;
+              continue;
+            }
+            break;
+          }
         } catch {
           isUnknown = true;
         }
@@ -504,6 +521,15 @@ export class RestoreOrchestrator {
 
       if (isLive) {
         alreadyRunning.push({ nodeId: node.id, logicalId: node.logicalId });
+        continue;
+      }
+      if (idleSession) {
+        // Keep the pane/history and the existing per-target failure contract.
+        // Choosing a fresh versus resumed conversation belongs to the person.
+        launched.push({
+          nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
+          error: `Session alive, agent not running for '${node.logicalId}'. Attach to tmux session '${idleSession}' and restart the agent there; the pane and its history have been preserved.`,
+        });
         continue;
       }
       if (isUnknown) {
