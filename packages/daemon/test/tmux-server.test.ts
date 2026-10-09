@@ -19,25 +19,29 @@ describe("the daemon's tmux server", () => {
     setDaemonTmuxServer([]);
   });
 
-  it("names no server outside tmux, or on the default server", () => {
+  it("names no server outside tmux, or on tmux's standard default socket", () => {
+    const standard = join(realpathSync("/tmp"), "tmux-501");
     expect(tmuxServerArgs({}, 501)).toEqual([]);
     expect(tmuxServerArgs({ TMUX: "" }, 501)).toEqual([]);
-    expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/default,123,0`, TMUX_TMPDIR: base }, 501)).toEqual([]);
+    expect(tmuxServerArgs({ TMUX: `${standard}/default,123,0` }, 501)).toEqual([]);
+    expect(tmuxServerArgs({ TMUX: `${standard}/default,123,0`, TMUX_TMPDIR: "/tmp" }, 501)).toEqual([]);
   });
 
-  it("names a socket in tmux's own directory with -L", () => {
-    expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/person,123,0`, TMUX_TMPDIR: base }, 501)).toEqual(["-L", "person"]);
+  it("names another socket in tmux's standard directory with -L, finding /tmp's real path", () => {
+    expect(tmuxServerArgs({ TMUX: `${join(realpathSync("/tmp"), "tmux-501")}/person,123,0` }, 501)).toEqual(["-L", "person"]);
+    expect(tmuxServerArgs({ TMUX: "/tmp/tmux-501/person,123,0" }, 501)).toEqual(["-L", "person"]);
+  });
+
+  it("names a socket by its path when TMUX_TMPDIR moved it, because -L resolves in the attaching terminal", () => {
+    expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/person,123,0`, TMUX_TMPDIR: base }, 501)).toEqual(["-S", `${base}/tmux-501/person`]);
+    expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/default,123,0`, TMUX_TMPDIR: base }, 501)).toEqual(["-S", `${base}/tmux-501/default`]);
+    // Outside tmux, a custom TMUX_TMPDIR still moves the daemon's default server.
+    expect(tmuxServerArgs({ TMUX_TMPDIR: base }, 501)).toEqual(["-S", join(base, "tmux-501", "default")]);
   });
 
   it("names a socket anywhere else, or another user's, with -S", () => {
-    expect(tmuxServerArgs({ TMUX: "/srv/sockets/team,9,1", TMUX_TMPDIR: base }, 501)).toEqual(["-S", "/srv/sockets/team"]);
-    expect(tmuxServerArgs({ TMUX: `${base}/tmux-501/person,123,0`, TMUX_TMPDIR: base }, 502)).toEqual(["-S", `${base}/tmux-501/person`]);
-  });
-
-  it("finds tmux's directory under /tmp when TMUX_TMPDIR is unset", () => {
-    const dir = join(realpathSync("/tmp"), "tmux-501");
-    expect(tmuxServerArgs({ TMUX: `${dir}/person,123,0` }, 501)).toEqual(["-L", "person"]);
-    expect(tmuxServerArgs({ TMUX: `${dir}/default,123,0` }, 501)).toEqual([]);
+    expect(tmuxServerArgs({ TMUX: "/srv/sockets/team,9,1" }, 501)).toEqual(["-S", "/srv/sockets/team"]);
+    expect(tmuxServerArgs({ TMUX: "/tmp/tmux-501/person,123,0" }, 502)).toEqual(["-S", "/tmp/tmux-501/person"]);
   });
 
   it("keeps the attach command unchanged on the default server, and adds the server otherwise", () => {
