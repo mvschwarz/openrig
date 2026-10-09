@@ -244,6 +244,10 @@ describe("Codex behind a spawning launcher", () => {
     expect(await check(() => launcherRows())).toBeNull();
     expect(await check(() => launcherRows(resume, "resume other "))).toBeNull();
     expect(await check(() => launcherRows(resume, "", "resume --last "))).toBeNull();
+    // A deeper `resume --last` is read before the launcher's token, whatever the ps row order.
+    const deeperLast = () => launcherRows(resume).map(r => r.pid === 13 ? { ...r, command: "codex resume --last" } : r);
+    expect(await check(deeperLast)).toBeNull();
+    expect(await check(() => deeperLast().reverse())).toBeNull();
   });
   it("still refuses Codex processes on different branches", async () => {
     const siblings = (r: NativeProcessRow[]) => [...r, { ...r[4]!, pid: 15 }];

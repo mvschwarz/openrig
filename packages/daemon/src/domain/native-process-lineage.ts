@@ -406,7 +406,11 @@ function launcherChain(candidates: NativeProcessObservation[], rows: NativeProce
     const above = ancestors(candidate);
     return candidates.every((other) => other === candidate || above.has(other.process.pid));
   });
-  return deepest ? [deepest, ...candidates.filter((candidate) => candidate !== deepest)] : null;
+  if (!deepest) return null;
+  // On one chain every link has a distinct depth; order them all by it, so an
+  // ancestor's identity is never read ahead of a deeper link's.
+  const depth = new Map(candidates.map((candidate) => [candidate, ancestors(candidate).size]));
+  return [...candidates].sort((a, b) => depth.get(b)! - depth.get(a)!);
 }
 
 export interface ClaudeDeliveryObservation {
