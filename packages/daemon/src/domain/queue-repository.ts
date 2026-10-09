@@ -13,7 +13,7 @@ import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
-import { classifyDestination } from "./gateway/destination-resolver.js";
+import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import {
   computeClosureRequiredAt,
   validateClosure,
@@ -1312,13 +1312,7 @@ export class QueueRepository {
     // address it can never hold). Classified indeterminate for gateway
     // (landed with the owning subsystem; render unconfirmable here) — never
     // verified, never failed.
-    const destClass = classifyDestination(destinationSession, {
-      entities: (() => {
-        const loaded = this.loadHumanRegistryFn();
-        return loaded.ok ? loaded.entities : null;
-      })(),
-      hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
-    });
+    const destClass = this.classifyDestinationOf(destinationSession);
     if (destClass.class === "gateway-routable") {
       const resolvedNote = destClass.via === "registry-alias" && destClass.resolvedHuman
         ? ` — the human registry resolves it to registered human '${destClass.resolvedHuman}'`
@@ -3523,6 +3517,18 @@ export class QueueRepository {
       if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
     return out;
+  }
+
+  /** OPR.0.5.6.14 — the one destination-classification seam, as the wake path consults it.
+   *  Public for the single-row read route; getById itself stays free of topology reads. */
+  classifyDestinationOf(destinationSession: string): DestinationClass {
+    return classifyDestination(destinationSession, {
+      entities: (() => {
+        const loaded = this.loadHumanRegistryFn();
+        return loaded.ok ? loaded.entities : null;
+      })(),
+      hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
+    });
   }
 
   /** OPR.0.5.6.14 — terminal transport is a CAPABILITY, not topology presence.

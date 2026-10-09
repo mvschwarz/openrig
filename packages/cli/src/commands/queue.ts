@@ -81,12 +81,15 @@ function stringField(row: QueueRow, key: string): string | null {
   return typeof row[key] === "string" ? row[key] as string : null;
 }
 
-/** The row's own signals decide who owns delivery; the address pattern is only the guess
- *  before the daemon has recorded a wake result or a gateway receipt. */
+/** The row's own signals decide who owns delivery: a gateway receipt, then the recorded wake
+ *  result, then the daemon's destination class (present before any wake, e.g. --no-nudge). The
+ *  address pattern is only the fallback for a daemon that reports none of these. */
 function receiptSourceOf(destination: string | null, row: QueueRow): "gateway" | "terminal" {
   if (stringField(row, "deliveryOutcome") !== null) return "gateway";
   const wakeResult = stringField(row, "lastNudgeResult");
   if (wakeResult !== null) return wakeResult.startsWith("gateway-owned:") ? "gateway" : "terminal";
+  const destinationClass = stringField(row, "destinationClass");
+  if (destinationClass !== null) return destinationClass === "gateway-routable" ? "gateway" : "terminal";
   return destination !== null && isHumanSeatSessionRef(destination) ? "gateway" : "terminal";
 }
 
@@ -228,10 +231,12 @@ export async function waitForDeliveryOutcome(
     } else {
       // --no-nudge requested no wake: there is no terminal receipt to wait for.
       if (target.nudge === false) return terminalDeliveryResult(qitemId, destination, row, "not-requested", null);
-      const outcome = terminalWakeOutcome(stringField(row, "lastNudgeResult"));
-      // A claim or a settled receipt ends the wait; an unconfirmed or held wake keeps
-      // watching for a claim until the bound. Nothing here re-sends the wake.
-      if (stringField(row, "claimedAt") !== null || outcome === "verified" || outcome === "failed") {
+      const wakeResult = stringField(row, "lastNudgeResult");
+      const outcome = terminalWakeOutcome(wakeResult);
+      // Any recorded wake result (or an existing claim) ends the wait: a later pickup is
+      // `rig queue show`'s to report. Only a missing wake result waits up to the bound.
+      // Nothing here re-sends the wake.
+      if (wakeResult !== null || stringField(row, "claimedAt") !== null) {
         return terminalDeliveryResult(qitemId, destination, row, outcome, null);
       }
       if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs);

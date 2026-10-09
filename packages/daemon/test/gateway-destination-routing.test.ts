@@ -34,6 +34,8 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { Hono } from "hono";
+import { queueRoutes } from "../src/routes/queue.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -535,5 +537,37 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     const note = "slack-owner-notification-posted notification_key=" + key + " level=ALERT kind=unclassified message_ts=333.44 thread_ts=333.44";
     h.repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: note });
     expect(h.repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key), "the receipt suppresses the repeat").toBe(true);
+  });
+});
+
+// #1029 — the single-row read carries the resolver's own routing decision, so a reader such as
+// `rig queue create --verify` never has to guess a registered person's alias from its
+// spelling, even when no wake result exists yet (--no-nudge). getById itself stays unchanged.
+describe("GET /api/queue/:qitemId carries the destination class", () => {
+  const MIKE = { ...FOUNDER_FRAGMENT, entityId: "mike", displayName: "Mike", address: "mike@external" } as unknown as HumanFragment;
+
+  it.each([
+    ["dev-a@rig1", "pane-bound"],
+    ["mike@kernel", "gateway-routable"],
+    ["human-founder@kernel", "gateway-routable"],
+    ["founder@external", "gateway-routable"],
+    ["revieweer@rig1", "unroutable"],
+  ] as const)("%s reads as %s on a --no-nudge row", async (destinationSession, destinationClass) => {
+    const h = makeHarness({ entities: () => [FOUNDER_FRAGMENT, MIKE] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("queueRepo" as never, h.repo); await next(); });
+    app.route("/api/queue", queueRoutes());
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession, nudge: false,
+      summary: "Routing", evidenceRef: EVIDENCE, body: "b",
+    });
+    const res = await app.request(`/api/queue/${item.qitemId}`);
+    expect(res.status).toBe(200);
+    const row = await res.json() as Record<string, unknown>;
+    expect(row.lastNudgeResult).toBeNull();
+    expect(row.destinationClass).toBe(destinationClass);
+    expect(h.repo.getById(item.qitemId)).not.toHaveProperty("destinationClass");
+    expect(h.sends).toHaveLength(0);
+    h.db.close();
   });
 });

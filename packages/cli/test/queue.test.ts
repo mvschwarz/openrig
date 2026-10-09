@@ -459,7 +459,7 @@ describe("rig queue CLI", () => {
       return waitForDeliveryOutcome(client, "qitem-t", boundedDeps(), target).then((result) => ({ result, reads: client.reads }));
     };
 
-    it("smoke-test case through create: delivered-ack-pending then a claim reports both, not a failed handoff", async () => {
+    it("smoke-test case through create: settles on the first delivered-ack-pending read, not a failed handoff", async () => {
       const id = "qitem-agent-verify";
       const rows = [
         {},
@@ -483,21 +483,31 @@ describe("rig queue CLI", () => {
         destinationKind: "agent",
         outcome: "delivered-ack-pending",
         wakeResult: "delivered-ack-pending",
-        claim: { observed: true, claimedAt: "2026-10-08T10:00:10.000Z", pickup: "working" },
-        detail: "The qitem is saved. Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed. Claimed at 2026-10-08T10:00:10.000Z (pickup working). A claim shows the seat took the item; it does not prove the body was read.",
-        nextAction: null,
+        claim: { observed: false, claimedAt: null, pickup: "unclaimed" },
+        detail: "The qitem is saved. Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed. No claim observed yet. This is not a failed handoff.",
+        nextAction: `rig queue show ${id} --json`,
       });
       expect(process.exitCode).toBeUndefined();
       expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
-      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(3);
+      // The wait ends on the first recorded wake result; the later claim is not awaited.
+      expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(2);
     });
 
-    it("persisted row with an unconfirmed receipt and no claim: saved, unconfirmed, not a failed handoff", async () => {
-      const { result } = await verify([{ lastNudgeResult: "delivered-ack-pending" }]);
+    it("persisted row with an unconfirmed receipt and no claim: saved, unconfirmed, not a failed handoff, at once", async () => {
+      const { result, reads } = await verify([{ lastNudgeResult: "delivered-ack-pending" }]);
+      expect(reads).toBe(1);
       expect(result).toMatchObject({ receiptSource: "terminal", destinationKind: "agent", outcome: "delivered-ack-pending", claim: { observed: false, claimedAt: null, pickup: "unclaimed" }, nextAction: "rig queue show qitem-t --json" });
       expect(result).not.toHaveProperty("humanReadership");
       expect(result).not.toHaveProperty("connectorAccepted");
-      expect(result.detail).toBe("The qitem is saved. Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed. No claim observed within 10ms. This is not a failed handoff.");
+      expect(result.detail).toBe("The qitem is saved. Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed. No claim observed yet. This is not a failed handoff.");
+    });
+
+    it("an existing claim is reported with the first wake result", async () => {
+      const { result, reads } = await verify([{ lastNudgeResult: "delivered-ack-pending", state: "in-progress", claimedAt: "2026-10-08T10:00:10.000Z", pickup: { state: "working" } }]);
+      expect(reads).toBe(1);
+      expect(result).toMatchObject({ outcome: "delivered-ack-pending", claim: { observed: true, claimedAt: "2026-10-08T10:00:10.000Z", pickup: "working" }, nextAction: null });
+      expect(result.detail).toContain("A claim shows the seat took the item; it does not prove the body was read.");
+      expect(result.detail).not.toContain("not a failed handoff");
     });
 
     it("a verified wake is distinct from delivered-ack-pending and settles the wait", async () => {
@@ -524,23 +534,26 @@ describe("rig queue CLI", () => {
       expect(result.detail).not.toContain("not a failed handoff");
     });
 
-    it("an indeterminate:* wake stays unconfirmed until the bound", async () => {
-      const { result } = await verify([{ lastNudgeResult: "indeterminate:timeout" }]);
+    it("an indeterminate:* wake is reported unconfirmed at once", async () => {
+      const { result, reads } = await verify([{ lastNudgeResult: "indeterminate:timeout" }]);
+      expect(reads).toBe(1);
       expect(result).toMatchObject({ outcome: "indeterminate", nextAction: "rig queue show qitem-t --json" });
       expect(result.detail).toContain("Terminal receipt unconfirmed (indeterminate:timeout)");
       expect(result.detail).toContain("This is not a failed handoff.");
     });
 
-    it("a retained wake points at the held message and does not promise a retry", async () => {
-      const { result } = await verify([{ lastNudgeResult: "retained:typing_guard" }]);
+    it("a retained wake is reported at once, points at the held message and does not promise a retry", async () => {
+      const { result, reads } = await verify([{ lastNudgeResult: "retained:typing_guard" }]);
+      expect(reads).toBe(1);
       expect(result).toMatchObject({ outcome: "retained", nextAction: "rig seat held-messages bob@rig" });
       expect(result.detail).toContain("nothing was typed into the pane");
       expect(result.detail).toContain("not retried automatically");
       expect(result.detail).not.toMatch(/ladder retries/);
     });
 
-    it("no wake result within the bound stays still-pending", async () => {
-      const { result } = await verify([{}]);
+    it("only a missing wake result waits, up to the bound, then stays still-pending", async () => {
+      const { result, reads } = await verify([{}]);
+      expect(reads).toBeGreaterThan(1);
       expect(result).toMatchObject({ outcome: "still-pending", wakeResult: null, claim: { observed: false } });
       expect(result.detail).toContain("No terminal receipt was recorded within 10ms.");
     });
@@ -571,7 +584,30 @@ describe("rig queue CLI", () => {
       expect(calls.filter((call) => call.method === "GET" && call.path === `/api/queue/${id}`)).toHaveLength(1);
     });
 
-    it("--no-nudge to a human-seat address keeps the bounded gateway wait", async () => {
+    it("--no-nudge to a registered person's alias keeps the bounded gateway wait (daemon destinationClass)", async () => {
+      const { result, reads } = await verify([{ destinationClass: "gateway-routable" }], { destinationSession: "mike@kernel", nudge: false });
+      expect(result).toMatchObject({ receiptSource: "gateway", destinationKind: "human", outcome: "still-pending", connectorAccepted: null, humanReadership: "unknown" });
+      expect(reads).toBeGreaterThan(1);
+    });
+
+    it("--no-nudge to a registered person's alias settles on the gateway receipt", async () => {
+      const { result } = await verify([{ destinationClass: "gateway-routable" }, { destinationClass: "gateway-routable", deliveryOutcome: "posted" }], { destinationSession: "mike@kernel", nudge: false });
+      expect(result).toMatchObject({ receiptSource: "gateway", outcome: "posted", connectorAccepted: true });
+    });
+
+    it("--no-nudge to a seat the daemon classes pane-bound reads once as not-requested", async () => {
+      const { result, reads } = await verify([{ destinationClass: "pane-bound" }], { destinationSession: "bob@rig", nudge: false });
+      expect(result).toMatchObject({ receiptSource: "terminal", destinationKind: "agent", outcome: "not-requested" });
+      expect(reads).toBe(1);
+    });
+
+    it("the daemon's pane-bound class for a human seat wins over the address pattern", async () => {
+      const { result, reads } = await verify([{ destinationClass: "pane-bound" }], { destinationSession: "human-founder@kernel", nudge: false });
+      expect(result).toMatchObject({ receiptSource: "terminal", destinationKind: "human", outcome: "not-requested", humanReadership: "unknown" });
+      expect(reads).toBe(1);
+    });
+
+    it("--no-nudge to a human-seat address on a daemon without destinationClass keeps the bounded gateway wait", async () => {
       const { result, reads } = await verify([{}], { destinationSession: "human-founder@kernel", nudge: false });
       expect(result).toMatchObject({ receiptSource: "gateway", destinationKind: "human", outcome: "still-pending", humanReadership: "unknown" });
       expect(reads).toBeGreaterThan(1);
