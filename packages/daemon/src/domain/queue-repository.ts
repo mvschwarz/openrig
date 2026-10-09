@@ -3324,7 +3324,7 @@ export class QueueRepository {
       WHERE state IN ('pending', 'in-progress', 'blocked')
         AND human_intent = 'update'
         AND is_human_seat_session(destination_session) = 1
-      ORDER BY (priority = 'urgent') DESC, ts_created DESC, qitem_id DESC LIMIT ?
+      ORDER BY CASE priority WHEN 'critical' THEN 2 WHEN 'urgent' THEN 1 ELSE 0 END DESC, ts_created DESC, qitem_id DESC LIMIT ?
     `).all(limit) as QueueItemRow[];
     return rows.map(row => this.rowToItem(row));
   }

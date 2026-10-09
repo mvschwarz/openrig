@@ -330,7 +330,7 @@ a daemon route or reconnect policy.
 The TUI FEED reads `/api/attention` for human requests and current explicit
 human-addressed updates. Its independent update query filters open states and
 strict human destinations before the 1001-row sentinel, serves at most 1000
-updates with urgent rows first, and requires no transport receipt. These local
+updates with critical then urgent rows first, and requires no transport receipt. These local
 FYIs create no approval obligation. `/api/queue/human-updates` remains confirmed
 delivery history; the TUI suppresses a history card when the same queue item is
 in the current update window. Current-update coverage is independent of the

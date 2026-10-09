@@ -61,7 +61,7 @@ export function attentionRoutes(): Hono {
       if (!queue) throw new Error("Queue repository unavailable");
       const rows = queue.listOpenHumanUpdates({ limit: 1001 });
       result.sources.push({ source: "queue updates", state: rows.length >= 1001 ? "partial" : "available",
-        detail: rows.length >= 1001 ? "Open human updates reached 1001 rows; showing at most 1000, urgent first." : "Open explicit human-addressed updates, urgent first; local FYIs do not require a delivery receipt or decision." });
+        detail: rows.length >= 1001 ? "Open human updates reached 1001 rows; showing at most 1000, critical then urgent first." : "Open explicit human-addressed updates, critical then urgent first; local FYIs do not require a delivery receipt or decision." });
       const current = rows.slice(0, 1000);
       const opened = wanted?.startsWith("queue-update:") ? queue.getById(wanted.slice(13)) : null;
       const detailOnly = opened?.humanIntent === "update" && isHumanSeatSessionRef(opened.destinationSession)
@@ -152,7 +152,7 @@ export function attentionRoutes(): Hono {
         add(item, () => [`Status: ${r.status}; first observed ${r.startedAt ?? "unknown"}; last observed ${r.lastObservedAt ?? "unknown"}`, `Freshness: ${r.freshness.state}; ${r.indeterminateReason ?? ""}`, `Posture: ${r.operatingPosture?.posture ?? "unknown"} · ${r.operatingPosture?.reason ?? "not supplied by source"}`, r.explanation, r.suggestedInspection, `Threshold: ${r.threshold}`, "Canonical source and bounded evidence:", JSON.stringify(r, null, 2)]);
       }
     } catch (e) { unavailable("health", e); }
-    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? Number(b.urgency === "urgent") - Number(a.urgency === "urgent") : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
+    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? ((b.urgency === "critical" ? 2 : b.urgency === "urgent" ? 1 : 0) - (a.urgency === "critical" ? 2 : a.urgency === "urgent" ? 1 : 0)) : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
     if (wanted && !result.detail) result.detailError = "Selected source is unavailable or outside the current source window. Return to Attention to refresh; absence is not resolution.";
     return c.json(result);
   });

@@ -33,7 +33,7 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
         files: q.evidenceRef?.startsWith("/") ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
     }
   }
-  read.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? Number(b.urgency === "urgent") - Number(a.urgency === "urgent") : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
+  read.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? ((b.urgency === "critical" ? 2 : b.urgency === "urgent" ? 1 : 0) - (a.urgency === "critical" ? 2 : a.urgency === "urgent" ? 1 : 0)) : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
   if (wanted?.startsWith("human-update:") && read.detail?.item.id !== wanted) {
     read.detail = null;
     read.detailError = "Selected delivered update is unavailable or outside the retained window. Return to Feed and refresh.";
