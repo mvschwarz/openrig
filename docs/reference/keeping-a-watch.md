@@ -40,7 +40,8 @@ Stop: after telling them once, or when they say stop.
 Unknown: not said yet.
 ```
 
-**2. Create it for yourself,** with a `watch` tag so it can be listed later (tags can't be changed after creation):
+**2. Create it for yourself,** with a `watch` tag so it can be listed later (tags can't be changed after creation).
+`<your session>` is your session name from `rig whoami --json`:
 
 ```bash
 rig queue create --destination <your session> --tags watch \
@@ -98,7 +99,7 @@ rig queue create --destination <entityId>@external --human-intent update \
   --summary "<subject>" --body-file <brief> --evidence-ref <watch task id> --verify --json
 ```
 
-- `--evidence-ref` is required for anything sent to a person. The watch task's ID is a durable pointer.
+- Always pass `--evidence-ref`; the watch task's ID is a durable pointer the person can open.
 - Later messages about the same watch can thread with `--reply-to <earlier message's id>`.
 - **`posted` means the connector posted it, not that they read it.** Don't say they saw it.
 - **If delivery fails or is indeterminate,** inspect that task before anything else. Never resend blindly.
@@ -148,7 +149,8 @@ under some conditions, with no delay guarantee. So:
 
 ## What not to use
 
-- **`rig watchdog register --policy periodic-reminder` for a person's watch.** It fires on the first scheduler tick,
-  repeats forever, and stops when the agent that registered it is replaced. It's fine for agent-to-agent reminders.
+- **`rig watchdog register --policy periodic-reminder` for a person's watch.** It repeats every interval until it's
+  stopped (the first fire comes one interval after you register it), and it stops when the agent that registered it
+  is replaced. It's fine for agent-to-agent reminders.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance.
