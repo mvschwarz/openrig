@@ -21,3 +21,10 @@ A tiny change can have builder-held verification. When independent QA is selecte
 the evaluator must not be the author. Load browser/dogfood skills only for a
 relevant UI journey. Respect a read-only assignment; fix-and-retest requires that
 scope, and changes make you an author of the repaired candidate.
+
+Run checks the way your permissions expect, so the person isn't stopped for each
+one. Run the project's own test command first: test runners such as `npm test`
+and `pytest` are allowed by default. To try an input the tests don't cover, run
+one plain command at a time (for example `python3 tip.py 1e30`), not a chained
+script with pipes, shell functions or quoted braces. A new program may still ask
+the person once, and a plain command is one they can allow for later runs.

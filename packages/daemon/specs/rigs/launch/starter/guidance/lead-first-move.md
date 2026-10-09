@@ -4,6 +4,11 @@ The person's goal usually reaches you from the kernel operator as a queue row: t
 how to reach them. Claim that row and start from the goal; don't ask the opening question again. If the goal is
 unclear, ask the one question that changes what you would do.
 
+**Keep your commands plain, so they don't stop for the person's approval.** Run `rig` commands as they are: don't pipe
+their output into `python3` or another program, don't put `$VARIABLES` in them, and don't write files through a shell
+heredoc. `rig queue show <id> --full` prints the row as JSON, so read the goal from its `body` field there, then run
+`rig queue claim <id>` on its own.
+
 **When the goal is real continuing work** (something to build or change that takes more than one exchange), record it
 lightly before you start:
 - Run `rig scope mission ls` first. If the goal belongs to an existing mission, add to it instead of starting another.
@@ -36,8 +41,9 @@ alongside the goal, and never replace one that exists:
 4. Run `rig ps --nodes --rig <rig> --json --fields canonicalSessionName,hostSelfId`. It gives each seat's exact address
    and the host that serves it.
 5. Match `dev-build` (you) to builder and `dev-review` to reviewer, using the actual addresses from step 4.
-   Write the file with those addresses and hosts, today's date, and yourself as curator (format: OpenRig's
-   `$OPENRIG_HOME/reference/rosters.md`):
+   Write the file with those addresses and hosts, today's date, and yourself as curator; the template below is the
+   whole format. Write it with your file-writing tool, not a shell heredoc. The file is outside the project folder,
+   so the person may be asked to approve this one write: say so in one line first.
 
    ```json
    {
