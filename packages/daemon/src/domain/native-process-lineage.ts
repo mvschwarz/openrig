@@ -407,8 +407,15 @@ export interface ClaudeDeliveryObservation {
   detail: string;
 }
 
-/** Ordinary delivery's uncertainty policy is separate from readiness/identity proof. */
-export async function observeClaudeDelivery(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<ClaudeDeliveryObservation> {
+/** Ordinary delivery's uncertainty policy is separate from readiness/identity proof.
+ *  `unknownKeepsIdle` (default true, for delivery): one unavailable sample can't erase a positive idle-shell refusal,
+ *  because declining to type into an idle shell is safe. Launch passes false: there idle means "tell the person to
+ *  restart", so it needs both samples idle with the same fingerprint, and a foreground starting between them reads
+ *  unknown. */
+export async function observeClaudeDelivery(
+  input: Parameters<typeof observeNativePaneProcess>[0],
+  opts: { unknownKeepsIdle?: boolean } = {},
+): Promise<ClaudeDeliveryObservation> {
   const unknown = { state: "unknown" as const, detail: "Claude runtime identity could not be established" };
   const sample = async (): Promise<ClaudeDeliveryObservation & { fingerprint?: string }> => {
     try {
@@ -458,9 +465,11 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
   const second = await sample();
   if (first.state === "conflict") return first;
   if (second.state === "conflict") return second;
-  // An unavailable sample cannot erase a positive idle-shell refusal.
-  if (first.state === "idle_shell" && second.state === "unknown") return first;
-  if (second.state === "idle_shell" && first.state === "unknown") return second;
+  // An unavailable sample cannot erase a positive idle-shell refusal (delivery only; see unknownKeepsIdle).
+  if (opts.unknownKeepsIdle !== false) {
+    if (first.state === "idle_shell" && second.state === "unknown") return first;
+    if (second.state === "idle_shell" && first.state === "unknown") return second;
+  }
   if (first.fingerprint && second.fingerprint && first.fingerprint !== second.fingerprint) {
     return { state: "conflict", detail: "The observed foreground process changed during delivery verification" };
   }

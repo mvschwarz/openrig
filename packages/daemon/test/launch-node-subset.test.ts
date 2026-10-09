@@ -23,6 +23,7 @@ function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unk
     capturePaneContent: vi.fn(async () => ""),
     getPaneCommand: vi.fn(async () => null),
     getPanePid: vi.fn(async () => null),
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
     getSessionStatus: vi.fn(async () => null),
     waitForReady: vi.fn(async () => true),
     listSessions: vi.fn(async () => []),
@@ -383,6 +384,30 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(tmux.sendKeys).not.toHaveBeenCalled();
     expect(sessionRegistry.getBindingForNode(nodeIds[0]!)).toEqual(before);
     expect(sessionRegistry.getSessionsForRig(rigId).find(s => s.id === session.id)?.status).toBe("running");
+  });
+
+  it.each(["subset", "single-seat"])("%s launch leaves an agent starting between the two samples running, not told to restart", async (route) => {
+    const { rigId } = seedPreservedShell();
+    const startedAt = "Fri Oct 9 07:00:01 2026";
+    // The first sample is the idle shell; by the second, a foreground wrapper has taken the terminal.
+    listProcesses.mockResolvedValueOnce([...processes]).mockResolvedValue([
+      { ...processes[0]!, tpgid: 12 },
+      { pid: 12, ppid: 10, pgid: 12, tpgid: 12, command: "bash ./start-agent.sh", executableName: "bash", startedAt },
+    ]);
+    const result = route === "subset"
+      ? await orchestrator.launchNodeSubset(rigId, ["dev.driver"])
+      : await orchestrator.launchSingleNode(rigId, "dev.driver");
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(result.launched ?? []).toEqual([]);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("does not read a bound pane that no longer belongs to the session", async () => {
+    const { rigId } = seedPreservedShell();
+    tmux.listPanes.mockResolvedValue([{ id: "%7", index: 0, cwd: "/", width: 80, height: 24, active: true }] as never);
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"]);
+    expect(result.alreadyRunning).toHaveLength(1);
+    expect(listProcesses).not.toHaveBeenCalled();
   });
 
   it("single-seat launch also reports the stopped agent", async () => {
