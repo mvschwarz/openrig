@@ -26,6 +26,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
+import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
 import { execPreflightCommand } from "./adapters/preflight-exec.js";
@@ -480,6 +481,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
+  // The real tmux runs with this process's environment, so its server is the one $TMUX names.
+  // An injected exec has no server of its own: printed attach commands stay in the default form.
+  setDaemonTmuxServer(opts?.tmuxExec ? [] : tmuxServerArgs(process.env));
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;

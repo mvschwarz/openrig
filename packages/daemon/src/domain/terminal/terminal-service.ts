@@ -34,6 +34,7 @@ import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
+import { daemonTmuxServerArgs } from "../../adapters/tmux-server.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
 import type {
@@ -209,7 +210,7 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux() });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() });
     if (resolved.kernelLayout && Number.isSafeInteger(viewportColumns) && viewportColumns! >= 120) {
       // The default's members are operator, dashboard, advisor. Keep the advisor separate
       // even when one of the other roles is unavailable; chunking two at a time would not.
@@ -256,7 +257,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux() })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
