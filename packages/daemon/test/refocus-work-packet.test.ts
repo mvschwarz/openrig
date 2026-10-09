@@ -286,6 +286,26 @@ describe("trace-to-root --packet — the work packet as text", () => {
     expect(out.slice(next)).not.toContain("q-held");
   });
 
+  it("names which of the held and next lists was cut, and keeps the older combined notice", () => {
+    const w = world();
+    const evidence = deriveWorkCandidates([
+      { qitemId: "q-held", state: "blocked", summary: "parked", tags: [], blockedOn: "q-gate" },
+      { qitemId: "q-next", state: "pending", summary: "later", tags: [] },
+    ], w.missions, nothingElse);
+    const trace = (flags: Record<string, boolean>) =>
+      w.trace(["--trees", "work", "--packet", "--work-candidates", "-"], { ...evidence, ...flags }).stdout;
+    const nextCut = trace({ heldTruncated: false, nextTruncated: true, heldAndNextTruncated: true });
+    expect(nextCut).toContain("(the next list was cut; `rig queue list --owned --state pending` has the rest)");
+    expect(nextCut).not.toContain("held list was cut");
+    expect(nextCut).not.toContain("held and next lists were cut");
+    const heldCut = trace({ heldTruncated: true, nextTruncated: false, heldAndNextTruncated: true });
+    expect(heldCut).toContain("(the held list was cut; `rig queue list --owned --state blocked` has the rest)");
+    expect(heldCut).not.toContain("next list was cut");
+    expect(trace({ heldTruncated: false, nextTruncated: false, heldAndNextTruncated: false })).not.toContain("was cut");
+    // A daemon from before the per-list flags sends only the combined one.
+    expect(trace({ heldAndNextTruncated: true })).toContain("(held and next lists were cut; `rig queue list` has the rest)");
+  });
+
   it("carries the seat's job and duties as text, or says the section was not found (W6)", () => {
     const w = world();
     const withSections = w.trace(["--trees", "topology", "--packet", "--topology-start", w.seat]).stdout;
