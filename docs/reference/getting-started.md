@@ -334,14 +334,16 @@ For an explicitly requested manual attachment, inspect the current bindings:
 rig ps --nodes --rig kernel --json
 ```
 
-Find `logicalId: operator.agent` and use its `canonicalSessionName` in a new
+Find `logicalId: operator.agent` and run its `tmuxAttachCommand`, after `env -u TMUX`, in a new
 terminal on the same host and account:
 
 ```sh
-env -u TMUX tmux attach-session -t '=<canonicalSessionName>'
+env -u TMUX <tmuxAttachCommand>
 ```
 
-The installing agent fills in the actual session name. This optional manual route
+When the daemon was started inside tmux on a non-default socket, its sessions live on that
+server, and `tmuxAttachCommand` names it (`tmux -L <name> …` or `tmux -S <path> …`). The installing
+agent fills in the actual command. This optional manual route
 is separate from the first-install desktop action above.
 
 ### Plain terminal: a new viewing session

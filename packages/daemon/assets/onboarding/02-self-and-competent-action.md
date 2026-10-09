@@ -67,9 +67,9 @@ conversation. Explain the failure and help with the chosen fallback; do not atta
 Over headless SSH, explain that no visible terminal opened; tell the person to open a new terminal window or
 tab and give one complete connection and attachment command using the current Herdr endpoint, as in the guide.
 No, SSH and headless use are valid background outcomes. If the person chooses a manual operator attachment after
-a failure, find the `operator.agent` row with `rig ps --nodes --rig kernel --json`. Give the exact
-`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'` with the observed name filled in for a new terminal
-on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
+a failure, find the `operator.agent` row with `rig ps --nodes --rig kernel --json`. Give `env -u TMUX` followed by
+that row's `tmuxAttachCommand`, exactly as listed (it names the daemon's tmux server when that isn't the default
+one), for a new terminal on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
 Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
 `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
