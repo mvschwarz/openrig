@@ -137,7 +137,9 @@ The other provider's CLI/login is optional. Herdr is installed by default unless
 you decline it; cmux remains optional. Do not copy credentials
 or start repeated sign-in attempts. Recheck the selected login after the user
 completes it. `rig setup --dry-run` previews the broader setup; applying
-`rig setup` checks **both** harnesses and installs a missing one with npm; on
+`rig setup` checks **both** harnesses and installs a missing one with npm, unless
+you pass the person's choice: `rig setup --providers claude` (or `codex`) leaves
+the other out, so it reads not selected instead of failed. On
 macOS it uses an existing Homebrew (it does not install Homebrew) to install a
 missing tmux (elsewhere tmux is checked, not installed). Herdr installs on
 macOS and Linux; pass `--no-herdr` to decline it. Setup also
