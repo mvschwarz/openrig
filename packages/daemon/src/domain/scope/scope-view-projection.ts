@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { readSliceReadiness, readProofContract, type ScopeReadiness, type ProofPolicyRead } from "../proof/judgments.js";
 import { createHash } from "node:crypto";
 import { NODE_FILE_PRECEDENCE } from "./node-file.js";
+import { parseMarkdownSections } from "../markdown-address.js";
 
 export interface ScopeFsDeps {
   readBytes?: (path: string) => Uint8Array | null;
@@ -98,13 +99,10 @@ function fmList(fm: string, key: string): string[] {
 
 /** Extract a `## <Heading>` section's body (up to the next `## ` or EOF). */
 function sectionBody(content: string, heading: string): string {
-  const re = new RegExp(`^## ${heading}\\s*$`, "m");
-  const m = re.exec(content);
-  if (!m) return "";
-  const start = m.index + m[0].length;
-  const rest = content.slice(start);
-  const next = /^## /m.exec(rest);
-  return (next ? rest.slice(0, next.index) : rest).trim();
+  const section = parseMarkdownSections(content).find((candidate) => candidate.level === 2 && candidate.title === heading);
+  if (!section) return "";
+  // The shared parser preserves fenced examples within the section span.
+  return section.text.split("\n").slice(1).join("\n").trim();
 }
 
 /** Numbered mini-requirement lines (top-level `N.` items; continuation lines folded in). */
