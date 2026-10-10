@@ -383,6 +383,29 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).toMatchObject({ host: "far", hostUnconfirmed: true });
     });
 
+    it("an unconfirmed --host offers both reads as alternatives, in the footer and in --json, for a create and a handoff's new row", async () => {
+      const local = "rig queue show 'qitem-20261010180000-aaaa' --full --json";
+      const remote = "OPENRIG_URL='<daemon-url of host far>' rig queue show 'qitem-20261010180000-aaaa' --full --json";
+      const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
+      expect(out).toContain(`full row: ${local} if this daemon is host far, otherwise ${remote}, or add --full to the create`);
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
+      expect(json.receipt).toMatchObject({ fullCommand: local, fullCommandOnHost: remote });
+
+      const v = VERBS.find((x) => x.verb === "handoff")!;
+      const newId = ((v.data as Row).created as Row).qitemId as string;
+      const routes = { [v.route]: { status: v.status, data: v.data }, "GET /healthz": { status: 503, data: {} } };
+      logs = [];
+      const plain = await run([...v.argv, "--host", "far"], routes);
+      expect(plain).toContain(`rig queue show 'qitem-20261010180000-aaaa' --full --json · rig queue show '${newId}' --full --json if this daemon is host far, otherwise OPENRIG_URL='<daemon-url of host far>' rig queue show '${newId}' --full --json, or add --full to the handoff`);
+      logs = [];
+      const hj = JSON.parse(await run([...v.argv, "--host", "far", "--json"], routes)) as Row;
+      expect(hj.receipt).toMatchObject({
+        fullCommands: ["rig queue show 'qitem-20261010180000-aaaa' --full --json", `rig queue show '${newId}' --full --json`],
+        createdFullCommandOnHost: `OPENRIG_URL='<daemon-url of host far>' rig queue show '${newId}' --full --json`,
+      });
+    });
+
     it("a same-body --id retry with a recorded result labels it as possibly an earlier wake's, never as this write's", async () => {
       const out = await create(["--id", "qitem-20261010180000-aaaa"], row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" }));
       const wake = out.split("\n").filter((l) => l.includes("wake:"));

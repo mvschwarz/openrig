@@ -215,6 +215,16 @@ function hostNote(ctx: ReceiptContext, what: string): string {
     : `${ctx.remoteHost!} (${what} lives on that daemon)`;
 }
 
+/** The read that returns a row in full. When `--host` locality is unconfirmed the
+ *  row is here or on that host, so both reads are offered as alternatives: the
+ *  local one as the runnable command, the on-host one beside it. */
+function fullRead(id: string, ctx: ReceiptContext, onHost: boolean): { command: string; onHost?: string; phrase: string } {
+  if (!onHost || !ctx.remoteHost) return { command: showCommand(id), phrase: showCommand(id) };
+  if (!ctx.remoteHostUnconfirmed) return { command: showCommand(id, ctx.remoteHost), phrase: showCommand(id, ctx.remoteHost) };
+  const local = showCommand(id), remote = showCommand(id, ctx.remoteHost);
+  return { command: local, onHost: remote, phrase: `${local} if this daemon is host ${ctx.remoteHost}, otherwise ${remote}` };
+}
+
 function footer(omitted: string[], commands: string[], verb: WriteVerb): string {
   const bodies = omitted.filter((p) => p === "body" || p.endsWith(".body")).length;
   const others = omitted.length - bodies;
@@ -233,7 +243,8 @@ export function buildWriteReceipt(body: unknown, ctx: ReceiptContext): WriteRece
     if (!isRow(body.closed) || !isRow(body.created)) return null;
     const closed = rowReceipt(body.closed, ctx, false);
     const created = rowReceipt(body.created, ctx, wakes);
-    const commands = [showCommand(String(body.closed.qitemId)), showCommand(String(body.created.qitemId), ctx.remoteHost)];
+    const reads = [fullRead(String(body.closed.qitemId), ctx, false), fullRead(String(body.created.qitemId), ctx, true)];
+    const commands = reads.map((r) => r.command);
     const extraTop = Object.keys(body).filter((k) => k !== "closed" && k !== "created" && k !== "advisories");
     const omitted = [...closed.omitted.map((p) => `closed.${p}`), ...created.omitted.map((p) => `created.${p}`), ...extraTop];
     const json: Row = {
@@ -241,26 +252,26 @@ export function buildWriteReceipt(body: unknown, ctx: ReceiptContext): WriteRece
       created: created.receipt,
       ...(Array.isArray(body.advisories) ? { advisories: body.advisories } : {}),
       ...(ctx.remoteHost ? { host: ctx.remoteHost, ...(ctx.remoteHostUnconfirmed ? { hostUnconfirmed: true } : {}) } : {}),
-      receipt: { omitted, fullCommands: commands },
+      receipt: { omitted, fullCommands: commands, ...(reads[1]!.onHost ? { createdFullCommandOnHost: reads[1]!.onHost } : {}) },
     };
     const text = [
       ...rowLines("closed", closed.receipt),
       ...rowLines("created", created.receipt),
       ...(ctx.remoteHost ? [`  host: ${hostNote(ctx, "the new row")}`] : []),
       ...(Array.isArray(body.advisories) ? body.advisories.map((a) => `advisory: ${isRow(a) && typeof a.message === "string" ? a.message : JSON.stringify(a)}`) : []),
-      footer(omitted, commands, ctx.verb),
+      footer(omitted, reads.map((r) => r.phrase), ctx.verb),
     ].join("\n");
     return { json, text };
   }
   if (typeof body.qitemId !== "string") return null;
   const one = rowReceipt(body, ctx, wakes);
-  const command = showCommand(body.qitemId, ctx.remoteHost);
+  const read = fullRead(body.qitemId, ctx, true);
   const json: Row = { ...one.receipt, ...(ctx.remoteHost ? { host: ctx.remoteHost, ...(ctx.remoteHostUnconfirmed ? { hostUnconfirmed: true } : {}) } : {}),
-    receipt: { omitted: one.omitted, fullCommand: command } };
+    receipt: { omitted: one.omitted, fullCommand: read.command, ...(read.onHost ? { fullCommandOnHost: read.onHost } : {}) } };
   const text = [
     ...rowLines(PAST[ctx.verb], one.receipt),
     ...(ctx.remoteHost ? [`  host: ${hostNote(ctx, "the row")}`] : []),
-    footer(one.omitted, [command], ctx.verb),
+    footer(one.omitted, [read.phrase], ctx.verb),
   ].join("\n");
   return { json, text };
 }
