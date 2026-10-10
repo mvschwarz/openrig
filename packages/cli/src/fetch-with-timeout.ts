@@ -21,6 +21,14 @@ export async function fetchWithTimeout(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new FetchTimeoutError(options.timeoutMessage)), options.timeoutMs);
   const externalSignal = init.signal;
+  const onExternalAbort = () => {
+    if (!externalSignal) return;
+    controller.abort(
+      externalSignal.reason instanceof Error
+        ? externalSignal.reason
+        : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted."),
+    );
+  };
 
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -30,13 +38,7 @@ export async function fetchWithTimeout(
         : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted.");
     }
 
-    externalSignal.addEventListener("abort", () => {
-      controller.abort(
-        externalSignal.reason instanceof Error
-          ? externalSignal.reason
-          : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted."),
-      );
-    }, { once: true });
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
 
   try {
@@ -53,5 +55,6 @@ export async function fetchWithTimeout(
     throw err;
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }
