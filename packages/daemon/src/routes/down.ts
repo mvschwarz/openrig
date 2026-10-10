@@ -51,7 +51,14 @@ downRoutes.post("/", async (c) => {
     const rigRepo = c.get("rigRepo" as never) as RigRepository;
     const rig = rigRepo.getRig(rigId);
     const rigName = rig?.rig.name ?? null;
-    const isUniqueName = rigName ? rigRepo.findRigsByName(rigName).length === 1 : false;
+    let rigs = rigName ? rigRepo.findRigsByName(rigName) : [];
+    if (rigName && rigs.length > 1) {
+      // An archived rig of the same name counts only when no active one has it
+      const activeRigs = rigRepo.findUnarchivedRigsByName(rigName);
+      if (activeRigs.length > 0) rigs = activeRigs;
+    }
+    // rig up <name> must lead back to this rig
+    const isUniqueName = rigs.length === 1 && rigs[0]!.id === rigId;
     const enriched = { ...result, rigName, isUniqueName };
     return c.json(enriched, 200);
   } catch (err) {

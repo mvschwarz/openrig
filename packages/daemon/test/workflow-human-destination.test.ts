@@ -202,7 +202,7 @@ describe.each(["serial", "dependency"])("workflow registered-human selection at 
       let faultHits = 0;
       const readFault = Object.assign(new Error("fixture capability evidence read failed"), { code: "SQLITE_IOERR" });
       const spy = vi.spyOn(db, "prepare").mockImplementation((sql) => {
-        if (((mode === "read-fault" || mode === "preferred") && sql === "SELECT id FROM rigs WHERE name = ? ORDER BY created_at LIMIT 1")
+        if (((mode === "read-fault" || mode === "preferred") && sql === "SELECT id FROM rigs WHERE name = ? ORDER BY archived_at IS NOT NULL, created_at LIMIT 1")
           || (mode === "binding-read-fault" && sql === "SELECT bound_rig FROM workflow_instances WHERE instance_id = ?")) {
           faultHits += 1;
           throw readFault;
@@ -253,7 +253,7 @@ describe.each(["serial", "dependency"])("workflow registered-human selection at 
     expect(runtime.exceptionReadiness(id)?.routes[0]).toMatchObject({ state: "ready", roleResolution: "no-match", position: "fallback", destinationSession: "owner-one@external" });
     const prepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation(sql => {
-      if (sql === "SELECT id FROM rigs WHERE name = ? ORDER BY created_at LIMIT 1") throw new Error("fixture inventory unavailable");
+      if (sql === "SELECT id FROM rigs WHERE name = ? ORDER BY archived_at IS NOT NULL, created_at LIMIT 1") throw new Error("fixture inventory unavailable");
       return prepare(sql);
     });
     expect(runtime.exceptionReadiness(id)?.routes[0]).toMatchObject({ state: "unavailable", roleResolution: "unavailable", destinationSession: null, message: "fixture inventory unavailable" });

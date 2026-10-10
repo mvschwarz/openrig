@@ -62,12 +62,14 @@ describe("AskService", () => {
   });
 
   it("returns guidance when rig is ambiguous", async () => {
+    const twoRigs = [
+      { id: "rig-1", name: "my-rig", createdAt: "2026-01-01", updatedAt: "2026-01-01" },
+      { id: "rig-2", name: "my-rig", createdAt: "2026-01-02", updatedAt: "2026-01-02" },
+    ];
     const deps = makeDeps({
       rigRepo: {
-        findRigsByName: vi.fn(() => [
-          { id: "rig-1", name: "my-rig", createdAt: "2026-01-01", updatedAt: "2026-01-01" },
-          { id: "rig-2", name: "my-rig", createdAt: "2026-01-02", updatedAt: "2026-01-02" },
-        ]),
+        findRigsByName: vi.fn(() => twoRigs),
+        findUnarchivedRigsByName: vi.fn(() => twoRigs),
       },
     });
     const svc = new AskService(deps);
