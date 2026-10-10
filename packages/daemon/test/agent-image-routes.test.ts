@@ -146,6 +146,30 @@ files: []
     expect(existsSync(join(libRoot, "pinned", ".pinned"))).toBe(false);
   });
 
+  it("preserves a pinned version when another version shares its image name", async () => {
+    for (const version of ["1", "2"]) writeImage(libRoot, `shared-${version}`, `
+name: shared
+version: ${version}
+runtime: claude-code
+source_seat: x
+source_session_id: s
+source_resume_token: t
+files: []
+`);
+    lib.scan();
+    const app = buildApp();
+    const firstId = encodeURIComponent("agent-image:shared:1");
+    expect((await app.request(`/api/agent-images/library/${firstId}/pin`, { method: "POST" })).status).toBe(200);
+    const res = await app.request(`/api/agent-images/library/${firstId}`, { method: "DELETE" });
+    expect(res.status).toBe(409);
+    expect((await res.json() as { reasons: string[] }).reasons).toContain("pinned");
+    expect(existsSync(join(libRoot, "shared-1", "manifest.yaml"))).toBe(true);
+    const secondId = encodeURIComponent("agent-image:shared:2");
+    expect((await app.request(`/api/agent-images/library/${secondId}`, { method: "DELETE" })).status).toBe(200);
+    expect(existsSync(join(libRoot, "shared-2", "manifest.yaml"))).toBe(false);
+    expect(existsSync(join(libRoot, "shared-1", "manifest.yaml"))).toBe(true);
+  });
+
   it("DELETE /library/:id refuses without force when image is referenced", async () => {
     // Create image
     writeImage(libRoot, "referenced", `
