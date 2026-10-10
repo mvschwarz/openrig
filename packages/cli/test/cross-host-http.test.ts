@@ -525,7 +525,21 @@ describe("capture --host (http branch)", () => {
     }));
     await cmd.parseAsync(["--host", "vm-ssh", "dev-impl@my-rig"], { from: "user" });
     expect(h.calls.length).toBe(0); // http client never touched for an ssh host
-    expect(sshCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "20"]);
+    expect(sshCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig"]); // no --lines: the remote's default stays the default
+  });
+
+  it("http host: an explicit --lines N cuts the remote capture to its last N lines, in text and JSON", async () => {
+    const pane = Array.from({ length: 26 }, (_, i) => `row${i + 1}`).join("\n") + "\n";
+    const h = mockClient(() => ({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig", content: pane, lines: 5 } }));
+    await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", "--lines", "5"], { from: "user" });
+    expect(h.calls[0]!.body).toEqual({ lines: 5, session: "dev-impl@my-rig" });
+    expect(captured.stdoutLines).toContain("row22\nrow23\nrow24\nrow25\nrow26\n");
+    expect(captured.stderrLines).toContain("[rig capture: dev-impl@my-rig: 21 earlier lines not shown; last 5 shown]");
+
+    captured.stdoutLines.length = 0;
+    await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", "--lines", "5", "--json"], { from: "user" });
+    const parsed = JSON.parse(captured.stdoutLines[0]!) as Record<string, any>;
+    expect(parsed.result.data).toMatchObject({ lines: 5, requestedLines: 5, omittedLines: 21 });
   });
 });
 
