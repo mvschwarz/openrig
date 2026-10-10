@@ -183,6 +183,7 @@ export class ProgressIndexer {
     const lines = content.split("\n");
     let title: string | null = null;
     let inFrontmatter = false;
+    let fence: { marker: string; length: number } | null = null;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
@@ -194,6 +195,22 @@ export class ProgressIndexer {
         if (line.trim() === "---") inFrontmatter = false;
         continue;
       }
+
+      // Example checkboxes/headings are code, not work. Match the same fence
+      // rules as Markdown section addressing, including longer closing runs.
+      const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (fenceMatch) {
+        const marker = fenceMatch[1]![0]!;
+        const length = fenceMatch[1]!.length;
+        const tail = fenceMatch[2]!;
+        if (fence) {
+          if (marker === fence.marker && length >= fence.length && /^[ \t\r]*$/.test(tail)) fence = null;
+        } else if (marker !== "`" || !tail.includes("`")) {
+          fence = { marker, length };
+        }
+        continue;
+      }
+      if (fence) continue;
 
       // First H1 → title (if frontmatter didn't supply one).
       if (!title) {
