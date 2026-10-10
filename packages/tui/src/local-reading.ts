@@ -50,10 +50,10 @@ export class LocalReadingController {
     }
     if (key === "r") { await this.load(); return true; }
     if (["up", "down", "pageup", "pagedown"].includes(key) || key.startsWith("select:")) {
-      const delta = key.includes("up") ? -1 : 1;
+      const delta = (key.includes("up") ? -1 : 1) * (key.startsWith("page") ? 10 : 1);
       if (s.result.entries) s.selected = Math.max(0, Math.min(s.result.entries.length - 1,
         key.startsWith("select:") ? Number(key.slice(7)) : s.selected + delta));
-      else s.scroll = Math.max(0, s.scroll + delta * (key.startsWith("page") ? 10 : 1));
+      else s.scroll = Math.max(0, s.scroll + delta);
       this.changed(); return true;
     }
     if (key === "enter" && !s.busy) {
