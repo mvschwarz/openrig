@@ -15,7 +15,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, probeSessionActivity, promptTextIsFaint, SessionTransport } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -1833,5 +1833,57 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:12Z") });
     await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
     expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
+  });
+});
+
+// Claude renders its prompt suggestion faint (SGR 2) in the composer. The shape follows a real Claude
+// 2.1.282 capture: `❯` and a no-break space, then the faint text. A plain capture drops the styling.
+describe("a Claude prompt suggestion is not a person's draft", () => {
+  const BORDER = "─".repeat(60);
+  const SUGGESTION = "yes run the tests and open the PR";
+  const plainPrompt = `❯\u00a0${SUGGESTION}`;
+  const faintPrompt = `\x1b[39m❯\u00a0\x1b[2m${SUGGESTION}\x1b[0m`;
+  // The observed layout: a framed composer, a blank row, then the mode bar.
+  const framedLayout = (prompt: string) => ["● Done.", "", "✻ Baked for 1m 18s", "", `${"─".repeat(40)} dev-build@starter ─`, prompt, BORDER, "",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)", ""].join("\n");
+  // A warning row under the mode bar, as when Claude can't auto-update into a read-only npm prefix.
+  const warningLayout = (prompt: string) => ["● Ready.", "", "✻ Crunched for 2s", "", BORDER, prompt, BORDER,
+    "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents", "  ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor", ""].join("\n");
+  // An unframed prompt directly above the mode bar.
+  const unframedLayout = (prompt: string) => ["● Ready.", "", prompt, "  ⏵⏵ accept edits on (shift+tab to cycle)", ""].join("\n");
+
+  it("from a plain capture: the framed layout reads idle; the warning-row and unframed layouts read a suggestion as a draft", () => {
+    expect(classifyPaneActivity(framedLayout(plainPrompt))).toMatchObject({ state: "agent_idle" });
+    expect(classifyPaneActivity(warningLayout(plainPrompt))).toMatchObject({ state: "attention", reason: "prompt_draft" });
+    expect(classifyPaneActivity(unframedLayout(plainPrompt))).toMatchObject({ state: "attention", reason: "prompt_draft" });
+  });
+
+  it("promptTextIsFaint is true only when all the prompt line's text is faint", () => {
+    expect(promptTextIsFaint(framedLayout(faintPrompt))).toBe(true);
+    expect(promptTextIsFaint(framedLayout(plainPrompt))).toBe(false); // no styling never proves faint
+    expect(promptTextIsFaint(framedLayout("❯\u00a0owned\x1b[2m ghost suffix\x1b[22m"))).toBe(false); // typed text plus a suggestion
+    expect(promptTextIsFaint(framedLayout(`❯\u00a0\x1b[38;5;2m${SUGGESTION}\x1b[39m`))).toBe(false); // a color value of 2 isn't faint
+    expect(promptTextIsFaint(framedLayout("❯\u00a0"))).toBe(false); // an empty composer has no text to judge
+  });
+
+  it.each([["warning-row", warningLayout], ["unframed", unframedLayout]] as const)(
+    "the %s layout: a faint suggestion reads idle, typed text still needs input", async (_label, layout) => {
+      const probe = (styledPrompt: string) => probeSessionActivity({
+        sessionName: "dev-build@starter", runtime: "claude-code", attachmentType: "tmux",
+        tmuxAdapter: mockTmux({ capturePaneContent: async (_pane: string, _lines?: number, opts?: { escapeSequences?: boolean }) =>
+          layout(opts?.escapeSequences ? styledPrompt : plainPrompt) }),
+      });
+      expect(await probe(faintPrompt)).toMatchObject({ state: "idle" });
+      expect(await probe(plainPrompt)).toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    });
+
+  it("only a Claude seat gets the styled check", async () => {
+    const captures: Array<boolean> = [];
+    await probeSessionActivity({
+      sessionName: "dev-build@starter", runtime: "codex", attachmentType: "tmux",
+      tmuxAdapter: mockTmux({ capturePaneContent: async (_pane: string, _lines?: number, opts?: { escapeSequences?: boolean }) => {
+        captures.push(opts?.escapeSequences === true); return unframedLayout(plainPrompt); } }),
+    });
+    expect(captures).toEqual([false]);
   });
 });

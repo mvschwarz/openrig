@@ -232,6 +232,49 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
+/** Whether the last prompt line's text is all faint (SGR 2), the way Claude renders its prompt
+ *  suggestion. Needs a capture with escape sequences: a plain capture never proves faint. Color
+ *  parameters (38/48/58 with 5;n or 2;r;g;b) are skipped, so a color value of 2 isn't read as faint. */
+export function promptTextIsFaint(styledPane: string): boolean {
+  let faint = false;
+  let lastPrompt: boolean | null = null;
+  for (const raw of styledPane.replace(/\r\n/g, "\n").split("\n")) {
+    const cells: Array<{ ch: string; faint: boolean }> = [];
+    const append = (text: string) => { for (const ch of text) cells.push({ ch, faint }); };
+    let offset = 0;
+    for (const match of raw.matchAll(/\x1b\[([0-9;:]*)m/g)) {
+      append(raw.slice(offset, match.index));
+      offset = match.index! + match[0].length;
+      const codes = match[1]!.split(";");
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i]!;
+        if (code === "38" || code === "48" || code === "58") { i += codes[i + 1] === "5" ? 2 : codes[i + 1] === "2" ? 4 : 0; continue; }
+        if (code === "2") faint = true;
+        else if (code === "" || code === "0" || code === "22") faint = false;
+      }
+    }
+    append(raw.slice(offset));
+    let start = 0;
+    while (start < cells.length && /\s/.test(cells[start]!.ch)) start++;
+    if (cells[start]?.ch !== "❯" && cells[start]?.ch !== "›") continue;
+    let text = start + 1;
+    while (text < cells.length && /\s/.test(cells[text]!.ch)) text++;
+    const visible = cells.slice(text).filter((cell) => !/\s/.test(cell.ch));
+    if (text > start + 1 && visible.length > 0) lastPrompt = visible.every((cell) => cell.faint);
+  }
+  return lastPrompt === true;
+}
+
+/** The capture with the last prompt line's text removed, leaving an empty composer. */
+function withEmptyComposer(paneContent: string): string {
+  const lines = paneContent.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const prompt = /^(\s*[❯›])\s+\S/.exec(lines[i]!);
+    if (prompt) { lines[i] = prompt[1]!; break; }
+  }
+  return lines.join("\n");
+}
+
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
@@ -489,7 +532,14 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "", { timerlessStatusIsLive: input.timerlessStatusIsLive === true });
+    const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
+    let classification = classifyPaneActivity(paneContent ?? "", classifyOptions);
+    // Claude renders its prompt suggestion faint, which the plain capture loses. Faint-only composer
+    // text is a display hint, not a person's draft, so it doesn't block a send. Typed text never is.
+    if (classification.reason === "prompt_draft" && runtime === "claude-code" && paneContent) {
+      const styled = await tmuxAdapter.capturePaneContent(sessionName, 20, { escapeSequences: true }).catch(() => null);
+      if (styled && promptTextIsFaint(styled)) classification = classifyPaneActivity(withEmptyComposer(paneContent), classifyOptions);
+    }
     return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
