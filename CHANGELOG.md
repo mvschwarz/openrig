@@ -963,6 +963,11 @@ And to the people whose reports shaped it: [@m3ac-AllbrittenJ](https://github.co
 
 ## [0.6.3]
 
+- Recognize running managed agy (Antigravity) seats behind OpenRig's staged
+  launch script, so `rig send` no longer refuses them with `sh` as the
+  foreground command. The proof mirrors Codex: one `agy` executable in the
+  pane's foreground process group and lineage, stable across two samples; an
+  agy launched with `--conversation` must match the expected token.
 - Recognize running managed Claude Code seats behind OpenRig's shell wrappers
   using pane lineage, foreground process and native session identity checks.
   This repairs the 0.6.2 messaging refusal reported by

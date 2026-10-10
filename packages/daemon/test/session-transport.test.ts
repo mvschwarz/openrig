@@ -18,6 +18,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
@@ -338,6 +339,7 @@ describe("SessionTransport", () => {
     sleep?: (ms: number) => Promise<void>;
     waitForIdlePollMs?: number;
     now?: () => Date;
+    listProcesses?: () => NativeProcessRow[];
   }) {
     return new SessionTransport({
       db,
@@ -433,6 +435,78 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("session_missing");
     expect(result.error).toContain("not found");
     expect(result.error).toContain("rig ps");
+  });
+
+  // The Enter can be lost while the Claude TUI ingests the paste: tmux accepts the key, the text
+  // stays typed in the input box. The send confirms consumption and presses one guarded Enter.
+  describe("submit confirmation after the first Enter", () => {
+    const MSG = "From: dev-check@my-rig\nTo: dev-impl@my-rig\n---\nQueue handoff: check your queue.";
+
+    function stagedPaneTmux(paneAfterFirstEnter: string, keys: string[]) {
+      let typed = false;
+      return mockTmux({
+        sendText: async () => { typed = true; return { ok: true }; },
+        sendKeys: async (_t, k) => { keys.push(k.join(",")); return { ok: true }; },
+        capturePaneContent: async () => (typed ? paneAfterFirstEnter : "❯ \n"),
+      });
+    }
+
+    it("presses one more Enter when the sent text is still staged in the input box", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const staged = `Brewed for 1m\n\n❯ ${MSG.replace(/\n/g, "\n  ")}\n─────────────────────────\n  ⏵⏵ bypass permissions on`;
+      const transport = createTransport(stagedPaneTmux(staged, keys), { sleep: async () => {} });
+
+      const result = await transport.send("dev-impl@my-rig", MSG);
+
+      expect(result.ok).toBe(true);
+      expect(keys).toEqual(["Enter", "Enter"]);
+    });
+
+    it("presses Enter on a later check when a large paste only finishes rendering after the first one", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const sleeps: number[] = [];
+      let typed = false;
+      let captures = 0;
+      const staged = `Brewed for 1m\n\n❯ ${MSG.replace(/\n/g, "\n  ")}\n─────────────────────────\n  ⏵⏵ bypass permissions on`;
+      const tmux = mockTmux({
+        sendText: async () => { typed = true; return { ok: true }; },
+        sendKeys: async (_t, k) => { keys.push(k.join(",")); return { ok: true }; },
+        // first check after the send: composer still rendering (empty); the second sees the staged text
+        capturePaneContent: async () => (typed && ++captures >= 2 ? staged : "❯ \n"),
+      });
+      const transport = createTransport(tmux, { sleep: async (ms) => { sleeps.push(ms); } });
+
+      const result = await transport.send("dev-impl@my-rig", MSG);
+
+      expect(result.ok).toBe(true);
+      expect(keys).toEqual(["Enter", "Enter"]);
+      expect(sleeps).toContain(1500);
+    });
+
+    it("sends no extra key when the Enter was consumed (input box empty, text only in history)", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const consumed = `❯ ${MSG.replace(/\n/g, "\n  ")}\n\n✻ Thinking…\n\n❯ \n─────────────────────────\n  ⏵⏵ bypass permissions on`;
+      const transport = createTransport(stagedPaneTmux(consumed, keys), { sleep: async () => {} });
+
+      const result = await transport.send("dev-impl@my-rig", MSG);
+
+      expect(result.ok).toBe(true);
+      expect(keys).toEqual(["Enter"]);
+    });
+
+    it("never presses Enter onto a permission prompt", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const prompt = "Authorize the release?\n\n❯ 1. Authorize publish\n  2. Roll back\n";
+      const transport = createTransport(stagedPaneTmux(prompt, keys), { sleep: async () => {} });
+
+      await transport.send("dev-impl@my-rig", MSG);
+
+      expect(keys).toEqual(["Enter"]);
+    });
   });
 
   // Test 5: send where sendKeys Enter fails returns "text visible but not submitted"
@@ -623,7 +697,8 @@ describe("SessionTransport", () => {
     expect(result.attempts).toBe(2);
     expect(result.activity?.state).toBe("idle");
     expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
-    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
+    // trailing capture: the post-Enter staged-text confirmation
+    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys", "capture"]);
   });
 
   it("send with wait-for-idle waits through current Claude thinking evidence and sends after idle", async () => {
@@ -677,7 +752,8 @@ describe("SessionTransport", () => {
     expect(result.attempts).toBe(2);
     expect(result.activity?.state).toBe("idle");
     expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
-    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
+    // trailing capture: the post-Enter staged-text confirmation
+    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys", "capture"]);
   });
 
   it.each([0, 5])("send with wait-for-idle times out on running activity without sending text (capture cost %ims)", async (captureCostMs) => {
@@ -1646,6 +1722,43 @@ describe("SessionTransport", () => {
     expect(result.ok).toBe(true);
     expect(result.warning).toContain("mid-task");
     expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  describe("agy foreground proof", () => {
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const agyTree = (): NativeProcessRow[] => [
+      { pid: 30, ppid: 1, pgid: 30, tpgid: 31, executableName: "bash", command: "-bash", startedAt },
+      { pid: 31, ppid: 30, pgid: 31, tpgid: 31, executableName: "sh", command: "/bin/sh /tmp/openrig-tmux-send-abc.txt", startedAt },
+      { pid: 32, ppid: 31, pgid: 31, tpgid: 31, executableName: "agy", command: "/usr/local/bin/agy --dangerously-skip-permissions --model claude-sonnet-5-5", startedAt },
+    ];
+    async function sendToAgy(rows: NativeProcessRow[]) {
+      const rig = rigRepo.createRig("agy-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "agy" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@agy-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@agy-rig", tmuxPane: "%3" });
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = { ...mockTmux({ getPaneCommand: async () => "sh", sendText: sendTextSpy }), getPanePid: async () => 30 } as unknown as TmuxAdapter;
+      const result = await createTransport(tmux, { listProcesses: () => rows }).send("dev-impl@agy-rig", "hello");
+      return { result, sendTextSpy };
+    }
+
+    it("delivers when tmux reports sh but the agy owns the pane foreground", async () => {
+      const { result, sendTextSpy } = await sendToAgy(agyTree());
+      expect(result.reason).not.toBe("target_runtime_unverified");
+      expect(sendTextSpy).toHaveBeenCalled();
+    });
+    it.each([
+      ["a bare idle shell", (r: NativeProcessRow[]) => [{ ...r[0]!, tpgid: 30 }]],
+      ["two agy candidates", (r: NativeProcessRow[]) => [...r, { ...r[2]!, pid: 33 }]],
+      ["an agy that is not a pane descendant", (r: NativeProcessRow[]) => r.map(x => x.pid === 32 ? { ...x, ppid: 999 } : x)],
+      ["an agy in a different process group", (r: NativeProcessRow[]) => r.map(x => x.pid === 32 ? { ...x, pgid: 99 } : x)],
+    ])("refuses with target_runtime_unverified for %s and sends nothing", async (_name, mutate) => {
+      const { result, sendTextSpy } = await sendToAgy(mutate(agyTree()));
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("target_runtime_unverified");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    });
   });
 
   // Test 9: an UNEXPECTED probe throw (the fail-closed class — not the

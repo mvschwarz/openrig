@@ -16,6 +16,7 @@ import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
+import type { AgyResumeAdapter } from "../adapters/agy-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { verifyClaudePaneProcess } from "./native-process-lineage.js";
@@ -143,6 +144,7 @@ interface RestoreOrchestratorDeps {
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
   ompResume?: OmpResumeAdapter;
+  agyResume?: AgyResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -162,6 +164,7 @@ export class RestoreOrchestrator {
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
   private ompResume: OmpResumeAdapter | null;
+  private agyResume: AgyResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
@@ -202,6 +205,7 @@ export class RestoreOrchestrator {
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
     this.ompResume = deps.ompResume ?? null;
+    this.agyResume = deps.agyResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
@@ -1492,7 +1496,9 @@ export class RestoreOrchestrator {
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
-        : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
+        : this.codexResume.canResume(resumeType, resumeToken) ? "codex"
+        : this.agyResume?.canResume(resumeType, resumeToken) ? "agy"
+        : "pi";
       const override = new NativePermissionStore(this.db).launchOverride(nodeId, runtime);
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
@@ -1535,6 +1541,23 @@ export class RestoreOrchestrator {
       // Recoverable — operator runs `codex login` and the seat continues.
       // Per-node mapping at lines 725-735 emits `status: "attention_required"`
       // with `attentionEvidence` for both runtimes; no further wiring needed.
+      if (result.code === "attention_required") {
+        return {
+          kind: "attention_required",
+          message: result.message,
+          evidence: (result as { evidence?: string }).evidence,
+        };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
+    if (this.agyResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.agyResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture === "auto" ? "floor" : resolvedPosture);
+      if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       if (result.code === "attention_required") {
         return {
           kind: "attention_required",

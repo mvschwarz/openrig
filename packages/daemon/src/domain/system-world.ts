@@ -24,7 +24,7 @@ const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
 
 export interface SystemWorldContextSelection {
   ref: string;
-  profiles?: { claude?: string; codex?: string };
+  profiles?: { claude?: string; codex?: string; agy?: string };
 }
 
 export interface SystemWorldManifest {
@@ -83,10 +83,11 @@ export function parseContextSelection(entry: unknown, label: string): SystemWorl
   const profiles = entry["profiles"];
   if (profiles === undefined) return { ref };
   if (!isRecord(profiles)) throw new Error(`${label}.profiles must be an object`);
-  assertOnlyKeys(profiles, ["claude", "codex"], `${label}.profiles`);
-  const parsed: { claude?: string; codex?: string } = {};
+  assertOnlyKeys(profiles, ["claude", "codex", "agy"], `${label}.profiles`);
+  const parsed: { claude?: string; codex?: string; agy?: string } = {};
   if (profiles["claude"] !== undefined) parsed.claude = boundedId(profiles["claude"], `${label}.profiles.claude`);
   if (profiles["codex"] !== undefined) parsed.codex = boundedId(profiles["codex"], `${label}.profiles.codex`);
+  if (profiles["agy"] !== undefined) parsed.agy = boundedId(profiles["agy"], `${label}.profiles.agy`);
   return { ref, profiles: parsed };
 }
 

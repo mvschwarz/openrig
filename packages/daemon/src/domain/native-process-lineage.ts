@@ -18,7 +18,7 @@ export interface NativeProcessRow {
   startedAt?: string;
 }
 
-export type NativeRuntime = "claude-code" | "codex";
+export type NativeRuntime = "claude-code" | "codex" | "agy";
 
 function tokens(command: string): string[] {
   // ps flattens argv: inline settings JSON retains its string delimiters.
@@ -154,6 +154,16 @@ function codexResumeToken(args: string[]): string | null | undefined {
   return null;
 }
 
+// agy names its conversation with --conversation <id>; undefined is a launch without one.
+function agyConversationToken(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--conversation") return args[index + 1];
+    if (arg.startsWith("--conversation=")) return arg.slice("--conversation=".length);
+  }
+  return undefined;
+}
+
 // Managed fresh/resume launches name the current Claude identity explicitly.
 // A fork's --resume names its parent, so it cannot prove the new occupant.
 function claudeSessionToken(args: string[]): string | null {
@@ -277,7 +287,7 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
   const root = byPid.get(panePid);
   if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return [];
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
-  const executable = runtime === "claude-code" ? "claude" : "codex";
+  const executable = runtime === "claude-code" ? "claude" : runtime;
   for (const row of rows) {
     const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
     if ((runtime === "claude-code" ? !claudeProcess(row, selectedExecutable)
@@ -304,6 +314,10 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   const { process } = observation;
   if (runtime === "claude-code") {
     if (!expectedToken || claudeSessionToken(tokens(process.command).slice(1)) !== expectedToken) return null;
+  } else if (runtime === "agy") {
+    // An agy without --conversation verifies as the only candidate; one that names a conversation must match the expected token.
+    const conversation = agyConversationToken(tokens(process.command).slice(1));
+    if (conversation !== undefined && expectedToken && conversation !== expectedToken) return null;
   } else {
     const resumeToken = codexResumeToken(tokens(process.command).slice(1));
     if (requireResume && !expectedToken) return null;
@@ -338,6 +352,17 @@ export async function verifyCodexPaneProcess(input: Parameters<typeof observeCod
   const first = await observeCodexPaneProcess(input);
   if (!first) return null;
   const second = await observeCodexPaneProcess(input);
+  return second?.fingerprint === first.fingerprint ? second : null;
+}
+
+export async function observeAgyPaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  return observeNativePaneProcess(input, "agy");
+}
+
+export async function verifyAgyPaneProcess(input: Parameters<typeof observeAgyPaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  const first = await observeAgyPaneProcess(input);
+  if (!first) return null;
+  const second = await observeAgyPaneProcess(input);
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 

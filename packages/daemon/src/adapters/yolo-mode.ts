@@ -81,6 +81,14 @@ export function piTrust(
   return yoloEnabled(env, resolvedPosture) ? "approve" : configured ?? "no-approve";
 }
 
+/** Antigravity launch posture flag: --dangerously-skip-permissions under YOLO or full_bypass. */
+export function agyPostureFlag(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): string {
+  return yoloEnabled(env, resolvedPosture) ? " --dangerously-skip-permissions" : "";
+}
+
 /**
  * OPR.0.5.3.1 — Claude classic-renderer launch env prefix.
  *

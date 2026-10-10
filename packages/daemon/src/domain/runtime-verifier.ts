@@ -81,7 +81,7 @@ export class RuntimeVerifier {
     return result;
   }
 
-  /** OPR.0.4.6.PI1 FR-1 — Verify Pi: `pi --version` (fallback `pi --help`)
+  /** Verify Pi: `pi --version` (fallback `pi --help`)
    *  plus the Node engine floor Pi requires (>= 22.19.0). Provider/model
    *  resolvability is member-scoped and verified at launch, not here. */
   async verifyPi(): Promise<RuntimeVerification> {
@@ -114,9 +114,16 @@ export class RuntimeVerifier {
     return result;
   }
 
+  /** Verify Antigravity CLI: `agy --version`, fallback to `agy --help`. */
+  async verifyAgy(): Promise<RuntimeVerification> {
+    const result = await this.verifyVersionOrHelp("agy", "agy");
+    this.persist(result);
+    return result;
+  }
+
   /**
    * Verify multiple runtimes. Returns results in input order.
-   * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex', 'pi', 'omp'
+   * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex', 'pi', 'omp', 'agy'
    */
   async verifyAll(runtimes: string[]): Promise<RuntimeVerification[]> {
     const results: RuntimeVerification[] = [];
@@ -128,6 +135,7 @@ export class RuntimeVerifier {
         case "codex": results.push(await this.verifyCodex()); break;
         case "pi": results.push(await this.verifyPi()); break;
         case "omp": results.push(await this.verifyOmp()); break;
+        case "agy": results.push(await this.verifyAgy()); break;
         default: {
           const v = this.buildVerification(runtime, "not_found", null, null, `unknown runtime: ${runtime}`);
           this.persist(v);

@@ -106,6 +106,17 @@ describe("RuntimeVerifier", () => {
     expect(result.runtime).toBe("codex");
   });
 
+  it("agy --version succeeds -> verified", async () => {
+    const exec = createMockExec({ "agy --version": "Antigravity CLI v1.2.14" });
+    const verifier = new RuntimeVerifier({ exec, db });
+
+    const result = await verifier.verifyAgy();
+
+    expect(result.status).toBe("verified");
+    expect(result.version).toBe("1.2.14");
+    expect(result.runtime).toBe("agy");
+  });
+
   // T7: verifyTmux auto-persists to DB
   it("verification auto-persists to runtime_verifications table", async () => {
     const exec = createMockExec({ "tmux -V": "tmux 3.4" });

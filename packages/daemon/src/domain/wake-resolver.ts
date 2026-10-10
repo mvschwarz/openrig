@@ -29,7 +29,7 @@ export interface KnownTenure {
 }
 
 export type WakeResolution =
-  | { resolved: true; token: string; runtime: "claude" | "codex"; sessionId: number }
+  | { resolved: true; token: string; runtime: "claude" | "codex" | "agy"; sessionId: number }
   | { resolved: false; reason: string; known: KnownTenure[] };
 
 /**
@@ -69,6 +69,6 @@ export function resolveWakeTarget(rows: WakeSessionRow[], input: WakeResolveInpu
     };
   }
 
-  const runtime: "claude" | "codex" = row.runtime === "codex" ? "codex" : "claude";
+  const runtime: "claude" | "codex" | "agy" = row.runtime === "codex" ? "codex" : row.runtime === "agy" ? "agy" : "claude";
   return { resolved: true, token: row.resumeToken, runtime, sessionId: row.id };
 }

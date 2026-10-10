@@ -13,7 +13,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeDelivery, verifyAgyPaneProcess, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -1587,6 +1587,32 @@ export class SessionTransport {
       });
     }
 
+    // 5b. Confirm the Enter was consumed. The fixed gap between paste and Enter can lose the Enter
+    // while the Claude TUI is still ingesting the paste or redrawing (a turn ending): tmux accepts
+    // the key, yet the text stays typed in the input box, never submitted. Reuse the guarded
+    // submit-only path once. It presses Enter only when the pane's current input holds this exact
+    // text and refuses without sending a key otherwise, so a consumed send costs one capture.
+    if (runtime === "claude-code" && !opts?.dangerouslyInteract) {
+      // A large multi-line paste can take the TUI longer than one beat to render, so the staged
+      // text may not be visible yet at the first check: look once more later. A check that
+      // finds nothing staged presses nothing, so a later check cannot double-submit.
+      const checkDelaysMs = text.includes("\n") ? [500, 1500] : [500];
+      for (const delayMs of checkDelaysMs) {
+        await this.sleep(delayMs);
+        try {
+          const confirm = await this.send(sessionName, "", {
+            submitOnly: true,
+            expectedStagedText: text,
+            expectedStagedLineCount: text.split("\n").length,
+            actorSession: opts?.actorSession,
+          });
+          if (confirm.ok || confirm.reason !== "staged_mismatch") break;
+        } catch {
+          // Best effort: the original send already succeeded; never fail it over the confirmation.
+          break;
+        }
+      }
+    }
     const interaction = promptOverride ? { promptInteraction: "enter-sent" as const } : {};
 
     // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
@@ -1771,11 +1797,12 @@ export class SessionTransport {
       return null;
     }
     if (!paneCommand || !isShellForeground(paneCommand)) return null;
-    if (runtime === "codex" && pane) {
-      // Reuse stable, foreground, pane-descendant Codex proof. A resumed process
-      // must name this session's token. Stale UI, a Node
+    if ((runtime === "codex" || runtime === "agy") && pane) {
+      // Reuse stable, foreground, pane-descendant native proof (agy sits behind a staged sh script).
+      // A resumed Codex process must name this session's token. Stale UI, a Node
       // launcher alone, missing observations or a native process elsewhere cannot clear it.
-      const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
+      const verify = runtime === "agy" ? verifyAgyPaneProcess : verifyCodexPaneProcess;
+      const native = await verify({ target: sessionName, tmux: this.tmuxAdapter,
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }

@@ -46,15 +46,17 @@ export function classifyPaneRuntimeMatch(
 ): "match" | "mismatch" {
   if (!command) return "match"; // no signal — never false-mismatch a present pane
   const cmd = command.trim().toLowerCase();
-  const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex";
+  const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex" || expectedRuntime === "agy";
 
   // Positive same-runtime signal.
   if (expectedRuntime === "claude-code" && cmd.includes("claude")) return "match";
   if (expectedRuntime === "codex" && cmd.includes("codex")) return "match";
+  if (expectedRuntime === "agy" && (cmd.includes("agy") || cmd.includes("antigravity"))) return "match";
 
   // Cross-runtime contradiction (a DIFFERENT agent occupies the pane).
-  if (expectedRuntime === "claude-code" && cmd.includes("codex")) return "mismatch";
-  if (expectedRuntime === "codex" && cmd.includes("claude")) return "mismatch";
+  if (expectedRuntime === "claude-code" && (cmd.includes("codex") || cmd.includes("agy"))) return "mismatch";
+  if (expectedRuntime === "codex" && (cmd.includes("claude") || cmd.includes("agy"))) return "mismatch";
+  if (expectedRuntime === "agy" && (cmd.includes("claude") || cmd.includes("codex"))) return "mismatch";
 
   // A bare shell where an agent runtime was expected — the agent process is
   // gone or an orphan/squat shell occupies the pane.
