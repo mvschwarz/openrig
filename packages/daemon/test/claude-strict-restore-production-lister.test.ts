@@ -149,4 +149,23 @@ describe("strict restore reads full process rows from the production lister", ()
       { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude mcp serve" },
     ])).toMatchObject({ ok: true, observedPid: 100 });
   });
+
+  // Round 8: a Node-hosted Claude started with Node's own options before the script.
+  it.each([
+    "node --inspect /usr/local/bin/claude --resume review-token",
+    "node -r ./x.js /usr/local/bin/claude --resume review-token",
+    "node --max-old-space-size=8192 -- /usr/local/bin/claude --resume review-token",
+  ])("a Node-hosted Claude parent with Node options (%s) over a witnessed child on another conversation keeps main's proof", async (command) => {
+    expect(await strictRestore([
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "node", command },
+      { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
+    ])).toMatchObject({ ok: true, observedPid: 100 });
+  });
+  it("a Node process that runs no script file (-e) is not a runtime parent", async () => {
+    expect(await strictRestore([
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "node", command: "node -e run() /usr/local/bin/claude --resume review-token" },
+      { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
+    ])).toMatchObject({ ok: false });
+  });
 });
+
