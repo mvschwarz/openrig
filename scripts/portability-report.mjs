@@ -19,8 +19,9 @@
 //   add --locations-only to list file and line without quoting the matched text (for public CI output)
 
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const CHECKS = [
   {
@@ -163,7 +164,13 @@ export function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (import.meta.url === `file://${resolve(process.argv[1])}`) {
+function invokedDirectly() {
+  try {
+    return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+  } catch { return false; }
+}
+
+if (invokedDirectly()) {
   try {
     process.exitCode = main();
   } catch (error) {
