@@ -1834,4 +1834,62 @@ describe("SessionTransport", () => {
     await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
     expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
   });
+
+  // A terminal seat's shell runs every typed line, so it gets the exact text, never the envelope.
+  function seedTerminalSeat() {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.ui", { role: "ui", runtime: "terminal" });
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@term-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig" });
+  }
+  const HEREDOC = "cat <<'EOF'\nSent: as typed\nEOF";
+
+  it("send to a terminal seat types exactText exactly, with no envelope and no delivered segment", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    // The write moment is 30s after the compose stamp: an enveloped send would gain "delivered +30s".
+    const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:39Z") });
+
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC, stampISO: "2026-08-06T17:42:09Z" });
+
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
+  it("send to an agent seat ignores exactText and keeps the envelope", async () => {
+    seedCanonicalRig();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+
+    const result = await transport.send("dev-impl@my-rig", H_ENVELOPE, { exactText: "hi" });
+
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBeUndefined();
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it("enveloped fan-out to a terminal seat and an agent seat gives each the right text", async () => {
+    seedCanonicalRig(); // dev-impl@my-rig, claude-code
+    seedTerminalSeat(); // infra-ui@term-rig, terminal
+    const sent = new Map<string, string>();
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (target, text) => { sent.set(target, text); return { ok: true }; } });
+    const transport = createTransport(tmux);
+
+    const result = await transport.broadcast(
+      { sessions: ["dev-impl@my-rig", "infra-ui@term-rig"] },
+      "make test",
+      { envelopeSender: "orch@my-rig", stampISO: "2026-08-06T17:42:09Z" },
+    );
+
+    expect(result.sent).toBe(2);
+    expect(sent.get("infra-ui@term-rig")).toBe("make test");
+    expect(sent.get("dev-impl@my-rig")).toContain("From: orch@my-rig");
+    expect(sent.get("dev-impl@my-rig")).toContain("make test");
+    const byName = new Map(result.results.map((r) => [r.sessionName, r]));
+    expect(byName.get("infra-ui@term-rig")?.envelopeOmitted).toBe(true);
+    expect(byName.get("dev-impl@my-rig")?.envelopeOmitted).toBeUndefined();
+  });
 });

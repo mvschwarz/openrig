@@ -206,6 +206,7 @@ describe("send --host (http branch)", () => {
     expect(body.session).toBe("dev-impl@my-rig"); // BR-1: never member@rig@host
     expect(String(body.text)).toContain("To: dev-impl@my-rig");
     expect(String(body.text)).toContain("hello");
+    expect(body.exactText).toBe("hello"); // the remote daemon types this if the seat is a terminal
     expect(call.options?.headers?.Authorization).toBe("Bearer test-token");
     expect(captured.stdoutLines).toContain("[via host=vps-b (http://vps-b:7433)]");
     expect(captured.stdoutLines).toContain("Sent to dev-impl@my-rig");

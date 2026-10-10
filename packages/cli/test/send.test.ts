@@ -211,6 +211,47 @@ describe("Send CLI", () => {
     expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
   });
 
+  it("a terminal seat: sends exactText beside the envelope, prints the note, and --verify checks the exact text", async () => {
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let captures = 0;
+    const client = {
+      post: async (path: string, body: Record<string, unknown>) => {
+        posts.push({ path, body });
+        if (path === "/api/transport/capture") {
+          captures += 1;
+          return { status: 200, data: { ok: true, content: captures === 1 ? "❯ make test" : "❯ " } };
+        }
+        if (body["submitOnly"]) return { status: 200, data: { ok: true, submitOnly: true } };
+        return { status: 200, data: { ok: true, sessionName: "infra-ui@term-rig", verified: true, outcome: "delivered", envelopeOmitted: true } };
+      },
+    } as unknown as DaemonClient;
+
+    const { logs } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "infra-ui@term-rig", "make test", "--verify",
+      ]);
+    });
+
+    const sends = posts.filter((p) => p.path === "/api/transport/send");
+    // An older daemon ignores exactText and still types the enveloped text.
+    expect(sends[0]!.body["text"]).toContain("From: sender@my-rig");
+    expect(sends[0]!.body["exactText"]).toBe("make test");
+    // The staged check and its one guarded Enter look for what the terminal seat was given.
+    const submit = sends.find((p) => p.body["submitOnly"]);
+    expect(submit?.body["expectedStagedText"]).toBe("make test");
+    const output = logs.join("\n");
+    expect(output).toContain("Sent to infra-ui@term-rig");
+    expect(output).toContain("Note: sent as exact text, without the From/To envelope, because infra-ui@term-rig is a terminal seat.");
+  });
+
+  it("--raw sends no exactText", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "/help", "--raw"]);
+    });
+    expect(lastSendBody!["text"]).toBe("/help");
+    expect(lastSendBody!["exactText"]).toBeUndefined();
+  });
+
   it.each(["", "  \t\n"])("refuses an empty or whitespace-only direct message before transport", async (message) => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", message]);

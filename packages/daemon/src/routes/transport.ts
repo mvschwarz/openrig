@@ -40,6 +40,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly?: boolean;
       expectedStagedText?: string;
       expectedStagedLineCount?: number;
+      /** The unwrapped text; typed instead of `text` when the recipient is a terminal seat. */
+      exactText?: string;
     }>();
 
     // submitOnly (mechanics-gate fix d9b3989a) sends NO text — the Enter-only retry for staged
@@ -110,6 +112,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
       expectedStagedLineCount: body.expectedStagedLineCount,
+      exactText: typeof body.exactText === "string" ? body.exactText : undefined,
     });
 
     if (result.outcome === "retained") return c.json(result);
@@ -157,7 +160,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
           outbox.record({
             senderSession: derivedActor,
             destinationSession: body.session,
-            body: body.text,
+            body: result.envelopeOmitted ? body.exactText! : body.text,
             identityProvenance: "transport:v1",
           });
         } catch (err) {
