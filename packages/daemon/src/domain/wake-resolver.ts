@@ -52,7 +52,7 @@ export function resolveWakeTarget(rows: WakeSessionRow[], input: WakeResolveInpu
   }
 
   const gen = input.generation ?? 1;
-  if (gen < 1 || gen > rows.length) {
+  if (!Number.isInteger(gen) || gen < 1 || gen > rows.length) {
     return {
       resolved: false,
       reason: `Generation ${gen} does not exist for seat '${input.seat}' — only ${rows.length} tenure(s) recorded. Pick 1..${rows.length} (1 = newest).`,
