@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 
+// Blind /bin/sh staging is intentionally gone on win32 (defect-2/3 fix); these
+// POSIX-contract tests skip there. Raw-command behavior: tmux-win32-psmux.test.ts.
+const onWin32 = process.platform === "win32";
+
 function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
   const files = new Map<string, string>();
   let names = 0;
@@ -39,7 +43,7 @@ describe("shell launch transport", () => {
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
-  it("uses only the existing sh dependency for the fish capability probe", async () => {
+  it.skipIf(onWin32)("uses only the existing sh dependency for the fish capability probe", async () => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
@@ -64,7 +68,7 @@ describe("shell launch transport", () => {
     }
   });
 
-  it.each(["pair\\\\backslashes", "trailing\\", "quote\\'backslash"])("keeps a backslash payload on sh without changing its value (%s)", async value => {
+  (onWin32 ? it.skip : it).each(["pair\\\\backslashes", "trailing\\", "quote\\'backslash"])("keeps a backslash payload on sh without changing its value (%s)", async value => {
     const root = mkdtempSync(join(tmpdir(), "fish-staging-"));
     try {
       const f = fixture(undefined, join(root, "launch.sh"));
@@ -77,7 +81,7 @@ describe("shell launch transport", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("keeps the existing sh invocation for a backslash staging path", async () => {
+  it.skipIf(onWin32)("keeps the existing sh invocation for a backslash staging path", async () => {
     const f = fixture(undefined, "/tmp/launch\\\\tail\\");
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
@@ -85,7 +89,7 @@ describe("shell launch transport", () => {
     expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- ${shellQuote(f.scriptPath)}\nclaude\n`);
   });
 
-  it("keeps the short sh invocation when fish fallback syntax would exceed the input bound", async () => {
+  it.skipIf(onWin32)("keeps the short sh invocation when fish fallback syntax would exceed the input bound", async () => {
     const f = fixture(undefined, "/tmp/" + "p".repeat(240));
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
@@ -94,7 +98,7 @@ describe("shell launch transport", () => {
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
   });
 
-  it("keeps ordinary staging unchanged in fish without sourceInPane", async () => {
+  it.skipIf(onWin32)("keeps ordinary staging unchanged in fish without sourceInPane", async () => {
     const f = fixture();
     const paneCommand = vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "codex")).toEqual({ ok: true });
@@ -102,14 +106,14 @@ describe("shell launch transport", () => {
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
   });
 
-  it.each(["nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
+  (onWin32 ? it.skip : it).each(["nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
   });
 
-  it("retains /bin/sh staging when the pane command read fails", async () => {
+  it.skipIf(onWin32)("retains /bin/sh staging when the pane command read fails", async () => {
     const f = fixture("display-message");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
@@ -122,7 +126,7 @@ describe("shell launch transport", () => {
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`( . '/tmp/launch '\"'\"'quoted'\"'\"'.sh' )`);
   });
 
-  it("keeps long PATH/quoted arguments out of terminal input and retains script until consumption", async () => {
+  it.skipIf(onWin32)("keeps long PATH/quoted arguments out of terminal input and retains script until consumption", async () => {
     const f = fixture();
     const command = `env PATH='${"p".repeat(4096)}' codex -s workspace-write resume 'same-native-id' -m 'chosen-model'`;
     expect(await f.adapter.sendShellCommand("pane", command)).toEqual({ ok: true });
@@ -159,7 +163,14 @@ describe("shell launch transport", () => {
 
   it("refuses an oversized bootstrap path before writing or sending", async () => {
     const f = fixture(undefined, "/tmp/" + "a".repeat(512));
-    expect(await f.adapter.sendShellCommand("pane", "codex")).toMatchObject({ ok: false, code: "launch_path_too_long" });
+    // POSIX: the staging PATH itself exceeds the input bound, so the refusal
+    // fires before the script is written. win32 has no staging (defect-2/3
+    // fix): the same refusal guards an oversized RAW command (>1024B under
+    // stageIfLong) before any write or terminal input.
+    const win32 = process.platform === "win32";
+    const command = win32 ? "x".repeat(1100) : "codex";
+    expect(await f.adapter.sendShellCommand("pane", command, undefined, win32 ? { stageIfLong: true } : undefined))
+      .toMatchObject({ ok: false, code: "launch_path_too_long" });
     expect(f.fileOps.writeFile).not.toHaveBeenCalled();
     expect(f.commands).toEqual([]);
   });
@@ -176,6 +187,8 @@ describe("shell launch transport", () => {
   });
 
   it("refuses a 1024-byte Pi command when its staged invocation exceeds the bound", async () => {
+    // Passes on both platforms: POSIX refuses the oversized staged invocation;
+    // win32 refuses the equally oversized raw command at the same bound.
     const f = fixture(undefined, "/tmp/" + "a".repeat(512));
     const command = "é".repeat(512);
     expect(Buffer.byteLength(command, "utf8")).toBe(1024);
