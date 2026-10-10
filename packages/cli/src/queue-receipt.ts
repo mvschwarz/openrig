@@ -13,20 +13,12 @@ import { shellQuote } from "./cross-host-executor.js";
  * the read that returns it. Error responses never come here: they print in full.
  */
 
-const ENV = "OPENRIG_OUTPUT_COMPACT";
-
-/** Whether compact defaults are on. `OPENRIG_OUTPUT_COMPACT` set to `true`/`1`
- *  is on and `false`/`0` is off (the config store's boolean words); any other
- *  non-empty value is off, with a note on stderr. Unset or empty defers to the
- *  `output.compact` config key, default off. An unreadable config is off. */
+/** Whether compact defaults are on, by the config store's own resolution, the
+ *  same one `rig config get output.compact` reports: `OPENRIG_OUTPUT_COMPACT`
+ *  (`true`/`1` or `false`/`0`), else the config file, else off. An invalid env
+ *  value is rejected with the store's warning and falls back to the file, as
+ *  `config get` does. An unreadable config is off. */
 export function compactOutputEnabled(store?: Pick<ConfigStore, "get">): boolean {
-  const raw = process.env[ENV];
-  if (raw !== undefined && raw !== "") {
-    if (raw === "true" || raw === "1") return true;
-    if (raw === "false" || raw === "0") return false;
-    process.stderr.write(`[openrig-config] ${ENV}=${JSON.stringify(raw)} is not true, 1, false or 0; output.compact is off for this command\n`);
-    return false;
-  }
   try {
     return (store ?? new ConfigStore()).get("output.compact") === true;
   } catch {
@@ -65,7 +57,7 @@ const STARTS_WAKE: ReadonlySet<WriteVerb> = new Set(["create", "handoff", "hando
  *  `.priority == "routine"` or `.lastNudgeResult == null` reads as it does today;
  *  the rest appear only when the row has a value. */
 const ALWAYS = ["qitemId", "state", "destinationSession", "sourceSession", "tsCreated", "tsUpdated", "priority", "summary",
-  "pickup", "lastNudgeResult", "lastNudgeAttempt"] as const;
+  "tags", "pickup", "lastNudgeResult", "lastNudgeAttempt"] as const;
 const WHEN_SET = ["tier", "blockedOn", "closureReason", "closureTarget", "closureRequiredAt", "claimedAt", "handedOffTo",
   "handedOffFrom", "targetRepo", "expiresAt", "advisories", "handoffAdvisory", "createWarning", "persisted", "delivery"] as const;
 const SHOWN_WAITING = ["blocker", "nextBackstop"] as const;
@@ -175,6 +167,8 @@ function rowLines(heading: string, r: Row): string[] {
   if (r.targetRepo) facts.push(`repo ${String(r.targetRepo)}`);
   lines.push(`  ${facts.join(" · ")}`);
   if (r.summary) lines.push(`  summary: ${String(r.summary)}`);
+  // Tags can't be changed after create, so a wrong one is caught here, not on a later read.
+  if (Array.isArray(r.tags) && r.tags.length > 0) lines.push(`  tags: ${r.tags.map(String).join(", ")}`);
   if (isRow(r.pickup)) lines.push(`  pickup: ${String(r.pickup.state)}${r.pickup.evidence ? ` (${String(r.pickup.evidence)})` : ""}`);
   const waiting = isRow(r.waiting) ? r.waiting : null;
   if (waiting && isRow(waiting.blocker)) {

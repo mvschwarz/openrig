@@ -4,6 +4,7 @@ import path from "node:path";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
 import { compactOutputEnabled } from "../src/queue-receipt.js";
+import { ConfigStore } from "../src/config-store.js";
 
 /**
  * Slice 15 (OPR.0.7.0.15) P1 — queue writes print a short receipt when the
@@ -168,7 +169,8 @@ describe("queue write receipt (output.compact)", () => {
         if (k === "waiting" || k === "lastNudgeResult" || k === "lastNudgeAttempt") continue; // projected / carried by wake
         expect(shown.has(k) || omitted.includes(k), k).toBe(true);
       }
-      expect(omitted).toEqual(expect.arrayContaining(["tags", "chainOfRecord", "waiting.liveness", "waiting.lastMeaningfulChange"]));
+      expect(omitted).toEqual(expect.arrayContaining(["chainOfRecord", "waiting.liveness", "waiting.lastMeaningfulChange"]));
+      expect(omitted).not.toContain("tags");
     });
 
     for (const v of VERBS) {
@@ -234,6 +236,28 @@ describe("queue write receipt (output.compact)", () => {
       const json = JSON.parse(await run([...argv, "--json"], route)) as Row;
       expect(json.advisories).toEqual([advisory]);
       expect(json.handoffAdvisory).toEqual(handoffAdvisory);
+    });
+
+    it("tags sit at today's key, path and type on every verb, and print in plain form", async () => {
+      for (const v of VERBS) {
+        logs = [];
+        const json = JSON.parse(await run([...v.argv, "--json"], { [v.route]: { status: v.status, data: v.data } })) as Row;
+        const rows = json.closed ? [json.closed as Row, json.created as Row] : [json];
+        for (const r of rows) expect(r.tags, v.verb).toEqual(["mission:m"]);
+        logs = [];
+        expect(await run(v.argv, { [v.route]: { status: v.status, data: v.data } }), v.verb).toContain("  tags: mission:m");
+      }
+      logs = [];
+      const untagged = JSON.parse(await run(["claim", "qitem-x", "--json"], { "POST /api/queue/qitem-x/claim": { status: 200, data: row({ qitemId: "qitem-x", tags: null }) } })) as Row;
+      expect(untagged).toHaveProperty("tags", null);
+    });
+
+    it("each write's --full help says the receipt's waiting keeps only blocker and nextBackstop", () => {
+      const queue = createProgram({ queueDeps: makeDeps({}) }).commands.find((c) => c.name() === "queue")!;
+      for (const v of VERBS) {
+        const full = queue.commands.find((c) => c.name() === v.verb)!.options.find((o) => o.long === "--full")!;
+        expect(full.description, v.verb).toContain("the receipt's waiting keeps only blocker and nextBackstop");
+      }
     });
 
     it("an unrecognized response shape prints whole rather than guess", async () => {
@@ -424,47 +448,79 @@ describe("queue write receipt (output.compact)", () => {
   });
 });
 
-describe("the output.compact switch", () => {
+describe("the output.compact switch: one resolution, the config store's", () => {
   let home: string;
+  let real: ConfigStore;
   beforeEach(() => {
     vi.unstubAllEnvs();
     home = fs.mkdtempSync(path.join(process.env.OPENRIG_HOME ?? "/tmp", "compact-"));
+    real = new ConfigStore(path.join(home, "config.json"));
     stderr = [];
     vi.spyOn(process.stderr, "write").mockImplementation(((s: string) => { stderr.push(String(s)); return true; }) as typeof process.stderr.write);
   });
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-  const store = (value?: unknown) => ({ get: (key: string) => { expect(key).toBe("output.compact"); return value ?? false; } });
+  /** The switch must read exactly what `rig config get output.compact` reports. */
+  const agree = (expected: boolean) => {
+    expect(compactOutputEnabled(real)).toBe(expected);
+    expect(real.get("output.compact")).toBe(expected);
+  };
 
-  it("is off by default", () => {
-    expect(compactOutputEnabled(store())).toBe(false);
+  it("is off by default", () => agree(false));
+  it("rig config set output.compact true / false turns it on and off", () => {
+    real.set("output.compact", "true");
+    agree(true);
+    real.set("output.compact", "false");
+    agree(false);
   });
-  it.each(["1", "true"])("env %s is on", (v) => {
+  it.each(["1", "true"])("env %s is on, over a config of false", (v) => {
+    real.set("output.compact", "false");
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", v);
-    expect(compactOutputEnabled(store(false))).toBe(true);
+    agree(true);
   });
-  it.each(["0", "false"])("env %s is off, even over a config of true", (v) => {
+  it.each(["0", "false"])("env %s is off, over a config of true", (v) => {
+    real.set("output.compact", "true");
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", v);
-    expect(compactOutputEnabled(store(true))).toBe(false);
+    agree(false);
   });
-  it.each(["yes", "on", "TRUE", " 1", "2"])("an unrecognized env value %j is off, with a note, even over a config of true", (v) => {
+  it.each(["yes", "on", "TRUE", " 1", "2"])("an invalid env value %j is rejected with the store's warning and falls back to the file, for config get and writes alike", (v) => {
+    real.set("output.compact", "true");
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", v);
-    expect(compactOutputEnabled(store(true))).toBe(false);
-    expect(stderr.join("")).toContain("output.compact is off for this command");
+    agree(true);
+    expect(stderr.join("")).toContain("env override for output.compact rejected");
+    real.set("output.compact", "false");
+    agree(false);
   });
   it("an empty env defers to the config", () => {
+    real.set("output.compact", "true");
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "");
-    expect(compactOutputEnabled(store(true))).toBe(true);
+    agree(true);
   });
   it("an unreadable config is off", () => {
     expect(compactOutputEnabled({ get: () => { throw new Error("bad config"); } })).toBe(false);
   });
-  it("rig config set output.compact true turns it on through the real config store", async () => {
-    const { ConfigStore } = await import("../src/config-store.js");
-    const real = new ConfigStore(path.join(home, "config.json"));
-    expect(compactOutputEnabled(real)).toBe(false);
-    real.set("output.compact", "true");
-    expect(compactOutputEnabled(real)).toBe(true);
-    real.set("output.compact", "false");
-    expect(compactOutputEnabled(real)).toBe(false);
+});
+
+describe("review case: config file true + OPENRIG_OUTPUT_COMPACT=yes", () => {
+  const configPath = () => path.join(process.env.OPENRIG_HOME!, "config.json");
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("OPENRIG_SESSION_NAME", "worker@r");
+    logs = []; errors = []; stderr = [];
+    vi.spyOn(console, "log").mockImplementation((...a) => { logs.push(a.join(" ")); });
+    vi.spyOn(console, "error").mockImplementation((...a) => { errors.push(a.join(" ")); });
+    vi.spyOn(process.stderr, "write").mockImplementation(((s: string) => { stderr.push(String(s)); return true; }) as typeof process.stderr.write);
+    process.exitCode = undefined;
+  });
+  afterEach(() => { fs.rmSync(configPath(), { force: true }); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+  it("rig config get and a queue write agree: both read true from the file", async () => {
+    new ConfigStore().set("output.compact", "true");
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "yes");
+    const resolved = new ConfigStore().resolveWithSource("output.compact");
+    expect(resolved).toMatchObject({ value: true, source: "file" });
+    const v = VERBS.find((x) => x.verb === "claim")!;
+    const out = await run([...v.argv, "--json"], { [v.route]: { status: v.status, data: v.data } });
+    expect(JSON.parse(out)).toHaveProperty("receipt"); // the receipt, as config get reports
+    expect(stderr.join("")).toContain("env override for output.compact rejected");
   });
 });
