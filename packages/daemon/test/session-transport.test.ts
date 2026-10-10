@@ -1898,6 +1898,13 @@ describe("a Claude prompt suggestion is not a person's draft", () => {
     // The suggestion changed: the first capture's draft text isn't what the styled frame shows.
     expect(await probe(warningLayout(plainPrompt), warningLayout("\x1b[39m❯\u00a0\x1b[2mshow me the diff\x1b[0m")))
       .toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    // Evidence is compacted and truncated, so the full composer text is what must match: drafts that
+    // differ only in internal spacing, or share their first 240 characters, are different text.
+    expect(await probe(warningLayout("❯\u00a0yes run  the tests and open the PR"), warningLayout(faintPrompt)))
+      .toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    const long = "word ".repeat(60);
+    expect(await probe(warningLayout(`❯\u00a0${long}first`), warningLayout(`\x1b[39m❯\u00a0\x1b[2m${long}second\x1b[0m`)))
+      .toMatchObject({ state: "needs_input", reason: "prompt_draft" });
     // Typed text in the styled frame.
     expect(await probe(warningLayout(plainPrompt), warningLayout(plainPrompt))).toMatchObject({ state: "needs_input", reason: "prompt_draft" });
     // The seat started work: its live status row in the styled frame is kept.

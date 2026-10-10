@@ -279,16 +279,23 @@ export function promptTextIsFaint(styledPane: string): boolean {
 /** Classifies one Claude capture taken with escape sequences, as a single frame. `suggestion` is set
  *  only when that frame's own draft is its last prompt line and all of that text is faint: it's then
  *  the frame classified as an empty composer. */
-export function classifyStyledFrame(styledPane: string, options: ClassifyPaneOptions = {}): { frame: string; asIs: PaneActivityClassification; suggestion: PaneActivityClassification | null } {
+export function classifyStyledFrame(styledPane: string, options: ClassifyPaneOptions = {}): { frame: string; asIs: PaneActivityClassification; composer: string | null; suggestion: PaneActivityClassification | null } {
   const lines = styledLines(styledPane).map((cells) => cells.map((cell) => cell.ch).join(""));
   const frame = lines.join("\n");
   const asIs = classifyPaneActivity(frame, options);
+  const composer = draftComposerLine(lines, asIs);
+  if (composer === null || !promptTextIsFaint(styledPane)) return { frame, asIs, composer, suggestion: null };
   const last = lastPromptLine(lines);
-  if (asIs.reason !== "prompt_draft" || last < 0 || asIs.evidence !== truncateEvidence(lines[last]!) || !promptTextIsFaint(styledPane)) {
-    return { frame, asIs, suggestion: null };
-  }
   lines[last] = /^\s*[❯›]/.exec(lines[last]!)![0];
-  return { frame, asIs, suggestion: classifyPaneActivity(lines.join("\n"), options) };
+  return { frame, asIs, composer, suggestion: classifyPaneActivity(lines.join("\n"), options) };
+}
+
+/** The full text of the line a `prompt_draft` verdict read as the draft, when that's the last prompt
+ *  line; otherwise null. Evidence is compacted and truncated, so callers compare this instead. */
+function draftComposerLine(lines: string[], verdict: PaneActivityClassification): string | null {
+  const last = lastPromptLine(lines);
+  if (verdict.reason !== "prompt_draft" || last < 0 || verdict.evidence !== truncateEvidence(lines[last]!)) return null;
+  return lines[last]!.trim();
 }
 
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
@@ -560,7 +567,7 @@ export async function probeSessionActivity(input: {
       const later = styled ? classifyStyledFrame(styled, classifyOptions) : null;
       const newer = !later ? null
         : later.asIs.state === "agent_active" || (later.asIs.state === "attention" && later.asIs.reason !== "prompt_draft") ? later.asIs
-        : later.suggestion && later.asIs.evidence === classification.evidence ? later.suggestion
+        : later.suggestion && later.composer === draftComposerLine(paneContent.split("\n"), classification) ? later.suggestion
         : null;
       if (later && newer) {
         classification = newer;
