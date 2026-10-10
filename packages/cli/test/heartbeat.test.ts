@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { heartbeatCommand, analyzeHeartbeat } from "../src/commands/heartbeat.js";
@@ -81,6 +81,17 @@ describe("rig heartbeat", () => {
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it.each(["\n", "\r\n"])("reports durable queue entries with line ending %j", async (newline) => {
+    const content = queue([entry({ id: "waiting", state: "in-progress", title: "Authored task", body: "**State transitions:**\n- 2026-04-24T08:00:00Z - in-progress (accepted)" })]).replace(/\n/g, newline);
+    const file = writeQueue(root, "alpha", "dev", "impl", content);
+    const cmd = heartbeatCommand({ sharedDocsRoot: root, now: () => NOW });
+    const captured = await captureLogs(() => cmd.parseAsync(["node", "rig", "--rig", "alpha", "--json"]).then(() => {}));
+    const report = JSON.parse(captured.logs[0]!);
+    expect(report.summary).toMatchObject({ total: 1, unproven: 1 });
+    expect(report.items[0]).toMatchObject({ id: "waiting", title: "Authored task", owner: "dev.impl", session: "dev-impl@alpha" });
+    expect(readFileSync(file, "utf8")).toBe(content);
   });
 
   it("classifies checked-out, proven-active, stalled, unproven, blocked, parked, and done states", () => {
