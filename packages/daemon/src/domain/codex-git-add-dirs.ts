@@ -37,7 +37,7 @@ export const resolveCodexGitAddDirs: CodexGitAddDirResolver = async (cwd) => {
     );
   });
   if (stdout === null) return [];
-  const dirs = [...new Set(stdout.split("\n").map((line) => line.trim()).filter(Boolean))];
+  const dirs = [...new Set(stdout.split("\n").filter(Boolean))];
   return dirs.filter((dir) => {
     try {
       return fs.statSync(dir).isDirectory();
