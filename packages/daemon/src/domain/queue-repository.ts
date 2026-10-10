@@ -10,6 +10,7 @@ import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { isTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
@@ -1339,7 +1340,7 @@ export class QueueRepository {
     // command line (it carries the row's summary), and nothing there can claim the row. So nothing
     // is typed; the row stays queued and visible. `failed:` keeps it on the wake ladder, whose
     // retries come back here and type nothing before it escalates.
-    if (this.isTerminalSeat(destinationSession)) {
+    if (isTerminalSeat(this.db, destinationSession)) {
       return {
         classified: "failed",
         nudgeResult: `failed:terminal-seat: '${destinationSession}' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it and nothing there can claim this row. The row stays queued; route it to an agent seat.`,
@@ -3582,26 +3583,6 @@ export class QueueRepository {
       if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
     return out;
-  }
-
-  /** A `runtime: terminal` node, by its newest session row or else its composed canonical name. */
-  private isTerminalSeat(dest: string): boolean {
-    try {
-      const exact = this.db.prepare(
-        `SELECT n.runtime AS runtime FROM sessions s JOIN nodes n ON n.id = s.node_id
-          WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`,
-      ).get(dest) as { runtime: string | null } | undefined;
-      if (exact) return exact.runtime === "terminal";
-      const at = dest.lastIndexOf("@");
-      if (at <= 0) return false;
-      const composed = this.db.prepare(
-        `SELECT n.runtime AS runtime FROM nodes n JOIN rigs r ON r.id = n.rig_id
-          WHERE r.name = ? AND REPLACE(n.logical_id, '.', '-') = ? LIMIT 1`,
-      ).get(dest.slice(at + 1), dest.slice(0, at)) as { runtime: string | null } | undefined;
-      return composed?.runtime === "terminal";
-    } catch {
-      return false;
-    }
   }
 
   /** OPR.0.5.6.14 — terminal transport is a CAPABILITY, not topology presence.

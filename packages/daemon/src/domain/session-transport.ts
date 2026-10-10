@@ -10,6 +10,7 @@ import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activi
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
+import { isTerminalSeat } from "./terminal-seat.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -1161,7 +1162,7 @@ export class SessionTransport {
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     // OpenRig's own notices (an `@system` actor: the watchdog, the model monitor) are never typed into
     // a terminal seat, whose shell or TUI would run them. Queue wakes stop earlier, in performWakeSend.
-    if (opts?.actorSession?.endsWith("@system") && this.getSessionMeta(sessionName).runtime === "terminal") {
+    if (opts?.actorSession?.endsWith("@system") && isTerminalSeat(this.db, sessionName)) {
       return { ok: false, sessionName, sent: false, reason: "terminal_seat",
         error: `'${sessionName}' is a terminal seat (runtime: terminal); OpenRig does not type its own notices into it. Nothing was sent.` };
     }
@@ -1171,7 +1172,7 @@ export class SessionTransport {
     // segment must never edit a line of the exact text.
     if (opts?.exactText !== undefined) {
       const { exactText, ...rest } = opts;
-      if (this.getSessionMeta(sessionName).runtime !== "terminal") return this.send(sessionName, text, rest);
+      if (!isTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
       return { ...(await this.send(sessionName, exactText, { ...rest, stampISO: undefined })), envelopeOmitted: true };
     }
     const guard = this.tmuxAdapter.deliveryGuard;

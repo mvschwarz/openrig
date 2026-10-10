@@ -1907,6 +1907,22 @@ describe("SessionTransport", () => {
     expect(sent).toEqual(["make test"]);
   });
 
+  it("a terminal seat known only by its composed name (binding, no session row): exact text for a person, refusal for a watchdog notice", async () => {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.logs", { role: "logs", runtime: "terminal" });
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-logs@term-rig" });
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+
+    const personal = await transport.send("infra-logs@term-rig", H_ENVELOPE, { exactText: "tail -f app.log", actorSession: "dev-impl@my-rig" });
+    expect(personal).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["tail -f app.log"]);
+
+    const notice = await transport.send("infra-logs@term-rig", "[OpenRig watchdog] x; touch /tmp/should-not-run", { actorSession: "watchdog@system" });
+    expect(notice).toMatchObject({ ok: false, reason: "terminal_seat" });
+    expect(sent).toEqual(["tail -f app.log"]);
+  });
+
   // OpenRig's own notices (an @system actor) are never typed into a terminal seat.
   it("a watchdog delivery to a terminal seat types nothing and records failed with the reason; an agent seat is unchanged", async () => {
     seedTerminalSeat();
