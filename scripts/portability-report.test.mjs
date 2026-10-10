@@ -96,3 +96,19 @@ test("the report says so when nothing is found and groups findings when somethin
   assert.match(report, /## Home path \(1\)/);
   assert.match(report, /docs\/a\.md:10/);
 });
+
+test("the CLI executes through a script path containing spaces and a hash", async () => {
+  const { mkdtempSync, symlinkSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { spawnSync } = await import("node:child_process");
+  const temp = mkdtempSync(join(tmpdir(), "openrig script # "));
+  try {
+    const script = join(temp, "portability report.mjs");
+    symlinkSync(fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), script);
+    const result = spawnSync(process.execPath, [script, "--unknown-option"], { encoding: "utf8" });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /Unknown argument: --unknown-option/);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
