@@ -42,6 +42,7 @@ export function enumArg(allowed: readonly string[]): (value: string) => string {
 export function wantsJsonOutput(argv: readonly string[]): boolean {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    if (a === "--") break;
     if (a === "--json") return true;
     if ((a === "-o" || a === "--output" || a === "--format") && argv[i + 1] === "json") return true;
     if (/^(?:-o|--output|--format)=json$/.test(a)) return true;
