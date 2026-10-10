@@ -161,7 +161,9 @@ describe("exact session targets for capture, session environment and pipe-pane",
         expect(await a.switchClient("client", target)).toEqual({ ok: true });
         expect(sessions[GONE]).toMatchObject({ respawned: true, viewed: true, options: { "@probe": "own", "remain-on-exit": "on" } });
         expect(sessions[SIBLING]!.options).toBeUndefined();
-        if (target !== GONE) expect(calls.every((c) => c[c.indexOf("-t") + 1] === target)).toBe(true);
+        // The respawn's server-wide read of inherited parent-session identity addresses no session.
+        expect(calls.filter((c) => !c.includes("-t")).map((c) => c.join(" "))).toEqual(["tmux show-environment -g"]);
+        if (target !== GONE) expect(calls.filter((c) => c.includes("-t")).every((c) => c[c.indexOf("-t") + 1] === target)).toBe(true);
       });
     }
 

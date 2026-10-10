@@ -35,7 +35,7 @@ describe("tmux argv exec path", () => {
       "-c", "/home/user/my project/code",
       "-e", "OPENRIG_TRANSCRIPTS_LINES=", "-e", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=",
       "-e", "PATH=/a b:/c", "-e", "EMPTY=",
-    ]]);
+    ], ["tmux", "show-environment", "-g"]]);
   });
 
   it("sendKeys passes key names as separate verbatim units", async () => {
@@ -56,7 +56,7 @@ describe("tmux argv exec path", () => {
     const seen: string[][] = [];
     const { adapter } = argvAdapter(seen);
     await adapter.respawnPane("%1", "codex resume 'tok en'", { cwd: "/w", env: { A: "b c" } });
-    expect(seen).toEqual([["tmux", "respawn-pane", "-t", "%1", "-c", "/w", "-e", "A=b c", "codex resume 'tok en'"]]);
+    expect(seen).toEqual([["tmux", "show-environment", "-g"], ["tmux", "respawn-pane", "-t", "%1", "-c", "/w", "-e", "A=b c", "codex resume 'tok en'"]]);
   });
 
   it("capture and display probes build atomic argv (no shell join artifacts)", async () => {

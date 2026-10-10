@@ -3,6 +3,7 @@ import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
 import { randomUUID } from "node:crypto";
+import { parentSessionEnvKeys } from "../domain/parent-session-env.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -580,10 +581,41 @@ export class TmuxAdapter {
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     try {
       await this.run(argv, legacyParts.join(" "));
+      // A tmux server started from a Claude Code session or Herdr pane hands
+      // their identity to every new pane. Mark it removed for this session only
+      // and restart the fresh pane so its shell starts without it.
+      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv))) {
+        const respawn = ["tmux", "respawn-pane", "-k", "-t", exactTarget(name, "pane")];
+        if (cwd != null) respawn.push("-c", cwd);
+        await this.run(respawn, posixJoinArgv(respawn));
+      }
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
     }
+  }
+
+  /** Mark the server's inherited parent-session identity as removed in one
+   * session's environment, never the server's global one. Explicit seat
+   * values stay. Returns whether anything was marked. */
+  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
+    let global: string;
+    try {
+      global = await this.run(["tmux", "show-environment", "-g"], "tmux show-environment -g");
+    } catch {
+      return false; // Nothing readable to exclude; the launch itself is unaffected.
+    }
+    const inherited: Record<string, string> = {};
+    for (const line of global.split(/\r?\n/)) {
+      const eq = line.indexOf("=");
+      if (eq > 0) inherited[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    const keys = parentSessionEnvKeys(inherited).filter((key) => !keep.includes(key));
+    for (const key of keys) {
+      const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
+      await this.run(argv, posixJoinArgv(argv));
+    }
+    return keys.length > 0;
   }
 
   /**
@@ -836,6 +868,9 @@ export class TmuxAdapter {
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
     if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
     try {
+      // The successor starts from the session environment: exclude inherited
+      // parent-session identity there first (sessions made before this existed).
+      await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
       await this.run(argv, legacyRespawn.join(" "));
       return { ok: true };
     } catch (err) {
