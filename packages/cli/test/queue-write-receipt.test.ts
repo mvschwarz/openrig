@@ -354,10 +354,49 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).toMatchObject({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-10T18:00:01.000Z" });
     });
 
-    it("a --host create names the host and the remote read", async () => {
-      const out = await create(["--host", "far"], row());
+    const createVia = async (extra: string[], data: Row, health: { status: number; data: unknown }) =>
+      run(["create", "--destination", "worker@r", "--body", BODY, "--summary", "s", ...extra],
+        { "POST /api/queue/create": { status: 201, data }, "GET /healthz": health });
+
+    it("a --host create to another daemon names the host and the remote read", async () => {
+      const out = await createVia(["--host", "far"], row(), { status: 200, data: { selfHostId: "here" } });
       expect(out).toContain("host: far (the row lives on that daemon)");
       expect(out).toContain("OPENRIG_URL='<daemon-url of host far>' rig queue show 'qitem-20261010180000-aaaa' --full --json");
+    });
+
+    it("a --host naming this daemon's own host id is local, as the daemon resolves it: no remote host, a local read", async () => {
+      const out = await createVia(["--host", "here"], row(), { status: 200, data: { selfHostId: "here" } });
+      expect(out).not.toContain("host:");
+      expect(out).not.toContain("OPENRIG_URL");
+      expect(out).toContain("full row: rig queue show 'qitem-20261010180000-aaaa' --full --json");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "here", "--json"], row(), { status: 200, data: { selfHostId: "here" } })) as Row;
+      expect(json).not.toHaveProperty("host");
+      expect((json.receipt as Row).fullCommand).toBe("rig queue show 'qitem-20261010180000-aaaa' --full --json");
+    });
+
+    it("a --host whose locality can't be confirmed says so rather than assert the row is remote", async () => {
+      const out = await createVia(["--host", "far"], row(), { status: 503, data: {} });
+      expect(out).toContain("host: far (this daemon's own host id could not be read; if it is not far, the row lives on that daemon)");
+      logs = [];
+      const json = JSON.parse(await createVia(["--host", "far", "--json"], row(), { status: 503, data: {} })) as Row;
+      expect(json).toMatchObject({ host: "far", hostUnconfirmed: true });
+    });
+
+    it("a same-body --id retry with a recorded result labels it as possibly an earlier wake's, never as this write's", async () => {
+      const out = await create(["--id", "qitem-20261010180000-aaaa"], row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" }));
+      const wake = out.split("\n").filter((l) => l.includes("wake:"));
+      expect(wake).toEqual(["  wake: the daemon's recorded wake result; if --id named an existing row, it was returned with no new wake (the row's recorded result, possibly an earlier wake's: verified at 2026-10-09T00:00:00.000Z)"]);
+      expect(wake[0]).not.toMatch(/wake: verified/);
+      logs = [];
+      const json = JSON.parse(await create(["--id", "qitem-20261010180000-aaaa", "--json"], row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" }))) as Row;
+      expect(json.wake).toMatchObject({ evidence: "recorded", result: "verified", maybeEarlier: true });
+      expect(json).toMatchObject({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" });
+    });
+
+    it("without --id a recorded result stays this write's, unlabelled", async () => {
+      const out = await create([], row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-10T18:00:01.000Z" }));
+      expect(out).toContain("wake: verified at 2026-10-10T18:00:01.000Z — the daemon's recorded wake result\n");
     });
   });
 });

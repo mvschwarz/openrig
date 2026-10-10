@@ -44,6 +44,8 @@ export interface ReceiptContext {
   idGiven?: boolean;
   /** A `--host` write whose new row lives on another daemon. */
   remoteHost?: string;
+  /** The selected daemon's own host id could not be read, so `remoteHost` may name this daemon. */
+  remoteHostUnconfirmed?: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -82,6 +84,9 @@ interface WakeEvidence {
   result?: string;
   at?: string;
   detail: string;
+  /** The write may have returned an existing row (a same-body `--id` retry or a
+   *  re-driven cross-host handoff), so a recorded result may be an earlier wake's. */
+  maybeEarlier?: true;
 }
 
 /** Only what this response proves. "Scheduled" is never said: the response
@@ -96,15 +101,16 @@ function wakeEvidence(row: Row, ctx: ReceiptContext): WakeEvidence {
   if (warning?.code === "qitem_body_not_saved") {
     return { evidence: "existing-row", ...(result ? { result } : {}), ...(at ? { at } : {}), detail: "an existing row was returned; this write started no new wake" };
   }
-  if (result?.startsWith("failed:wake not retained")) {
-    return { evidence: "not-staged", result, ...(at ? { at } : {}), detail: "the row saved but its wake was NOT staged" };
-  }
-  if (result) return { evidence: "recorded", result, ...(at ? { at } : {}), detail: "the daemon's recorded wake result" };
   const maybeExisting = ctx.idGiven
     ? "; if --id named an existing row, it was returned with no new wake"
     : ctx.remoteHost && ctx.verb !== "create"
       ? "; a re-driven cross-host handoff returns the existing successor with no new wake"
       : "";
+  const earlier = maybeExisting ? { maybeEarlier: true as const } : {};
+  if (result?.startsWith("failed:wake not retained")) {
+    return { evidence: "not-staged", result, ...(at ? { at } : {}), ...earlier, detail: `the row saved but its wake was NOT staged${maybeExisting}` };
+  }
+  if (result) return { evidence: "recorded", result, ...(at ? { at } : {}), ...earlier, detail: `the daemon's recorded wake result${maybeExisting}` };
   return { evidence: "none-recorded", detail: `no wake result recorded yet (delivery, if staged, follows the write)${maybeExisting}` };
 }
 
@@ -189,7 +195,9 @@ function rowLines(heading: string, r: Row): string[] {
     // An existing row's result belongs to an earlier wake, so it follows the label rather than leads it.
     lines.push(w.evidence === "existing-row"
       ? `  wake: ${String(w.detail)}${literal ? ` (the row's earlier wake result: ${literal})` : ""}`
-      : `  wake: ${literal ? `${literal} — ` : ""}${String(w.detail)}`);
+      : w.maybeEarlier && literal
+        ? `  wake: ${String(w.detail)} (the row's recorded result, possibly an earlier wake's: ${literal})`
+        : `  wake: ${literal ? `${literal} — ` : ""}${String(w.detail)}`);
   }
   if (isRow(r.createWarning)) lines.push(`  WARNING: ${String(r.createWarning.message ?? JSON.stringify(r.createWarning))}`);
   if (isRow(r.handoffAdvisory)) lines.push(`  advisory: ${String(r.handoffAdvisory.message ?? JSON.stringify(r.handoffAdvisory))}`);
@@ -199,6 +207,12 @@ function rowLines(heading: string, r: Row): string[] {
   if (r.persisted !== undefined) lines.push(`  persisted: ${String(r.persisted)}`);
   if (r.delivery !== undefined) lines.push(`  delivery: ${JSON.stringify(r.delivery)}`);
   return lines;
+}
+
+function hostNote(ctx: ReceiptContext, what: string): string {
+  return ctx.remoteHostUnconfirmed
+    ? `${ctx.remoteHost!} (this daemon's own host id could not be read; if it is not ${ctx.remoteHost!}, ${what} lives on that daemon)`
+    : `${ctx.remoteHost!} (${what} lives on that daemon)`;
 }
 
 function footer(omitted: string[], commands: string[], verb: WriteVerb): string {
@@ -226,13 +240,13 @@ export function buildWriteReceipt(body: unknown, ctx: ReceiptContext): WriteRece
       closed: closed.receipt,
       created: created.receipt,
       ...(Array.isArray(body.advisories) ? { advisories: body.advisories } : {}),
-      ...(ctx.remoteHost ? { host: ctx.remoteHost } : {}),
+      ...(ctx.remoteHost ? { host: ctx.remoteHost, ...(ctx.remoteHostUnconfirmed ? { hostUnconfirmed: true } : {}) } : {}),
       receipt: { omitted, fullCommands: commands },
     };
     const text = [
       ...rowLines("closed", closed.receipt),
       ...rowLines("created", created.receipt),
-      ...(ctx.remoteHost ? [`  host: ${ctx.remoteHost} (the new row lives on that daemon)`] : []),
+      ...(ctx.remoteHost ? [`  host: ${hostNote(ctx, "the new row")}`] : []),
       ...(Array.isArray(body.advisories) ? body.advisories.map((a) => `advisory: ${isRow(a) && typeof a.message === "string" ? a.message : JSON.stringify(a)}`) : []),
       footer(omitted, commands, ctx.verb),
     ].join("\n");
@@ -241,10 +255,11 @@ export function buildWriteReceipt(body: unknown, ctx: ReceiptContext): WriteRece
   if (typeof body.qitemId !== "string") return null;
   const one = rowReceipt(body, ctx, wakes);
   const command = showCommand(body.qitemId, ctx.remoteHost);
-  const json: Row = { ...one.receipt, ...(ctx.remoteHost ? { host: ctx.remoteHost } : {}), receipt: { omitted: one.omitted, fullCommand: command } };
+  const json: Row = { ...one.receipt, ...(ctx.remoteHost ? { host: ctx.remoteHost, ...(ctx.remoteHostUnconfirmed ? { hostUnconfirmed: true } : {}) } : {}),
+    receipt: { omitted: one.omitted, fullCommand: command } };
   const text = [
     ...rowLines(PAST[ctx.verb], one.receipt),
-    ...(ctx.remoteHost ? [`  host: ${ctx.remoteHost} (the row lives on that daemon)`] : []),
+    ...(ctx.remoteHost ? [`  host: ${hostNote(ctx, "the row")}`] : []),
     footer(one.omitted, [command], ctx.verb),
   ].join("\n");
   return { json, text };

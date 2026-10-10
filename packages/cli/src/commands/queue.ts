@@ -171,13 +171,29 @@ function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptCo
   return !full && compactOutputEnabled() ? ctx : null;
 }
 
-/** A `--host` id naming another daemon; `local` and the bare form are this one. */
+/** A `--host` id that may name another daemon. Empty and `local` never do; one that
+ *  equals the selected daemon's own host id is settled by {@link settleReceiptHost}. */
 function remoteHostOf(hostId: string | undefined): string | undefined {
   return hostId && hostId !== "local" ? hostId : undefined;
 }
 
-function printWriteResult(json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): void {
-  const projected = receipt && status < 400 ? buildWriteReceipt(body, receipt) : null;
+/** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
+ *  daemon's selfHostId took the local path, so its receipt must not call the row
+ *  remote. Read only for a receipt; an unreadable id leaves the host unconfirmed. */
+async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext): Promise<ReceiptContext> {
+  if (!receipt.remoteHost) return receipt;
+  let selfHostId: string | undefined;
+  try {
+    const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
+    if (health.status === 200 && typeof health.data?.selfHostId === "string" && health.data.selfHostId.trim()) selfHostId = health.data.selfHostId;
+  } catch { /* An unreadable id must not change or fail the write's output. */ }
+  if (selfHostId === receipt.remoteHost) return { ...receipt, remoteHost: undefined };
+  return selfHostId === undefined ? { ...receipt, remoteHostUnconfirmed: true } : receipt;
+}
+
+async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
+  const settled = receipt && status < 400 ? await settleReceiptHost(client, receipt) : null;
+  const projected = settled ? buildWriteReceipt(body, settled) : null;
   if (!projected) {
     printResult(json, body, status);
     return;
@@ -210,7 +226,7 @@ async function printQueueItemResult(
         + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`,
     };
   }
-  printWriteResult(json, body, status, receipt);
+  await printWriteResult(client, json, body, status, receipt);
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -695,10 +711,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 detail: "create response did not include a qitem id; delivery cannot be correlated",
                 nextAction: null,
               };
-          printWriteResult(opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status, receipt);
+          await printWriteResult(client, opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status, receipt);
           return;
         }
-        printWriteResult(opts.json ?? false, res.data, res.status, receipt);
+        await printWriteResult(client, opts.json ?? false, res.data, res.status, receipt);
       }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 
