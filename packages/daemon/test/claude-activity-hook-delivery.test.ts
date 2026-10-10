@@ -20,7 +20,8 @@ import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/clau
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
+import { basename, dirname, resolve as pathResolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import type { RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
@@ -131,6 +132,18 @@ function seededOwned(): string {
   return JSON.stringify({ hooks });
 }
 
+/** The file's mode as recorded in the git index ("100755"), or null outside a git checkout. */
+function committedMode(filePath: string): string | null {
+  try {
+    const out = execFileSync("git", ["ls-files", "--stage", "--", basename(filePath)], {
+      cwd: dirname(filePath), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.trim().split(/\s+/)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 // Packaged contract (QA blocker 1f53796c): the projected relay must be 0755, and production
 // PRESERVES the source mode (no adapter chmod policy). So the SHIPPED asset itself must be
 // executable — this regression STATS the real committed asset, not a synthetic 0o755 fixture.
@@ -139,7 +152,18 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
     const assetPath = pathResolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
     const mode = statSync(assetPath).mode & 0o777;
     expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
-    expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+    // What ships is the COMMITTED mode. A git checkout's working-tree mode is that mode filtered
+    // by the checkout user's umask (umask 002, the default for user-private-group accounts on
+    // many Linux distributions, yields 0775), so the exact 0755 is asserted on the git index when
+    // this is a git checkout, and on the file itself otherwise (e.g. an extracted package).
+    const indexMode = committedMode(assetPath);
+    if (indexMode !== null) {
+      expect(indexMode, "committed relay mode").toBe("100755");
+      expect(mode & 0o755, `checkout relay mode is 0${mode.toString(8)}, expected at least 0755`).toBe(0o755);
+      expect(mode & 0o002, `checkout relay mode is 0${mode.toString(8)}, world-writable`).toBe(0);
+    } else {
+      expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+    }
   });
 });
 

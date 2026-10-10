@@ -56,6 +56,7 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
 
   return async (args: string[], stdinFrom?: string[]) => {
     const kills: Array<() => void> = [];
+    const groups: number[] = [];
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -67,16 +68,22 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
       // reads stdin sees EOF immediately — the exact hole the inline invoker left open.
       const consumer = spawn(command, args, {
         stdio: [stdinFrom ? "pipe" : "ignore", "pipe", "pipe"],
+        detached: OWN_SESSION,
       });
-      kills.push(() => consumer.kill("SIGKILL"));
+      trackGroup(consumer, groups);
+      kills.push(() => killAndRelease(consumer));
 
       let producerDone: Promise<ProcExit> | null = null;
       let producerClosed = false;
       let producerKilledEarly = false;
       let killProducer: (() => void) | null = null;
       if (stdinFrom) {
-        const producer = spawn(tarCommand, stdinFrom, { stdio: ["ignore", "pipe", "pipe"] });
-        killProducer = () => producer.kill("SIGKILL");
+        const producer = spawn(tarCommand, stdinFrom, {
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: OWN_SESSION,
+        });
+        trackGroup(producer, groups);
+        killProducer = () => killAndRelease(producer);
         kills.push(killProducer);
         // EPIPE on the wiring (consumer exited early) must not crash the invoker — the producer's
         // own SIGPIPE death is the loud signal, reported through the dual-exit check below.
@@ -140,8 +147,109 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
       return { stdout: consumerExit.stdout, stderr: consumerExit.stderr, code: 0 };
     } finally {
       clearTimeout(timer);
+      for (const pgid of groups) releaseGroup(pgid);
     }
   };
+}
+
+/** Each side is spawned `detached`, which on POSIX is setsid(): the child leads its own session
+ *  (and process group), so a group kill reaches everything the step started, not just the direct
+ *  child. The price: a signal sent to the PARENT's process group (a terminal's Ctrl-C, a closed
+ *  terminal or dropped SSH session's SIGHUP, a supervisor's group SIGTERM) no longer reaches the
+ *  steps. The live-group registry below pays it back: while any step runs, the parent SIGKILLs
+ *  every live step group on process exit and on SIGINT, SIGTERM, SIGHUP and SIGQUIT.
+ *
+ *  Its handlers are PREPENDED, so they run before any handler the host registered, and a host
+ *  `process.once(signal, graceful)` is still counted (a once-wrapper removes itself only when it
+ *  runs). If the host listens, its handler decides what the parent does next; if nothing else
+ *  listens, the signal is re-raised so the parent ends by that signal, as it would have.
+ *
+ *  Accepted costs: SIGKILL of the parent cannot be caught, so it still orphans a running step
+ *  (the step's own timeout does not help then either). And the handlers are JavaScript: while a
+ *  step runs, a Ctrl-C is acted on only when the parent's event loop gets to it, not at once. */
+const OWN_SESSION = process.platform !== "win32";
+
+/** Process groups of steps still in flight (pgid === leader pid, since each side is detached). */
+const liveGroups = new Set<number>();
+let parentHandlersInstalled = false;
+
+function killLiveGroups(): void {
+  for (const pgid of liveGroups) {
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch {
+      // ESRCH: that group is already gone.
+    }
+  }
+}
+
+function onParentExit(): void {
+  killLiveGroups();
+}
+
+function onParentSignal(signal: NodeJS.Signals): void {
+  killLiveGroups();
+  liveGroups.clear();
+  uninstallParentHandlers();
+  // We run first (prepended), so every host listener, a pending once-wrapper included, is still
+  // registered here and will receive this same signal: then the host decides what the parent
+  // does. With no other listener, the default action (end by that signal) is what would have
+  // happened without us, so re-raise it.
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+}
+
+/** Parent signals whose default action ends the process and so would orphan a running step. */
+const PARENT_SIGNALS: readonly NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
+
+function installParentHandlers(): void {
+  if (parentHandlersInstalled) return;
+  process.prependListener("exit", onParentExit);
+  for (const signal of PARENT_SIGNALS) process.prependListener(signal, onParentSignal);
+  parentHandlersInstalled = true;
+}
+
+function uninstallParentHandlers(): void {
+  if (!parentHandlersInstalled) return;
+  process.off("exit", onParentExit);
+  for (const signal of PARENT_SIGNALS) process.off(signal, onParentSignal);
+  parentHandlersInstalled = false;
+}
+
+function trackGroup(child: ReturnType<typeof spawn>, groups: number[]): void {
+  if (!OWN_SESSION || child.pid === undefined) return; // spawn failed: nothing to track
+  groups.push(child.pid);
+  liveGroups.add(child.pid);
+  installParentHandlers();
+}
+
+function releaseGroup(pgid: number): void {
+  liveGroups.delete(pgid);
+  if (liveGroups.size === 0) uninstallParentHandlers();
+}
+
+/** SIGKILL the child's whole process group, then release our ends of its stdio.
+ *
+ *  A step's direct child is not the only process holding its pipes: `sh -c "sleep 30"` under dash
+ *  as shipped on Debian/Ubuntu forks `sleep` instead of exec'ing it (bash execs it), and a real
+ *  engine CLI may leave helpers behind. Killing only the direct child leaves those descendants
+ *  running as orphans AND leaves `close` (what waitExit settles on, fired once every stdio stream
+ *  closes) waiting on them, i.e. the step is unbounded again. The group kill ends the
+ *  descendants; destroying the streams is the backstop for one that left the group (a further
+ *  setsid). */
+function killAndRelease(child: ReturnType<typeof spawn>): void {
+  let groupKilled = false;
+  if (OWN_SESSION && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      groupKilled = true;
+    } catch {
+      // ESRCH: the group is already gone. Fall through to the direct kill.
+    }
+  }
+  if (!groupKilled) child.kill("SIGKILL");
+  child.stdin?.destroy();
+  child.stdout?.destroy();
+  child.stderr?.destroy();
 }
 
 /** Settle a child into a ProcExit — spawn errors and signal deaths both map to non-zero codes,

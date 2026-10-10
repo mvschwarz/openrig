@@ -233,9 +233,12 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
     const src = path.join(root, "src.json");
     fs.writeFileSync(src, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
     const before = fs.lstatSync(src);
-    // Simulate a swap in the check-then-use window: same path, a different inode now.
-    fs.rmSync(src);
+    // Simulate a swap in the check-then-use window: same path, a different inode now. Move the
+    // original aside rather than deleting it: while it stays allocated the imposter cannot be
+    // handed the same inode number (ext4 recycles a freed inode number immediately).
+    fs.renameSync(src, path.join(root, "displaced.json"));
     fs.writeFileSync(src, JSON.stringify({ k: "IMPOSTER" }), { mode: 0o600 });
+    expect(fs.lstatSync(src).ino).not.toBe(before.ino); // the swap really happened
     const dest = path.join(root, "dest.json");
     expect(copyOntoFresh(src, dest, { dev: before.dev, ino: before.ino })).toBe(false);
     expect(fs.existsSync(dest)).toBe(false);
