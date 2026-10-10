@@ -100,6 +100,18 @@ describe("Codex fresh launch git add-dirs (issue #121)", () => {
     for (const dir of dirs) expect(fs.statSync(dir).isDirectory()).toBe(true);
   });
 
+  it.each(["metadata ", "metadata\t"])("preserves whitespace in separate Git metadata directory %j", async (name) => {
+    const repo = nodePath.join(root, "separate repo");
+    const metadata = nodePath.join(root, name);
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q", "--separate-git-dir", metadata);
+    git(repo, "commit", "-q", "--allow-empty", "-m", "init");
+    expect(fs.statSync(nodePath.join(repo, ".git")).isFile()).toBe(true);
+    const dirs = addDirs(await freshLaunchCommand(repo));
+    expect(dirs).toContain(metadata);
+    for (const dir of dirs) expect(fs.statSync(dir).isDirectory()).toBe(true);
+  });
+
   it("resume does not resolve or add git dirs (unchanged)", async () => {
     const tmux = mockTmux();
     const resolveGitAddDirs = vi.fn(async () => ["/should/not/appear"]);
