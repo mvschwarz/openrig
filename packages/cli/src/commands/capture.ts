@@ -128,7 +128,14 @@ Examples:
 Supported notes:
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
-    lines (returned), requestedLines and omittedLines.
+    lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace
+    are dropped before counting (a deliberately blank last row isn't returned); omittedLines counts
+    only the earlier rows the limit left out.
+  - Over ssh (--host), the remote host's own rig CLI does the capture, so mixed versions differ:
+    an older CLI here with no --lines gets the last 20 lines from a remote with this CLI (older
+    CLIs always forward --lines 20); this CLI with --lines N gets the older history-plus-pane
+    output from a remote with an older CLI; and --history-plus-pane fails there as an unknown
+    option (plain --lines N gives that host's old view).
   - Multi-target capture reports unsupported external_cli nodes as explicit per-target failures.
   - For outbound-only external_cli nodes, use rig whoami/rig ps instead of rig capture.
   - --host captures on a remote host declared in ~/.openrig/hosts.yaml. The host
