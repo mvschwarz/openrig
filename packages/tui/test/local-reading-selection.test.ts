@@ -51,6 +51,19 @@ describe("local reader listing selection", () => {
     expect(controller.state.selected).toBe(0);
     expect(localLines(controller.state).some((line) => line.text === "No visible entries in this selected directory.")).toBe(true);
   });
+  it("pages through a directory listing and opens the resulting selection", async () => {
+    const { root, requests, controller } = fixture();
+    for (let index = 0; index < 25; index++) writeFileSync(join(root, `${String(index).padStart(2, "0")}.md`), "content");
+    await controller.load({ op: "list", root: "fixture", path: "" });
+    await controller.key("pagedown");
+    expect(controller.state.selected).toBe(10);
+    await controller.key("pageup");
+    expect(controller.state.selected).toBe(0);
+    for (let count = 0; count < 3; count++) await controller.key("pagedown");
+    expect(controller.state.selected).toBe(24);
+    await controller.key("enter");
+    expect(requests.at(-1)).toEqual({ op: "read", root: "fixture", path: "24.md" });
+  });
   it("does not change a newer selection when an old listing finishes late", async () => {
     let finish!: (result: LocalResult) => void;
     const controller = new LocalReadingController(() => new Promise((resolve) => { finish = resolve; }), () => {});
