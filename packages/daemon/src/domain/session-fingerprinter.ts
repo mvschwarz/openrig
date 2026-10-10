@@ -21,8 +21,8 @@ export interface FingerprintResult {
 
 const SHELL_NAMES = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh"]);
 
-const CLAUDE_PROCESS_PATTERNS = ["claude", "claude-code"];
-const CODEX_PROCESS_PATTERNS = ["codex"];
+const CLAUDE_PROCESS_PATTERNS = ["claude", "claude-code", ".claude-wrapped", ".claude-unwrapped", ".claude-unwrapp"];
+const CODEX_PROCESS_PATTERNS = ["codex", ".codex-wrapped", ".codex-unwrapped", ".codex-unwrappe"];
 // Only the OpenRig-managed runner's READY marker is evidence of resumable OMP
 // state; a bare `omp` executable could use the default, unisolated user home.
 // No Layer-1 OMP signal: tmux reports the runner as `node`, never its argv.
@@ -89,10 +89,10 @@ export class SessionFingerprinter {
 
     // --- Layer 1: Process tree / active command ---
     if (pane.activeCommand) {
-      const cmd = pane.activeCommand.toLowerCase();
+      const cmd = (pane.activeCommand.split("/").pop() ?? pane.activeCommand).toLowerCase();
 
       for (const pattern of CLAUDE_PROCESS_PATTERNS) {
-        if (cmd.includes(pattern)) {
+        if (cmd === pattern) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "claude-code", confidence: "high", evidence };
@@ -100,7 +100,7 @@ export class SessionFingerprinter {
       }
 
       for (const pattern of CODEX_PROCESS_PATTERNS) {
-        if (cmd.includes(pattern)) {
+        if (cmd === pattern) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "codex", confidence: "high", evidence };
