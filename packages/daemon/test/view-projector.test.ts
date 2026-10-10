@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { Hono } from "hono";
+import { viewsRoutes } from "../src/routes/views.js";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -132,6 +134,29 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
   it("show with --rig filter narrows by session-suffix match", () => {
     const result = projector.show("recently-active", { rig: "product-lab" });
     expect(result.rowCount).toBe(3); // all 3 product-lab qitems
+  });
+
+  it.each(["dev_team", "dev%team", "dev\\team"])("HTTP rig filter treats %s as a literal session suffix", async (rig) => {
+    const exact = [];
+    for (const [sourceSession, destinationSession] of [
+      [`alice@${rig}`, "bob@elsewhere"],
+      ["alice@elsewhere", `bob@${rig}`],
+    ]) {
+      exact.push((await queueRepo.create({ sourceSession, destinationSession, body: "exact rig", nudge: false })).qitemId);
+    }
+    await queueRepo.create({ sourceSession: "alice@devXteam", destinationSession: "bob@dev-other-team", body: "different rig", nudge: false });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("viewProjector" as never, projector as never);
+      c.set("eventBus" as never, bus as never);
+      await next();
+    });
+    app.route("/api/views", viewsRoutes());
+    const response = await app.request(`/api/views/recently-active?rig=${encodeURIComponent(rig)}`);
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.rows.map((row: { qitem_id: string }) => row.qitem_id).sort()).toEqual(exact.sort());
+    expect(result.rowCount).toBe(2);
   });
 
   it("show <unknown-view> throws view_not_found", () => {

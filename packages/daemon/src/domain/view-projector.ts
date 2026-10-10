@@ -159,8 +159,9 @@ export class ViewProjector {
 
   private runBuiltIn(name: BuiltInViewName, rig: string | undefined, limit: number): ViewQueryResult {
     const fixtureClause = fixtureExclusionClause();
-    const rigClause = rig ? `AND (destination_session LIKE ? OR source_session LIKE ?)` : "";
-    const rigParams: unknown[] = rig ? [`%@${rig}`, `%@${rig}`] : [];
+    const rigClause = rig ? `AND (destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')` : "";
+    const rigPattern = rig ? `%@${rig.replace(/[\\%_]/g, "\\$&")}` : undefined;
+    const rigParams: unknown[] = rigPattern ? [rigPattern, rigPattern] : [];
 
     // S04 — the pickup lens post-processes through the ONE shared derivation rule
     // (derivePickup), never a second SQL copy of it: claimed live rows, oldest claim first,
