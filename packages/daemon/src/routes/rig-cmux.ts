@@ -16,6 +16,7 @@ interface NodeInventoryStubEntry {
   logicalId: string;
   canonicalSessionName: string | null;
   sessionStatus: string | null;
+  storedSessionStatus?: string | null;
   attachmentType: string | null;
 }
 
@@ -99,12 +100,13 @@ rigCmuxRoutes.post("/launch", async (c) => {
   const launchableByLogical = new Map<string, string>();
   const missing: MissingSeat[] = [];
   const nonTmuxIds = new Set<string>();
-  const EARLY_EXIT_STATUSES: Record<string, true> = { exited: true };
+  const EARLY_EXIT_STATUSES: Record<string, true> = { exited: true, detached: true };
   const MISSING_SESSION_STATUSES: Record<string, true> = { exited: true, detached: true };
 
   // Collect candidates: seats with a tmux-compatible canonical name.
-  // Track original sessionStatus for reason classification.
-  interface Candidate { logicalId: string; sessionName: string; sessionStatus: string | null }
+  // Track projected status for the response and stored status for main-compatible
+  // readiness timing: projected detached + stored running still gets the wait.
+  interface Candidate { logicalId: string; sessionName: string; sessionStatus: string | null; storedSessionStatus: string | null }
   const candidates: Candidate[] = [];
   const noSessionIds = new Set<string>();
 
@@ -118,7 +120,7 @@ rigCmuxRoutes.post("/launch", async (c) => {
       missing.push({ logicalId: entry.logicalId, reason: "non-tmux" });
       continue;
     }
-    candidates.push({ logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus });
+    candidates.push({ logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus, storedSessionStatus: entry.storedSessionStatus ?? entry.sessionStatus });
   }
 
   // Bounded readiness wait with re-read for no-session seats.
@@ -139,7 +141,7 @@ rigCmuxRoutes.post("/launch", async (c) => {
         if (!noSessionIds.has(entry.logicalId)) continue;
         if (entry.canonicalSessionName && (entry.attachmentType == null || entry.attachmentType === "tmux")) {
           noSessionIds.delete(entry.logicalId);
-          pending.set(entry.logicalId, { logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus });
+          pending.set(entry.logicalId, { logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus, storedSessionStatus: entry.storedSessionStatus ?? entry.sessionStatus });
           noSessionDiscovered++;
         }
       }
@@ -159,10 +161,8 @@ rigCmuxRoutes.post("/launch", async (c) => {
       }
     }
     if (pending.size === 0 && noSessionIds.size === 0) break;
-    // A projected `detached` may be a recently missing tmux session, so keep
-    // main's bounded wait and let the live session probe decide attachment.
     if (!firstPass && foundThisCycle === 0 && noSessionDiscovered === 0 && noSessionIds.size === 0) {
-      const allPendingTerminal = pending.size === 0 || [...pending.values()].every((c) => EARLY_EXIT_STATUSES[c.sessionStatus ?? ""] === true);
+      const allPendingTerminal = pending.size === 0 || [...pending.values()].every((c) => EARLY_EXIT_STATUSES[c.storedSessionStatus ?? ""] === true);
       if (allPendingTerminal) break;
     }
     firstPass = false;

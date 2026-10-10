@@ -479,10 +479,10 @@ rigsRoutes.post("/:id/archive", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const force = body["force"] === true;
 
-  // Preserve main's action decision: a confirmed missing session was
-  // attention_required before the read projection named it detached.
+  // Preserve main's action decision: only a stored running session with
+  // confirmed absence was attention_required before this read projection.
   const lifecycleState = deriveRigLifecycleState(getNodeInventory(repo.db, rigId).map((entry) =>
-    identityVerdictConfirmsSessionMissing(entry.identityVerdict)
+    entry.storedSessionStatus === "running" && identityVerdictConfirmsSessionMissing(entry.identityVerdict)
       ? "attention_required"
       : entry.lifecycleState
   ));

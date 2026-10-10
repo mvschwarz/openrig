@@ -247,8 +247,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     },
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
-    status: node.startupStatus === "failed"
-      ? "failed"
+    status: node.identityVerdict?.reason === "session_missing" && node.sessionStatus === "detached"
+      ? "detached"
+      : node.startupStatus === "failed"
+        ? "failed"
       : node.lifecycleState === "attention_required" || identityDownranked || node.startupStatus === "attention_required"
         ? "attention_required"
         // S19: the SERVED taxonomy display decides first (the daemon's one bridge);

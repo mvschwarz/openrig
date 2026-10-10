@@ -441,6 +441,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       ...base,
       logicalId: "dev.missing-session",
       sessionStatus: "detached",
+      startupStatus: "failed",
       lifecycleState: "detached",
       terminalActive: false,
       identityVerdict: { verdict: "pane_missing", reason: "session_missing" },

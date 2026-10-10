@@ -1258,9 +1258,6 @@ async function handleNodes(
     if (n.startupStatus === "attention_required" && n.latestError?.includes("rig seat continue ")) {
       console.log(`Startup details (${n.canonicalSessionName ?? n.logicalId}): ${n.latestError}`);
     }
-    if (missingSessionGuidance(n)) {
-      console.log(`Session details (${n.canonicalSessionName ?? n.logicalId}): ${missingSessionGuidance(n)}`);
-    }
   }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;

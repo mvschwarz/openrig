@@ -189,6 +189,31 @@ describe("Rig CRUD routes", () => {
     expect(repo.getRigSummaries({ archivedOnly: true }).map((entry) => entry.id)).toContain(rig.id);
   });
 
+  it("requires force for a live seat plus stored-detached missing seat", async () => {
+    const rig = repo.createRig("stored-detached-archive");
+    const healthy = repo.addNode(rig.id, "dev.healthy", { runtime: "codex" });
+    const missing = repo.addNode(rig.id, "dev.missing", { runtime: "codex" });
+    const healthySession = sessionRegistry.registerSession(healthy.id, "dev-healthy@stored-detached-archive");
+    const missingSession = sessionRegistry.registerSession(missing.id, "dev-missing@stored-detached-archive");
+    sessionRegistry.updateStatus(healthySession.id, "running");
+    sessionRegistry.updateStatus(missingSession.id, "detached");
+    sessionRegistry.updateBinding(missing.id, {
+      tmuxSession: missingSession.sessionName, tmuxPane: "%1", attachmentType: "tmux",
+    });
+    new SeatIdentityStore(db).upsert({
+      nodeId: missing.id, sessionName: missingSession.sessionName,
+      verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      observedAt: new Date(Date.now() + 1).toISOString(),
+    });
+
+    const archive = (force: boolean) => app.request(`/api/rigs/${rig.id}/archive`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }),
+    });
+    expect((await archive(false)).status).toBe(409);
+    expect((await archive(true)).status).toBe(200);
+  });
+
   it("POST /api/rigs/:id/attach-self binds an external_cli agent to an existing node", async () => {
     const rig = repo.createRig("rigged-buildout");
     const node = repo.addNode(rig.id, "orch1.lead", { runtime: "claude-code" });
