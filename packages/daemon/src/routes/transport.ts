@@ -99,6 +99,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: resolved.error }, status);
     }
 
+    const exactText = typeof body.exactText === "string" ? body.exactText : undefined;
     const result = await transport.send(body.session, body.text ?? "", {
       deliveryId: body.deliveryId,
       verify: body.verify,
@@ -112,7 +113,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
       expectedStagedLineCount: body.expectedStagedLineCount,
-      exactText: typeof body.exactText === "string" ? body.exactText : undefined,
+      exactText,
     });
 
     if (result.outcome === "retained") return c.json(result);
@@ -160,7 +161,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
           outbox.record({
             senderSession: derivedActor,
             destinationSession: body.session,
-            body: result.envelopeOmitted ? body.exactText! : body.text,
+            body: result.envelopeOmitted && exactText !== undefined ? exactText : body.text,
             identityProvenance: "transport:v1",
           });
         } catch (err) {
