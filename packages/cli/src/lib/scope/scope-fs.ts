@@ -88,7 +88,7 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(original);
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
   if (!match) {
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
     const separator = original.startsWith("\n") ? "" : "\n";
@@ -97,8 +97,8 @@ export function updateFrontmatter(
   }
 
   const originalBlock = match[1]!;
-  const blockStart = match.index + match[0].length - originalBlock.length - 4;
-  const blockEnd = blockStart + originalBlock.length - (originalBlock.endsWith("\r") ? 1 : 0);
+  const blockStart = original.indexOf("\n") + 1;
+  const blockEnd = blockStart + originalBlock.length;
   const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
   let block: string;
   try {
