@@ -211,19 +211,31 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   return token;
 }
 
-/** A Claude runtime by OS evidence: a verified Claude process, or a native or Nix
- * Claude whose argv0 is claude and whose OS name is a version string or a Nix
- * wrapper name, when the executable-path witness is unavailable (unreadable,
- * exited or over budget). A path that is present but does not match stays
- * unverified. A helper or shell never qualifies: its argv0 is not claude. */
+const DELETED_WITNESS = " (deleted)";
+
+/** A Claude process with a present executable witness: `claudeProcess`, or a native
+ * or Nix Claude whose Linux witness is its unlinked binary (`<path> (deleted)` after
+ * an upgrade or garbage collection) and whose stripped path passes `claudeProcess`.
+ * Kept out of `claudeProcess` itself, which delivery also uses. Any other present
+ * path that does not match stays unverified. */
+function witnessedClaudeRow(row: NativeProcessRow): boolean {
+  return claudeProcess(row) || (needsClaudeExecutablePath(row) && row.executablePath?.endsWith(DELETED_WITNESS) === true
+    && claudeProcess({ ...row, executablePath: row.executablePath.slice(0, -DELETED_WITNESS.length) }));
+}
+
+/** A Claude runtime where only main's result is kept: a witnessed Claude, or a
+ * native or Nix Claude (argv0 claude, a version or Nix OS name) whose witness is
+ * unavailable (unreadable, exited or over budget). Used for the parent role and the
+ * intermediate stop only, never to recognise a child that refuses its launcher or
+ * takes the proof. */
 function claudeRuntimeRow(row: NativeProcessRow): boolean {
-  return claudeProcess(row) || (needsClaudeExecutablePath(row) && row.executablePath === undefined);
+  return witnessedClaudeRow(row) || (needsClaudeExecutablePath(row) && row.executablePath === undefined);
 }
 
 /** Verified Claude runtimes that `parent` starts directly (same process group,
  * no shell or other Claude runtime between), keyed by the conversation each
- * names. A runtime counts only on executable, argv0 and path evidence
- * (`claudeRuntimeRow`), never on an argument that mentions claude, and only an
+ * names. A child counts only on a present executable witness
+ * (`witnessedClaudeRow`), never on an argument that mentions claude, and only an
  * explicitly parsed `--session-id`/`--resume` names one: an opaque or unparsed
  * child names nothing. The lowest pid wins, so row order cannot change it. */
 function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcessRow[], byPid: Map<number, NativeProcessRow>): Map<string, NativeProcessRow> {
@@ -231,7 +243,7 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
   if (parent.pgid === undefined) return children;
   const isShell = (row: NativeProcessRow) => isShellForeground(executableName(tokens(row.command)[0]?.replace(/^-/, "") ?? ""));
   for (const row of processes) {
-    if (row === parent || row.pgid !== parent.pgid || !claudeRuntimeRow(row)) continue;
+    if (row === parent || row.pgid !== parent.pgid || !witnessedClaudeRow(row)) continue;
     const identity = claudeSessionIdentity(tokens(row.command).slice(1));
     if (typeof identity !== "string") continue;
     const seen = new Set<number>();

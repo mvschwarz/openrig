@@ -13,8 +13,14 @@ const processMocks = vi.hoisted(() => ({ execFile: vi.fn() }));
 vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal<object>()), execFile: processMocks.execFile }));
 // The executable-path witness is unavailable (as for exited or unreadable pids), so
 // no fake pid here can resolve to a real process on the test host.
+// Each case sets the witnesses it needs; any other pid has none.
+const witnesses = vi.hoisted(() => new Map<number, string>());
 vi.mock("node:fs/promises", async (importOriginal) => ({ ...(await importOriginal<object>()),
-  readlink: vi.fn(async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }) }));
+  readlink: vi.fn(async (path: string) => {
+    const witness = witnesses.get(Number(path.match(/^\/proc\/(\d+)\/exe$/)?.[1]));
+    if (witness === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    return witness;
+  }) }));
 
 const startedAt = "Fri Oct  2 20:00:00 2026";
 type Row = { pid: number; ppid: number; pgid: number; tpgid: number; ucomm: string; command: string };
@@ -30,8 +36,10 @@ processMocks.execFile.mockImplementation((file: string, args: string[], _options
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-async function strictRestore(processRows: Row[], panePid = 100): Promise<{ ok: boolean; observedPid: number | null | undefined }> {
+async function strictRestore(processRows: Row[], panePid = 100, paths: Record<number, string> = {}): Promise<{ ok: boolean; observedPid: number | null | undefined }> {
   rows = processRows;
+  witnesses.clear();
+  for (const [pid, path] of Object.entries(paths)) witnesses.set(Number(pid), path);
   const db = createFullTestDb(); databases.push(db);
   const repo = new RigRepository(db), registry = new SessionRegistry(db);
   const rig = repo.createRig("prod1091"), name = "worker@prod1091";
@@ -84,24 +92,56 @@ describe("strict restore reads full process rows from the production lister", ()
         { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
       ])).toMatchObject({ ok: true, observedPid: 100 });
     });
-  it("N1: a script launcher over a version-titled child on another conversation is refused", async () => {
-    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: false });
+  // Round 7 (Root, eeea3f6e): a child with no readable witness keeps main's baseline.
+  it("a script launcher over an unwitnessed version-titled child on another conversation keeps main's result", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: true, observedPid: 100 });
   });
-  it("N1: a script and a helper on the token over a version-titled child on another conversation are refused", async () => {
+  it("a script and a helper on the token over an unwitnessed version-titled child keep main's result", async () => {
     expect(await strictRestore([shellPane, script,
       { pid: 99, ppid: 100, pgid: 100, tpgid: 100, ucomm: "ugrep", command: "ugrep -n claude --session-id review-token file.ts" },
-      version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: false });
+      version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: true, observedPid: 100 });
   });
-  it("N1: a version-titled child naming the token is the proof process", async () => {
-    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id review-token")], 90)).toMatchObject({ ok: true, observedPid: 101 });
+  it("an unwitnessed version-titled child naming the token leaves the proof with the launcher, as on main", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id review-token")], 90)).toMatchObject({ ok: true, observedPid: 100 });
   });
-  it("N1: a version-titled opaque intermediate owns its own child, so the launcher keeps main's proof", async () => {
+  it("an unwitnessed version-titled opaque intermediate owns its own child, so the launcher keeps main's proof", async () => {
     expect(await strictRestore([shellPane, script, version(101, 100, "--settings /shim/settings.json"),
       version(102, 101, "--session-id different")], 90)).toMatchObject({ ok: true, observedPid: 100 });
   });
-  it("a helper with a version-shaped OS name is never a runtime", async () => {
+  it("a helper with a version-shaped OS name over an unwitnessed version-titled child keeps main's result", async () => {
     expect(await strictRestore([shellPane,
       { pid: 100, ppid: 90, pgid: 100, tpgid: 100, ucomm: "2.1.286", command: "rg claude --resume review-token" },
-      version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: false });
+      version(101, 100, "--session-id different")], 90)).toMatchObject({ ok: true, observedPid: 100 });
+  });
+
+  // Round 7 F1: Linux reports an unlinked running binary as `<path> (deleted)`.
+  const versionsPath = "/home/u/.local/share/claude/versions/2.1.286";
+  const nixPath = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-claude-code-2.1.286/bin/.claude-unwrapped";
+  it.each([["version-titled", "2.1.286", versionsPath], ["Nix-wrapped", ".claude-unwrapp", nixPath]])(
+    "F1: a %s Claude parent whose witness is deleted, over a child Claude on another conversation, keeps main's proof", async (_name, ucomm, path) => {
+      expect(await strictRestore([
+        { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm, command: "claude --resume review-token" },
+        { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
+      ], 100, { 100: `${path} (deleted)` })).toMatchObject({ ok: true, observedPid: 100 });
+    });
+  it("a witnessed (deleted) version-titled child on another conversation refuses the script launcher", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id different")], 90,
+      { 101: `${versionsPath} (deleted)` })).toMatchObject({ ok: false });
+  });
+  it("a witnessed version-titled child naming the token is the proof process", async () => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id review-token")], 90,
+      { 101: versionsPath })).toMatchObject({ ok: true, observedPid: 101 });
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id review-token")], 90,
+      { 101: `${versionsPath} (deleted)` })).toMatchObject({ ok: true, observedPid: 101 });
+  });
+  it.each(["/usr/bin/python3", "/usr/bin/python3 (deleted)"])("a child with a known non-Claude witness (%s) is not recognised", async (path) => {
+    expect(await strictRestore([shellPane, script, version(101, 100, "--session-id different")], 90,
+      { 101: path })).toMatchObject({ ok: true, observedPid: 100 });
+  });
+  it("a direct Claude tool child (claude mcp serve) leaves the real Claude's proof unchanged", async () => {
+    expect(await strictRestore([
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --resume review-token" },
+      { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude mcp serve" },
+    ])).toMatchObject({ ok: true, observedPid: 100 });
   });
 });
