@@ -20,6 +20,11 @@ import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
+import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { WatchdogPolicyEngine, formatWatchdogDeliveryMessage } from "../src/domain/watchdog-policy-engine.js";
+import { ModelDivergenceMonitor } from "../src/domain/model-divergence/model-divergence-monitor.js";
 
 describe("agent pane activity classifier", () => {
   it("classifies active Working pane as agent_active", () => {
@@ -1833,5 +1838,152 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:12Z") });
     await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
     expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
+  });
+
+  // A terminal seat's shell runs every typed line, so it gets the exact text, never the envelope.
+  function seedTerminalSeat() {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.ui", { role: "ui", runtime: "terminal" });
+    const session = sessionRegistry.registerSession(node.id, "infra-ui@term-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig" });
+  }
+  const HEREDOC = "cat <<'EOF'\nSent: as typed\nEOF";
+
+  it("send to a terminal seat types exactText exactly, with no envelope and no delivered segment", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    // The write moment is 30s after the compose stamp: an enveloped send would gain "delivered +30s".
+    const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:39Z") });
+
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC, stampISO: "2026-08-06T17:42:09Z" });
+
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
+  it("send to an agent seat ignores exactText and keeps the envelope", async () => {
+    seedCanonicalRig();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+
+    const result = await transport.send("dev-impl@my-rig", H_ENVELOPE, { exactText: "hi" });
+
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBeUndefined();
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it("enveloped fan-out to a terminal seat and an agent seat gives each the right text", async () => {
+    seedCanonicalRig(); // dev-impl@my-rig, claude-code
+    seedTerminalSeat(); // infra-ui@term-rig, terminal
+    const sent = new Map<string, string>();
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (target, text) => { sent.set(target, text); return { ok: true }; } });
+    const transport = createTransport(tmux);
+
+    const result = await transport.broadcast(
+      { sessions: ["dev-impl@my-rig", "infra-ui@term-rig"] },
+      "make test",
+      { envelopeSender: "orch@my-rig", stampISO: "2026-08-06T17:42:09Z" },
+    );
+
+    expect(result.sent).toBe(2);
+    expect(sent.get("infra-ui@term-rig")).toBe("make test");
+    expect(sent.get("dev-impl@my-rig")).toContain("From: orch@my-rig");
+    expect(sent.get("dev-impl@my-rig")).toContain("make test");
+    const byName = new Map(result.results.map((r) => [r.sessionName, r]));
+    expect(byName.get("infra-ui@term-rig")?.envelopeOmitted).toBe(true);
+    expect(byName.get("dev-impl@my-rig")?.envelopeOmitted).toBeUndefined();
+  });
+
+  it("a person's send (a seat actor) to a terminal seat still gets the exact text", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", actorSession: "dev-impl@my-rig" });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["make test"]);
+  });
+
+  it("a terminal seat known only by its composed name (binding, no session row): exact text for a person, refusal for a watchdog notice", async () => {
+    const rig = rigRepo.createRig("term-rig");
+    const node = rigRepo.addNode(rig.id, "infra.logs", { role: "logs", runtime: "terminal" });
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-logs@term-rig" });
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+
+    const personal = await transport.send("infra-logs@term-rig", H_ENVELOPE, { exactText: "tail -f app.log", actorSession: "dev-impl@my-rig" });
+    expect(personal).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["tail -f app.log"]);
+
+    const notice = await transport.send("infra-logs@term-rig", "[OpenRig watchdog] x; touch /tmp/should-not-run", { actorSession: "watchdog@system", openrigNotice: true });
+    expect(notice).toMatchObject({ ok: false, reason: "terminal_seat" });
+    expect(sent).toEqual(["tail -f app.log"]);
+  });
+
+  it("a person's send from a seat in a rig named system still gets the exact text", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", actorSession: "ops-member@system" });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["make test"]);
+  });
+
+  // OpenRig's own notices (the watchdog, the model monitor) are never typed into a terminal seat.
+  it("a watchdog delivery to a terminal seat types nothing and records failed with the reason; an agent seat is unchanged", async () => {
+    seedTerminalSeat();
+    seedCanonicalRig();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (target) => { sent.push(target); return { ok: true }; } }));
+    migrate(db, [watchdogHistorySchema]); // watchdog suites migrate history inline
+    const jobs = new WatchdogJobsRepository(db), history = new WatchdogHistoryLog(db);
+    const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(db), resolveTargetGeneration: () => "g1",
+      // The deliver startup.ts wires.
+      deliver: async (request, source) => {
+        const result = await transport.send(request.targetSession, formatWatchdogDeliveryMessage(source, request.message),
+          { deliveryId: `guard-watchdog-${source.occurrenceId ?? source.jobId}`, actorSession: "watchdog@system", auditPointer: source.jobId, openrigNotice: true });
+        return result.ok ? { status: "ok" } : { status: "failed", error: result.error };
+      } });
+    const register = (target: string) => jobs.register({ policy: "periodic-reminder", targetSession: target,
+      specYaml: `target:\n  session: ${target}\nmessage: x; touch /tmp/should-not-run\n`, intervalSeconds: 60, registeredBySession: "dev-impl@my-rig" });
+
+    const toTerminal = await engine.evaluate(register("infra-ui@term-rig"));
+    expect(sent).toEqual([]);
+    expect(toTerminal.delivery?.status).toBe("failed");
+    expect(toTerminal.history).toMatchObject({ deliveryStatus: "failed" });
+    expect(toTerminal.history!.evaluationNotes).toMatchObject({ deliveryReason: expect.stringContaining("is a terminal seat") });
+
+    const toAgent = await engine.evaluate(register("dev-impl@my-rig"));
+    expect(toAgent.delivery?.status).toBe("ok");
+    expect(sent).toEqual(["dev-impl@my-rig"]);
+  });
+
+  it("a model-divergence notice types nothing into a terminal operator seat and still reaches the orchestrator", async () => {
+    seedTerminalSeat();
+    seedCanonicalRig();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (target) => { sent.push(target); return { ok: true }; } }));
+    const recorded: Array<{ channels: Array<{ channel: string; target: string | null; status: string; detail?: string }> }> = [];
+    const monitor = new ModelDivergenceMonitor({
+      listPinnedSeats: () => [{ nodeId: "b", sessionName: "sibling@test", rigId: "rig", rigName: "test", runtime: "codex", pinnedModel: "gpt-5.1-codex-mini", generation: "g2" }],
+      readEffectiveModel: () => ({ ok: true, model: "gpt-5.4-mini" }),
+      resolveOrchSeats: () => ["dev-impl@my-rig"], resolveOperatorSeat: () => "infra-ui@term-rig", resolveOversightSeat: () => null,
+      recordProclamation: (p) => recorded.push(p as never), warn: () => {},
+      // The sendToSession startup.ts wires.
+      sendToSession: async (target, message, id) => {
+        const result = await transport.send(target, message, { deliveryId: id, actorSession: "model-monitor@system", auditPointer: id, openrigNotice: true });
+        return result.ok ? { ok: true, outcome: result.outcome } : { ok: false, error: result.error };
+      },
+    });
+
+    await monitor.checkOnce();
+
+    expect(sent).toEqual(["dev-impl@my-rig"]);
+    const channels = recorded[0]!.channels;
+    expect(channels.find((c) => c.target === "dev-impl@my-rig")).toMatchObject({ status: "delivered" });
+    expect(channels.find((c) => c.channel === "operator")).toMatchObject({ status: "failed", target: "infra-ui@term-rig", detail: expect.stringContaining("is a terminal seat") });
   });
 });

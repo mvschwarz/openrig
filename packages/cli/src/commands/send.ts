@@ -272,7 +272,9 @@ acknowledgement.
 A mid-task/busy target now sends-with-advisory by default (busy is not a block);
 --force is a back-compat no-op and never bypasses the interactive-prompt/permission
 guard. Use --raw to send exact text/keystrokes
-without the From/To envelope (e.g. a slash command); it is still guarded. Use
+without the From/To envelope (e.g. a slash command); it is still guarded. A
+terminal seat (runtime: terminal) always gets the exact text, because its shell
+would run the envelope lines; the output says so. Use
 --dangerously-interact --reason "<why>" to DELIBERATELY drive a prompt (select an
 option or approve a permission) — the only override of the prompt guard; it
 implies --raw and is audit-logged. The answer is typed as keystrokes: letters may
@@ -472,7 +474,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
-          session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
+          session, text: outboundText, exactText: raw ? undefined : payload, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
           dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
         }, transportRequestOptions(waitForIdleMs));
       } catch (err) {
@@ -499,7 +501,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // return alone when --verify asked for consumption.
       let effect: EffectCheck | undefined;
       if (opts.verify && res.status < 400) {
-        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, outboundText), waitForIdleMs, res.data["promptInteraction"], opts.dangerouslyInteract);
+        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, res.data["envelopeOmitted"] ? payload : outboundText), waitForIdleMs, res.data["promptInteraction"], opts.dangerouslyInteract);
       }
 
       if (opts.json) {
@@ -527,6 +529,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
 
       console.log(`Sent to ${session}`);
+      if (res.data["envelopeOmitted"]) console.log(exactTextNote(session));
       // OPR.0.4.3.28 correction — an `unknown`-telemetry send now PROCEEDS with a non-blocking
       // advisory (was a fail-closed refusal). Surface it on the human output, not only in --json.
       const advisory = res.data["warning"] as string | undefined;
@@ -588,6 +591,10 @@ interface StagedIdentity {
   expectedLines: number;
   /** recognizable head of the user's payload (contained in any wrap), daemon-precheck normalization */
   payloadHead: string;
+}
+
+function exactTextNote(session: string): string {
+  return `Note: sent as exact text, without the From/To envelope, because ${session} is a terminal seat.`;
 }
 
 function stagedIdentityFor(payload: string, expectedStagedText: string): StagedIdentity {
@@ -851,7 +858,7 @@ async function runHttpHostSend(
   const outboundText = raw ? text : wrapSendBody(originSender, session, text, { stampISO: new Date().toISOString() });
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
-    session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
+    session, text: outboundText, exactText: raw ? undefined : text, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
   }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
 
@@ -894,6 +901,7 @@ async function runHttpHostSend(
     return;
   }
   console.log(`Sent to ${session}`);
+  if (data["envelopeOmitted"]) console.log(exactTextNote(session));
   const advisory = data["warning"] as string | undefined;
   if (advisory) {
     console.log(`Advisory: ${advisory}`);
@@ -1029,7 +1037,7 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; envelopeOmitted?: boolean }>) ?? [];
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
   // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —
   // the false delivery claim is suppressed entirely, not qualified.
@@ -1049,7 +1057,7 @@ async function runFanOutSend(params: {
     } else if (ec && !ec.checked) {
       console.log(`${r.sessionName}: sent (effect UNCHECKED: ${ec.why} — transport verdict only)`);
     } else {
-      console.log(`${r.sessionName}: sent`);
+      console.log(`${r.sessionName}: sent${r.envelopeOmitted ? " as exact text, without the From/To envelope (terminal seat)" : ""}`);
     }
   }
   // The delivered count never includes a staged-unresolved recipient.

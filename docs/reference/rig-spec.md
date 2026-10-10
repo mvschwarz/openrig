@@ -440,6 +440,8 @@ profile: none
 
 All three must be present together. Any partial combination is a validation error.
 
+`rig send` to a terminal node types the exact text, without the From/To envelope that agent seats get, because the shell would run the envelope lines. The sender's output says so.
+
 ### agent_ref Rules
 
 - Must start with `local:` or `path:`
