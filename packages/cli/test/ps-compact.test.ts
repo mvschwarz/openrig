@@ -149,6 +149,10 @@ const RIG_A_NODES = [
     blockedWorkCount: 1,
     contextPercent: 92,
   }),
+  makeFatNode("rig-a", "openrig-build", "ops.missing", {
+    lifecycleState: "detached", sessionStatus: "detached", activityState: "unknown",
+    identityReason: "session_missing",
+  }),
 ];
 
 const RIG_B_NODES = [
@@ -170,13 +174,6 @@ const RIG_C_NODES = [
   makeFatNode("rig-c", "openrig-velocity", "dev1.driver"),
   makeFatNode("rig-c", "openrig-velocity", "dev1.qa"),
 ];
-const MISSING_NODE = makeFatNode("rig-c", "openrig-velocity", "dev1.missing", {
-  lifecycleState: "detached",
-  sessionStatus: "detached",
-  activityState: "unknown",
-  identityReason: "session_missing",
-});
-RIG_C_NODES.push(MISSING_NODE);
 
 const ALL_NODES = [...RIG_A_NODES, ...RIG_B_NODES, ...RIG_C_NODES];
 const TOTAL_NODE_COUNT = ALL_NODES.length; // 15
@@ -554,7 +551,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   it("human node views explain a missing tmux session and the recovery path", async () => {
     for (const extra of [[], ["--full"]]) {
       const { logs } = await captureLogs(async () => {
-        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", ...extra]);
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build", ...extra]);
       });
       expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
     }

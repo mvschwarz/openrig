@@ -7,6 +7,7 @@ import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../src/domain/restore-orchestrator.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 
 function insertStartupContextRow(db: Database.Database, nodeId: string) {
   db.prepare(
@@ -158,16 +159,25 @@ describe("Rig CRUD routes", () => {
     expect(res.status).toBe(400);
   });
 
-  it("keeps a confirmed-missing seat under the archive safety guard", async () => {
+  it("archives a mixed healthy-plus-missing rig without force, as on main", async () => {
     const rig = repo.createRig("mixed-archive");
-    const node = repo.addNode(rig.id, "dev.impl", { runtime: "codex" });
-    const session = sessionRegistry.registerSession(node.id, "dev-impl@mixed-archive");
-    sessionRegistry.updateStatus(session.id, "running");
-    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%1", attachmentType: "tmux" });
-    db.prepare(`INSERT INTO seat_identity_verdicts
-      (node_id, verdict, evidence_source, reason, registered_pane, observed_at)
-      VALUES (?, 'pane_missing', 'tmux_session', 'session_missing', '%1', ?)`)
-      .run(node.id, new Date().toISOString());
+    const healthy = repo.addNode(rig.id, "dev.healthy", { runtime: "codex" });
+    const missing = repo.addNode(rig.id, "dev.missing", { runtime: "codex" });
+    const healthySession = sessionRegistry.registerSession(healthy.id, "dev-healthy@mixed-archive");
+    const missingSession = sessionRegistry.registerSession(missing.id, "dev-missing@mixed-archive");
+    for (const session of [healthySession, missingSession]) sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(missing.id, {
+      tmuxSession: missingSession.sessionName, tmuxPane: "%1", attachmentType: "tmux",
+    });
+    new SeatIdentityStore(db).upsert({
+      nodeId: missing.id,
+      sessionName: missingSession.sessionName,
+      verdict: "pane_missing",
+      evidenceSource: "tmux_session",
+      reason: "session_missing",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      observedAt: new Date(Date.now() + 1).toISOString(),
+    });
 
     const res = await app.request(`/api/rigs/${rig.id}/archive`, {
       method: "POST",
@@ -175,8 +185,8 @@ describe("Rig CRUD routes", () => {
       body: JSON.stringify({}),
     });
 
-    expect(res.status).toBe(409);
-    expect(repo.getRig(rig.id)?.rig.archivedAt).toBeFalsy();
+    expect(res.status).toBe(200);
+    expect(repo.getRigSummaries({ archivedOnly: true }).map((entry) => entry.id)).toContain(rig.id);
   });
 
   it("POST /api/rigs/:id/attach-self binds an external_cli agent to an existing node", async () => {
