@@ -48,13 +48,23 @@ describe("advisory bundle check", () => {
   });
 
 
+  it("reports a README directory instead of treating it as a readable document", async () => {
+    fs.rmSync(path.join(root, "README.md")); fs.mkdirSync(path.join(root, "README.md"));
+    const result = await checkBundleFolder(root);
+    expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "readme_in_docs", status: "finding" }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "README.md" }));
+  });
+
   it("checks startup paths relative to the declaring local agent", async () => {
     const dir = path.join(root, "agent"); fs.mkdirSync(dir);
     fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex").replace("profile: none", "profile: default"));
-    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  default: {}\n');
+    fs.mkdirSync(path.join(dir, "skill"));
+    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nresources:\n  skills:\n    - {id: fixture, path: skill}\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  default: {}\n');
     fs.writeFileSync(path.join(dir, "context.md"), "Context");
     expect((await checkBundleFolder(root)).checks.filter(c => c.status === "finding")).toEqual([]);
     fs.rmSync(path.join(dir, "context.md"));
+    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
+    fs.mkdirSync(path.join(dir, "context.md"));
     expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
   });
 
