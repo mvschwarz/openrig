@@ -26,6 +26,11 @@ const startedAt = "Fri Oct  2 20:00:00 2026";
 type Row = { pid: number; ppid: number; pgid: number; tpgid: number; ucomm: string; command: string };
 let rows: Row[] = [];
 processMocks.execFile.mockImplementation((file: string, args: string[], _options: unknown, callback: (error: Error | null, result: { stdout: string; stderr: string }) => void) => {
+  // macOS reads executable witnesses through osascript (pids follow the script argument).
+  if (file === "/usr/bin/osascript") {
+    const pids = args.slice(args.indexOf("-e") + 2).map(Number);
+    return callback(null, { stdout: JSON.stringify(pids.map((pid) => [pid, witnesses.get(pid) ?? null])), stderr: "" });
+  }
   if (file !== "ps") return callback(new Error(`unexpected spawn: ${file}`), { stdout: "", stderr: "" });
   const columns = args[1]!.split(",");
   const line = (row: Row) => columns.map((column) => column === "lstart" ? startedAt
