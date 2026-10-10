@@ -26,6 +26,8 @@ interface CaptureOpts {
   host?: string;
   json?: boolean;
   historyPlusPane?: boolean;
+  /** --lines was given on the command line (not the "20" default). */
+  linesGiven?: boolean;
   /** Set when --lines N was given (and --history-plus-pane wasn't): the output is cut to the last N lines. */
   exactLines?: number;
 }
@@ -143,7 +145,8 @@ Supported notes:
       const explicitHost = opts.host;
       opts.host = resolveEffectiveHost(opts.host);
       const deps = getDeps();
-      opts.exactLines = exactLineCount(opts, cmd.getOptionValueSource("lines") === "cli");
+      opts.linesGiven = cmd.getOptionValueSource("lines") === "cli";
+      opts.exactLines = exactLineCount(opts, opts.linesGiven);
 
       // OPR.0.4.6.MH4 §4 — `agent@rig@host` target sugar (session operand
       // only; --rig/--pod values are names, never sugar-parsed). Suffix must
@@ -240,7 +243,7 @@ async function runCrossHostCapture(
   if (opts.rig) argv.push("--rig", opts.rig);
   if (opts.pod) argv.push("--pod", opts.pod);
   // Only an explicit --lines is forwarded: the remote's own default stays the default.
-  if (opts.exactLines !== undefined || opts.historyPlusPane) argv.push("--lines", opts.lines ?? "20");
+  if (opts.linesGiven || opts.historyPlusPane) argv.push("--lines", opts.lines ?? "20");
   if (opts.historyPlusPane) argv.push("--history-plus-pane");
   if (opts.json) argv.push("--json");
 
