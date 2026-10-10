@@ -795,7 +795,7 @@ export class StartupOrchestrator {
       sendOrder, source, ...(actionIndex === undefined ? {} : { actionIndex }), observations: [], retry: "not_run" };
     let phase: "initial" | "guarded_retry" | "after_retry" = "initial";
     const record = (pane: string | null, look?: number) => {
-      const evidence = startupSubmissionEvidence(pane, text, STARTUP_SUBMIT_CAPTURE_LINES);
+      const evidence = startupSubmissionEvidence(pane, text, STARTUP_SUBMIT_CAPTURE_LINES, input.adapter.runtime);
       if (evidence) diagnostic.observations.push({ ...evidence, phase, ...(look === undefined ? {} : { look }) });
       return evidence;
     };
@@ -809,7 +809,7 @@ export class StartupOrchestrator {
       await this.sleep(200);
       const first = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter."); }
-      const { pane, state: before, looks } = await this.settleOwnPaste(tmuxSession, first, text);
+      const { pane, state: before, looks } = await this.settleOwnPaste(tmuxSession, first, text, input.adapter.runtime);
       if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
         if (looks) record(first, 0);
@@ -832,7 +832,7 @@ export class StartupOrchestrator {
       await this.sleep(200);
       const after = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!after?.trim()) { record(after); return unverified("Startup submission capture is unavailable after the guarded retry."); }
-      const observed = inspectStartupStagedText(after, text);
+      const observed = inspectStartupStagedText(after, text, input.adapter.runtime);
       if (observed === "staged") {
         const warning = `Startup prompt still staged in ${tmuxSession}; press Enter in that pane.`;
         input.stagedSubmissionWarning = warning;
@@ -864,16 +864,16 @@ export class StartupOrchestrator {
    * Remaining ambiguity: a person who clears a collapsed paste with the same line count inside the window reads
    * as submitted.
    */
-  private async settleOwnPaste(tmuxSession: string, pane: string, text: string): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number }> {
-    let state = inspectStartupStagedText(pane, text);
+  private async settleOwnPaste(tmuxSession: string, pane: string, text: string, runtime: string | null): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number }> {
+    let state = inspectStartupStagedText(pane, text, runtime);
     let looks = 0;
-    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS && startupOwnCollapsedPaste(pane, text)) {
+    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS && startupOwnCollapsedPaste(pane, text, runtime)) {
       await this.sleep(200);
       // A failed re-look adds nothing; the last usable observation stands.
       const next = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES).catch(() => null);
       if (!next?.trim()) break;
       pane = next;
-      state = inspectStartupStagedText(pane, text);
+      state = inspectStartupStagedText(pane, text, runtime);
       looks++;
     }
     return { pane, state, looks };

@@ -95,7 +95,15 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    (`send`, `:1155`). With the seat's typing guard on, the message is held
    instead of typed: the result is `outcome: "retained"` with HTTP 200
    (`routes/transport.ts:115`); operators use `rig seat set-typing-guard` and
-   `rig seat held-messages`.
+   `rig seat held-messages`. This same typing guard has `off` (default),
+   `draft-aware`, and `hold` modes. The legacy enabled boolean selects hold/off.
+   `DraftAwareDelivery` makes one attempt for opted-in seats and immediately returns
+   the exact refusal reason and original held IDs when input is unavailable.
+   Migration `100_typing_guard_modes` extends existing guard/audit rows and adds
+   non-executable receipt metadata to the original outbox; it creates no tables
+   or retry scheduler. Combined wakes preserve every original ID/body.
+   Legacy storage bits fail safe to hold on rollback; newer legacy audit writes
+   supersede older saved modes on re-upgrade, including same-value writes.
 3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
    (`session-transport.ts:1482`), unless the caller passes
@@ -118,6 +126,21 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    without `-p` (`session-transport.ts:1541`) and Enter is pressed only if the
    whole answer is still staged (`:1562`–`1570`). A successful paste proves
    transport execution, not runtime consumption.
+   The transport's prompt reader uses the shared `composer-prompts.ts` matchers
+   from Mr-Neutr0n's #635. Its cursor-aware extension preserves capture styling
+   and excludes a wholly dim autocomplete suffix after the cursor. The daemon
+   directly depends on `string-width` to compare Unicode terminal cell widths
+   with cursor positions and exact staged text; a dependency hoisted from the
+   TUI would not declare this daemon runtime requirement. Default seats retain
+   their existing advisory recognition and staged-text verification behavior.
+   For draft-aware seats, `TmuxAdapter` checks the current composer after buffer
+   preparation and again immediately before keys. The delivery lease records
+   the pasted text and any observed collapsed-paste label; Enter requires that
+   owned input. Late human input, changed recipients or stopped queue wakes refuse
+   further input or hold the message; ambiguous writes remain indeterminate. Nothing
+   is retried automatically. Unicode cell widths use the daemon's direct
+   `string-width` dependency. See [per-seat terminal delivery](../../reference/seat-delivery.md)
+   for activation, persistence, inspection and lifecycle tradeoffs.
 5. Optional `--verify`: capture the last 30 pane lines before and after the
    send (after a 500 ms wait, `:1597`) and count the message's first 40
    characters in each. A higher count after the send reports

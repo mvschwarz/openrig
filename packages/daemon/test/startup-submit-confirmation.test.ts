@@ -347,6 +347,18 @@ describe("startup prompt submission", () => {
       expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2); // one Enter per submission; the startup prompt's is not repeated
     });
   }
+  // The seat's runtime scopes the composer region, so an earlier transcript line carrying another
+  // harness's glyph does not read our own collapsed paste as ambiguous (review on #635).
+  it("confirms a Claude seat's own paste with an earlier Codex-glyph transcript line", async () => {
+    const f = fixture(0, "claude-code", true);
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => `› an earlier transcript line\n${ownPaste(sentPrompt(f))}`)
+      .mockResolvedValueOnce(composerCrop("Press up to edit queued messages"));
+    const result = await f.start({ startupActions: proofActions(false) });
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(result.ok && result.submission).toBeUndefined();
+    expect(f.submitted).toHaveLength(2);
+    expect(f.submitted[1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
+  });
   // Only our own collapsed paste earns another look. Anything else keeps its first-look verdict even if the
   // composer clears a moment later, because a person may have cleared it (review-r2's constructed controls).
   const foreignFirstLooks: Array<[string, (sent: string) => string]> = [

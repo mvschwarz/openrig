@@ -469,10 +469,13 @@ version, from checking the environment to a useful report to the OpenRig team.
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the
   running process enforces it.
-- **`rig seat set-typing-guard <seat> --enabled true|false --reason <text>`** — protect a human's
-  draft in that seat: automatic input is retained instead of typed while the guard is on.
+- **`rig seat set-typing-guard <seat> --mode off|draft-aware|hold --reason <text>`** — choose
+  ordinary automatic delivery, immediate retention when input is busy/unreadable, or holding all automatic
+  input. `--enabled true|false` remains compatible: true selects hold, false selects off.
+  `rig seat status` shows the requested/effective mode; wait for pending activation to finish.
   **`rig seat held-messages`** lists what was retained and **`rig seat retire-held-message`**
-  retires one; disabling the guard does not replay held messages.
+  retires one; changing mode does not replay old held messages. Draft-aware returns the exact
+  refusal and original ID immediately; callers decide further action, with no daemon retry timer.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
   Managed compaction waits for the seat's restore map before compacting; `rig compact --state`,

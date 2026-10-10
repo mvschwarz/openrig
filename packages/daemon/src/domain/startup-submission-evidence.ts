@@ -1,20 +1,24 @@
 import { createHash } from "node:crypto";
+import {
+  composerPromptClassForRuntime,
+  composerPromptIsAmbiguous,
+  composerSelectionPrefixPattern,
+  findComposerInputLineIndex,
+} from "./composer-prompts.js";
 
 const normalize = (text: string): string => text.replace(/\s+/g, "");
 // Claude 2.1.289 briefly replaces its mode bar after a bracketed paste.
 // Only the bare hint and medium-effort suffix are established by retained captures.
-const isComposerFooter = (line: string): boolean => /(?:shift\+tab to cycle|\? for shortcuts)/i.test(line)
+export const isComposerFooter = (line: string): boolean => /(?:shift\+tab to cycle|\? for shortcuts)/i.test(line)
   || /^paste again to expand(?:\s{2,}◐ medium · \/effort)?$/.test(line);
 // This placeholder occupies an empty composer while submitted text is queued.
 const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
 /** The same composer region used by the startup Enter guard. No transcript fallback. */
-function composerRegion(pane: string | null) {
+function composerRegion(pane: string | null, runtime: string | null = null) {
+  const promptClass = composerPromptClassForRuntime(runtime);
   const lines = (pane ?? "").split("\n");
-  let inputAt = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i]!.trimStart().startsWith("❯")) { inputAt = i; break; }
-  }
+  const inputAt = findComposerInputLineIndex(lines, promptClass);
   let end = -1;
   if (inputAt >= 0) {
     // Prompt text can itself contain rules (the startup challenge does).
@@ -26,15 +30,16 @@ function composerRegion(pane: string | null) {
       }
     }
   }
-  const body = inputAt < 0 || end < 0 || /^❯\s*\d+\./.test(lines[inputAt]!.trimStart())
+  const body = inputAt < 0 || end < 0 || composerPromptIsAmbiguous(lines, inputAt, promptClass)
+    || composerSelectionPrefixPattern(promptClass).test(lines[inputAt]!.trimStart())
     ? null : normalize(lines.slice(inputAt, end).join("\n").trimStart().slice(1));
   return { body, markerLine: inputAt < 0 ? null : inputAt + 1,
     closingRuleLine: end < 0 ? null : end + 1, capturedLines: pane === null ? 0 : lines.length };
 }
 
 /** An echoed turn or a partial/opaque composer stays unverified. */
-export function inspectStartupStagedText(pane: string | null, expected: string): "staged" | "clear" | "unverified" {
-  const { body } = composerRegion(pane);
+export function inspectStartupStagedText(pane: string | null, expected: string, runtime: string | null = null): "staged" | "clear" | "unverified" {
+  const { body } = composerRegion(pane, runtime);
   if (body === null) return "unverified";
   if (!body) return "clear";
   if (body === normalize(expected)) return "staged";
@@ -46,8 +51,8 @@ export function inspectStartupStagedText(pane: string | null, expected: string):
 const COLLAPSED_PASTE = /^\[Pastedtext#\d+\+(\d+)lines\]$/;
 
 /** Whether the composer holds only Claude's collapsed label for a paste with the expected text's newline count. */
-export function startupOwnCollapsedPaste(pane: string | null, expected: string): boolean {
-  const { body } = composerRegion(pane);
+export function startupOwnCollapsedPaste(pane: string | null, expected: string, runtime: string | null = null): boolean {
+  const { body } = composerRegion(pane, runtime);
   const label = body === null ? null : COLLAPSED_PASTE.exec(body);
   return label !== null && Number(label[1]) === expected.split("\n").length - 1;
 }
@@ -84,9 +89,9 @@ export interface StartupSubmissionDiagnostic {
 /** No excerpts: every startup source accepts arbitrary, potentially credential-bearing text.
  * Fixed-size metadata per capture (at most three per send), never a pane/prompt dump.
  * Diagnostics must not turn a delivery decision into a failure. */
-export function startupSubmissionEvidence(pane: string | null, expected: string, captureScrollbackLines: number): StartupSubmissionEvidence | undefined {
+export function startupSubmissionEvidence(pane: string | null, expected: string, captureScrollbackLines: number, runtime: string | null = null): StartupSubmissionEvidence | undefined {
   try {
-    const { body, ...positions } = composerRegion(pane);
+    const { body, ...positions } = composerRegion(pane, runtime);
     const expectedBytes = Buffer.from(normalize(expected));
     const observedBytes = body === null ? null : Buffer.from(body);
     const digest = (bytes: Buffer) => ({ bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });

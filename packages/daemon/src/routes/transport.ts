@@ -105,6 +105,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       dangerouslyInteract: body.dangerouslyInteract,
       reason: body.reason,
       actorSession: derivedActor, // transport-derived, never the body claim
+      ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
       // Mechanics-gate fix (d9b3989a): the walk retry's bare-Enter mode, guarded in the
       // transport by the expected-staged-text precheck.
       submitOnly: body.submitOnly,
@@ -121,6 +122,14 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         guard_target_changed: 409,
         delivery_identity_conflict: 409,
         retained_quota_full: 409,
+        delivery_already_attempted: 409,
+        delivery_in_progress: 409,
+        delivery_indeterminate: 409,
+        draft_input_busy: 409,
+        draft_input_unknown: 409,
+        draft_input_changed: 409,
+        draft_hold_expired: 409,
+        draft_wake_superseded: 409,
         session_missing: 404,
         tmux_unavailable: 503,
         transport_unavailable: 409,
@@ -150,7 +159,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // never the relay). A null-actor send has no derived sender to attribute (no fabricated row). The
     // send is already committed, so a rare audit-write failure is LOGGED, never a false-negative on a
     // delivered send.
-    if (derivedActor && !body.submitOnly) { // submitOnly types no text — nothing to outbox-record
+    if (derivedActor && !body.submitOnly && !result.outboxIds?.length) { // Deferred sends already own their original outbox rows.
       const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
       if (outbox) {
         try {
@@ -285,6 +294,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       reason: body.reason,
       actorSession: derivedActor, // transport-derived, never the body claim
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
+      ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
     });
 
     // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED
@@ -298,7 +308,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
       if (outbox) {
         for (const r of result.results) {
-          if (!r.sessionName || r.outcome === "retained") continue;
+          if (!r.sessionName || r.outcome === "retained" || r.outboxIds?.length) continue;
           try {
             const entry = outbox.record({
               senderSession: derivedActor,

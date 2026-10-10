@@ -15,7 +15,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, hasExpectedStagedText, inspectStartupStagedText, SessionTransport } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -74,6 +74,18 @@ describe("agent pane activity classifier", () => {
     const result = classifyPaneActivity([
       "  Tip: You can resume a previous conversation by running codex resume",
       "› Ask Codex to do anything",
+      "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
+      "  ← for agents · ? for shortcuts                       ⚠ 1 warning · f2 to view",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_prompt");
+  });
+
+  it("classifies an idle Codex 0.153 `»` composer placeholder as agent_idle", () => {
+    const result = classifyPaneActivity([
+      "  Tip: You can resume a previous conversation by running codex resume",
+      "» Ask Codex to do anything",
       "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
       "  ← for agents · ? for shortcuts                       ⚠ 1 warning · f2 to view",
     ].join("\n"));
@@ -282,6 +294,109 @@ describe("agent pane activity classifier", () => {
 
     expect(result.state).toBe("unknown");
     expect(result.reason).toBe("empty_capture");
+  });
+
+  // #79 — Codex 0.153 variants draw the composer prompt as `»`. The shared
+  // glyph set (composer-prompts.ts) must classify it exactly like `❯`/`›`.
+  it("classifies a `»` composer as idle", () => {
+    const result = classifyPaneActivity(["prior output", "» "].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_prompt");
+  });
+
+  it("classifies a `»` draft above the Codex footer as a prompt draft", () => {
+    const result = classifyPaneActivity([
+      "prior output",
+      "» half typed input",
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("prompt_draft");
+  });
+
+  it("classifies a `»` numbered selection as attention", () => {
+    const result = classifyPaneActivity(["» 1. Yes", "  2. No"].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("selection_prompt");
+  });
+});
+
+describe("shared composer matchers", () => {
+  it("hasExpectedStagedText matches Claude `❯` staged text", () => {
+    expect(hasExpectedStagedText("prior\n❯ deploy the release\n────────────\nhint", "deploy the release", "claude-code")).toBe(true);
+  });
+
+  it("hasExpectedStagedText matches Codex `›` staged text", () => {
+    expect(hasExpectedStagedText("prior\n› deploy the release\n", "deploy the release", "codex")).toBe(true);
+  });
+
+  it("hasExpectedStagedText matches Codex 0.153 `»` staged text", () => {
+    expect(hasExpectedStagedText("prior\n» deploy the release\n", "deploy the release", "codex")).toBe(true);
+  });
+
+  it("hasExpectedStagedText reads a Claude draft whose continuation starts with a Codex glyph", () => {
+    const pane = [
+      "prior output",
+      "❯ please check this:",
+      "› run the tests",
+      "────────────",
+      "hint bar",
+    ].join("\n");
+    // Runtime-scoped markers: the `›` continuation is part of the Claude draft,
+    // not a second composer. The union-only read would take the `›` line as the
+    // input marker and lose the drafted head.
+    expect(hasExpectedStagedText(pane, "please check this:\n› run the tests", "claude-code")).toBe(true);
+  });
+
+  it("hasExpectedStagedText never treats a numbered selection as staged input", () => {
+    expect(hasExpectedStagedText("prior\n❯ 1. Yes\n", "Yes", "claude-code")).toBe(false);
+    expect(hasExpectedStagedText("prior\n» 1. Yes\n", "Yes", "codex")).toBe(false);
+    // The broad prefix exclusion also catches compact options (`1.Yes`), which
+    // the draft/selection classifier's spaced pattern deliberately does not.
+    expect(hasExpectedStagedText("prior\n❯ 1.Yes\n", "Yes", "claude-code")).toBe(false);
+    expect(hasExpectedStagedText("prior\n› 2.No\n", "2.No", "codex")).toBe(false);
+  });
+
+  it("inspectStartupStagedText reads a `»` composer body", () => {
+    const pane = [
+      "Previous turn",
+      "» hello world",
+      "────────────",
+      "shift+tab to cycle",
+    ].join("\n");
+
+    expect(inspectStartupStagedText(pane, "hello world", "codex")).toBe("staged");
+    expect(inspectStartupStagedText(pane, "something else", "codex")).toBe("unverified");
+  });
+
+  it("inspectStartupStagedText excludes a compact numbered option", () => {
+    const pane = ["Previous turn", "❯ 1.Yes", "────────────", "shift+tab to cycle"].join("\n");
+
+    expect(inspectStartupStagedText(pane, "1.Yes", "claude-code")).toBe("unverified");
+  });
+
+  // Review round 2 (mvschwarz on #635): with no runtime there is no way to say
+  // which mixed-glyph line is the live composer, so the union read must fail
+  // closed exactly as the pre-shared-matcher check did.
+  it("unknown runtime refuses a mixed-glyph composer block", () => {
+    const separators: string[][] = [[], [""], ["────────────"]];
+    for (const separator of separators) {
+      for (const glyph of ["›", "»"]) {
+        const pane = [
+          "❯ unrelated first line",
+          ...separator,
+          `${glyph} expected text`,
+          "────────────",
+          "shift+tab to cycle",
+        ].join("\n");
+
+        expect(hasExpectedStagedText(pane, "expected text")).toBe(false);
+        expect(inspectStartupStagedText(pane, "expected text")).toBe("unverified");
+      }
+    }
   });
 });
 

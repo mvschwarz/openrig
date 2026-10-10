@@ -10,14 +10,17 @@ import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
+import Database from 'better-sqlite3';
+import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
+import {migrate} from '../src/db/migrate.js';
 const seat='writer@demo', input={sessionName:seat,runtime:'claude-code',usedPercentage:90};
 const homes:string[]=[];
 afterEach(()=>{vi.restoreAllMocks();for(const h of homes.splice(0))rmSync(h,{recursive:true,force:true});});
-function fixture(manualPrepWaitMs=1000){
+function fixture(manualPrepWaitMs=1000,guardDb?:Database.Database){
  const home=mkdtempSync(join(tmpdir(),'compaction-preparation-'));homes.push(home);
  let clock=10000,generation='generation-one',activity='idle';
  let onSleep:(()=>Promise<void>)|undefined;
- const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
+ const db=guardDb??({prepare:()=>({get:()=>undefined,all:()=>[]})} as any);
  const writes:string[]=[],keys:string[][]=[];
  const policy={enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
  const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendText:vi.fn(async(_:string,text:string)=>{writes.push(text);return{ok:true};}),sendKeys:vi.fn(async(_:string,k:string[])=>{keys.push(k);return{ok:true};})};
@@ -172,17 +175,24 @@ it('uncertain compact receipt never replays an already submitted command',async(
 });
 
 it('skip-map cannot bypass typing guard or a changed occupant',async()=>{
- for(const change of ['guard','occupant']){
-  const f=fixture();const original=f.transport.waitUntilIdle.bind(f.transport);
-  vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{
-   const r=await original(...args);
-   if(change==='guard')vi.spyOn(f.guard,'preference').mockReturnValue({nodeId:'node-one',desired:true,effective:true,pending:false});
-   else f.generation('generation-two');
-   return r;
-  });
-  const result=await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true});
-  expect(result.triggered).toBe(false);expect(compacts(f)).toHaveLength(0);
-  expect(result).toMatchObject({reason:change==='guard'?'typing_guard_enabled':'stale_generation'});
+ for(const change of ['guard','hold-mode','occupant']){
+  const db=new Database(':memory:');
+  try{
+   migrate(db,ALL_MIGRATIONS);
+   db.exec("INSERT INTO rigs(id,name) VALUES ('rig-demo','demo'); INSERT INTO nodes(id,rig_id,logical_id,runtime) VALUES ('node-one','rig-demo','writer','claude-code');");
+   const f=fixture(1000,db);const original=f.transport.waitUntilIdle.bind(f.transport);
+   vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{
+    const r=await original(...args);
+    // Activate the real persisted control: a mocked preference read does not
+    // exercise the operation boundary or the compatible enabled selector.
+    if(change!=='occupant')await f.guard.set('node-one',change==='guard'?true:{mode:'hold'},'operator','protect input during preparation');
+    else f.generation('generation-two');
+    return r;
+   });
+   const result=await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true});
+   expect(result.triggered).toBe(false);expect(compacts(f)).toHaveLength(0);
+   expect(result).toMatchObject({reason:change==='occupant'?'stale_generation':'typing_guard_enabled'});
+  }finally{db.close();}
  }
 });
 

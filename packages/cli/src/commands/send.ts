@@ -12,6 +12,7 @@ import { resolveCrossHostTarget } from "../cross-host-target.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
+import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -20,6 +21,10 @@ const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 // fetch's 10 s connect timeout, so a host that never accepts the connection still reads as unreachable. A send
 // that outlasts it reads as unconfirmed, never as failed.
 const CROSS_HOST_SEND_TIMEOUT_MS = 30_000;
+
+/** The shared composer glyph set (Claude `❯`, Codex `›`, Codex 0.153 `»`) from the daemon's
+ * composer-prompts surface, so the CLI staged check can never disagree with the daemon guard. */
+const PROMPT_LINE_PATTERN = new RegExp(`^\\s*[${COMPOSER_PROMPT_CLASS}]`);
 
 /**
  * Wrap a `rig send` body with an email-style envelope so the recipient
@@ -687,10 +692,10 @@ async function detectStagedAtPrompt(
   const lines = pane.split("\n");
   let lastPrompt = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^\s*[❯›]/.test(lines[i]!)) { lastPrompt = i; break; }
+    if (PROMPT_LINE_PATTERN.test(lines[i]!)) { lastPrompt = i; break; }
   }
   if (lastPrompt === -1) return { state: "not-staged" };
-  const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(/^\s*[❯›]/, "");
+  const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(PROMPT_LINE_PATTERN, "");
   // IDENTITY FIRST (round-2 F2, desk-binding): the literal-residual match uses
   // the daemon submit-precheck's own normalization (strip ALL whitespace,
   // contiguous containment) so a detector-positive is compatible with the

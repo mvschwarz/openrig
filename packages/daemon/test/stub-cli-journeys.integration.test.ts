@@ -75,6 +75,25 @@ describe("stub CLI journeys", () => {
     // Exact arrays, not subset matches: an extra sibling is a failure.
   }, 60_000);
 
+  it("hold mode retains a CLI send outside its pane and exposes its original ID", async () => {
+    const marker = `typing-guard-${randomUUID()}`;
+    try {
+      const preference = await cli(["seat", "set-typing-guard", recipient, "--mode", "hold", "--reason", "fixture manual input", "--json"]);
+      expect(preference).toMatchObject({ effective: true, effectiveMode: "hold", pending: false });
+      const receipt = await cli(["send", recipient, marker, "--verify", "--json"]);
+      expect(receipt).toMatchObject({ outcome: "retained", sent: false, verified: false });
+      expect(receipt.outboxIds).toHaveLength(1);
+      const id = receipt.outboxIds[0];
+      const retained = await cli(["seat", "held-messages", recipient, "--id", id, "--json"]);
+      expect(retained.entry).toMatchObject({ outboxId: id, deliveryState: "retained", destinationSession: recipient });
+      expect(retained.entry.body).toContain(marker);
+      expect(JSON.stringify(await cli(["capture", recipient, "--json"]))).not.toContain(marker);
+      expect(await cli(["seat", "status", sender, "--json"])).toMatchObject({ typingGuard: { effective: false, effectiveMode: "off" } });
+    } finally {
+      await cli(["seat", "set-typing-guard", recipient, "--enabled", "false", "--reason", "fixture cleanup", "--json"]);
+    }
+  }, 60_000);
+
   it("replays one exact stream item after restart and an idempotent emit retry", async () => {
     const id = `journey-${randomUUID()}`;
     const tag = `journey-tag-${randomUUID()}`;
