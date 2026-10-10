@@ -1,11 +1,11 @@
 // A rig brought up again under the same name archives the stopped one, and both rows keep the name.
 // Lookups by rig name must answer for the active rig, not the archived one: rig ask, the queue's
-// target_repo check, the workflow role and member probes, and rig whoami --session. An archived
-// rig still answers when it is the only one with that name.
+// target_repo check, the workflow role and member probes, rig whoami --session, and the restore
+// hint rig down prints. An archived rig still answers when it is the only one with that name.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { migrate } from "../src/db/migrate.js";
 import { workspacePrimitiveSchema } from "../src/db/migrations/038_workspace_primitive.js";
 import { queueTargetRepoSchema } from "../src/db/migrations/039_queue_target_repo.js";
@@ -135,6 +135,21 @@ describe("archived rig sharing a name with the active rig", () => {
     const result = whoami.resolve({ sessionName: `dev-builder1@${RIG}`, compact: true });
 
     expect(result?.identity.rigId).toBe(activeId);
+  });
+
+  it("rig down offers rig up <name> as the restore when only an archived rig shares the name", async () => {
+    const { app } = createTestApp(db);
+
+    const res = await app.request("/api/down", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigId: activeId }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.rigName).toBe(RIG);
+    expect(body.isUniqueName).toBe(true);
   });
 
   it("an archived rig still answers when no active rig has the name", () => {
