@@ -182,8 +182,9 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
       body: "pane-backed founder seat",
     });
     await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
-    expect(h.sends.map((send) => send.session)).toEqual(["human-founder@rig1"]);
-    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:/);
+    // Pane-bound, not gateway-owned. The pane is a terminal seat, so the wake is not typed into it.
+    expect(h.sends).toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:terminal-seat: /);
   });
 
   it("PANELLESS TOPOLOGY IS NOT A TERMINAL: an external_cli-bound registered human stays gateway-routable", async () => {
@@ -566,6 +567,18 @@ describe("a terminal seat never gets a typed queue wake", () => {
     });
     // The wake ladder retries through maybeNudge.
     await h.repo.maybeNudge(item.qitemId, session, true, "dev-a@rig1");
+    expect(h.sends).toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:terminal-seat: /);
+  });
+
+  it("a terminal seat known only by its composed name (binding, no session row) gets no typed wake", async () => {
+    h.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-logs', 'rig-1', 'infra.logs', 'terminal')").run();
+    h.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-logs', 'node-logs', 'tmux', 'infra-logs@rig1')").run();
+    const item = await h.repo.create({
+      sourceSession: "dev-a@rig1", destinationSession: "infra-logs@rig1",
+      summary: "x; touch /tmp/should-not-run", evidenceRef: EVIDENCE, body: "composed seat",
+    });
+    await vi.waitFor(() => expect(h.repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
     expect(h.sends).toHaveLength(0);
     expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:terminal-seat: /);
   });

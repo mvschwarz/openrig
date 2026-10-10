@@ -3589,14 +3589,22 @@ export class QueueRepository {
    *  node carries an explicit tmux binding. external_cli is paneless and must
    *  continue to the human-registry/gateway leg. FAIL-OPEN only where the DB
    *  cannot carry classification evidence (empty/partial bootstrap schemas). */
-  /** The newest session row for this name belongs to a `runtime: terminal` node. */
+  /** The seat is a `runtime: terminal` node: by its newest session row, else by the composed
+   *  canonical name (`<logical id with dashes>@<rig>`), as {@link hasTerminalTransport} resolves it. */
   private isTerminalSeat(dest: string): boolean {
     try {
-      const row = this.db.prepare(
+      const exact = this.db.prepare(
         `SELECT n.runtime AS runtime FROM sessions s JOIN nodes n ON n.id = s.node_id
           WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`,
       ).get(dest) as { runtime: string | null } | undefined;
-      return row?.runtime === "terminal";
+      if (exact) return exact.runtime === "terminal";
+      const at = dest.lastIndexOf("@");
+      if (at <= 0) return false;
+      const composed = this.db.prepare(
+        `SELECT n.runtime AS runtime FROM nodes n JOIN rigs r ON r.id = n.rig_id
+          WHERE r.name = ? AND REPLACE(n.logical_id, '.', '-') = ? LIMIT 1`,
+      ).get(dest.slice(at + 1), dest.slice(0, at)) as { runtime: string | null } | undefined;
+      return composed?.runtime === "terminal";
     } catch {
       return false;
     }
