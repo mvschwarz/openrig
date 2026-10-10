@@ -1335,6 +1335,16 @@ export class QueueRepository {
     if (destClass.class === "unroutable") {
       return { classified: "failed", nudgeResult: destClass.teaching };
     }
+    // A terminal seat runs a shell or a TUI, not an agent. Typed wake text would run there as a
+    // command line (it carries the row's summary), and nothing there can claim the row. So nothing
+    // is typed; the row stays queued and visible. `failed:` keeps it on the wake ladder, whose
+    // retries come back here and type nothing before it escalates.
+    if (this.isTerminalSeat(destinationSession)) {
+      return {
+        classified: "failed",
+        nudgeResult: `failed:terminal-seat: '${destinationSession}' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it and nothing there can claim this row. The row stays queued; route it to an agent seat.`,
+      };
+    }
     const stampISO = new Date().toISOString();
     let text: string;
     if (prebuiltText !== undefined) {
@@ -3579,6 +3589,19 @@ export class QueueRepository {
    *  node carries an explicit tmux binding. external_cli is paneless and must
    *  continue to the human-registry/gateway leg. FAIL-OPEN only where the DB
    *  cannot carry classification evidence (empty/partial bootstrap schemas). */
+  /** The newest session row for this name belongs to a `runtime: terminal` node. */
+  private isTerminalSeat(dest: string): boolean {
+    try {
+      const row = this.db.prepare(
+        `SELECT n.runtime AS runtime FROM sessions s JOIN nodes n ON n.id = s.node_id
+          WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`,
+      ).get(dest) as { runtime: string | null } | undefined;
+      return row?.runtime === "terminal";
+    } catch {
+      return false;
+    }
+  }
+
   private hasTerminalTransport(dest: string): boolean {
     try {
       const anyTopology = this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()
