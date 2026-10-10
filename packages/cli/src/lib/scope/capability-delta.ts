@@ -55,6 +55,13 @@ export function capabilityDeltaExpiryFindings(missionDir: string): AuditFinding[
     const successorPath = path.resolve(path.dirname(deltaPath), successorRef);
     if (successorPath === deltaPath || !fs.existsSync(canonPath) || !fs.existsSync(successorPath)) continue;
 
+    try {
+      if (!fs.statSync(successorPath).isFile()) continue;
+      fs.accessSync(successorPath, fs.constants.R_OK);
+    } catch {
+      continue;
+    }
+
     let canonNamesDelta = false;
     try {
       canonNamesDelta = documentHeader(fs.readFileSync(canonPath, "utf8"))
