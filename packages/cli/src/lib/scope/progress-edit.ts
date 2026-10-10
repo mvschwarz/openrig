@@ -97,7 +97,7 @@ export function addProgressRow(
   let sectionIdx = -1;
   for (let i = start; i < lines.length; i++) {
     const h = lines[i]!.match(HEADING_RE);
-    if (h && h[2]!.trim() === section) { sectionIdx = i; break; }
+    if (h && h[1] === "##" && h[2]!.trim() === section) { sectionIdx = i; break; }
   }
 
   if (sectionIdx === -1) {
