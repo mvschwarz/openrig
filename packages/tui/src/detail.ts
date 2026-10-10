@@ -40,7 +40,11 @@ export function wrapDetailLines(lines: ContentLine[], width: number): ContentLin
     while (line.text.length - offset + indent.length > room) {
       const chunk = indent + line.text.slice(offset, offset + room - indent.length + 1);
       const space = chunk.lastIndexOf(" ", room);
-      const cut = space >= room / 2 ? space : room;
+      let cut = space >= room / 2 ? space : room;
+      // A hard wrap must keep a UTF-16 surrogate pair on the same row.
+      const before = chunk.charCodeAt(cut - 1);
+      const after = chunk.charCodeAt(cut);
+      if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) cut--;
       result.push({ text: chunk.slice(0, cut), ...(result.length === 0 && line.action ? { action: line.action } : {}) });
       offset += cut - indent.length;
       while (offset < line.text.length && /\s/.test(line.text[offset]!)) offset++;
