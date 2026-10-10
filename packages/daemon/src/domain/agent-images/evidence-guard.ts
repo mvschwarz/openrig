@@ -82,7 +82,7 @@ export function evaluateProtection(opts: EvidenceGuardOpts): ImageProtectionStat
       reasons,
       references: refs,
     };
-    statuses.set(img.name, status);
+    statuses.set(img.id, status);
     if (status.protected) protectedNameSet.add(img.name);
   }
 
@@ -93,7 +93,7 @@ export function evaluateProtection(opts: EvidenceGuardOpts): ImageProtectionStat
   while (changed) {
     changed = false;
     for (const img of opts.images) {
-      const status = statuses.get(img.name)!;
+      const status = statuses.get(img.id)!;
       if (status.protected) continue;
       // img's lineage lists ANCESTORS. We protect a DESCENDANT of a
       // protected image — meaning if any ancestor of `img` is
@@ -111,7 +111,7 @@ export function evaluateProtection(opts: EvidenceGuardOpts): ImageProtectionStat
     }
   }
 
-  return opts.images.map((img) => statuses.get(img.name)!);
+  return opts.images.map((img) => statuses.get(img.id)!);
 }
 
 /** Walk spec-library roots for YAML files and collect file paths that
