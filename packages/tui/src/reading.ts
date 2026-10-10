@@ -66,9 +66,19 @@ export function fileLines(result: FileReadResult | null | undefined, target: Fil
   let start = 0;
   if (target.anchor) {
     const slugs = new Map<string, number>();
-    let fence = false;
+    let fence: { marker: string; length: number } | null = null;
     const found = sourceRows.findIndex((row) => {
-      if (/^\s*(```|~~~)/.test(row)) fence = !fence;
+      const marker = row.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (marker) {
+        const run = marker[1]!;
+        const tail = marker[2]!;
+        if (!fence) {
+          if (run[0] !== "`" || !tail.includes("`")) fence = { marker: run[0]!, length: run.length };
+        } else if (run[0] === fence.marker && run.length >= fence.length && /^[ \t]*$/.test(tail)) {
+          fence = null;
+        }
+        return false;
+      }
       const heading = !fence && row.match(/^ {0,3}#{1,6}\s+(.+?)(?:\s+#+)?\s*$/);
       if (!heading) return false;
       const slug = headingSlug(heading[1]!);
