@@ -53,6 +53,32 @@ describe("chat routes", () => {
     db.close();
   });
 
+  it.each([
+    ["send", null], ["send", []], ["send", "text"], ["send", { body: 42 }],
+    ["send", { body: "message", sender: 42 }],
+    ["topic", null], ["topic", []], ["topic", { topic: 42 }],
+    ["topic", { topic: "discussion", body: 42 }],
+    ["topic", { topic: "discussion", sender: 42 }],
+  ])("rejects malformed %s payload before persistence or emission: %j", async (route, payload) => {
+    const emit = vi.spyOn(eventBus, "emit");
+    const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(400);
+    expect(chatRepo.history(rigId)).toEqual([]);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, ""])("keeps optional empty topic body and transport sender precedence: %s", async body => {
+    const response = await app.request(`/api/rigs/${rigId}/chat/topic`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify({ topic: "discussion", sender: "claimed@rig", body }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ sender: "wire@rig", topic: "discussion", body: "" });
+  });
+
   it.each([false, true])("watch drains buffered messages before switching to live delivery (late arrival: %s)", async lateArrival => {
     const history = [chatRepo.send(rigId, "alice", "history one"), chatRepo.send(rigId, "alice", "history two")];
     const expected = [...history];
