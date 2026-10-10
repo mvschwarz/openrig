@@ -6,11 +6,15 @@ import type { Action, InputEvent, Screen, ViewState } from "./types.js";
 import { specDetailArrowsScroll } from "./state.js";
 import { StringDecoder } from "node:string_decoder";
 
-function parseText(text: string, final: boolean): { events: InputEvent[]; remainder: string } {
+function parseText(text: string, final: boolean, skipLF = false): { events: InputEvent[]; remainder: string; skipLF: boolean } {
   const events: InputEvent[] = [];
   let i = 0;
   while (i < text.length) {
     const ch = text[i] ?? "";
+    if (skipLF) {
+      skipLF = false;
+      if (ch === "\n") { i += 1; continue; }
+    }
     if (ch === "\x1b") {
       const tail = text.slice(i);
       if (!final && "\x1b[200~".startsWith(tail)) break;
@@ -84,6 +88,7 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
     }
     if (ch === "\t") { events.push({ type: "key", key: "tab" }); i += 1; continue; }
     if (ch === "\r" || ch === "\n") {
+      skipLF = ch === "\r";
       events.push({ type: "key", key: "enter", action: { type: "activate" } });
       i += 1;
       continue;
@@ -97,7 +102,7 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
     if (char >= " ") events.push({ type: "char", ch: char });
     i += char.length;
   }
-  return { events, remainder: text.slice(i) };
+  return { events, remainder: text.slice(i), skipLF };
 }
 
 export interface InputDecoder {
@@ -113,16 +118,19 @@ export interface InputDecoder {
 export function createInputDecoder(): InputDecoder {
   const utf8 = new StringDecoder("utf8");
   let pending = "";
+  let skipLF = false;
   return {
     write(bytes) {
       pending += typeof bytes === "string" ? bytes : utf8.write(bytes);
-      const parsed = parseText(pending, false);
+      const parsed = parseText(pending, false, skipLF);
       pending = parsed.remainder;
+      skipLF = parsed.skipLF;
       return parsed.events;
     },
     flush() {
-      const parsed = parseText(pending, true);
+      const parsed = parseText(pending, true, skipLF);
       pending = parsed.remainder;
+      skipLF = parsed.skipLF;
       return parsed.events;
     },
     hasPending() {
