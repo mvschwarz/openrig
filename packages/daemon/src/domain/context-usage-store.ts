@@ -76,6 +76,7 @@ interface CodexTokenCountEvent {
   timestamp?: string;
   payload?: {
     type?: string;
+    rate_limits?: unknown;
     info?: {
       last_token_usage?: CodexTokenUsageRaw;
       model_context_window?: number;
@@ -472,7 +473,12 @@ export class ContextUsageStore {
       if (!line.includes("\"token_count\"")) continue;
       try {
         const parsed = JSON.parse(line) as CodexTokenCountEvent;
-        if (parsed.payload?.type === "token_count") return parsed;
+        if (parsed.payload?.type === "token_count") {
+          // Native Codex also writes quota-only updates under token_count.
+          // They carry no context measurement and must not replace its timestamp.
+          if (parsed.payload.info == null && parsed.payload.rate_limits != null) continue;
+          return parsed;
+        }
       } catch {
         continue;
       }
