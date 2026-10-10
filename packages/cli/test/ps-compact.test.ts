@@ -66,9 +66,11 @@ function runningDeps(port: number): StatusDeps {
 
 function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   lifecycleState?: string;
+  sessionStatus?: string;
   startupStatus?: string;
   activityState?: string;
   activityReason?: string;
+  identityReason?: string;
   hasAssignedWork?: boolean;
   assignedWorkCount?: number;
   pendingWorkCount?: number;
@@ -90,10 +92,11 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     hostSelfId: "host-84c37990",
     nodeKind: "agent" as const,
     runtime: "claude-code",
-    sessionStatus: "running",
+    sessionStatus: opts?.sessionStatus ?? "running",
     startupStatus: opts?.startupStatus ?? "ready",
     restoreOutcome: "n-a",
     lifecycleState: opts?.lifecycleState ?? "running",
+    identityVerdict: opts?.identityReason ? { reason: opts.identityReason } : null,
     tmuxAttachCommand: `tmux attach -t ${logicalId.replace(".", "-")}@${rigName}`,
     resumeCommand: `claude --resume /path/to/session/${logicalId}`,
     latestError: opts?.latestError ?? null,
@@ -167,6 +170,13 @@ const RIG_C_NODES = [
   makeFatNode("rig-c", "openrig-velocity", "dev1.driver"),
   makeFatNode("rig-c", "openrig-velocity", "dev1.qa"),
 ];
+const MISSING_NODE = makeFatNode("rig-c", "openrig-velocity", "dev1.missing", {
+  lifecycleState: "detached",
+  sessionStatus: "detached",
+  activityState: "unknown",
+  identityReason: "session_missing",
+});
+RIG_C_NODES.push(MISSING_NODE);
 
 const ALL_NODES = [...RIG_A_NODES, ...RIG_B_NODES, ...RIG_C_NODES];
 const TOTAL_NODE_COUNT = ALL_NODES.length; // 15
@@ -539,6 +549,15 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // WORK begins after the fixed RIG/SESSION/LIFECYCLE/ACTIVITY columns.
     // It renders the total active assignment count (6), never the pending-only count (3).
     expect(assignedLine!.slice(22 + 38 + 11 + 14, 22 + 38 + 11 + 14 + 6).trim()).toBe("6");
+  });
+
+  it("human node views explain a missing tmux session and the recovery path", async () => {
+    for (const extra of [[], ["--full"]]) {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", ...extra]);
+      });
+      expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
+    }
   });
 
   it("--full human table uses full-detail columns", async () => {

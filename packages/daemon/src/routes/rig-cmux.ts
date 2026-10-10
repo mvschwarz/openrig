@@ -99,7 +99,8 @@ rigCmuxRoutes.post("/launch", async (c) => {
   const launchableByLogical = new Map<string, string>();
   const missing: MissingSeat[] = [];
   const nonTmuxIds = new Set<string>();
-  const STALE_STATUSES = new Set(["exited", "detached"]);
+  const EARLY_EXIT_STATUSES: Record<string, true> = { exited: true };
+  const MISSING_SESSION_STATUSES: Record<string, true> = { exited: true, detached: true };
 
   // Collect candidates: seats with a tmux-compatible canonical name.
   // Track original sessionStatus for reason classification.
@@ -158,12 +159,11 @@ rigCmuxRoutes.post("/launch", async (c) => {
       }
     }
     if (pending.size === 0 && noSessionIds.size === 0) break;
-    // Early-exit when no progress was made this cycle (no new live sessions
-    // AND no new sessions discovered from no-session seats) and all remaining
-    // pending are known-stale.
+    // A projected `detached` may be a recently missing tmux session, so keep
+    // main's bounded wait and let the live session probe decide attachment.
     if (!firstPass && foundThisCycle === 0 && noSessionDiscovered === 0 && noSessionIds.size === 0) {
-      const allPendingStale = pending.size === 0 || [...pending.values()].every((c) => STALE_STATUSES.has(c.sessionStatus ?? ""));
-      if (allPendingStale) break;
+      const allPendingTerminal = pending.size === 0 || [...pending.values()].every((c) => EARLY_EXIT_STATUSES[c.sessionStatus ?? ""] === true);
+      if (allPendingTerminal) break;
     }
     firstPass = false;
     if (Date.now() < deadline) {
@@ -173,8 +173,8 @@ rigCmuxRoutes.post("/launch", async (c) => {
 
   // Classify remaining pending/no-session with reason fidelity.
   for (const [logicalId, candidate] of pending) {
-    const isStale = STALE_STATUSES.has(candidate.sessionStatus ?? "");
-    missing.push({ logicalId, reason: isStale ? "session-missing" : "still-booting" });
+    const isMissing = MISSING_SESSION_STATUSES[candidate.sessionStatus ?? ""] === true;
+    missing.push({ logicalId, reason: isMissing ? "session-missing" : "still-booting" });
   }
   for (const logicalId of noSessionIds) {
     missing.push({ logicalId, reason: "no-session" });

@@ -673,6 +673,41 @@ describe("POST /api/rigs/:rigId/cmux/launch", () => {
     expect(body.missing).toBeUndefined();
   });
 
+  it("keeps the bounded wait when a projected-detached session reappears", async () => {
+    let callCount = 0;
+    const dynamicTmux = {
+      ...makeTmuxAdapterStub(new Set()),
+      hasSession: async () => ++callCount >= 3,
+    } as unknown as import("../src/adapters/tmux.js").TmuxAdapter;
+    const app = new Hono();
+    const rigs = {
+      "rig-1": {
+        id: "rig-1",
+        name: "returning-rig",
+        nodes: [{ logicalId: "a", podId: "p1", canonicalSessionName: "a@returning-rig", sessionStatus: "detached" as string | undefined }],
+      },
+    };
+    const rigRepo = makeRigRepoStub(rigs);
+    const layoutService = new CmuxLayoutService(makeMockAdapter({ available: true }), { sleep: async () => {} });
+    app.use("*", async (c, next) => {
+      c.set("rigRepo" as never, rigRepo);
+      c.set("cmuxAdapter" as never, makeMockAdapter({ available: true }));
+      c.set("cmuxLayoutService" as never, layoutService);
+      c.set("nodeInventoryFn" as never, makeNodeInventoryStub(rigs));
+      c.set("tmuxAdapter" as never, dynamicTmux);
+      c.set("readinessTimeoutMs" as never, 500);
+      c.set("readinessPollMs" as never, 10);
+      c.set("db" as never, {} as Database.Database);
+      await next();
+    });
+    app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
+
+    const res = await app.request("/api/rigs/rig-1/cmux/launch", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workspaces: Array<{ agents: string[] }> };
+    expect(body.workspaces[0]!.agents).toContain("a@returning-rig");
+  });
+
   it("OPR.0.3.4.8: stale/exited session remains session-missing (never attached even after polling)", async () => {
     const app = buildApp({
       rigs: {

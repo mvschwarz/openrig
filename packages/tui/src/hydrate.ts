@@ -74,7 +74,7 @@ interface NodeInventoryRead {
     needsInput?: { count?: number; reason?: string | null } | null;
     decidedBy?: string | null;
   } | null;
-  identityVerdict?: { verdict?: string } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   cwd?: string | null;
@@ -214,7 +214,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
   const ctx = node.contextUsage;
   const known = ctx?.availability === "known";
   const identityDownranked = node.identityVerdict?.verdict === "mismatch"
-    || node.identityVerdict?.verdict === "pane_missing";
+    || (node.identityVerdict?.verdict === "pane_missing" && node.identityVerdict?.reason !== "session_missing");
   return {
     nodeId: node.nodeId,
     name: node.logicalId,

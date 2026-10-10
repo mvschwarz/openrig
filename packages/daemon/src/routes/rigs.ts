@@ -478,10 +478,13 @@ rigsRoutes.post("/:id/archive", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const force = body["force"] === true;
 
-  // AC-6 running-rig guard (daemon-layer, so every client inherits it): a
-  // running/degraded rig requires --force, with a 3-part honest error.
+  // This guard preserves main's action decision: confirmed session absence
+  // was attention_required before the read projection named it detached.
   const inventory = getNodeInventory(repo.db, rigId);
-  const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+  const archiveStates = inventory.map((entry) =>
+    entry.identityVerdict?.reason === "session_missing" ? "attention_required" as const : entry.lifecycleState
+  );
+  const lifecycleState = deriveRigLifecycleState(archiveStates);
   if ((lifecycleState === "running" || lifecycleState === "degraded") && !force) {
     return c.json({
       error: {

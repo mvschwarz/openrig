@@ -158,6 +158,27 @@ describe("Rig CRUD routes", () => {
     expect(res.status).toBe(400);
   });
 
+  it("keeps a confirmed-missing seat under the archive safety guard", async () => {
+    const rig = repo.createRig("mixed-archive");
+    const node = repo.addNode(rig.id, "dev.impl", { runtime: "codex" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@mixed-archive");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%1", attachmentType: "tmux" });
+    db.prepare(`INSERT INTO seat_identity_verdicts
+      (node_id, verdict, evidence_source, reason, registered_pane, observed_at)
+      VALUES (?, 'pane_missing', 'tmux_session', 'session_missing', '%1', ?)`)
+      .run(node.id, new Date().toISOString());
+
+    const res = await app.request(`/api/rigs/${rig.id}/archive`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(409);
+    expect(repo.getRig(rig.id)?.rig.archivedAt).toBeFalsy();
+  });
+
   it("POST /api/rigs/:id/attach-self binds an external_cli agent to an existing node", async () => {
     const rig = repo.createRig("rigged-buildout");
     const node = repo.addNode(rig.id, "orch1.lead", { runtime: "claude-code" });

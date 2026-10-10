@@ -42,8 +42,8 @@ describe("SeatStatusService", () => {
     const res = await app.request(`/api/seat/status/${encodeURIComponent(session.sessionName)}`);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
-      session_status: "detached", startup_status: "ready", occupant_lifecycle: "unknown",
-      current_occupant: session.sessionName,
+      session_status: "detached", session_reason: "session_missing", startup_status: "ready",
+      occupant_lifecycle: "unknown", current_occupant: session.sessionName,
     });
     expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toEqual(stored);
   });
