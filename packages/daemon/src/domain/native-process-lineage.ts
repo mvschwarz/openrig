@@ -264,36 +264,18 @@ function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcess
 }
 
 /** Parents main already accepts as a Claude runtime, for keeping main's result
- * when a child names another conversation: a verified Claude binary, a
- * Node-hosted Claude (Node running a Claude script, past Node's own options; OS
- * name node when known), or an older row with no OS name whose argv0 is claude.
- * A shell script launcher and a helper whose argv merely mentions claude are not
- * runtimes. */
+ * when a child names another conversation: a Claude runtime by OS evidence
+ * (`claudeRuntimeRow`); Node (OS name node or unknown) with a Claude executable
+ * among its arguments, which is main's own match and is kept for compatibility,
+ * not as runtime evidence (it never feeds child recognition); or an older row
+ * with no OS name whose argv0 is claude. A shell script launcher and a helper
+ * whose argv merely mentions claude are not runtimes. */
 function claudeRuntimeParent(row: NativeProcessRow): boolean {
   if (claudeRuntimeRow(row)) return true;
   const [argv0 = "", ...args] = tokens(row.command);
-  if (executableName(argv0) === "node" && claudeExecutable(nodeScript(args) ?? "")
+  if (executableName(argv0) === "node" && args.some((arg) => claudeExecutable(arg))
     && (row.executableName === undefined || executableName(row.executableName) === "node")) return true;
   return row.executableName === undefined && claudeExecutable(argv0);
-}
-
-// Node options that take their value as the next argument.
-const NODE_OPTIONS_WITH_VALUE = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader",
-  "-C", "--conditions", "--env-file", "--env-file-if-exists", "--inspect-port", "--title", "--input-type"]);
-
-/** The script Node runs: the first argument after Node's own options (the same
- * grammar as #1080). Null when Node runs no script file: code given with -e/-p
- * (also --eval=, --print=, and joined short flags such as -pe), stdin (`-`), or
- * no argument. Arguments after those are data, never a script. */
-function nodeScript(args: string[]): string | null {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === "--") return args[index + 1] ?? null;
-    if (arg === "-" || /^--(?:eval|print)(?:=|$)/.test(arg) || /^-[a-zA-Z]*[ep][a-zA-Z]*$/.test(arg)) return null;
-    if (!arg.startsWith("-")) return arg;
-    if (NODE_OPTIONS_WITH_VALUE.has(arg)) index += 1;
-  }
-  return null;
 }
 
 /** Require a live process in the pane's own lineage whose argv names both the

@@ -150,22 +150,32 @@ describe("strict restore reads full process rows from the production lister", ()
     ])).toMatchObject({ ok: true, observedPid: 100 });
   });
 
-  // Round 8: a Node-hosted Claude started with Node's own options before the script.
+  // Rounds 8–9: a Node-hosted parent keeps main's own match (a Claude executable among
+  // Node's arguments). That is compatibility, not runtime evidence; no Node grammar is complete.
   it.each([
     "node --inspect /usr/local/bin/claude --resume review-token",
     "node -r ./x.js /usr/local/bin/claude --resume review-token",
     "node --max-old-space-size=8192 -- /usr/local/bin/claude --resume review-token",
-  ])("a Node-hosted Claude parent with Node options (%s) over a witnessed child on another conversation keeps main's proof", async (command) => {
+    "node --max-old-space-size 8192 /usr/local/bin/claude --resume review-token",
+    "node --stack-size 4000 /usr/local/bin/claude --resume review-token",
+    "node --disable-warning X /usr/local/bin/claude --resume review-token",
+    "node --watch-path ./src /usr/local/bin/claude --resume review-token",
+    "node --diagnostic-dir /tmp/d /usr/local/bin/claude --resume review-token",
+    "node --redirect-warnings /tmp/w /usr/local/bin/claude --resume review-token",
+    "node --icu-data-dir /tmp/icu /usr/local/bin/claude --resume review-token",
+    "node --trace-event-categories v8 /usr/local/bin/claude --resume review-token",
+    // An in-process loader really runs the Claude it names.
+    "node -e require(process.argv[1]) /opt/claude --resume review-token",
+  ])("a Node-hosted parent (%s) over a witnessed child on another conversation keeps main's proof", async (command) => {
     expect(await strictRestore([
       { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "node", command },
       { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
     ])).toMatchObject({ ok: true, observedPid: 100 });
   });
-  it("a Node process that runs no script file (-e) is not a runtime parent", async () => {
+  it("a Node-shaped parent whose OS executable is a shell stays refused", async () => {
     expect(await strictRestore([
-      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "node", command: "node -e run() /usr/local/bin/claude --resume review-token" },
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, ucomm: "bash", command: "node --inspect /usr/local/bin/claude --resume review-token" },
       { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
     ])).toMatchObject({ ok: false });
   });
 });
-
