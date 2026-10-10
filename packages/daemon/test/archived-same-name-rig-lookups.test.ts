@@ -124,17 +124,33 @@ describe("archived rig sharing a name with the active rig", () => {
     expect(tryResolveRoleByCapability(roleResolutionContext(db, RIG), "builder")).toBe(`dev-builder1@${RIG}`);
   });
 
-  it("rig whoami --session resolves to the active rig instead of calling the session ambiguous", () => {
-    const whoami = new WhoamiService({
+  function whoami(): WhoamiService {
+    return new WhoamiService({
       db,
       rigRepo,
       sessionRegistry: new SessionRegistry(db),
       transcriptStore: new TranscriptStore({ transcriptsRoot: "/tmp/transcripts", enabled: true }),
     });
+  }
 
-    const result = whoami.resolve({ sessionName: `dev-builder1@${RIG}`, compact: true });
+  it("rig whoami --session resolves to the active rig instead of calling the session ambiguous", () => {
+    const result = whoami().resolve({ sessionName: `dev-builder1@${RIG}`, compact: true });
 
     expect(result?.identity.rigId).toBe(activeId);
+  });
+
+  it("rig whoami --session resolves a session only the archived rig has to the archived rig", () => {
+    seat(archivedId, "builder3", "exited");
+
+    const result = whoami().resolve({ sessionName: `dev-builder3@${RIG}`, compact: true });
+
+    expect(result?.identity.rigId).toBe(archivedId);
+  });
+
+  it("rig whoami --session stays ambiguous while the archived rig's session is still running", () => {
+    db.prepare("UPDATE sessions SET status = 'running' WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(archivedId);
+
+    expect(() => whoami().resolve({ sessionName: `dev-builder1@${RIG}`, compact: true })).toThrow(/ambiguous/i);
   });
 
   it("rig down offers rig up <name> as the restore when only an archived rig shares the name", async () => {

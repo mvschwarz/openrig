@@ -180,10 +180,12 @@ export class WhoamiService {
       }
       let rigIds = new Set(rigBySession.values());
       if (rigIds.size > 1) {
-        // An archived rig of the same name counts only when no active one has it
+        // An archived rig of the same name counts only when no active one has it,
+        // unless its session with this name is still running
+        const runningRigIds = new Set(sessionRows.filter((s) => s.status === "running").map((s) => rigBySession.get(s.id)));
         const activeRigIds = new Set([...rigIds].filter((rigId) =>
           this.db.prepare("SELECT 1 FROM rigs WHERE id = ? AND archived_at IS NULL").get(rigId) !== undefined));
-        if (activeRigIds.size > 0) rigIds = activeRigIds;
+        if (activeRigIds.size > 0) rigIds = new Set([...rigIds].filter((rigId) => activeRigIds.has(rigId) || runningRigIds.has(rigId)));
       }
 
       if (rigIds.size > 1) {
