@@ -24,7 +24,12 @@ Examples:
   }
 
   async function resolveRigId(client: DaemonClient, rigRef: string): Promise<string> {
-    const summaries = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary");
+    const summaries = await client.get<Array<{ id: string; name: string }> | { error?: string }>("/api/rigs/summary");
+    if (summaries.status >= 400) {
+      const error = !Array.isArray(summaries.data) ? summaries.data?.error : undefined;
+      throw new Error(error ?? `Failed to list rigs (HTTP ${summaries.status})`);
+    }
+    if (!Array.isArray(summaries.data)) throw new Error("The daemon returned an invalid rig summary.");
     const match = summaries.data.find((r) => r.name === rigRef || r.id === rigRef);
     if (!match) throw new Error(`Rig '${rigRef}' not found`);
     return match.id;
