@@ -16,6 +16,9 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -1833,5 +1836,101 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:12Z") });
     await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
     expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
+  });
+
+  // ── #1084: --wait-for-idle must not hold the seat's serial lease ──
+  function attachGuard(tmux: TmuxAdapter): SeatDeliveryGuard {
+    db.exec(outboxEntriesSchema.sql);
+    db.exec(seatDeliveryGuardSchema.sql);
+    const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name));
+    (tmux as unknown as { deliveryGuard?: SeatDeliveryGuard }).deliveryGuard = guard;
+    return guard;
+  }
+
+  function transportWithGuard(tmux: TmuxAdapter, overrides?: {
+    sleep?: (ms: number) => Promise<void>;
+    waitForIdlePollMs?: number;
+  }) {
+    // createFullTestDb predates the guard/outbox migrations; the guard's own
+    // tests exec these schemas the same way.
+    attachGuard(tmux);
+    return createTransport(tmux, { sleep: async () => undefined, waitForIdlePollMs: 1, ...overrides });
+  }
+
+  it("#1084: a wait-for-idle send does not hold the delivery lease while waiting", async () => {
+    seedCanonicalRig();
+    let bSent = false;
+    let waitPolling = false;
+    const order: string[] = [];
+    const tmux = mockTmux({
+      // Running until B's write lands, idle after: the wait can only resolve
+      // once B has gone through, which requires the lease to be free.
+      capturePaneContent: async () => {
+        waitPolling = true;
+        return bSent ? IDLE_PANE : BUSY_PANE;
+      },
+      sendText: async (_t, text) => {
+        order.push(text);
+        if (text === "B") bSent = true;
+        return { ok: true as const };
+      },
+    });
+    const transport = createTransport(tmux, {
+      sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.min(ms, 5))),
+      waitForIdlePollMs: 1,
+    });
+    attachGuard(tmux);
+
+    const a = transport.send("dev-impl@my-rig", "A", { waitForIdleMs: 500 });
+    while (!waitPolling) await new Promise((resolve) => setTimeout(resolve, 1));
+    const b = await transport.send("dev-impl@my-rig", "B");
+    const aResult = await a;
+
+    expect(b.ok).toBe(true);
+    expect(aResult.ok).toBe(true);
+    expect(aResult.sent).toBe(true);
+    expect(aResult.activity?.state).toBe("idle");
+    // B's write landed while A was still waiting — the lease was free.
+    expect(order).toEqual(["B", "A"]);
+  });
+
+  it("#1084: a pre-waited send re-checks readiness just before typing and refuses a new prompt", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    // The wait sees busy then idle (resolves); the in-lease re-check sees a
+    // freshly posted picker and must refuse with the existing reason.
+    const tmux = mockTmux({
+      capturePaneContent: scriptedPanes([BUSY_PANE, IDLE_PANE, MENU_PANE]),
+      sendText: sendTextSpy,
+    });
+    const transport = transportWithGuard(tmux);
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_needs_input");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("needs_input");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("#1084: a wait-mode send with the typing guard enabled retains immediately without waiting", async () => {
+    const { node } = seedCanonicalRig();
+    let captures = 0;
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => { captures++; return IDLE_PANE; },
+      sendText: sendTextSpy,
+    });
+    const guard = attachGuard(tmux);
+    await guard.set(node.id, true, "test", "test holds the seat");
+    const transport = createTransport(tmux, { sleep: async () => undefined, waitForIdlePollMs: 1 });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("retained");
+    expect(result.reason).toBe("typing_guard_enabled");
+    expect(captures).toBe(0);
+    expect(sendTextSpy).not.toHaveBeenCalled();
   });
 });

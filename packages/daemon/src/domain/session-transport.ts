@@ -700,6 +700,11 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal #1084 seam: a lease-free idle wait already completed in send()
+   *  before the serial lease; sendUnguarded consumes this evidence instead of
+   *  waiting again, then re-checks readiness just before typing. Never
+   *  client-supplied. */
+  preWaitedIdle?: { activity: AgentActivity; waitedMs: number; attempts: number };
   /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
    *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
    *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
@@ -1181,7 +1186,78 @@ export class SessionTransport {
           if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
         }
       }
-      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, opts), async target => {
+      // #1084 — the idle wait must not occupy the seat's serial lease: a long
+      // --wait-for-idle inside guard.operation holds up other sends and queue
+      // creates to this seat for the whole wait. Wait first (lease-free
+      // observation), then enter the lease only for the readiness re-check +
+      // write. Skipped when the typing guard is enabled (operation retains
+      // immediately, as today), when the target is unresolvable (operation
+      // throws, as today), and for submit-only (which never waits, as today).
+      // If the guard flips before the lease, sendUnguarded still waits inside,
+      // exactly as today — the pre-wait is taken only when evidence exists.
+      let sendOpts = opts;
+      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle) {
+        // Best-effort: anything unresolvable here (a target or binding the DB
+        // cannot describe) falls through to guard.operation, which throws or
+        // retains exactly as before. Early returns below are unaffected.
+        try {
+          const meta = this.getSessionMeta(sessionName);
+          if (meta.attachmentType === "external_cli") {
+            return {
+              ok: false,
+              sessionName,
+              reason: "transport_unavailable",
+              error: `Session '${sessionName}' is attached as an external CLI node. Inbound tmux transport is unavailable for this target.`,
+            };
+          }
+          if (opts.force) {
+            return {
+              ok: false,
+              sessionName,
+              reason: "invalid_wait_for_idle",
+              error: "--wait-for-idle cannot be combined with force. No text was sent.",
+              sent: false,
+            };
+          }
+          if (!Number.isFinite(opts.waitForIdleMs) || opts.waitForIdleMs <= 0) {
+            return {
+              ok: false,
+              sessionName,
+              reason: "invalid_wait_for_idle",
+              error: "waitForIdleMs must be a positive number. No text was sent.",
+              sent: false,
+            };
+          }
+          const preTarget = guard.maybeTarget(sessionName);
+          const prePref = preTarget ? guard.preference(preTarget.nodeId) : undefined;
+          if (preTarget && !prePref?.effective && !prePref?.desired) {
+            const preWait = await this.waitForIdle({
+              sessionName,
+              runtime: meta.runtime,
+              attachmentType: meta.attachmentType,
+              timeoutMs: opts.waitForIdleMs,
+              binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
+              readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+            });
+            if (!preWait.ok) {
+              return {
+                ok: false,
+                sessionName,
+                reason: preWait.reason,
+                error: preWait.error,
+                sent: false,
+                activity: preWait.activity,
+                waitedMs: preWait.waitedMs,
+                attempts: preWait.attempts,
+              };
+            }
+            sendOpts = { ...opts, preWaitedIdle: { activity: preWait.activity, waitedMs: preWait.waitedMs, attempts: preWait.attempts } };
+          }
+        } catch {
+          // Fall through with today's path (in-lease wait / retain / throw).
+        }
+      }
+      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, sendOpts), async target => {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         this.db.transaction(() => {
           for (const id of ids) {
@@ -1394,7 +1470,12 @@ export class SessionTransport {
       return observe({ ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true });
     }
 
-    if (waitForIdleMs !== undefined) {
+    // #1084: when send() already waited lease-free (preWaitedIdle), consume the
+    // evidence instead of waiting again; otherwise wait here, exactly as before
+    // (typing-guard flip and unresolvable-target races keep today's behavior).
+    // The readiness re-check below still runs on the pre-waited path, just
+    // before typing, inside the lease.
+    if (waitForIdleMs !== undefined && !opts?.preWaitedIdle) {
       const waitResult = await this.waitForIdle({
         sessionName,
         runtime,
@@ -1418,6 +1499,12 @@ export class SessionTransport {
           ...waitEvidence,
         };
       }
+    } else if (opts?.preWaitedIdle) {
+      waitEvidence = {
+        activity: opts.preWaitedIdle.activity,
+        waitedMs: opts.preWaitedIdle.waitedMs,
+        attempts: opts.preWaitedIdle.attempts,
+      };
     }
 
     // 2. OPR.0.4.1.10 — robust prompt/permission + mid-work guard on the DEFAULT path.
@@ -1433,7 +1520,11 @@ export class SessionTransport {
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
     let promptOverride = false;
-    if (waitForIdleMs === undefined) {
+    // #1084: this re-check also runs on the pre-waited path, inside the lease
+    // just before typing — the wait happened before the lease was acquired, so
+    // readiness at type time is re-established here with the existing dispatch
+    // (needs_input refuses as before; no new refusals).
+    if (waitForIdleMs === undefined || opts?.preWaitedIdle) {
       const readiness = await this.classifySendReadiness({
         sessionName,
         runtime,
@@ -1482,6 +1573,9 @@ export class SessionTransport {
             reason: "target_needs_input",
             activity: readiness,
             error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+            // #1084: wait-mode shape (activity stays the fresh re-check, not
+            // the pre-wait evidence — the spread must not overwrite it).
+            ...(waitMode ? { sent: false, waitedMs: waitEvidence.waitedMs, attempts: waitEvidence.attempts } : {}),
           };
         }
       } else if (readiness.state === "unknown") {
