@@ -55,6 +55,23 @@ describe("watchdog routes (PL-004 Phase C)", () => {
 
   afterEach(() => db.close());
 
+  it.each(["scanIntervalSeconds", "activeWakeIntervalSeconds"])("POST /register rejects invalid %s before creating a job", async (field) => {
+    for (const value of [0, -1, 1.5, "invalid"]) {
+      const response = await app.request("/api/watchdog/register", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...validRegisterBody, [field]: value }),
+      });
+      expect(response.status, `${field}=${value}`).toBe(400);
+      expect(jobsRepo.listActive()).toHaveLength(0);
+    }
+    const response = await app.request("/api/watchdog/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...validRegisterBody, [field]: 30 }),
+    });
+    expect(response.status).toBe(201);
+    expect((await response.json())[field]).toBe(30);
+  });
+
   it("POST /register returns 201 + persists job + emits watchdog.job_registered", async () => {
     const captured: Array<{ type: string }> = [];
     bus.subscribe((e) => captured.push(e));
