@@ -355,7 +355,7 @@ function latestProof(body: string, now: Date): HeartbeatProof | null {
     proofs.push({ at: timestamp, ageSeconds: age, line, path });
   }
 
-  proofs.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+  proofs.sort((a, b) => parseTimestamp(a.at)!.getTime() - parseTimestamp(b.at)!.getTime());
   return proofs.at(-1) ?? null;
 }
 
