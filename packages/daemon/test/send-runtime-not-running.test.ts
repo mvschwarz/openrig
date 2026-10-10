@@ -288,12 +288,17 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     }
   });
 
-  it("negative: a terminal node's shell is its runtime, so it still receives text", async () => {
+  it("negative: a terminal node's shell is its runtime, so a person's send still types (OpenRig's own notice is refused as a terminal seat)", async () => {
     seat("terminal", "ops-human@my-rig");
     const { tmux, sendText } = tmuxWithPane(async () => "zsh");
-    const result = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux }), "ops-human@my-rig");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
 
-    expect(result.ok).toBe(true);
+    const personal = await transport.send("ops-human@my-rig", "printf 'hello\\n'", { actorSession: "dev-impl@my-rig" });
+    expect(personal.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+
+    const watchdog = await watchdogSend(transport, "ops-human@my-rig");
+    expect(watchdog).toMatchObject({ ok: false, reason: "terminal_seat" });
     expect(sendText).toHaveBeenCalledOnce();
   });
 
