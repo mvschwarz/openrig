@@ -738,6 +738,9 @@ export interface SendOpts {
    *  (`runtime: terminal`), send() types this instead of `text`, so the shell never runs the
    *  envelope lines. Agent recipients keep `text`. */
   exactText?: string;
+  /** Internal: one of OpenRig's own notices (the watchdog, the model monitor); never accepted from
+   *  HTTP send options. A terminal seat refuses it rather than having it typed into its shell or TUI. */
+  openrigNotice?: true;
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
@@ -1160,9 +1163,9 @@ export class SessionTransport {
   }
 
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
-    // OpenRig's own notices (an `@system` actor: the watchdog, the model monitor) are never typed into
-    // a terminal seat, whose shell or TUI would run them. Queue wakes stop earlier, in performWakeSend.
-    if (opts?.actorSession?.endsWith("@system") && isTerminalSeat(this.db, sessionName)) {
+    // OpenRig's own notices (the watchdog, the model monitor) are never typed into a terminal seat,
+    // whose shell or TUI would run them. Queue wakes stop earlier, in performWakeSend.
+    if (opts?.openrigNotice && isTerminalSeat(this.db, sessionName)) {
       return { ok: false, sessionName, sent: false, reason: "terminal_seat",
         error: `'${sessionName}' is a terminal seat (runtime: terminal); OpenRig does not type its own notices into it. Nothing was sent.` };
     }

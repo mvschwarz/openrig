@@ -1994,7 +1994,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           const previous = outboxHandlerInstance.getById(deliveryId);
           const payload = previous?.guardBinding ? previous.body : formatWatchdogDeliveryMessage(source, message);
           const result = await sessionTransport.send(targetSession, payload,
-            { deliveryId, actorSession: "watchdog@system", auditPointer: source.jobId });
+            { deliveryId, actorSession: "watchdog@system", auditPointer: source.jobId, openrigNotice: true });
           if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
           return result.ok
             ? { status: "ok", continuityActionCompleted }
@@ -2285,7 +2285,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           try {
             const previous = deliveryId ? outboxHandlerInstance.getById(deliveryId) : null;
             const payload = previous?.guardBinding ? previous.body : message;
-            const result = await sessionTransport.send(target, payload, { deliveryId, actorSession: "model-monitor@system", auditPointer: deliveryId });
+            const result = await sessionTransport.send(target, payload, { deliveryId, actorSession: "model-monitor@system", auditPointer: deliveryId, openrigNotice: true });
             return result.ok ? { ok: true, outcome: result.outcome } : { ok: false, error: result.error };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };

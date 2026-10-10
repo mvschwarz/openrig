@@ -65,7 +65,7 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
   // The watchdog's deliver() makes exactly this call (startup.ts parked-owner delivery).
   const watchdogSend = (transport: SessionTransport, name: string) =>
     transport.send(name, "[OpenRig watchdog scheduler · policy: parked-owner-consumer] You are parked", {
-      deliveryId: "guard-watchdog-job-1", actorSession: "watchdog@system", auditPointer: "job-1",
+      deliveryId: "guard-watchdog-job-1", actorSession: "watchdog@system", auditPointer: "job-1", openrigNotice: true,
     });
 
   it.each([["claude-code", "zsh"], ["codex", "-bash"]])("%s seat showing %s: refused, nothing typed", async (runtime, shell) => {

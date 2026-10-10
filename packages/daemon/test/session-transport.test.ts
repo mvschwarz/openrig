@@ -1918,12 +1918,21 @@ describe("SessionTransport", () => {
     expect(personal).toMatchObject({ ok: true, envelopeOmitted: true });
     expect(sent).toEqual(["tail -f app.log"]);
 
-    const notice = await transport.send("infra-logs@term-rig", "[OpenRig watchdog] x; touch /tmp/should-not-run", { actorSession: "watchdog@system" });
+    const notice = await transport.send("infra-logs@term-rig", "[OpenRig watchdog] x; touch /tmp/should-not-run", { actorSession: "watchdog@system", openrigNotice: true });
     expect(notice).toMatchObject({ ok: false, reason: "terminal_seat" });
     expect(sent).toEqual(["tail -f app.log"]);
   });
 
-  // OpenRig's own notices (an @system actor) are never typed into a terminal seat.
+  it("a person's send from a seat in a rig named system still gets the exact text", async () => {
+    seedTerminalSeat();
+    const sent: string[] = [];
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } }));
+    const result = await transport.send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", actorSession: "ops-member@system" });
+    expect(result).toMatchObject({ ok: true, envelopeOmitted: true });
+    expect(sent).toEqual(["make test"]);
+  });
+
+  // OpenRig's own notices (the watchdog, the model monitor) are never typed into a terminal seat.
   it("a watchdog delivery to a terminal seat types nothing and records failed with the reason; an agent seat is unchanged", async () => {
     seedTerminalSeat();
     seedCanonicalRig();
@@ -1935,7 +1944,7 @@ describe("SessionTransport", () => {
       // The deliver startup.ts wires.
       deliver: async (request, source) => {
         const result = await transport.send(request.targetSession, formatWatchdogDeliveryMessage(source, request.message),
-          { deliveryId: `guard-watchdog-${source.occurrenceId ?? source.jobId}`, actorSession: "watchdog@system", auditPointer: source.jobId });
+          { deliveryId: `guard-watchdog-${source.occurrenceId ?? source.jobId}`, actorSession: "watchdog@system", auditPointer: source.jobId, openrigNotice: true });
         return result.ok ? { status: "ok" } : { status: "failed", error: result.error };
       } });
     const register = (target: string) => jobs.register({ policy: "periodic-reminder", targetSession: target,
@@ -1965,7 +1974,7 @@ describe("SessionTransport", () => {
       recordProclamation: (p) => recorded.push(p as never), warn: () => {},
       // The sendToSession startup.ts wires.
       sendToSession: async (target, message, id) => {
-        const result = await transport.send(target, message, { deliveryId: id, actorSession: "model-monitor@system", auditPointer: id });
+        const result = await transport.send(target, message, { deliveryId: id, actorSession: "model-monitor@system", auditPointer: id, openrigNotice: true });
         return result.ok ? { ok: true, outcome: result.outcome } : { ok: false, error: result.error };
       },
     });
