@@ -1,7 +1,7 @@
 // A rig brought up again under the same name archives the stopped one, and both rows keep the name.
 // Lookups by rig name must answer for the active rig, not the archived one: rig ask, the queue's
-// target_repo check, and the workflow role and member probes. An archived rig still answers when
-// it is the only one with that name.
+// target_repo check, the workflow role and member probes, and rig whoami --session. An archived
+// rig still answers when it is the only one with that name.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
@@ -14,6 +14,9 @@ import { PodRepository } from "../src/domain/pod-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { AskService } from "../src/domain/ask-service.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { TranscriptStore } from "../src/domain/transcript-store.js";
+import { WhoamiService } from "../src/domain/whoami-service.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import {
   rigMemberExists,
@@ -119,6 +122,19 @@ describe("archived rig sharing a name with the active rig", () => {
   it("workflow probes see the active rig's members and live seats", () => {
     expect(rigMemberExists(db, RIG, `dev-builder2@${RIG}`)).toBe(true);
     expect(tryResolveRoleByCapability(roleResolutionContext(db, RIG), "builder")).toBe(`dev-builder1@${RIG}`);
+  });
+
+  it("rig whoami --session resolves to the active rig instead of calling the session ambiguous", () => {
+    const whoami = new WhoamiService({
+      db,
+      rigRepo,
+      sessionRegistry: new SessionRegistry(db),
+      transcriptStore: new TranscriptStore({ transcriptsRoot: "/tmp/transcripts", enabled: true }),
+    });
+
+    const result = whoami.resolve({ sessionName: `dev-builder1@${RIG}`, compact: true });
+
+    expect(result?.identity.rigId).toBe(activeId);
   });
 
   it("an archived rig still answers when no active rig has the name", () => {
