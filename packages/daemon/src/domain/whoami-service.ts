@@ -58,7 +58,7 @@ export interface WhoamiResult {
   contextUsage?: import("./types.js").ContextUsage;
   /** PL-012 Token / Context Usage Surface v0 — runtime-specific context
    *  detail surfaced alongside the cross-runtime contextUsage primitive.
-   *  Codex: threadId from the per-pid logs DB. Claude Code: resumeToken
+   *  Codex: threadId from the stored resume token. Claude Code: resumeToken
    *  + current usage from the context-usage sample. Terminal: null. */
   runtimeContext?: RuntimeContext | null;
   /** PL-007 Workspace Primitive v0 — typed workspace block when the
@@ -371,34 +371,21 @@ export class WhoamiService {
     const lastSampledAt = contextUsage?.sampledAt ?? null;
 
     if (runtime === "codex") {
-      // Codex thread-id resolution requires a pid (codex-thread-id.ts is
-      // pid-keyed). Surface null at v0 — the operator drops to terminal
-      // for thread-id extraction. NAMED v0+1 trigger: dogfood reports
-      // needing UI-side thread-id without terminal drop.
+      // #122: launch captures the Codex thread id and stores it as the
+      // session's resume token (resume_type codex_id), the same value the
+      // context monitor reads usage by. conversationId has no source yet.
       return {
         runtime: "codex",
-        threadId: null,
+        threadId: this.latestResumeToken(nodeId),
         conversationId: null,
         estimatedTokens,
         lastSampledAt,
       };
     }
     if (runtime === "claude-code") {
-      // resumeToken lives on sessions.resume_token (migration 006).
-      // Read the most-recent session for this node.
-      let resumeToken: string | null = null;
-      try {
-        const row = this.db
-          .prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
-          .get(nodeId) as { resume_token: string | null } | undefined;
-        resumeToken = row?.resume_token ?? null;
-      } catch {
-        // Migration absent (test harness) — surface null honestly.
-        resumeToken = null;
-      }
       return {
         runtime: "claude-code",
-        resumeToken,
+        resumeToken: this.latestResumeToken(nodeId),
         estimatedTokens,
         lastSampledAt,
       };
@@ -406,6 +393,20 @@ export class WhoamiService {
     // Unknown runtime: surface null until the daemon learns the
     // runtime's context exposure shape. PL-005 honest-degradation.
     return null;
+  }
+
+  /** resumeToken lives on sessions.resume_token (migration 006).
+   *  Read the most-recent session for this node. */
+  private latestResumeToken(nodeId: string): string | null {
+    try {
+      const row = this.db
+        .prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+        .get(nodeId) as { resume_token: string | null } | undefined;
+      return row?.resume_token ?? null;
+    } catch {
+      // Migration absent (test harness) — surface null honestly.
+      return null;
+    }
   }
 
   private getCurrentSessionName(nodeId: string, rigId: string): string | null {

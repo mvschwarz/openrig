@@ -211,15 +211,24 @@ describe("WhoamiService", () => {
     }
   });
 
-  it("PL-012: codex seat surfaces runtimeContext with runtime=codex (threadId null at v0)", () => {
+  it("PL-012: codex seat with no captured thread surfaces threadId null", () => {
     const { nodeB } = seedRig();
     const result = svc.resolve({ nodeId: nodeB.id });
     expect(result).not.toBeNull();
     expect(result!.runtimeContext?.runtime).toBe("codex");
     if (result!.runtimeContext?.runtime === "codex") {
-      // v0: threadId resolution requires pid plumbing; surface null
-      // honestly rather than fabricated.
       expect(result!.runtimeContext.threadId).toBeNull();
+      expect(result!.runtimeContext.conversationId).toBeNull();
+    }
+  });
+
+  it("#122: codex seat surfaces its captured thread id from the stored resume token", () => {
+    const { nodeB, sessB } = seedRig();
+    db.prepare("UPDATE sessions SET resume_token = ?, resume_type = 'codex_id' WHERE id = ?").run("019a-codex-thread", sessB.id);
+    const result = svc.resolve({ nodeId: nodeB.id });
+    expect(result!.runtimeContext?.runtime).toBe("codex");
+    if (result!.runtimeContext?.runtime === "codex") {
+      expect(result!.runtimeContext.threadId).toBe("019a-codex-thread");
       expect(result!.runtimeContext.conversationId).toBeNull();
     }
   });
