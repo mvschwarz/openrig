@@ -192,7 +192,7 @@ export function analyzeHeartbeat(input: {
 }
 
 export function parseQueueFile(sharedDocsRoot: string, queueFile: string): QueueEntry[] {
-  const content = fs.readFileSync(queueFile, "utf8");
+  const content = fs.readFileSync(queueFile, "utf8").replace(/\r\n/g, "\n");
   const rig = deriveRigName(sharedDocsRoot, queueFile);
   const owner = deriveOwner(queueFile);
   const session = deriveSessionName(owner, rig);
