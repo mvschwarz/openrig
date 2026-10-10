@@ -96,3 +96,11 @@ test("the report says so when nothing is found and groups findings when somethin
   assert.match(report, /## Home path \(1\)/);
   assert.match(report, /docs\/a\.md:10/);
 });
+
+test("keeps added header-shaped text as source content inside a hunk", () => {
+  const text = ["+++ b/file.md", "@@ -0,0 +1,2 @@", "+++ b/literal.md", "+see /Users/alice/work"].join("\n");
+  assert.deepEqual(addedLines(text), [
+    { file: "file.md", line: 1, text: "++ b/literal.md" },
+    { file: "file.md", line: 2, text: "see /Users/alice/work" },
+  ]);
+});

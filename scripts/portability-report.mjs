@@ -56,14 +56,21 @@ export function addedLines(diffText) {
   const lines = [];
   let file = null;
   let lineNumber = 0;
+  let remainingNewLines = 0;
   for (const raw of diffText.split("\n")) {
-    if (raw.startsWith("+++ ")) {
-      file = raw === "+++ /dev/null" ? null : raw.replace(/^\+\+\+ b\//, "");
-    } else if (raw.startsWith("@@")) {
-      lineNumber = Number(/\+(\d+)/.exec(raw)?.[1] ?? 0);
-    } else if (file && raw.startsWith("+")) {
+    if (remainingNewLines > 0 && raw.startsWith("+")) {
       lines.push({ file, line: lineNumber, text: raw.slice(1) });
       lineNumber += 1;
+      remainingNewLines -= 1;
+    } else if (remainingNewLines > 0 && raw.startsWith(" ")) {
+      lineNumber += 1;
+      remainingNewLines -= 1;
+    } else if (raw.startsWith("+++ ")) {
+      file = raw === "+++ /dev/null" ? null : raw.replace(/^\+\+\+ b\//, "");
+    } else if (raw.startsWith("@@")) {
+      const hunk = /\+(\d+)(?:,(\d+))?/.exec(raw);
+      lineNumber = Number(hunk?.[1] ?? 0);
+      remainingNewLines = Number(hunk?.[2] ?? (hunk ? 1 : 0));
     }
   }
   return lines;
