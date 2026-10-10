@@ -137,6 +137,21 @@ export class WatchdogJobsError extends Error {
   }
 }
 
+/** Optional scan/wake cadences influence the same scheduler as the main interval. */
+function validateCadences(input: RegisterWatchdogJobInput): void {
+  for (const [field, value] of [
+    ["interval_seconds", input.intervalSeconds],
+    ["scan_interval_seconds", input.scanIntervalSeconds],
+    ["active_wake_interval_seconds", input.activeWakeIntervalSeconds],
+  ] as const) {
+    if (field !== "interval_seconds" && value == null) continue;
+    if (!Number.isInteger(value) || (value ?? 0) <= 0) {
+      throw new WatchdogJobsError("interval_invalid", `${field} must be a positive integer (got ${String(value)})`,
+        { field, intervalSeconds: value });
+    }
+  }
+}
+
 /** Defensive additive-column detect (mirrors queue-repository's detectQueueColumn): a harness whose
  *  db predates migration 063 lacks the generation columns, so writers degrade instead of throwing. */
 function detectWatchdogColumn(db: Database.Database, columnName: string): boolean {
@@ -175,13 +190,7 @@ export class WatchdogJobsRepository {
         { policy: input.policy, supported: [...PHASE_D_POLICIES] },
       );
     }
-    if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {
-      throw new WatchdogJobsError(
-        "interval_invalid",
-        `interval_seconds must be a positive integer (got ${input.intervalSeconds})`,
-        { intervalSeconds: input.intervalSeconds },
-      );
-    }
+    validateCadences(input);
     if (!input.targetSession || !input.targetSession.includes("@")) {
       throw new WatchdogJobsError(
         "target_session_invalid",
@@ -350,6 +359,7 @@ export class WatchdogJobsRepository {
     input: EnsureAutoRegistrationInput,
     historicalTargetSessions: string[] = [input.targetSession],
   ): WatchdogJob {
+    validateCadences(input);
     const existing = this.findAutoRegistration(
       input.policy,
       input.targetSession,
