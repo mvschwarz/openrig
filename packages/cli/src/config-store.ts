@@ -794,6 +794,28 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
     }
   },
+  // Constraint gap fix — numeric keys whose consumers crash or silently
+  // misbehave out of range: serve() throws ERR_SOCKET_BAD_PORT outside
+  // [0, 65535] (0 stays legal — checkPort treats port <= 0 as "always
+  // available" and the repo's own preflight tests write daemon.port = 0),
+  // and a negative preview refresh interval disables auto-refresh without
+  // telling anyone (tanstack isValidTimeout rejects negatives, so polling
+  // just stops). parseInt's permissive coercion ("7433abc" → 7433) is not
+  // safe here per banked feedback_static_gates_mirror_runtime_validators.
+  "daemon.port": (raw, coerced) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0 || coerced > 65535) {
+      throw new Error(`Invalid value for daemon.port: must be an integer in [0, 65535], got "${raw}"`);
+    }
+  },
+  "ui.preview.refresh_interval_seconds": (raw, coerced) => {
+    // 0 is legal: tanstack-query treats refetchInterval 0 as "disabled",
+    // which is the documented way to stop preview auto-refresh entirely.
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0 || coerced > 3600) {
+      throw new Error(`Invalid value for ui.preview.refresh_interval_seconds: must be an integer in [0, 3600], got "${raw}"`);
+    }
+  },
+  "ui.preview.max_pins": positiveIntegerConstraint("ui.preview.max_pins"),
+  "ui.preview.default_lines": positiveIntegerConstraint("ui.preview.default_lines"),
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();

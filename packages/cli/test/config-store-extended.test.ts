@@ -678,6 +678,71 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(() => store.set("ui.preview.refresh_interval_seconds", "soon")).toThrow(/expected a number/);
   });
 
+  // Constraint gap (Slice 27 residue): these four numeric keys have no
+  // KEY_CONSTRAINTS entry, so parseInt accepted 99999/-1/7433abc for
+  // daemon.port and silently disabled preview polling for negative
+  // refresh intervals. Pin the accept/reject matrix per key.
+  it("daemon.port rejects out-of-range, negative, and partial values; 0 and 65535 stay legal", () => {
+    const store = new ConfigStore(configPath);
+    for (const raw of ["65536", "99999", "-1", "7433abc", "7433.5"]) {
+      expect(() => store.set("daemon.port", raw), `daemon.port must reject ${raw}`)
+        .toThrow(/integer in \[0, 65535\]/);
+    }
+    store.set("daemon.port", "0");
+    expect(store.get("daemon.port")).toBe(0);
+    store.set("daemon.port", "65535");
+    expect(store.get("daemon.port")).toBe(65535);
+    store.set("daemon.port", "7434");
+    expect(store.get("daemon.port")).toBe(7434);
+  });
+
+  it("out-of-range daemon.port in config.json falls back to the default instead of crashing the daemon at boot", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      writeFileSync(configPath, JSON.stringify({ daemon: { port: 99999 } }));
+      const store = new ConfigStore(configPath);
+      expect(store.get("daemon.port")).toBe(7433);
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for daemon.port rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("ui.preview.refresh_interval_seconds rejects negatives/partials but keeps 0 (disable) and slow polls legal", () => {
+    const store = new ConfigStore(configPath);
+    for (const raw of ["-5", "3abc", "3.5", "3601"]) {
+      expect(() => store.set("ui.preview.refresh_interval_seconds", raw),
+        `refresh_interval_seconds must reject ${raw}`)
+        .toThrow(/integer in \[0, 3600\]/);
+    }
+    // 0 disables auto-refresh (tanstack refetchInterval === 0 early-return).
+    store.set("ui.preview.refresh_interval_seconds", "0");
+    expect(store.get("ui.preview.refresh_interval_seconds")).toBe(0);
+    store.set("ui.preview.refresh_interval_seconds", "3600");
+    expect(store.get("ui.preview.refresh_interval_seconds")).toBe(3600);
+  });
+
+  it("ui.preview.max_pins and ui.preview.default_lines require positive integers", () => {
+    const store = new ConfigStore(configPath);
+    for (const [key, value] of [
+      ["ui.preview.max_pins", "0"],
+      ["ui.preview.max_pins", "-2"],
+      ["ui.preview.max_pins", "4.5"],
+      ["ui.preview.max_pins", "4abc"],
+      ["ui.preview.default_lines", "0"],
+      ["ui.preview.default_lines", "-1"],
+      ["ui.preview.default_lines", "50abc"],
+    ] as const) {
+      expect(() => store.set(key, value), `${key} must reject ${value}`)
+        .toThrow(/positive integer/);
+    }
+    store.set("ui.preview.max_pins", "6");
+    store.set("ui.preview.default_lines", "200");
+    expect(store.get("ui.preview.max_pins")).toBe(6);
+    expect(store.get("ui.preview.default_lines")).toBe(200);
+  });
+
   it("OPENRIG_UI_PREVIEW_* env vars override file values", () => {
     const store = new ConfigStore(configPath);
     store.set("ui.preview.refresh_interval_seconds", "5");

@@ -362,6 +362,62 @@ describe("SettingsStore (User Settings v0)", () => {
     }
   });
 
+  // Constraint gap (Slice 27 residue, lockstep twin of the CLI store): these
+  // four numeric keys had no KEY_CONSTRAINTS entry, so parseInt accepted
+  // 99999/-1/7433abc for daemon.port and negative preview intervals silently
+  // disabled polling. Pin the accept/reject matrix on the daemon write path
+  // (the same set() the /api/config POST handler uses).
+  it("daemon.port rejects out-of-range, negative, and partial values; 0 and 65535 stay legal", () => {
+    const store = new SettingsStore(configPath);
+    for (const raw of ["65536", "99999", "-1", "7433abc", "7433.5"]) {
+      expect(() => store.set("daemon.port", raw), `daemon.port must reject ${raw}`)
+        .toThrow(/integer in \[0, 65535\]/);
+    }
+    store.set("daemon.port", "0");
+    expect(store.resolveOne("daemon.port").value).toBe(0);
+    store.set("daemon.port", "65535");
+    expect(store.resolveOne("daemon.port").value).toBe(65535);
+  });
+
+  it("ui.preview.* interval/pins/lines constraints accept legal values and reject garbage", () => {
+    const store = new SettingsStore(configPath);
+    for (const raw of ["-5", "3abc", "3.5", "3601"]) {
+      expect(() => store.set("ui.preview.refresh_interval_seconds", raw),
+        `refresh_interval_seconds must reject ${raw}`)
+        .toThrow(/integer in \[0, 3600\]/);
+    }
+    for (const [key, value] of [
+      ["ui.preview.max_pins", "0"],
+      ["ui.preview.max_pins", "-2"],
+      ["ui.preview.default_lines", "0"],
+      ["ui.preview.default_lines", "50abc"],
+    ] as const) {
+      expect(() => store.set(key, value), `${key} must reject ${value}`)
+        .toThrow(/positive integer/);
+    }
+    // Legal values still round-trip.
+    store.set("ui.preview.refresh_interval_seconds", "0");
+    expect(store.resolveOne("ui.preview.refresh_interval_seconds").value).toBe(0);
+    store.set("ui.preview.max_pins", "6");
+    expect(store.resolveOne("ui.preview.max_pins").value).toBe(6);
+    store.set("ui.preview.default_lines", "200");
+    expect(store.resolveOne("ui.preview.default_lines").value).toBe(200);
+  });
+
+  it("out-of-range daemon.port in config.json falls back to the default with a warning", () => {
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: 99999 } }));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const store = new SettingsStore(configPath);
+      expect(store.resolveOne("daemon.port").value).toBe(7433);
+      expect(store.resolveOne("daemon.port").source).toBe("default");
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for daemon.port rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("workspace.root cascades into per-subdir defaults", () => {
     const store = new SettingsStore(configPath);
     store.set("workspace.root", "/custom/ws");
