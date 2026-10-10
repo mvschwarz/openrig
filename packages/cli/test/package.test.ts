@@ -5,6 +5,7 @@ import { packageCommand } from "../src/commands/package.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   return {
@@ -123,6 +124,7 @@ function createMockDaemon() {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         valid: true,
+        warnings: sourceRef.includes("warning") ? ["Role 'stale' references hook 'hooks/old.yaml' absent from exports.hooks; hooks in this package path are deferred, not installed"] : [],
         manifest: {
           name: "test-pkg",
           version: "1.0.0",
@@ -156,6 +158,7 @@ function createMockDaemon() {
       res.end(JSON.stringify({
         packageName: "test-pkg",
         packageVersion: "1.0.0",
+        warnings: sourceRef.includes("warning") ? ["Role 'stale' references hook 'hooks/old.yaml' absent from exports.hooks; hooks in this package path are deferred, not installed"] : [],
         entries: [
           { exportType: "skill", exportName: "helper", classification: "safe_projection", targetPath: "/repo/.claude/skills/helper/SKILL.md", deferred: false },
           { exportType: "hook", exportName: "pre-commit", classification: "config_mutation", targetPath: "", deferred: true, deferReason: "Deferred to Phase 5" },
@@ -285,6 +288,7 @@ describe("rig package", () => {
   beforeAll(async () => {
     srv = createMockDaemon();
     port = await srv.listen();
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
   afterAll(async () => { await srv.close(); });
 
@@ -305,6 +309,18 @@ describe("rig package", () => {
   });
 
   // Test 2: validate invalid manifest → errors[] + exitCode 1
+  it("validate and plan omit obsolete role-hook warnings while keeping deferred reporting", async () => {
+    for (const action of ["validate", "plan"]) {
+      const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", action, "/warning/path"]));
+      expect(logs.join("\n")).not.toContain("Warning:");
+      if (action === "plan") {
+        expect(logs.join("\n")).toContain("Deferred: 1");
+        expect(logs.join("\n")).toContain("pre-commit");
+      }
+      expect(exitCode).toBeUndefined();
+    }
+  });
+
   it("validate invalid manifest: prints errors, exitCode 1", async () => {
     const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", "validate", "/invalid/path"]));
     const output = logs.join("\n");

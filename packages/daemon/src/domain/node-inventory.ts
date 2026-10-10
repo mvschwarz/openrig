@@ -1,5 +1,6 @@
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
+import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
@@ -45,7 +46,9 @@ interface InventoryRow {
   previous_occupant: string | null;
   handover_at: string | null;
   // Newest session fields (may be null if no session)
+  session_id: string | null;
   session_name: string | null;
+  session_created_at: string | null;
   session_status: string | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -249,18 +252,20 @@ function deriveOccupantLifecycle(
 
 function deriveContinuityOutcome(
   row: InventoryRow,
-  restoreOutcome: NodeRestoreOutcome,
+  restore: RestoreProjection | undefined,
 ): NodeInventoryEntry["continuityOutcome"] {
   if (row.continuity_outcome) {
     return row.continuity_outcome as NodeInventoryEntry["continuityOutcome"];
   }
+  const restoreOutcome = restore?.outcome ?? "n-a";
   if (restoreOutcome === "n-a") return null;
-  // L3: `attention_required` and `operator_recovered` are restore-attempt
-  // outcomes that don't map onto the ContinuityOutcome vocabulary
-  // ("resumed"|"rebuilt"|"forked"|"fresh"|"failed"). Surface as null here;
-  // the lifecycleState projection picks them up via restoreOutcome directly.
+  // Acknowledgment and responsiveness clear attention, not conversation lineage.
+  // Only the winning reconciliation's bound strict proof can infer a resume.
+  // Explicit stored outcomes above remain historical facts, not fresh probes.
   if (restoreOutcome === "attention_required") return null;
-  if (restoreOutcome === "operator_recovered") return "resumed";
+  if (restoreOutcome === "operator_recovered") {
+    return restore?.resumedRuntime === row.runtime ? "resumed" : null;
+  }
   // OPR.0.3.4.2: a deliberate fresh-prime IS fresh continuity; awaiting-decision
   // means zero session, so no continuity outcome exists — null (the
   // restoreOutcome field carries the distinct term).
@@ -269,43 +274,95 @@ function deriveContinuityOutcome(
   return restoreOutcome;
 }
 
-// FS-1 W1.3 S1 — hoist restore-outcome derivation to ONCE-PER-RIG.
-// Prior shape: deriveRestoreOutcome(db, rigId, nodeId) fetched + JSON-parsed the
-// rig's ENTIRE restore-event set once PER NODE inside buildInventoryEntry (K
-// nodes x E events per rig per poll = the dominant W3 residual). This builds a
-// nodeId->outcome map in ONE seq-DESC pass and buildInventoryEntry does an O(1)
-// lookup.
-//   OPR.0.3.4.11 + 0.4.0.16: per-node-latest across restore.completed,
-//   restore.subset_completed, AND restore.outcome_reconciled. reconciled has a
-//   different shape (top-level nodeId/to, not result.nodes[]).
-// BYTE-IDENTICAL BY CONSTRUCTION: the prior per-node reader returned the FIRST
-// event in seq-DESC order that referenced the node. This single seq-DESC pass
-// sets a node's outcome ONLY IF ABSENT — so the first (highest-seq) event
-// referencing a node wins, reproducing exactly that (incl.
-// newer-reconcile-overrides-older-failure). rigId given -> WHERE rig_id=? (the
-// prior single-rig filter); rigId omitted -> all rigs in one pass (a nodeId is
-// referenced only by its own rig's events, so the per-node value is identical).
-// [GUARD AT CODE REVIEW: the only-if-absent set is the one load-bearing
-//  semantics cell — it is what preserves first/newest-wins.]
-function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, NodeRestoreOutcome> {
-  const stmt = db.prepare(
-    `SELECT type, payload, seq FROM events WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${rigId ? " AND rig_id = ?" : ""} ORDER BY seq DESC`
-  );
-  const rows = (rigId ? stmt.all(rigId) : stmt.all()) as { type: string; payload: string; seq: number }[];
-  const map = new Map<string, NodeRestoreOutcome>();
+interface RestoreProjection {
+  outcome: NodeRestoreOutcome;
+  resumedRuntime?: "claude-code" | "codex";
+}
+
+function restoreKey(rigId: string, nodeId: string): string {
+  return JSON.stringify([rigId, nodeId]);
+}
+
+function eventObject(value: unknown): Record<string, any> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, any> : undefined;
+}
+
+// One batch for either the selected rig or the fleet. Keep the outcome arm's
+// existing partial indexes; exclude the rig-only index for starts (NULL node_id)
+// so the node/type index can select them, with a scan fallback if it is absent.
+// UNION ALL adds attempt boundaries without a per-node receipt query.
+// Ascending seq with overwrites preserves the former newest-node, first-wins
+// fold. Evidence is never borrowed
+// from an older reconciliation when a newer acknowledgment wins.
+function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, RestoreProjection> {
+  const filter = rigId ? " AND rig_id = ?" : "";
+  const startsFilter = rigId ? " AND +rig_id = ?" : "";
+  const rows = db.prepare(`
+    SELECT type, payload, seq, rig_id, node_id FROM events
+      WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${filter}
+    UNION ALL
+    SELECT type, payload, seq, rig_id, node_id FROM events
+      WHERE node_id IS NULL AND type = 'restore.started'${startsFilter}
+    ORDER BY seq ASC
+  `).all(...(rigId ? [rigId, rigId] : [])) as {
+    type: string; payload: string; seq: number; rig_id: string; node_id: string | null;
+  }[];
+  const map = new Map<string, RestoreProjection>();
+  const attempts = new Map<string, {
+    seq: number;
+    start?: Record<string, any>;
+    completed: boolean;
+    outcomes: Map<string, string>;
+  }>();
   for (const row of rows) {
-    try {
-      if (row.type === "restore.outcome_reconciled") {
-        const event = JSON.parse(row.payload) as { nodeId: string; to: string };
-        if (!map.has(event.nodeId)) map.set(event.nodeId, mapStatus(event.to));
-        continue;
-      }
-      const event = JSON.parse(row.payload) as { result: RestoreResult };
-      for (const nodeResult of event.result.nodes) {
-        if (!map.has(nodeResult.nodeId)) map.set(nodeResult.nodeId, mapStatus(nodeResult.status));
-      }
-    } catch {
+    let event: Record<string, any> | undefined;
+    try { event = eventObject(JSON.parse(row.payload)); } catch { /* Unknown evidence. */ }
+    if (row.type === "restore.started") {
+      // Even an unreadable new attempt prevents reuse of an earlier receipt.
+      attempts.set(row.rig_id, { seq: row.seq, start: event, completed: false, outcomes: new Map() });
       continue;
+    }
+    const attempt = attempts.get(row.rig_id);
+    if (row.type === "restore.completed" && attempt && !attempt.completed) {
+      // Match the first completion within this attempt, as the receipt reader
+      // does. Missing/corrupt receipts cannot become continuity proof.
+      attempt.completed = true;
+      const start = attempt.start;
+      const result = eventObject(event?.result);
+      const roster = start?.intendedRoster ?? result?.intendedRoster ?? result?.nodes;
+      if (start?.rigId === row.rig_id && event?.rigId === row.rig_id
+        && typeof start?.snapshotId === "string"
+        && event?.snapshotId === start.snapshotId && result?.snapshotId === start.snapshotId
+        && Array.isArray(result?.nodes) && Array.isArray(roster)) {
+        const intended = new Set(roster.map((node: any) => node?.nodeId));
+        for (const node of result.nodes) {
+          if (typeof node?.nodeId === "string" && intended.has(node.nodeId)) {
+            attempt.outcomes.set(node.nodeId, node.status);
+          }
+        }
+      }
+    }
+    if (!event) continue;
+    if (row.type === "restore.outcome_reconciled") {
+      if (typeof event.nodeId !== "string") continue;
+      const evidence = eventObject(event.evidence);
+      const strict = event.rigId === row.rig_id && event.nodeId === row.node_id
+        && event.to === "operator_recovered" && (event.from === "failed" || event.from === "attention_required")
+        && !!attempt && attempt.seq === event.attemptId && attempt.outcomes.get(event.nodeId) === event.from
+        && evidence?.tmux === true && evidence.resumeTokenUsed === true && evidence.paneState === "usable"
+        && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex");
+      map.set(restoreKey(row.rig_id, event.nodeId), {
+        outcome: mapStatus(event.to),
+        ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
+      });
+      continue;
+    }
+    if (!Array.isArray(event.result?.nodes)) continue;
+    for (const node of [...event.result.nodes].reverse()) {
+      if (typeof node?.nodeId === "string") {
+        map.set(restoreKey(row.rig_id, node.nodeId), { outcome: mapStatus(node.status) });
+      }
     }
   }
   return map;
@@ -393,9 +450,10 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
  * window (a stale `verified` suppresses the down-rank a fresh squat/orphan
  * should trigger; a stale `mismatch` would down-rank a healthy new pane).
  *
- * A verdict applies ONLY when it was computed against the current binding:
- *   verdict.sessionName === row.session_name  AND
- *   verdict.evidence.registeredPane === row.tmux_pane
+ * Same-name/same-pane handovers also replace the occupant. The observation
+ * must belong to the latest registration and follow the recorded handover.
+ * observedAt is captured before the reconciler's async probes, so a sweep
+ * that finishes after cutover still carries its predecessor observation time.
  * Otherwise return null — the projection treats it as ABSENT (fail-open: a
  * running seat is left unchanged, never down-ranked). This keeps the rev1-r1
  * fail-open discipline: turning a stale verdict into ABSENT never down-ranks;
@@ -403,11 +461,23 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
  */
 function applicableVerdict(
   verdict: SeatIdentityVerdict | null,
-  row: Pick<InventoryRow, "session_name" | "binding_tmux_pane">,
+  row: Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at">,
 ): SeatIdentityVerdict | null {
   if (!verdict) return null;
   if (verdict.sessionName !== row.session_name) return null;
   if (verdict.evidence.registeredPane !== row.binding_tmux_pane) return null;
+  const observedAt = Date.parse(verdict.observedAt);
+  if (!Number.isFinite(observedAt)) return null;
+  // SQLite's datetime('now') is UTC but omits the timezone suffix.
+  const utcTime = (value: string) => Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value)
+    ? `${value.replace(" ", "T")}Z` : value);
+  if (row.session_created_at && !(observedAt >= utcTime(row.session_created_at))) return null;
+  // Registry session IDs are ULIDs; retain their millisecond precision when
+  // two registrations share SQLite's one-second created_at timestamp.
+  if (row.session_id && /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i.test(row.session_id)
+    && observedAt <= decodeTime(row.session_id)) return null;
+  // Equal-millisecond observations cannot establish which occupant was read.
+  if (row.handover_at && !(observedAt > utcTime(row.handover_at))) return null;
   return verdict;
 }
 
@@ -485,7 +555,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.handover_result,
       n.previous_occupant,
       n.handover_at,
+      s.id as session_id,
       s.session_name,
+      s.created_at as session_created_at,
       s.status as session_status,
       s.startup_status,
       s.resume_type,
@@ -536,7 +608,7 @@ interface InventoryBuildContext {
   // FS-1 W1.3 S1/S2 — the once-per-rig-batched per-node reads, keyed by node_id.
   // Built ONCE per projection (rig-scoped for single-rig, all-rigs for the
   // batched path) and looked up O(1) here instead of a query per node.
-  restoreOutcomes: Map<string, NodeRestoreOutcome>;
+  restoreOutcomes: Map<string, RestoreProjection>;
   orienteds: Map<string, NodeOriented>;
 }
 
@@ -549,7 +621,8 @@ function buildInventoryEntry(
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
   // is referenced by no restore event, matching the prior fall-through).
-  const restoreOutcome = restoreOutcomes.get(row.node_id) ?? "n-a";
+  const restore = restoreOutcomes.get(restoreKey(row.rig_id, row.node_id));
+  const restoreOutcome = restore?.outcome ?? "n-a";
   // OPR.0.4.3.19 rev1-r2 B1 — a durable verdict is keyed only by node_id, so
   // after a rebind/relaunch (same node, NEW session + NEW pane) a stale
   // `verified` verdict for the OLD pane would otherwise be served for the new
@@ -586,7 +659,13 @@ function buildInventoryEntry(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     sessionStatus: row.session_status,
-    startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+    // Match the graph's current-status projection without rewriting the startup
+    // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
+    storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+    startupStatus: row.session_status === "running"
+      && identityVerdictDownranksRunning(identityVerdict?.verdict)
+      ? "attention_required"
+      : row.startup_status as NodeInventoryEntry["startupStatus"],
     restoreOutcome,
     // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
     // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has
@@ -594,7 +673,7 @@ function buildInventoryEntry(
     oriented: orienteds.get(row.node_id) ?? "n-a",
     lifecycleState,
     occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict?.verdict ?? null),
-    continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
+    continuityOutcome: deriveContinuityOutcome(row, restore),
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
@@ -1047,8 +1126,8 @@ export function attachTerminalActivityAndWork(
  *
  * The logicalId is the pod-aware `pod.member` form (dot-separated).
  * The canonical session form replaces the dot with a dash to match the
- * convention from deriveCanonicalSessionName (so `redo.driver-2` in
- * rig `openrig-velocity` becomes `redo-driver-2@openrig-velocity`).
+ * convention from deriveCanonicalSessionName (so `dev.driver-2` in
+ * rig `my-rig` becomes `dev-driver-2@my-rig`).
  *
  * Sums distinct destination_session keys to avoid double-counting
  * when both forms are identical (managed seats whose
@@ -1285,10 +1364,12 @@ export async function attachAgentActivity(
 
     // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
     // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
-    // Live motion DOES upgrade it, and on this fleet that is the common case rather than the exotic
-    // one: every seat's hook currently arrives and is then demoted to unknown because the occupant
-    // generation cannot be resolved, so a demoted hook — not a positive idle one — is what stands
-    // between a working seat and a truthful label.
+    // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
+    // relay's launch environment (for example, relaunched outside the product launcher without
+    // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
+    // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
+    // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
+    // is what stands between a working seat and a truthful label.
     if (hookActivity) {
       return {
         ...entry,

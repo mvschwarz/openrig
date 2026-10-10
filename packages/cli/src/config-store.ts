@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
+import { writeTextAtomically } from "./atomic-text-write.js";
+import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
@@ -12,6 +13,7 @@ import {
 // truth at ~/.openrig/config.json. Resolution stays env > file > default.
 
 export interface RiggedConfig {
+  launch: { nonInterruptive: boolean };
   daemon: { port: number; host: string };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
@@ -109,10 +111,9 @@ export interface RiggedConfig {
       auditLog: boolean;
     };
   };
-  // plugin-primitive Phase 3a slice 3.5 — runtime feature flags. Currently
-  // single-flag for Codex; extracts to its own primitive workspace if/when
-  // 3+ flags accumulate (per DESIGN.md §5.8).
+  // Runtime launch settings and the Codex hooks feature flag.
   runtime: {
+    readinessTimeoutSeconds: number;
     codex: {
       hooksEnabled: boolean;
     };
@@ -215,6 +216,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 );
 
 const DEFAULTS = {
+  launch: { nonInterruptive: false },
   daemon: { port: 7433, host: "127.0.0.1" },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
@@ -256,7 +258,7 @@ const DEFAULTS = {
   // V1 Phase 4 — Advisor default per universal-shell.md L83;
   // Operator default empty per L84 ("not configured").
   agents: {
-    advisorSession: "advisor-lead@openrig-velocity",
+    advisorSession: "advisor-lead@kernel",
     operatorSession: "",
   },
   // V1 Phase 5 P5-3 — feed subscription defaults per for-you-feed.md
@@ -273,8 +275,9 @@ const DEFAULTS = {
       auditLog: false,
     },
   },
-  // plugin-primitive Phase 3a slice 3.5 — Codex feature flag default ON.
+  // Runtime readiness keeps the existing 30-second default; Codex hooks stay on.
   runtime: {
+    readinessTimeoutSeconds: 30,
     codex: {
       hooksEnabled: true,
     },
@@ -372,6 +375,7 @@ export const VALID_KEYS = [
   "context.system_world",
   "skills.root",
   "onboarding.default_pack.enabled",
+  "launch.non_interruptive",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -396,6 +400,7 @@ export const VALID_KEYS = [
   "feed.subscriptions.audit_log",
   // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
   "runtime.codex.hooks_enabled",
+  "runtime.readiness_timeout_seconds",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
   // 7 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
   "policies.claude_compaction.enabled",
@@ -465,6 +470,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
+  "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
@@ -490,6 +496,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // Net-new key post-rename: OPENRIG_X primary only per the 5-key
   // boundary doctrine (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
+  "runtime.readiness_timeout_seconds": { primary: "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS" },
   // Slice 27 — Claude auto-compaction policy. OPENRIG_X primary only
   // (net-new keys, no legacy).
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
@@ -549,6 +556,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
+  "launch.non_interruptive": ["launch", "nonInterruptive"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -569,6 +577,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
+  "runtime.readiness_timeout_seconds": ["runtime", "readinessTimeoutSeconds"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
   "policies.claude_compaction.pre_compact_instruction": ["policies", "claudeCompaction", "preCompactInstruction"],
@@ -770,6 +779,21 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "transcripts.lines": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+      throw new Error("Invalid transcripts.lines: must be an integer in [1, 1000000]");
+    }
+  },
+  "transcripts.poll_interval_seconds": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 3600) {
+      throw new Error("Invalid transcripts.poll_interval_seconds: must be an integer in [1, 3600]");
+    }
+  },
+  "runtime.readiness_timeout_seconds": (raw, coerced) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
+      throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
+    }
+  },
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();
@@ -921,6 +945,11 @@ export class ConfigStore {
   // resolves the legacy ~/.rigged sidecar), so a persisted read here IS proof the daemon sees it.
   // A read-back MISMATCH means the write silently did not take — we REFUSE loudly rather than report
   // a phantom success (the accept-and-drop / config-set-success-without-persist class).
+  /** Publish a complete config without truncating the previous usable file. */
+  private writeConfig(content: string): void {
+    writeTextAtomically(this.configPath, content, "config");
+  }
+
   private verifyPersisted(keyPath: string[], expected: unknown): void {
     let reread: Record<string, unknown>;
     try {
@@ -1030,7 +1059,9 @@ export class ConfigStore {
           auditLog: v("feed.subscriptions.audit_log") as boolean,
         },
       },
+      launch: { nonInterruptive: v("launch.non_interruptive") as boolean },
       runtime: {
+        readinessTimeoutSeconds: v("runtime.readiness_timeout_seconds") as number,
         codex: {
           hooksEnabled: v("runtime.codex.hooks_enabled") as boolean,
         },
@@ -1199,7 +1230,7 @@ export class ConfigStore {
       const fcDyn = this.readConfigFile();
       setNestedValue(fcDyn, ["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       mkdirSync(dirname(this.configPath), { recursive: true });
-      writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       this.verifyPersisted(["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       return;
     }
@@ -1222,7 +1253,7 @@ export class ConfigStore {
       }
     }
     mkdirSync(dirname(this.configPath), { recursive: true });
-    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
     this.verifyPersisted(KEY_TO_PATH[key], coerced);
   }
 
@@ -1247,7 +1278,7 @@ export class ConfigStore {
       const fcDyn = this.readConfigFile();
       const subsParent = getNestedValue(fcDyn, ["feed", "subscriptions"]) as Record<string, unknown> | undefined;
       if (subsParent && feedHost.hostId in subsParent) delete subsParent[feedHost.hostId];
-      writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       return;
     }
     if (!isValidKey(key)) {
@@ -1274,7 +1305,7 @@ export class ConfigStore {
         }
       }
     }
-    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
   }
 
   private readConfigFile(): Record<string, unknown> {

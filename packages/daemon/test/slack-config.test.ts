@@ -34,6 +34,47 @@ describe("Slice-11 config — first-class + honest unconfigured (item 5)", () =>
     expect(raw).not.toMatch(/xox[bp]-|xapp-|hooks\.slack\.com/);
   });
 
+  it("#192: a config without channelMap loads and saves byte-identically (no new key, no new readiness row)", () => {
+    const authored = { ...DEFAULT_CONFIG, channel: "C0DEFAULT", enabled: true };
+    const p = saveConfig(authored, home);
+    const bytes = fs.readFileSync(p, "utf8");
+    expect(bytes).not.toContain("channelMap");
+    expect(loadConfig(home)).not.toHaveProperty("channelMap");
+    saveConfig(loadConfig(home), home);
+    expect(fs.readFileSync(p, "utf8")).toBe(bytes);
+    expect(staticReadiness(loadConfig(home), true, true).map((r) => r.label)).not.toContain("channel-map");
+  });
+
+  it("#192: channelMap round-trips through save and load and adds one readiness row", () => {
+    const channelMap = [{ match: "my-rig", channel: "C0EXAMPLE1" }, { match: "pr@my-rig", channel: "C0EXAMPLE1" }];
+    saveConfig({ ...DEFAULT_CONFIG, channel: "C0DEFAULT", channelMap }, home);
+    const cfg = loadConfig(home);
+    expect(cfg.channelMap).toEqual(channelMap);
+    expect(staticReadiness(cfg, true, true).find((r) => r.label === "channel-map"))
+      .toEqual({ ok: true, label: "channel-map", detail: "2 entries over 1 channel(s); `rig slack verify` checks membership in each" });
+  });
+
+  it("#192: an invalid channelMap is refused on save (nothing written) and on load", () => {
+    const bad = { ...DEFAULT_CONFIG, channel: "C0DEFAULT", channelMap: [{ match: "my-rig", channel: "C1" }, { match: "my-rig", channel: "C2" }] };
+    expect(() => saveConfig(bad, home)).toThrow(/two entries for 'my-rig'/);
+    expect(configFileExists(home)).toBe(false);
+    fs.writeFileSync(path.join(home, "slack-connector.json"), JSON.stringify(bad));
+    expect(() => loadConfig(home)).toThrow(/two entries for 'my-rig'/);
+  });
+
+  it("#192: an entry field from a newer OpenRig loads (ignored, reported loudly) but is never saved", () => {
+    const newer = { ...DEFAULT_CONFIG, enabled: true, channel: "C0DEFAULT", channelMap: [{ match: "my-rig", channel: "C0EXAMPLE1", inbound: "lead@my-rig" }] };
+    fs.writeFileSync(path.join(home, "slack-connector.json"), JSON.stringify(newer));
+    const cfg = loadConfig(home); // a downgrade keeps the connector loading
+    expect(cfg.channelMap?.[0]?.channel).toBe("C0EXAMPLE1");
+    const row = staticReadiness(cfg, true, true).find((r) => r.label === "channel-map")!;
+    expect(row.ok).toBe(false);
+    expect(row.detail).toContain("IGNORED unsupported field(s) channelMap[0].inbound");
+    const before = fs.readFileSync(path.join(home, "slack-connector.json"), "utf8");
+    expect(() => saveConfig(cfg, home)).toThrow(/channelMap\[0\] \('my-rig'\) has unsupported field\(s\) inbound: slack-connector\.json was written by a newer OpenRig version\. Upgrade OpenRig, or edit the file by hand/);
+    expect(fs.readFileSync(path.join(home, "slack-connector.json"), "utf8")).toBe(before); // nothing lost
+  });
+
   it("staticReadiness honestly reports what's missing without throwing (S10: bot+channel gate outbound; webhook retired)", () => {
     const cfg = loadConfig(home);
     const r = staticReadiness(cfg, /*bot*/ false, /*app*/ false);

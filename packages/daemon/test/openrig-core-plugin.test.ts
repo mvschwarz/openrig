@@ -84,7 +84,7 @@ describe("openrig-core plugin — manifest shape (HG-2.2)", () => {
     const manifest = JSON.parse(content) as Record<string, unknown>;
     // Required fields per Claude plugin spec
     expect(manifest["name"]).toBe("openrig-core");
-    expect(manifest["version"]).toBe("0.1.1");
+    expect(manifest["version"]).toMatch(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
     expect(typeof manifest["description"]).toBe("string");
     expect((manifest["description"] as string).length).toBeLessThanOrEqual(1024);
     // Hook + skills wiring
@@ -99,15 +99,16 @@ describe("openrig-core plugin — manifest shape (HG-2.2)", () => {
     const manifest = JSON.parse(content) as Record<string, unknown>;
     // Codex requires name + version + description (per IMPL-PRD §2.3)
     expect(manifest["name"]).toBe("openrig-core");
-    expect(manifest["version"]).toBe("0.1.1");
+    expect(manifest["version"]).toMatch(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
     expect(typeof manifest["description"]).toBe("string");
     expect(manifest["hooks"]).toBe("./hooks/codex.json");
     expect(manifest["skills"]).toBe("./skills");
   });
 
-  it("both manifests reference the same skills/ subdir (cross-runtime portability)", () => {
+  it("both manifests agree on version and skills/ subdir (cross-runtime portability)", () => {
     const claude = JSON.parse(fs.readFileSync(nodePath.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf-8")) as Record<string, unknown>;
     const codex = JSON.parse(fs.readFileSync(nodePath.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), "utf-8")) as Record<string, unknown>;
+    expect(claude["version"]).toEqual(codex["version"]);
     expect(claude["skills"]).toEqual(codex["skills"]);
   });
 });

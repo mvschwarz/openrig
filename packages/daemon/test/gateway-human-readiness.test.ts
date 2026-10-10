@@ -89,3 +89,63 @@ describe("registered human primary-binding readiness", () => {
     expect(result.nextAction).toBe("rig slack verify --json");
   });
 });
+
+describe("#192 readiness checks every channel the connector posts to", () => {
+  const mapped: SlackConnectorConfig = { ...config, channel: "C0DEFAULT", channelMap: [
+    { match: "my-rig", channel: "C0EXAMPLE1" }, { match: "other-rig", channel: "C0EXAMPLE1" }, { match: "pr@my-rig", channel: "C0EXAMPLE2" },
+  ] };
+  const scopes = async () => ({ ok: true, granted: config.requiredScopes, missing: [] });
+  const membership = (members: Record<string, { ok: boolean; isMember: boolean; error?: string }>, asked: string[]) =>
+    async (_token: string, channel: string) => { asked.push(channel); return members[channel] ?? { ok: true, isMember: false }; };
+  const yes = { ok: true, isMember: true };
+
+  it("is not-ready when the app is missing from a mapped channel, naming the channel and what maps to it", async () => {
+    const asked: string[] = [];
+    const result = await resolveHumanDeliveryReadiness({ human, config: mapped, gatewayState: "active", botToken: "secret" }, {
+      verifyScopes: scopes, verifyMembership: membership({ C0DEFAULT: yes, C0EXAMPLE1: yes, C0EXAMPLE2: { ok: true, isMember: false } }, asked),
+    });
+    expect(asked).toEqual(["C0DEFAULT", "C0EXAMPLE1", "C0EXAMPLE2"]); // each unique channel once
+    expect(result).toMatchObject({ state: "not-ready", ready: false, reason: "connector is not a member of mapped channel C0EXAMPLE2 (pr@my-rig)", nextAction: "rig slack verify --json" });
+  });
+
+  it("names every missing channel, the default first", async () => {
+    const result = await resolveHumanDeliveryReadiness({ human, config: mapped, gatewayState: "active", botToken: "secret" }, {
+      verifyScopes: scopes, verifyMembership: membership({ C0DEFAULT: { ok: true, isMember: false }, C0EXAMPLE1: { ok: true, isMember: false }, C0EXAMPLE2: yes }, []),
+    });
+    expect(result.reason).toBe("connector is not a member of its configured channel; mapped channel C0EXAMPLE1 (my-rig, other-rig)");
+  });
+
+  it("is ready only when the app is in every channel", async () => {
+    const result = await resolveHumanDeliveryReadiness({ human, config: mapped, gatewayState: "active", botToken: "secret" }, {
+      verifyScopes: scopes, verifyMembership: membership({ C0DEFAULT: yes, C0EXAMPLE1: yes, C0EXAMPLE2: yes }, []),
+    });
+    expect(result).toMatchObject({ state: "ready", ready: true, reason: "required scopes and channel membership verified (3 channels)", nextAction: null });
+  });
+
+  it("is indeterminate when a mapped check is unavailable and no channel is known to be missing", async () => {
+    const result = await resolveHumanDeliveryReadiness({ human, config: mapped, gatewayState: "active", botToken: "secret" }, {
+      verifyScopes: scopes, verifyMembership: membership({ C0DEFAULT: yes, C0EXAMPLE1: { ok: false, isMember: false, error: "ratelimited" }, C0EXAMPLE2: yes }, []),
+    });
+    expect(result).toMatchObject({ state: "indeterminate", reason: "channel membership verification unavailable: C0EXAMPLE1: ratelimited" });
+  });
+
+  it("a known missing channel outranks an unavailable check", async () => {
+    const result = await resolveHumanDeliveryReadiness({ human, config: mapped, gatewayState: "active", botToken: "secret" }, {
+      verifyScopes: scopes, verifyMembership: membership({ C0DEFAULT: yes, C0EXAMPLE1: { ok: false, isMember: false, error: "ratelimited" }, C0EXAMPLE2: { ok: true, isMember: false } }, []),
+    });
+    expect(result).toMatchObject({ state: "not-ready", reason: "connector is not a member of mapped channel C0EXAMPLE2 (pr@my-rig)" });
+  });
+
+  it("without a map: one check of the default channel, with today's wording for every outcome", async () => {
+    const run = async (answer: { ok: boolean; isMember: boolean; error?: string }) => {
+      const asked: string[] = [];
+      const result = await resolveHumanDeliveryReadiness({ human, config, gatewayState: "active", botToken: "secret" }, {
+        verifyScopes: scopes, verifyMembership: membership({ C1: answer }, asked),
+      });
+      return { asked, state: result.state, reason: result.reason };
+    };
+    expect(await run(yes)).toEqual({ asked: ["C1"], state: "ready", reason: "required scopes and channel membership verified" });
+    expect(await run({ ok: true, isMember: false })).toEqual({ asked: ["C1"], state: "not-ready", reason: "connector is not a member of its configured channel" });
+    expect(await run({ ok: false, isMember: false, error: "boom" })).toEqual({ asked: ["C1"], state: "indeterminate", reason: "channel membership verification unavailable: boom" });
+  });
+});

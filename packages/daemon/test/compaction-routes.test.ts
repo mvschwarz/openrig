@@ -1,8 +1,8 @@
 // OPR.0.4.3.14 — manual compaction trigger route (POST /api/compaction/trigger).
 //
 // Proves: the route resolves the target + reads the EXISTING context-usage
-// projection BEFORE calling the enforcer (the prep prompt carries the sourced
-// usage %); non-Claude → 422 runtime_filter; unknown usage → 409 no_usage_data
+// projection BEFORE calling the enforcer (known usage permits a manual request
+// independently of the threshold); non-Claude → 422 runtime_filter; unknown usage → 409 no_usage_data
 // (route passes null, never invents a value); ambiguous → 409; missing field →
 // 400; enforcer-unwired → 503. Reuses the shipped SessionTransport + the SAME
 // ClaudeCompactionEnforcer (no second path).
@@ -10,8 +10,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import type Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -79,6 +79,7 @@ function knownUsage(sessionName: string, usedPercentage: number): ContextUsage {
 interface AppParts {
   app: Hono;
   sentTexts: string[];
+  enforcer: ClaudeCompactionEnforcer;
 }
 
 describe("compaction routes — POST /api/compaction/trigger", () => {
@@ -115,17 +116,23 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     return { claudeNodeId: claude.id, codexNodeId: codex.id };
   }
 
-  function buildApp(opts?: { wireEnforcer?: boolean }): AppParts {
+  function buildApp(opts?: { wireEnforcer?: boolean; completeMap?: boolean; bearerToken?: string }): AppParts {
     const sentTexts: string[] = [];
     const transport = new SessionTransport({
       db,
       rigRepo,
       sessionRegistry,
-      tmuxAdapter: idleTmux(async (_t, text) => { sentTexts.push(text); return { ok: true as const }; }),
+      tmuxAdapter: idleTmux(async (_t, text) => {
+        sentTexts.push(text);
+        const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
+        const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
+        if (opts?.completeMap !== false && marker && target) { const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, "# Fixture map\n" + marker); }
+        return { ok: true as const };
+      }),
       sleep: async () => undefined,
       waitForIdlePollMs: 1,
     });
-    const enforcer = new ClaudeCompactionEnforcer(makeSettings(), transport, { openrigHome: stateDir });
+    const enforcer = new ClaudeCompactionEnforcer(makeSettings(), transport, { openrigHome: stateDir, manualPrepWaitMs: 50, resolveOccupantGeneration: () => "fixture-generation" });
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionTransport" as never, transport);
@@ -134,11 +141,11 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
       if (opts?.wireEnforcer !== false) c.set("compactionEnforcer" as never, enforcer);
       await next();
     });
-    app.route("/api/compaction", compactionRoutes());
-    return { app, sentTexts };
+    app.route("/api/compaction", compactionRoutes({ bearerToken: opts?.bearerToken }));
+    return { app, sentTexts, enforcer };
   }
 
-  it("sources the KNOWN context-usage % before triggering: prep prompt carries it, /compact follows", async () => {
+  it("known below-threshold usage permits manual preparation, then /compact follows", async () => {
     const { claudeNodeId } = seed();
     usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
     const { app, sentTexts } = buildApp();
@@ -151,8 +158,9 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ok: true, session: "dev-impl@my-rig", stage: "compact-sent" });
-    // Phase 1 prep carries the sourced usage % (proves usage read before trigger).
-    expect(sentTexts[0]).toContain("Current context usage is 42%");
+    // The manual request does not claim that the threshold was reached.
+    expect(sentTexts[0]).toContain("OpenRig manual compaction was requested");
+    expect(sentTexts[0]).not.toContain("configured compaction threshold");
     // Phase 2 /compact followed.
     expect(sentTexts[1]).toContain("/compact");
     expect(sentTexts).toHaveLength(2);
@@ -224,4 +232,50 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     expect(res.status).toBe(503);
     expect((await res.json()).reason).toBe("compaction_unavailable");
   });
+  it("an explicit skip-map uses the same route/enforcer without a published map", async () => {
+    const { claudeNodeId } = seed();
+    usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
+    const { app, sentTexts } = buildApp({ completeMap: false });
+    const res = await app.request("/api/compaction/trigger", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", skipMap: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(sentTexts.filter(t => t.startsWith("/compact"))).toHaveLength(1);
+    const state = await app.request("/api/compaction/state?session=dev-impl@my-rig");
+    expect((await state.json()).preparation.status).toBe("compact-sent");
+  });
+
+  it("cancel disarms a waiting attempt; state reads do not submit compact", async () => {
+    seed();
+    const { app, sentTexts, enforcer } = buildApp({ completeMap: false });
+    await enforcer.maybeAutoCompact({ sessionName: "dev-impl@my-rig", runtime: "claude-code", usedPercentage: 90 });
+    const cancel = await app.request("/api/compaction/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig" }),
+    });
+    expect((await cancel.json()).preparation).toMatchObject({ status: "stopped", reason: "preparation_cancelled" });
+    const state = await app.request("/api/compaction/state?session=dev-impl@my-rig");
+    expect((await state.json()).preparation.status).toBe("stopped");
+    expect(sentTexts.filter(t => t.startsWith("/compact"))).toHaveLength(0);
+  });
+
+  it("skip-map and cancel preserve bearer authorization and reject malformed opt-in", async () => {
+    seed();
+    const { app, sentTexts } = buildApp({ bearerToken: "fixture-token" });
+    for (const verb of ["trigger", "cancel"]) {
+      const denied = await app.request(`/api/compaction/${verb}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", skipMap: true }),
+      });
+      expect(denied.status).toBe(401);
+    }
+    const malformed = await app.request("/api/compaction/trigger", {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer fixture-token" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", skipMap: "yes" }),
+    });
+    expect(malformed.status).toBe(400);
+    expect(sentTexts).toHaveLength(0);
+  });
+
 });

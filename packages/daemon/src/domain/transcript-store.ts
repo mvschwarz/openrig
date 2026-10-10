@@ -1,8 +1,8 @@
-import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, fstatSync, readFileSync } from "node:fs";
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
-import { getLastCaptureAt } from "./transcript-rotation.js";
+import { getLastCaptureAt, DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
@@ -19,7 +19,7 @@ export interface TranscriptIngestHealth {
 }
 
 const DEFAULT_ROOT = getCompatibleOpenRigPath("transcripts");
-export const DEFAULT_TRANSCRIPT_STALE_AFTER_MS = 10_000;
+export { DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 function applyBackspaces(text: string): string {
   const chars: string[] = [];
@@ -128,30 +128,34 @@ const TAIL_CHUNK_SIZE = 16 * 1024;
  * the read offset to avoid splitting characters.
  */
 function readTailChunked(filePath: string, rawLines: number): string | null {
-  const stat = statSync(filePath);
-  if (stat.size === 0) return null;
-
   const fd = openSync(filePath, "r");
   try {
+    const stat = fstatSync(fd);
+    if (stat.size === 0) return null;
     let text = "";
     let offset = stat.size;
 
     while (offset > 0) {
       const readSize = Math.min(TAIL_CHUNK_SIZE, offset);
       offset -= readSize;
-      const buf = Buffer.alloc(readSize);
-      readSync(fd, buf, 0, readSize, offset);
+      const buf = readTranscriptChunk(fd, readSize, offset);
 
       // Adjust for split UTF-8 multibyte: if the first byte is a continuation
       // byte (10xxxxxx = 0x80-0xBF), we've split a character. Move the offset
       // forward past the continuation bytes so the leading char bytes will be
       // included in the next (earlier) chunk read.
+      // A valid UTF-8 character has at most three continuation bytes.
+      // Capping this also guarantees progress through malformed chunks.
       let skipBytes = 0;
-      while (skipBytes < buf.length && (buf[skipBytes]! & 0xC0) === 0x80) {
+      while (skipBytes < Math.min(3, buf.length) && (buf[skipBytes]! & 0xC0) === 0x80) {
         skipBytes++;
       }
-      if (skipBytes > 0) {
+      if (skipBytes > 0 && offset > 0) {
         offset += skipBytes; // push those bytes back for the next iteration
+      } else {
+        // No earlier bytes exist at offset zero. Decode malformed prefixes as
+        // replacement characters instead of rewinding to the same position.
+        skipBytes = 0;
       }
 
       const chunk = buf.subarray(skipBytes).toString("utf-8");
@@ -168,6 +172,20 @@ function readTailChunked(filePath: string, rawLines: number): string | null {
   } finally {
     closeSync(fd);
   }
+}
+
+/** An opened descriptor retains the published capture across atomic replacement.
+ * Do not turn a short read into fabricated NUL padding if an external writer
+ * truncates that descriptor in place. Existing callers report the I/O failure. */
+function readTranscriptChunk(fd: number, size: number, offset: number): Buffer {
+  const buffer = Buffer.alloc(size);
+  let read = 0;
+  while (read < size) {
+    const count = readSync(fd, buffer, read, size - read, offset + read);
+    if (count === 0) throw new Error("Transcript changed during read");
+    read += count;
+  }
+  return buffer;
 }
 
 function countNewlines(s: string): number {
@@ -285,8 +303,9 @@ export class TranscriptStore {
       // Shell redraws often emit char + backspace before replaying the line.
       .replace(/\r/g, "\n")
       .replace(/\u00a0/g, " ")
-      .replace(/[^\n]\x08/g, (match) => applyBackspaces(match))
-      .replace(/\x08+/g, "")
+      .split("\n")
+      .map(applyBackspaces)
+      .join("\n")
       // Treat carriage-return redraws as separate transcript lines.
       .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
       .replace(/[ \t]+\n/g, "\n")
@@ -382,14 +401,13 @@ export class TranscriptStore {
     const fd = openSync(filePath, "r");
     const decoder = new StringDecoder("utf-8");
     try {
-      const stat = statSync(filePath);
+      const stat = fstatSync(fd);
       const CHUNK_SIZE = 64 * 1024;
       let remainder = "";
 
       for (let offset = 0; offset < stat.size; offset += CHUNK_SIZE) {
         const readSize = Math.min(CHUNK_SIZE, stat.size - offset);
-        const buf = Buffer.alloc(readSize);
-        readSync(fd, buf, 0, readSize, offset);
+        const buf = readTranscriptChunk(fd, readSize, offset);
         // StringDecoder handles incomplete multibyte sequences at chunk boundaries
         const chunk = remainder + decoder.write(buf);
         const lines = chunk.split("\n");

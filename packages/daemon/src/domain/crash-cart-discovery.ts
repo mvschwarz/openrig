@@ -14,6 +14,7 @@
 
 import Database from "better-sqlite3";
 import { basename, isAbsolute, join } from "node:path";
+import { formatDaemonHostForUrl } from "./daemon-url.js";
 
 /** Refusal: a live daemon holds the DB, so the direct read is unsafe (route to the live read API). */
 export class DaemonLiveError extends Error {
@@ -87,8 +88,9 @@ export async function assertDaemonDown(deps: AssertDaemonDownDeps): Promise<void
     }
     const host = state.host ?? DEFAULT_HOST;
     const port = state.port ?? DEFAULT_PORT;
-    if (await probeHealthz(`http://${host}:${port}/healthz`)) {
-      throw new DaemonLiveError(`a daemon answered http://${host}:${port}/healthz — refusing the direct read`);
+    const url = `http://${formatDaemonHostForUrl(host)}:${port}/healthz`;
+    if (await probeHealthz(url)) {
+      throw new DaemonLiveError(`a daemon answered ${url} — refusing the direct read`);
     }
     return;
   }

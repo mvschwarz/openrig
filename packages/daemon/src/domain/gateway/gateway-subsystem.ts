@@ -162,6 +162,13 @@ export class GatewaySubsystem {
     return this.wireHandle.dispatcher.dispatch(op, entityBindingRef, payload, opts);
   }
 
+  /** Snapshot only: no dispatch-buffer scan, network or recovery work. The connector's
+   *  status reads the inbound dead-letter files for the backlog count — a bounded,
+   *  non-destructive read, no retry or recovery pass. */
+  connectorStatus(): Record<string, unknown> {
+    return { state: this.state, connector: this.wireHandle?.status?.() ?? null };
+  }
+
   status(): GatewaySubsystemStatus {
     const s: GatewaySubsystemStatus = { state: this.state };
     if (this.reason !== undefined) s.reason = this.reason;

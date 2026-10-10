@@ -41,7 +41,63 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type Database from "better-sqlite3";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
+import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
+
+export interface RoleOrientation {
+  state: "unknown" | "no-record" | "not-declared" | "missing" | "present";
+  reason?: string;
+  recordedAt?: string;
+  note?: string;
+  files: Array<{
+    path: string;
+    absolutePath: string;
+    ownerRoot: string;
+    resolvedPath: string;
+    resolvedOwnerRoot: string;
+    state: "present" | "missing" | "unknown";
+  }>;
+}
+
+/** Read the caller's explicit role bindings, not startup content or a guessed basename. */
+export function deriveRole(db: Database.Database | undefined, nodeId: string | null): RoleOrientation {
+  const unknown = (reason: string): RoleOrientation => ({ state: "unknown", reason, files: [] });
+  if (!db || !nodeId) return unknown("calling node unavailable");
+  try {
+    const row = db.prepare("SELECT resolved_files_json, created_at FROM node_startup_context WHERE node_id = ?")
+      .get(nodeId) as { resolved_files_json: string; created_at: string } | undefined;
+    if (!row) return { state: "no-record", files: [] };
+    const entries: unknown = JSON.parse(row.resolved_files_json);
+    if (!Array.isArray(entries) || entries.some(entry => !entry || typeof entry !== "object"
+      || Array.isArray(entry) || (entry.orientation !== undefined && entry.orientation !== "role"))) {
+      return unknown("malformed startup record");
+    }
+    const marked = entries.filter(entry => entry.orientation === "role");
+    if (marked.some(entry => [entry.path, entry.absolutePath, entry.ownerRoot]
+      .some(value => typeof value !== "string" || !value.trim())
+      || !path.isAbsolute(entry.absolutePath) || !path.isAbsolute(entry.ownerRoot))) {
+      return unknown("malformed role binding");
+    }
+    const files: RoleOrientation["files"] = marked.map(entry => {
+      const resolved = reanchorBuiltinStartupFile(entry);
+      let state: "present" | "missing" | "unknown";
+      try { state = fs.statSync(resolved.absolutePath).isFile() ? "present" : "missing"; }
+      catch (error) {
+        state = ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "") ? "missing" : "unknown";
+      }
+      return { path: entry.path, absolutePath: entry.absolutePath, ownerRoot: entry.ownerRoot,
+        resolvedPath: resolved.absolutePath, resolvedOwnerRoot: resolved.ownerRoot, state };
+    });
+    return {
+      state: files.some(file => file.state === "unknown") ? "unknown"
+        : files.some(file => file.state === "missing") ? "missing" : files.length ? "present" : "not-declared",
+      recordedAt: row.created_at,
+      note: "Timestamp is the startup-context record write/attempt, not verified successful launch or current-byte equivalence to the spec.",
+      files,
+    };
+  } catch { return unknown("startup record unavailable or malformed"); }
+}
 
 const MISSION_TAG = "mission:";
 const SLICE_TAG = "slice:";
@@ -277,4 +333,226 @@ export function deriveCurrentWork(
   const only = [...byPath.values()][0];
   if (!only) return refuse("no typed in-progress work resolved to a work node");
   return { currentWork: only, currentWorkBasis: only.basis };
+}
+
+/**
+ * OPR.0.7.0.12 — labelled work candidates, BESIDE the strict derivation above, never
+ * loosening it. deriveCurrentWork answers "which one node is this seat's work" and refuses
+ * anything short of certainty; this answers "what evidence does the queue hold", so the
+ * refocus packet can show it and let the AGENT decide. Nothing here picks a winner:
+ * candidates are evidence the agent may correct, and the absence of evidence is reported as
+ * such rather than filled with the project root.
+ *
+ * - An in-progress row's own `mission:` tag (with or without `slice:`) is a direct candidate,
+ *   labelled with that tag as its source. A tag that does not resolve on this host is named,
+ *   never swapped for a same-named directory found some other way.
+ * - An in-progress row with no mission tag offers its handoff ancestry: the nearest local
+ *   ancestor's mission tag, as a labelled candidate. A retargeted handoff (new body, no tags)
+ *   or an ancestor that is not on this host gives no assumed mission.
+ * - Pending rows are possible next work; blocked rows are held work with their blocker and
+ *   continuation. No order is implied between them.
+ * - A mission named only in body text is never evidence.
+ */
+export interface WorkCandidate {
+  kind: "tag" | "ancestry";
+  qitemId: string | null;
+  mission: string;
+  slice: string | null;
+  /** The slice node when the slice resolves, else the mission node; null when the mission does not. */
+  workNodePath: string | null;
+  intent: string | null;
+  source: string;
+  /** Why the tag did not fully resolve on this host, when it did not. */
+  unresolved: string | null;
+}
+
+export interface WorkCandidates {
+  missionsRoot: string | null;
+  candidates: WorkCandidate[];
+  /** In-progress rows whose work the queue cannot name. */
+  unknown: Array<{ qitemId: string | null; summary: string | null; reason: string }>;
+  next: Array<{ qitemId: string | null; summary: string | null; missions: string[] }>;
+  held: Array<{ qitemId: string | null; summary: string | null; blockedOn: string | null; continuation: string | null }>;
+  /** Mission directories on this host, bounded, so an agent can name one without guessing. */
+  missionsOnHost: string[];
+  missionsOnHostTruncated: boolean;
+}
+
+interface CandidateRow extends TaggedRow {
+  summary?: string | null;
+  body?: string | null;
+  blockedOn?: string | null;
+  handedOffFrom?: string | null;
+  chainOfRecord?: string[] | null;
+}
+
+export interface WorkCandidateLookups {
+  /** A row by id on this host, or null when it is not here (remote or removed). */
+  getRow: (qitemId: string) => CandidateRow | null;
+  /** The recorded park continuation of a blocked row, or null. */
+  continuationOf: (qitemId: string) => string | null;
+}
+
+const MISSIONS_ON_HOST_LIMIT = 30;
+
+const BLOCK_SCALAR = new Set(["|", ">", "|-", ">-", "|+", ">+"]);
+
+/**
+ * The one-line `intent:` from SPEC.md frontmatter, read the way trace-to-root.py's `intent()`
+ * reads it: a block scalar (`>-`, `|`, …) joins its indented lines with spaces, and wrapping
+ * quotes are removed. parseFrontmatter is line-by-line and would return the indicator itself.
+ */
+export function frontmatterIntent(raw: string): string | null {
+  const match = /^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/.exec(raw);
+  if (!match) return null;
+  const lines = match[1]!.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const found = /^intent:\s*(.*)$/.exec(lines[index]!);
+    if (!found) continue;
+    const value = found[1]!.trim();
+    if (BLOCK_SCALAR.has(value)) {
+      const block: string[] = [];
+      for (const later of lines.slice(index + 1)) {
+        if (later && !/^\s/.test(later)) break;
+        if (later.trim()) block.push(later.trim());
+      }
+      return block.join(" ") || null;
+    }
+    if (value.length >= 2 && value[0] === value.at(-1) && (value[0] === '"' || value[0] === "'")) {
+      if (value[0] === '"') {
+        try { return JSON.parse(value) as string; } catch { /* fall through to a plain strip */ }
+      }
+      return value.slice(1, -1) || null;
+    }
+    return value || null;
+  }
+  return null;
+}
+
+function readIntent(nodePath: string): string | null {
+  try {
+    return frontmatterIntent(fs.readFileSync(path.join(nodePath, "SPEC.md"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function resolveTagged(missionsRoot: string | null, mission: string, slice: string | null):
+  Pick<WorkCandidate, "workNodePath" | "intent" | "unresolved"> {
+  if (!missionsRoot) return { workNodePath: null, intent: null, unresolved: "no missions root configured" };
+  const missions = resolveWorkNodeDirs(missionsRoot, mission);
+  if (missions.length !== 1) {
+    return { workNodePath: null, intent: null,
+      unresolved: `mission ${mission} resolves to ${missions.length} directories on this host` };
+  }
+  const missionPath = path.join(missionsRoot, missions[0]!.dir);
+  if (!slice) return { workNodePath: missionPath, intent: readIntent(missionPath), unresolved: null };
+  const slicesRoot = path.join(missionPath, "slices");
+  const slices = resolveWorkNodeDirs(slicesRoot, slice);
+  if (slices.length !== 1) {
+    // The mission is the slice's own parent, not a substitute: its intent is still the work's.
+    return { workNodePath: missionPath, intent: readIntent(missionPath),
+      unresolved: `slice ${slice} resolves to ${slices.length} directories under ${missions[0]!.dir}` };
+  }
+  const slicePath = path.join(slicesRoot, slices[0]!.dir);
+  return { workNodePath: slicePath, intent: readIntent(slicePath), unresolved: null };
+}
+
+function listMissions(missionsRoot: string | null): { names: string[]; truncated: boolean } {
+  if (!missionsRoot) return { names: [], truncated: false };
+  try {
+    const names = fs.readdirSync(missionsRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && fs.existsSync(path.join(missionsRoot, entry.name, "SPEC.md")))
+      .map(entry => entry.name)
+      .sort();
+    return { names: names.slice(0, MISSIONS_ON_HOST_LIMIT), truncated: names.length > MISSIONS_ON_HOST_LIMIT };
+  } catch {
+    return { names: [], truncated: false };
+  }
+}
+
+export function deriveWorkCandidates(
+  rows: CandidateRow[],
+  missionsRoot: string | null,
+  lookups: WorkCandidateLookups,
+): WorkCandidates {
+  const candidates: WorkCandidate[] = [];
+  const unknown: WorkCandidates["unknown"] = [];
+  const next: WorkCandidates["next"] = [];
+  const held: WorkCandidates["held"] = [];
+  const seen = new Set<string>();
+  const add = (candidate: WorkCandidate) => {
+    const key = `${candidate.kind}|${candidate.mission}|${candidate.slice ?? ""}|${candidate.workNodePath ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(candidate);
+  };
+
+  for (const row of rows) {
+    const tags = row.tags ?? [];
+    const missions = tagValues(tags, MISSION_TAG);
+    const qitemId = row.qitemId ?? null;
+    const summary = row.summary ?? null;
+    if (row.state === "pending") {
+      next.push({ qitemId, summary, missions });
+      continue;
+    }
+    if (row.state === "blocked") {
+      held.push({ qitemId, summary, blockedOn: row.blockedOn ?? null,
+        continuation: qitemId ? lookups.continuationOf(qitemId) : null });
+      continue;
+    }
+    if (row.state !== "in-progress") continue;
+
+    if (missions.length > 0) {
+      const slices = tagValues(tags, SLICE_TAG);
+      // One slice tag belongs to its mission; anything else is shown without a slice rather
+      // than paired by array position.
+      const slice = missions.length === 1 && slices.length === 1 ? slices[0]! : null;
+      for (const mission of [...missions].sort()) {
+        add({ kind: "tag", qitemId, mission, slice,
+          ...resolveTagged(missionsRoot, mission, slice),
+          source: `tag mission:${mission}${slice ? ` + slice:${slice}` : ""} on ${rowLabel(qitemId)}` });
+      }
+      continue;
+    }
+
+    // No mission tag: handoff ancestry is a lead, not truth.
+    const ancestry = [...(row.chainOfRecord ?? [])].reverse();
+    if (row.handedOffFrom && !ancestry.includes(row.handedOffFrom)) ancestry.unshift(row.handedOffFrom);
+    if (ancestry.length === 0) {
+      unknown.push({ qitemId, summary, reason: "no mission tag and no handoff ancestry" });
+      continue;
+    }
+    let found = false;
+    for (const ancestorId of ancestry) {
+      const ancestor = lookups.getRow(ancestorId);
+      if (!ancestor) {
+        unknown.push({ qitemId, summary,
+          reason: `handoff ancestor ${ancestorId} is not on this host (remote or removed); no mission assumed` });
+        found = true;
+        break;
+      }
+      const ancestorMissions = tagValues(ancestor.tags ?? [], MISSION_TAG);
+      if (ancestorMissions.length === 0) continue;
+      if ((row.tags ?? []).length === 0 && (row.body ?? "") !== (ancestor.body ?? "")) {
+        unknown.push({ qitemId, summary,
+          reason: `retargeted handoff from ${ancestorId} (new body, no tags); no mission assumed` });
+        found = true;
+        break;
+      }
+      for (const mission of [...ancestorMissions].sort()) {
+        add({ kind: "ancestry", qitemId, mission, slice: null,
+          ...resolveTagged(missionsRoot, mission, null),
+          source: `handoff ancestor ${ancestorId} carries mission:${mission}; ${rowLabel(qitemId)} itself is untagged` });
+      }
+      found = true;
+      break;
+    }
+    if (!found) unknown.push({ qitemId, summary, reason: "no handoff ancestor carries a mission tag" });
+  }
+
+  const listed = listMissions(missionsRoot);
+  return { missionsRoot, candidates, unknown, next, held,
+    missionsOnHost: listed.names, missionsOnHostTruncated: listed.truncated };
 }

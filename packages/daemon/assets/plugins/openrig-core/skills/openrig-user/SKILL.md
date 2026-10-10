@@ -301,7 +301,10 @@ OpenRig v0.3.0 adds `rig agent-image`, `rig context-pack`, `rig workspace`, and
 `rig config init-workspace`. *(0.5.0: the `rig context-pack` alias is retired — the store + compose library is the single `rig context` noun; see "Context packs and paced delivery (0.5.0)".)* It also shifts fresh-user starter guidance toward
 `product-team` for human-directed work and `conveyor` for workflow-oriented
 work. Treat `demo` as legacy/test content unless a task specifically asks for
-the old demo spec.
+the old demo spec. *(0.6.6: the built-in teams are `starter` and `factory`, plus the
+specialist teams `code-review`, `research` and `pm`. `product-team`, `conveyor` and
+`demo` are gone, and `first-project` is starter's old name. `workshop` is a rig
+bundle.)*
 
 OpenRig v0.3.1 adds public package/source surfaces for Plugin Primitive v0,
 Claude Auto-Compaction Policy, migration `040_workflow_specs_diagnostic`,
@@ -327,7 +330,9 @@ before relying on a policy or its default.
 
 Compatibility checks:
 - `rig down` accepts a rig name or id. An ambiguous name matching more than one
-  active rig is refused with matching ids; use the intended id.
+  active rig is refused with matching ids; use the intended id. It ends every
+  agent's session and any work in progress, so check `rig ps --nodes --rig <rig>`
+  and that the person asked; `rig up <rig> --existing` restores it.
 - For queue/view JSON or limit differences, compare the installed command's help,
   the running daemon version and the actual response. A wrapper mismatch is not
   by itself a daemon-health failure, and historical workarounds are not current
@@ -357,8 +362,8 @@ rig start --json             # JSON output for agents
 ```
 
 Framing: `rig start` is the RECOVERY entry point, not the getting-started
-hero. The fresh-user boot hero remains `rig up <starter>` (typically
-`rig up product-team`). Reach for `rig start` after a host reboot, daemon
+hero. The fresh-user boot hero remains `rig up <team>` (typically
+`rig up starter` for a first change, or `rig up factory`). Reach for `rig start` after a host reboot, daemon
 restart, or any "bring my rigs back" moment.
 
 ### `rig reconcile-session` — no-launch adopt of a hand-resumed session
@@ -410,8 +415,23 @@ rig seat clear-attention <session> --reason "operator attested: the operator re-
 rig seat clear-attention <session> --json
 ```
 
-`--reason <text>` is the operator-attestation override path; without it the
-command runs the evidence gate. Either way the action is audited.
+`--reason <text>` can acknowledge startup-status and subset-restore attention.
+It does not bypass full-restore continuity checks or an active pane-identity
+mismatch/missing-pane check; those run first. Successful identity re-verification
+can also clear coexisting startup or subset-restore attention. If neither earlier
+path clears attention, omitting `--reason` requires activity or send evidence.
+Startup and restore clears write their corresponding audit events; an identity-only
+clear updates the current binding and identity verdict without a clear event.
+Acknowledgment or responsiveness alone does not prove that the original
+conversation resumed.
+
+A 422 response names the uncleared class and its failed check. If the recorded
+native token needs correction and you know the actual token, use
+`rig seat set-resume-token <session> --token-stdin --reason <explanation>`, then
+rerun `rig seat clear-attention <session>` to check the live evidence. The token
+update records operator provenance; it does not itself prove continuity.
+Stopping/relaunching a working seat is a separate disruptive operation, not a
+required cleanup or proof of resumed lineage.
 
 ### Periodic snapshots — crash-insurance floor
 
@@ -575,7 +595,17 @@ Read-only audit of the skill cascade. Detects `missing` / `stale` / `self-refere
 
 ### `rig seat clear-attention` — extended to derived projection staleness
 
-v0.3.4 shipped `clear-attention` gating on `session.startupStatus` only. v0.4.0 extends the verb to also reach **restoreOutcome-derived** attention (seat is `startupStatus=ready` + `sessionStatus=running` but carries `restoreOutcome=failed` / `continuityOutcome=failed`). Same evidence-gated audit row applies; the `--reason <text>` operator-attestation override carries the runtime / cwd-uncertainty disclosure honestly.
+`clear-attention` also reaches restore-derived attention even when
+`startupStatus=ready` and `sessionStatus=running`. Full-restore attention requires
+the restore reconciler's exact native-token and usable-pane checks; `--reason`
+cannot replace them. Subset-restore attention can reach the attestation path
+when no active pane-identity class takes precedence. That path records
+`operator_recovered` with `runtimeCwdVerified:false`; it is an acknowledgment,
+not proof of resumed lineage. Without an explicit stored continuity outcome,
+inventory leaves continuity null (`unverified` in `rig seat status`) unless the
+same restore attempt has a matching receipt and reconciliation with strict
+native-token and usable-pane proof. Explicit stored outcomes remain historical
+facts; acknowledgment or responsiveness alone cannot infer `resumed`.
 
 ### Native Codex session id capture
 

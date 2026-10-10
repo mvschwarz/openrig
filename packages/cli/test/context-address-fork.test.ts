@@ -90,10 +90,11 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
           ],
           pieces: [
             { atomId: "welcome", address: "notes.md#welcome", sourceKind: "library", order: 1, priority: "core", text: "hello", estimatedTokens: 2, provenance: { nominalPath: "/p/notes.md", realPath: "/p/notes.md", escapesRoot: false } },
-            { atomId: "recap", address: "seat:RECAP.md#d", sourceKind: "seat", order: 9, priority: "core", text: "decisions", estimatedTokens: 3, provenance: { nominalPath: "/s/RECAP.md", realPath: "/x", escapesRoot: true } },
+            { atomId: "recap", address: "seat:RECAP.md#d", sourceKind: "seat", order: 9, priority: "core", text: "decisions", estimatedTokens: 3, writtenAt: "2026-08-26T12:00:00.000Z", provenance: { nominalPath: "/s/RECAP.md", realPath: "/x", escapesRoot: true } },
           ],
           totalEstimatedTokens: 5,
           budget: { limitTokens: 4, overageTokens: 1, dropCandidates: [{ atomId: "recap", priority: "core", estimatedTokens: 3 }] },
+          warnings: ["fixture warning kept off stdout"],
           provenanceWarnings: ["piece 'recap' (seat:RECAP.md#d): bytes came from OUTSIDE its seat root — real path /x"],
         }));
       } else if (url.startsWith("/api/context-packs/library/by-ref/preview")) {
@@ -167,6 +168,15 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
     expect(recapHeader).toMatch(/ESCAPED|escape/i);
     const welcomeHeader = stdout.split("\n").find((l) => l.startsWith("=== welcome"))!;
     expect(welcomeHeader).not.toMatch(/ESCAPED|escape/i);
+  });
+
+  it("route warnings ride stderr, and the recap's write time rides its framing header", async () => {
+    const out = await run(port, ["profile", "packs/smoke", "--situation", "post-compaction", "--runtime", "claude", "--rig", "r1", "--seat", "s1"]);
+    expect(out.errLogs).toContain("WARNING fixture warning kept off stdout");
+    const stdout = out.logs.join("\n");
+    expect(stdout).not.toContain("fixture warning");
+    expect(stdout.split("\n").find((l) => l.startsWith("=== recap"))!).toMatch(/ written 2026-08-26T12:00:00\.000Z$/);
+    expect(stdout.split("\n").find((l) => l.startsWith("=== welcome"))!).not.toMatch(/written/);
   });
 
   it("r1 4d obs (2): --runtime defaults from OPENRIG_RUNTIME (a codex seat that forgets the flag must not silently get a claude profile); the flag beats the env", async () => {

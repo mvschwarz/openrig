@@ -1,7 +1,7 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -15,6 +15,7 @@ import {
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
   WakeLadderScheduler,
@@ -186,7 +187,9 @@ export function startWakeLadderScheduler(deps: {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
-  gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown) => { ok: boolean; error?: string } };
+  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
@@ -201,7 +204,7 @@ export function startWakeLadderScheduler(deps: {
     ? makeOperatorDeliveryEngine({
         home: OPENRIG_HOME,
         queueRepo,
-        dispatch: (op, ref, payload) => deps.gatewaySubsystem!.dispatch(op, ref, payload),
+        dispatch: (op, ref, payload, opts) => deps.gatewaySubsystem!.dispatch(op, ref, payload, opts),
       })
     : undefined;
   const scheduler = new WakeLadderScheduler({
@@ -210,6 +213,11 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
+      readPromptState: makePromptStateReader({
+        db,
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
+        getLatestHook: (sessionName) => deps.agentActivityStore?.getLatestForNode({ sessionName }),
+      }),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),
@@ -362,6 +370,7 @@ export async function startServer(port?: number) {
       }
     });
     injectWebSocket(srv);
+    trackHttpServerResponses(srv, deps.requestPhaseObserver?.observeRequest);
     servers.push(srv);
   }
 
@@ -387,10 +396,9 @@ export async function startServer(port?: number) {
       ["gateway", () => deps.gatewaySubsystem?.stop()],
       ["wake-ladder", () => wakeLadderScheduler?.stop()],
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
-      ["connections", () => Promise.all(servers.map((srv) => new Promise<void>((resolve, reject) => {
-        srv.close((error) => error ? reject(error) : resolve());
-      })))],
+      ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
       ["recorder", async () => {
+        deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {
           throw new Error("slow-operation recorder drain incomplete; records may be lost");
         }

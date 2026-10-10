@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Command } from "commander";
-import { hostCommand, type DoctorDeps } from "../src/commands/host.js";
+import { hostCommand, resolvePairTimeoutMs, MAX_PAIR_TIMEOUT_MS, type DoctorDeps } from "../src/commands/host.js";
 import { addHostEntry } from "../src/host-registry.js";
 
 describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
@@ -188,6 +188,35 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     expect(err.join("\n")).toContain("Nothing was persisted");
     expect(fs.existsSync(path.join(dir, "hosts.yaml"))).toBe(false);
     expect(fs.existsSync(path.join(dir, "secrets"))).toBe(false);
+  }, 15_000);
+
+  // The poll wait must be BOUNDED, not refused. A non-finite or overflowing
+  // --timeout (Infinity, 1e999, 1e306) would otherwise make the deadline
+  // `Date.now() + Infinity`, so when the target stops answering and polls keep
+  // failing, the retry loop never exits. Values that work today (blank, 0, -5)
+  // keep their current wait.
+  it("preserves today's accepted --timeout values", () => {
+    expect(resolvePairTimeoutMs(undefined)).toBe(600_000); // 600 s default
+    expect(resolvePairTimeoutMs("")).toBe(600_000);        // blank → default
+    expect(resolvePairTimeoutMs("0")).toBe(600_000);       // 0 → default
+    expect(resolvePairTimeoutMs("-5")).toBe(1_000);        // negative → 1 s floor
+    expect(resolvePairTimeoutMs("30")).toBe(30_000);
+    expect(resolvePairTimeoutMs("600")).toBe(600_000);
+  });
+
+  it("bounds a non-finite or overflowing --timeout so the wait cannot be infinite", () => {
+    expect(resolvePairTimeoutMs("Infinity")).toBe(MAX_PAIR_TIMEOUT_MS);
+    expect(resolvePairTimeoutMs("1e999")).toBe(MAX_PAIR_TIMEOUT_MS);
+    expect(resolvePairTimeoutMs("1e306")).toBe(MAX_PAIR_TIMEOUT_MS);
+    expect(Number.isFinite(resolvePairTimeoutMs("Infinity"))).toBe(true);
+  });
+
+  it("still pairs with a huge --timeout — it is bounded, not refused", async () => {
+    const deps = fakeDeps({ poll: [{ status: 200, body: { status: "approved", token: "issued-bearer" } }] });
+    const { exitCode } = await capture(() => run(deps, ["pair", "vps-a:7433", "--id", "vps-a", "--timeout", "Infinity"]));
+    expect(exitCode).toBeUndefined();
+    expect(deps.postCalls()).toBe(1);
+    expect(fs.existsSync(path.join(dir, "hosts.yaml"))).toBe(true);
   }, 15_000);
 
   // rev1-r2 B1: path-bearing ids die at the registry-door preflight —

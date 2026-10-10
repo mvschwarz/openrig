@@ -66,7 +66,7 @@ it("retains new and still-failing events across overlapping retries while succes
       { ts: failed.ts, attempts: 2 }, { ts: fresh.ts, attempts: 1 },
     ]);
     expect(repo.list({ limit: 100 })).toHaveLength(1);
-    expect(seen.load().has(fresh.ts)).toBe(false);
+    expect(seen.load().has(`${fresh.channel}:${fresh.ts}`)).toBe(false);
     unavailable = false;
     expect(await router.retryDeadLetters()).toEqual({ retried: 2, landed: 2 });
     expect(dead.readAll()).toEqual([]);

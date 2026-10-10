@@ -1,0 +1,12 @@
+schema: openrig.bundle-configurations/v1
+recommended: recommended
+seats:
+  build.lead: { runtimes: { claude-code: lead, codex: lead, pi: lead } }
+  build.impl: { runtimes: { claude-code: implementer, codex: implementer, pi: implementer } }
+  check.review: { runtimes: { codex: reviewer, claude-code: reviewer, pi: reviewer } }
+  check.qa: { runtimes: { codex: qa, claude-code: qa, pi: qa } }
+presets:
+  recommended: { build.lead: claude-code, build.impl: claude-code, check.review: codex, check.qa: codex }
+  all-claude: { build.lead: claude-code, build.impl: claude-code, check.review: claude-code, check.qa: claude-code }
+  all-codex: { build.lead: codex, build.impl: codex, check.review: codex, check.qa: codex }
+  all-pi: { build.lead: pi, build.impl: pi, check.review: pi, check.qa: pi }

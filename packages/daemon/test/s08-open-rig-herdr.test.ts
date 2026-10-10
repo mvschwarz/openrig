@@ -3,22 +3,36 @@
 // how it reads replies; they do not prove what a real Herdr does with duplicate labels or focus.
 import { describe, expect, it } from "vitest";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
-import { HerdrAdapter, HERDR_PANES_PER_PAGE, planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
+import { HerdrAdapter, HERDR_PANES_PER_PAGE, HERDR_PANES_UNCONFIRMED_NOTE, planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { PANES_PER_PAGE } from "../src/domain/terminal/view-composer.js";
 import { MAX_COLS, MAX_PER_WORKSPACE } from "../src/domain/cmux-layout-service.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { ComposedView, OpenViewResult, TerminalProvider } from "../src/domain/terminal/terminal-provider.js";
 
 const RIG = "big";
+const TEAM_HANDOFF_NOTE = "The shared dashboard is the overview; the team's lead pane is where you can talk about the work. Check the opened seats and any absent or degraded seats above. Can you see the team? A created workspace or a capture alone does not confirm what is visible on your screen.";
 const rows = Array.from({ length: 17 }, (_, i) => {
   const s = `seat-${String(i + 1).padStart(2, "0")}@${RIG}`;
   return { canonicalSessionName: s, attachmentType: "tmux" as const, tmuxSession: s, rigName: RIG, logicalId: `pod.s${i + 1}` };
 });
 
 type Req = { method: string; params: Record<string, unknown> };
+/** Every pane leaf's label in a layout.apply root (blank filler panes included). */
+const leafLabels = (root: unknown): string[] => {
+  const out: string[] = [];
+  const walk = (n: any) => {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "pane") out.push(String(n.label ?? ""));
+    walk(n.first); walk(n.second);
+  };
+  walk(root);
+  return out;
+};
 function herdrTransport(respond?: (method: string, params: Record<string, unknown>, n: number) => HerdrResult): { transport: HerdrTransport; requests: Req[] } {
   const requests: Req[] = [];
   let applied = 0;
+  // The default fake answers pane.list the way a live herdr would: every applied pane, still alive.
+  const panes: Array<{ pane_id: string; tab_id: string; label: string }> = [];
   return {
     requests,
     transport: {
@@ -27,7 +41,12 @@ function herdrTransport(respond?: (method: string, params: Record<string, unknow
         requests.push({ method, params: params as Record<string, unknown> });
         if (respond) return respond(method, params as Record<string, unknown>, applied);
         if (method === "workspace.create") return { type: "workspace_created", workspace: { workspace_id: "w1" }, tab: { tab_id: "w1:t0" } };
-        if (method === "layout.apply") { applied++; return { type: "layout_apply", layout: { workspace_id: "w1", tab_id: `w1:t${applied}` } }; }
+        if (method === "layout.apply") {
+          applied++;
+          for (const label of leafLabels((params as Record<string, unknown>)["root"])) panes.push({ pane_id: `p${panes.length}`, tab_id: `w1:t${applied}`, label });
+          return { type: "layout_apply", layout: { workspace_id: "w1", tab_id: `w1:t${applied}` } };
+        }
+        if (method === "pane.list") return { type: "pane_list", panes };
         return { type: "ok" };
       },
     },
@@ -76,13 +95,15 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
   it("17 live seats → workspace named after the rig, tabs of 16 then 1, each cell on its own seat, in order", async () => {
     const { transport, requests } = herdrTransport();
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "tok" }));
-    const res = await svc.openView({ view: `rig:${RIG}` });
+    const preview = await svc.previewView({ view: `rig:${RIG}` });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    const res = await svc.openView({ view: `rig:${RIG}`, expectedPlan: preview.planId });
     expect(res).toMatchObject({ provider: "herdr", ok: true, pages: 2, absent: [], degraded: [] });
     expect(res.opened).toEqual(rows.map((r) => r.canonicalSessionName));
     const create = requests.find((r) => r.method === "workspace.create")!;
     expect(create.params).toEqual({ focus: false, label: RIG });
     const applies = requests.filter((r) => r.method === "layout.apply");
-    expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#tok/1`, `openrig:rig:${RIG}#tok/2`]);
+    expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/1`, `openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/2`]);
     expect(applies.map((a) => cellSeats(a.params["root"]).length)).toEqual([16, 1]);
     expect([...cellSeats(applies[0]!.params["root"]), ...cellSeats(applies[1]!.params["root"])]).toEqual(rows.map((r) => r.canonicalSessionName));
   });
@@ -100,10 +121,12 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const { transport, requests } = herdrTransport();
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "layout.apply", "tab.focus", "tab.close"]);
-    expect(requests[3]!.params).toEqual({ tab_id: "w1:t1" });
-    expect(requests[4]!.params).toEqual({ tab_id: "w1:t0" });
-    expect(res.notes).toBeUndefined();
+    // #707: each applied page is followed by one pane.list read (this fake lists every pane alive, so nothing changes).
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "layout.apply", "pane.list", "tab.focus", "tab.close"]);
+    expect(requests[2]!.params).toEqual({ workspace_id: "w1" });
+    expect(requests[5]!.params).toEqual({ tab_id: "w1:t1" });
+    expect(requests[6]!.params).toEqual({ tab_id: "w1:t0" });
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
   });
 
   it("never closes a tab that holds a page, even if herdr reuses the starting tab", async () => {
@@ -142,7 +165,8 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.filter((r) => r.method === "workspace.create").map((c) => c.params["label"])).toEqual([RIG, `${RIG} (3)`]);
     expect(res.ok).toBe(true);
-    expect(res.notes).toEqual([`A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`]);
+    // This fake answers pane.list with no listing, so the page is unconfirmed (#707) and stays opened.
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, `A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`, HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
   it("a refused focus or close is a note; the opened seats are unchanged", async () => {
@@ -155,7 +179,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(res.opened).toHaveLength(17);
     expect(res.degraded).toEqual([]);
-    expect(res.notes).toEqual(["herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
   });
 
   it("honest partials: a page herdr refuses names its seats as degraded; the tile count never overclaims", async () => {
@@ -190,7 +214,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(requests.find((r) => r.method === "tab.focus")!.params).toEqual({ tab_id: "t2" });
     expect(res.opened).toHaveLength(17);
-    expect(res.notes).toEqual([KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("no page reports a tab id: no focus and no close, both said", async () => {
@@ -198,7 +222,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "layout.apply"]);
-    expect(res.notes).toEqual(["herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, "herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
   });
 
   it("a failed apply (which may still have taken effect) keeps the starting tab; its seats stay degraded, not counted", async () => {
@@ -213,7 +237,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
     expect(res.degraded).toHaveLength(16);
-    expect(res.notes).toEqual([KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("every page fails: nothing is focused or closed", async () => {
@@ -230,7 +254,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(closes(requests).map((r) => r.params)).toEqual([{ tab_id: "w1:t0" }]);
-    expect(res.notes).toBeUndefined();
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE]);
   });
 });
 
@@ -276,5 +300,15 @@ describe("S08 — cmux is unchanged", () => {
   it("the workspace name rule is Herdr-only: a mission/slice/saved view keeps its view id", () => {
     const view: ComposedView = { id: "mission:4.6", opened: [], absent: [], degraded: [], pages: [] };
     expect(planHerdrLayout(view, "t").workspaceLabel).toBe("mission:4.6");
+  });
+});
+
+describe("desktop Herdr endpoint", () => {
+  it.each([false, true])("retains the configured launch endpoint when socket alive=%s", async alive => {
+    const { transport } = herdrTransport();
+    transport.probe = async () => ({ alive });
+    const launch = { socketPath: "/fixture/daemon/herdr.sock", session: "fixture-daemon" };
+    const adapter = new HerdrAdapter({ transportFactory: () => transport, launch });
+    expect(await adapter.status()).toMatchObject({ available: alive, launch });
   });
 });

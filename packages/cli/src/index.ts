@@ -25,6 +25,7 @@ import { upCommand } from "./commands/up.js";
 import { downCommand } from "./commands/down.js";
 import { archiveCommand } from "./commands/archive.js";
 import { unarchiveCommand } from "./commands/unarchive.js";
+import { rosterCommand } from "./commands/roster.js";
 import { psCommand } from "./commands/ps.js";
 import { hostCommand } from "./commands/host.js";
 import { gatewayCommand } from "./commands/gateway.js";
@@ -53,6 +54,7 @@ import { preflightCommand } from "./commands/preflight.js";
 import { authCommand } from "./commands/auth.js";
 import { providerCommand } from "./commands/provider.js";
 import { usageCommand } from "./commands/usage.js";
+import { telemetryCommand } from "./commands/telemetry.js";
 import { healthCommand, type HealthDeps } from "./commands/health.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { expandCommand } from "./commands/expand.js";
@@ -93,6 +95,7 @@ import { CLI_VERSION } from "./version.js";
 export interface ProgramDeps {
   daemonDeps?: LifecycleDeps;
   statusDeps?: StatusDeps;
+  telemetryDeps?: StatusDeps;
   snapshotDeps?: StatusDeps;
   restoreDeps?: StatusDeps;
   uiDeps?: UiDeps;
@@ -168,7 +171,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program
     .name("rig")
     .description("CLI for the OpenRig local control plane")
-    .version(CLI_VERSION);
+    .version(CLI_VERSION)
+    .addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens a new desktop terminal itself: TUI | advisor | operator.\n  An installing agent can run this from its shell on the daemon's desktop.\n  Start a stopped daemon with rig daemon start.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n");
 
   program.addCommand(startCommand(depsOverride?.startDeps));
   program.addCommand(daemonCommand(depsOverride?.daemonDeps));
@@ -197,6 +201,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(unarchiveCommand(depsOverride?.unarchiveDeps));
   program.addCommand(hostCommand());
   program.addCommand(psCommand(depsOverride?.psDeps));
+  program.addCommand(rosterCommand());
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
@@ -232,6 +237,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(authCommand());
   program.addCommand(providerCommand());
   program.addCommand(usageCommand());
+  program.addCommand(telemetryCommand(depsOverride?.telemetryDeps));
   program.addCommand(healthCommand(depsOverride?.healthDeps));
   program.addCommand(doctorCommand());
   program.addCommand(expandCommand(depsOverride?.expandDeps));

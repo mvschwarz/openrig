@@ -1358,7 +1358,7 @@ export class WorkflowRuntime {
     if (!input.occurrenceId && unresolved.length !== 1) {
       throw new WorkflowProjectorError("failure_occurrence_required", `instance ${input.instanceId} has ${unresolved.length} unresolved failure occurrences; --occurrence is required`, { instanceId: input.instanceId, candidates: unresolved });
     }
-    const occurrence = selected ?? unresolved[0];
+    const occurrence = input.occurrenceId ? selected : unresolved[0];
     if (!occurrence || occurrence.status !== "unresolved") {
       throw new WorkflowProjectorError("failure_occurrence_not_unresolved", `failure occurrence ${input.occurrenceId ?? "(unspecified)"} is not unresolved`, { instanceId: input.instanceId, occurrenceId: input.occurrenceId ?? null });
     }

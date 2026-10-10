@@ -38,6 +38,25 @@ export interface UsageSeriesRow {
   resetsAt: string | null;
 }
 
+/** Captures are stored at millisecond precision in UTC. Keep the indexed column
+ * comparison, but compare an ISO cutoff's instant rather than its offset/spelling.
+ * Both >= and < use the next stored instant for a sub-millisecond boundary. */
+function capturedAtBound(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return value;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const local = new Date(0);
+  local.setUTCFullYear(year!, month! - 1, day!);
+  local.setUTCHours(hour!, minute!, second!, 0);
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() + 1 !== month ||
+    local.getUTCDate() !== day || local.getUTCHours() !== hour ||
+    local.getUTCMinutes() !== minute || local.getUTCSeconds() !== second) return value;
+  const epoch = Date.parse(value);
+  const betweenMilliseconds = /[1-9]/.test(match[7]?.slice(3) ?? "");
+  const bound = epoch + (betweenMilliseconds ? 1 : 0);
+  return Number.isFinite(bound) && Math.abs(bound) <= 8.64e15 ? new Date(bound).toISOString() : value;
+}
+
 /** Serve the RAW stored rows, oldest first. Bounds are absolute on captured_at
  *  (since inclusive-of-later, i.e. `>=`; until exclusive `<`). */
 export function queryUsageSeries(db: Database, q: UsageSeriesQuery): UsageSeriesRow[] {
@@ -45,8 +64,8 @@ export function queryUsageSeries(db: Database, q: UsageSeriesQuery): UsageSeries
   const params: unknown[] = [];
   if (q.seatSession) { where.push("seat_session = ?"); params.push(q.seatSession); }
   if (q.lane) { where.push("lane = ?"); params.push(q.lane); }
-  if (q.sinceIso) { where.push("captured_at >= ?"); params.push(q.sinceIso); }
-  if (q.untilIso) { where.push("captured_at < ?"); params.push(q.untilIso); }
+  if (q.sinceIso) { where.push("captured_at >= ?"); params.push(capturedAtBound(q.sinceIso)); }
+  if (q.untilIso) { where.push("captured_at < ?"); params.push(capturedAtBound(q.untilIso)); }
   const limit = q.limit && q.limit > 0 ? Math.floor(q.limit) : 10_000;
   const rows = db
     .prepare(
@@ -125,7 +144,10 @@ function hoursBetween(aIso: string, bIso: string): number {
 
 /** The money question: top-N seats by token burn over the last H hours. */
 export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
-  const sinceIso = new Date(new Date(q.nowIso).getTime() - q.windowHours * 3_600_000).toISOString();
+  const nowMs = new Date(q.nowIso).getTime();
+  const sinceIso = new Date(nowMs - q.windowHours * 3_600_000).toISOString();
+  // Stored captures use millisecond ISO timestamps; retain the exact endpoint.
+  const untilIso = new Date(nowMs + 1).toISOString();
 
   const seats = (
     db.prepare(`SELECT DISTINCT seat_session AS s FROM usage_samples`).all() as Array<{ s: string }>
@@ -135,31 +157,47 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
   const unknown: UnknownSeat[] = [];
 
   for (const seat of seats) {
-    const ctx = queryUsageSeries(db, { seatSession: seat, lane: "context", sinceIso });
-    if (ctx.length === 0) {
+    const rawContext = queryUsageSeries(db, { seatSession: seat, lane: "context", sinceIso, untilIso });
+    if (rawContext.length === 0) {
       // history exists (the seat appeared in the census) but nothing fresh
       unknown.push({ seatSession: seat, reason: "no_fresh_samples" });
       continue;
     }
+    // Missing counters are unknown observations, not a restart to zero.
+    const ctx = rawContext.filter((row): row is UsageSeriesRow & {
+      totalInputTokens: number; totalOutputTokens: number;
+    } => Number.isFinite(row.totalInputTokens) && Number.isFinite(row.totalOutputTokens));
     if (ctx.length < 2) {
       unknown.push({ seatSession: seat, reason: "insufficient_samples" });
       continue;
     }
     let tokensDelta = 0;
     let resets = 0;
-    for (let i = 1; i < ctx.length; i += 1) {
-      const prev = (ctx[i - 1]!.totalInputTokens ?? 0) + (ctx[i - 1]!.totalOutputTokens ?? 0);
-      const cur = (ctx[i]!.totalInputTokens ?? 0) + (ctx[i]!.totalOutputTokens ?? 0);
-      const delta = cur - prev;
-      if (delta >= 0) tokensDelta += delta;
-      else resets += 1; // a restart dropped the totals — never a negative burn
+    // A seat name can be reused by a later rig. Cumulative counters only
+    // describe movement within one node; crossing node baselines invents burn.
+    const previousByNode = new Map<string | null, number>();
+    let pairs = 0;
+    for (const row of ctx) {
+      const cur = row.totalInputTokens + row.totalOutputTokens;
+      const prev = previousByNode.get(row.nodeId);
+      if (prev !== undefined) {
+        pairs += 1;
+        const delta = cur - prev;
+        if (delta >= 0) tokensDelta += delta;
+        else resets += 1; // a restart dropped the totals — never negative burn
+      }
+      previousByNode.set(row.nodeId, cur);
+    }
+    if (pairs === 0) {
+      unknown.push({ seatSession: seat, reason: "insufficient_samples" });
+      continue;
     }
     const spanHours = hoursBetween(ctx[0]!.capturedAt, ctx[ctx.length - 1]!.capturedAt);
     const tokensPerHour = spanHours > 0 ? tokensDelta / spanHours : 0;
 
     const windows: WindowVelocity[] = [];
     for (const w of ["five_hour", "weekly"] as const) {
-      const rows = queryUsageSeries(db, { seatSession: seat, lane: "provider_window", sinceIso }).filter(
+      const rows = queryUsageSeries(db, { seatSession: seat, lane: "provider_window", sinceIso, untilIso }).filter(
         (r) => r.window === w,
       );
       if (rows.length === 0) continue;

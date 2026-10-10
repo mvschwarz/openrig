@@ -106,6 +106,7 @@ describe("BootstrapOrchestrator", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -197,6 +198,34 @@ describe("BootstrapOrchestrator", () => {
       podInstantiator: opts?.podInstantiator as any,
     });
   }
+
+  it.each([
+    ["false", undefined, false], ["true", undefined, true],
+    ["true", false, false], ["false", true, true],
+  ] as const)("non-interruptive default %s / override %s reaches instantiation", async (operatorDefault, choice, expected) => {
+    vi.stubEnv("OPENRIG_LAUNCH_NON_INTERRUPTIVE", operatorDefault);
+    const instantiator = createMockInstantiator(db);
+    const spy = vi.spyOn(instantiator, "instantiate");
+    const orch = buildOrchestrator({ instantiator });
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: writeSpec(SIMPLE_SPEC_YAML), nonInterruptive: choice });
+    expect(result.status).toBe("completed");
+    expect(spy).toHaveBeenCalledWith(expect.anything(), { nonInterruptive: expected });
+    if (expected) expect(result.warnings.join("\n")).toContain("saved for this rig");
+  });
+
+  it.each([
+    ["false", true, undefined, true], ["true", false, undefined, false],
+    ["false", true, false, false], ["true", false, true, true],
+    ["true", undefined, undefined, true], ["false", undefined, undefined, false],
+  ] as const)("pod authored choice: machine %s / declared %s / request %s => %s", async (machine, declared, request, expected) => {
+    vi.stubEnv("OPENRIG_LAUNCH_NON_INTERRUPTIVE", machine);
+    const instantiate = vi.fn(async () => ({ ok: true as const, result: { rigId: "choice-rig", specName: "choice", specVersion: "0.2", nodes: [] } }));
+    const orch = buildOrchestrator({ podInstantiator: { db, instantiate } });
+    const yaml = `version: "0.2"\nname: choice\n${declared === undefined ? "" : `non_interruptive: ${declared}\n`}pods: [{id: dev, label: Dev, members: [{id: shell, agent_ref: "builtin:terminal", runtime: terminal, profile: none, cwd: .}], edges: []}]\nedges: []\n`;
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: writeSpec(yaml), nonInterruptive: request });
+    expect(result.status, JSON.stringify(result)).toBe("completed");
+    expect(instantiate).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.objectContaining({ nonInterruptive: expected }));
+  });
 
   // T1: Plan mode returns plan, 0 bootstrap_actions rows
   it("plan mode returns plan with zero bootstrap_actions rows", async () => {
@@ -1306,6 +1335,11 @@ edges: []
     expect(result.status).toBe("completed");
     expect(result.rigId).toBe("rig-pod-1");
     expect(mockPodInstantiator.instantiate).toHaveBeenCalledTimes(1);
+
+    // The run records the rig it produced, as the flat-spec path does, so the launch spec can be traced to the rig.
+    const run = db.prepare("SELECT status, rig_id, source_ref FROM bootstrap_runs WHERE id = ?")
+      .get(result.runId) as { status: string; rig_id: string | null; source_ref: string };
+    expect(run).toEqual({ status: "completed", rig_id: "rig-pod-1", source_ref: specPath });
   });
 
   // --- Conveyor-Trust Minimal Fix (OPR.0.3.2.CT) — guard verdict
@@ -1392,6 +1426,9 @@ edges: []
     expect(detail.attentionNodes[0]!.logicalId).toBe("dev.qa");
     expect(detail.attentionNodes[0]!.sessionName).toBe("dev-qa@pod-mixed-rig");
     expect(detail.attentionNodes[0]!.evidence).toBe("trust prompt visible");
+    const run = db.prepare("SELECT status, rig_id FROM bootstrap_runs WHERE id = ?")
+      .get(result.runId) as { status: string; rig_id: string | null };
+    expect(run).toEqual({ status: "partial", rig_id: "rig-mixed-1" });
   });
 
   it("OPR.0.3.2.CT BLOCKER-1: all-launched (no attention, no failed) → status=completed, import_rig=ok (no regression)", async () => {

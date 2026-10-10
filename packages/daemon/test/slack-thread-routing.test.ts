@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { migrate } from "../src/db/migrate.js";
 import { threadSeatMapSchema } from "../src/db/migrations/072_thread_seat_map.js";
+import { threadPartMapSchema } from "../src/db/migrations/097_thread_part_map.js";
 import { ThreadSeatMap, formatPostedStamp, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
@@ -20,7 +21,7 @@ import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 
 function mapDb(): Database.Database {
   const db = new Database(":memory:");
-  migrate(db, [threadSeatMapSchema]);
+  migrate(db, [threadSeatMapSchema, threadPartMapSchema]);
   return db;
 }
 function memFs(): StateFsOps {
@@ -84,6 +85,44 @@ describe("thread↔seat map — exact-lookup semantics", () => {
     expect(r.skipped).toBe(3); // T2 (live) + 2 non-stamps
     expect(map.resolveByThread("T1")!.seat).toBe("s1");
     expect(map.resolveByThread("T2")!.seat).toBe("s2-live"); // untouched
+  });
+
+  it("maps a message posted into a thread to its own ask by channel, and rebuilds it from its stamp (#899)", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    map.open({ threadTs: "T1", channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
+    const reply = { messageTs: "P2", channel: "C1", threadTs: "T1", seat: "s2", conversationId: "q2" };
+    map.recordPart(reply);
+    map.recordPart(reply); // a replayed receipt keeps one row
+    expect(map.partOf("P2", "C1")).toEqual({ threadTs: "T1", seat: "s2", conversationId: "q2" });
+    expect(map.partOf("P2", "C-OTHER")).toBeNull(); // a timestamp is unique only within a channel
+    expect(map.resolveByThread("P2")).toBeNull(); // a reply never becomes a thread root
+    expect(map.resolveByConversation("q1")!.threadTs).toBe("T1");
+    // A lost table rebuilds replies from their stamps, which name the reply, the thread, its seat and its ask.
+    const rebuilt = new ThreadSeatMap(mapDb(), clock);
+    const stamp = (messageTs: string, seat = "s1", conversationId = "q1") =>
+      formatPostedStamp({ threadTs: "T1", messageTs, channel: "C1", human: "h1", seat, conversationId });
+    expect(rebuilt.rebuildFromStamps([stamp("T1"), stamp("P2", "s2", "q2"), stamp("P3"), stamp("P2", "s2", "q2")])).toEqual({ inserted: 3, skipped: 1 });
+    expect(rebuilt.partOf("P2", "C1")).toEqual({ threadTs: "T1", seat: "s2", conversationId: "q2" });
+    expect(rebuilt.resolveByThread("T1")!.seat).toBe("s1");
+  });
+
+  it("routes a reaction on a message posted into a thread to its own ask's seat, and ignores any other (#899)", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    map.open({ threadTs: "T1", channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
+    map.recordPart({ messageTs: "P2", channel: "C1", threadTs: "T1", seat: "s1", conversationId: "q1" }); // q1's own reply part
+    map.recordPart({ messageTs: "P3", channel: "C1", threadTs: "T1", seat: "s2", conversationId: "q2" }); // q2, posted into q1's thread
+    const route = makeThreadRouteResolver({ map, unroutedDestination: "orch@rig" });
+    expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C1" } as never)).toMatchObject({ destination: "s1", correlationQitemId: "q1" });
+    // Not the thread owner's: the ask the message was posted for.
+    expect(route({ type: "reaction_added", thread_ts: "P3", channel: "C1" } as never)).toMatchObject({ destination: "s2", correlationQitemId: "q2" });
+    // A person's reply in the thread was not posted by OpenRig; the same ts in another channel is another message.
+    expect(route({ type: "reaction_added", thread_ts: "R9", channel: "C1" } as never).routeClass).toBe("unmapped-thread");
+    expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C-OTHER" } as never).routeClass).toBe("unmapped-thread");
+    // A typed reply keeps routing by its thread root only.
+    expect(route({ type: "message", thread_ts: "P2", channel: "C1" } as never).routeClass).toBe("unmapped-thread");
+    // A root elsewhere with the same ts doesn't hide this channel's reply.
+    map.open({ threadTs: "P2", channel: "C-OTHER", human: "h1", seat: "s9", conversationId: "q9" });
+    expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C1" } as never)).toMatchObject({ destination: "s1", correlationQitemId: "q1" });
   });
 
   it("newest root is Slack's latest thread_ts, not when a rebuild happened to re-insert it", () => {
@@ -217,5 +256,45 @@ describe("outbound threading through the REAL delivery path (one reply root per 
     expect(stamps).toHaveLength(2);
     expect(parsePostedStamp(stamps[0]!)).toMatchObject({ threadTs: "1724.1", conversationId: "q1" });
     expect(parsePostedStamp(stamps[1]!)).toMatchObject({ threadTs: "1724.2", conversationId: "q2" });
+  });
+});
+
+describe("#192 channel map — one resolved channel per post (post, reconcile scan, upload)", () => {
+  let home: string;
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), "s192-del-")); });
+  afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+
+  it("posts, reconciles an ambiguous earlier attempt and uploads in the payload's channel, never the default", async () => {
+    const fsx = memFs();
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const fetchImpl: FetchImpl = async (url, init) => {
+      const method = new URL(url).pathname.split("/").pop() ?? "";
+      const raw = String(init?.body ?? "");
+      const body: Record<string, unknown> = raw.startsWith("{") ? JSON.parse(raw) as Record<string, unknown>
+        : { ...Object.fromEntries(new URL(url).searchParams), ...Object.fromEntries(new URLSearchParams(raw)) };
+      calls.push({ method, body });
+      const json = method === "conversations.history" ? { ok: true, messages: [], has_more: false }
+        : method === "files.getUploadURLExternal" ? { ok: true, upload_url: "https://files.slack.com/upload/v1/x", file_id: "F1" }
+        : { ok: true, ts: "1800.1" };
+      return new Response(JSON.stringify(json), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const attempted = new SeenStore("/att.jsonl", fsx, clock);
+    attempted.mark("d-1", "attempted"); // an earlier attempt with an unknown outcome
+    const roots: string[] = [];
+    const deliver = subsystemSlackDeliver({
+      botToken: "xoxb-EXAMPLE-fake", channel: "C0DEFAULT", sourceLabel: "vm", fetchImpl,
+      resolveChannel: (p) => (p.sourceSession === "pr@my-rig" ? "C0EXAMPLE2" : "C0DEFAULT"),
+      delivered: new SeenStore("/del.jsonl", fsx, clock), attempted, outboundSeen: new SeenStore("/seen.jsonl", fsx, clock),
+      readLocalImage: () => ({ bytes: new Uint8Array([1, 2, 3]), filename: "shot.png" }),
+      onPostedRoot: (_p, ts, channel) => { roots.push(`${channel}:${ts}`); },
+    });
+    const outcome = await deliver({ decisionId: "d-1", op: OUTBOUND_OP, entityBindingRef: "mike@external",
+      payload: { qitemId: "q1", summary: "s", body: "b", destinationSession: "mike@external", sourceSession: "pr@my-rig", evidenceRef: "/tmp/shot.png" } } as never);
+    expect(outcome).toEqual({ ok: true });
+    const channelOf = (method: string) => calls.filter((c) => c.method === method).map((c) => c.body.channel ?? c.body.channel_id);
+    expect(channelOf("conversations.history")).toEqual(["C0EXAMPLE2"]);
+    expect(channelOf("chat.postMessage")).toEqual(["C0EXAMPLE2"]);
+    expect(channelOf("files.completeUploadExternal")).toEqual(["C0EXAMPLE2"]);
+    expect(roots).toEqual(["C0EXAMPLE2:1800.1"]);
   });
 });

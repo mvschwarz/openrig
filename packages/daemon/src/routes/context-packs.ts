@@ -22,7 +22,7 @@ import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bund
 import { ContextPackError, type ContextPackAtom, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
 import { parseManifest } from "../domain/context-packs/manifest-parser.js";
 import { composeNamedProfile, composeProfile, ProfileComposeError, type ComposeInput, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
-import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
+import { isSeatRecapAddress, makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
 import { AddressResolutionError, parseAddress, resolveAddress } from "../domain/markdown-address.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
@@ -620,12 +620,19 @@ export function contextPacksRoutes(): Hono {
       const profile = selectedProfile
         ? composeNamedProfile({ ...composeInput, profile: selectedProfile, contextAtoms })
         : composeProfile(composeInput);
+      // The composer skips only an absent seat recap (post-compaction), so one warning covers it.
+      if (profile.skipped) warnings.push(`no seat recap for ${seat}@${rig}; read your newest restore map`);
       const pieces = profile.pieces.map((p) => {
         const record = readsByRef.get(parseAddress(p.address).ref);
         // Per-piece sha256: the Test-A door compares the profile's selected
         // pieces to the walk's delivered pieces hash-exactly, not by count.
         const pieceWorkMeta = workMeta.get(p.atomId);
-        const hashed = { ...p, ...(pieceWorkMeta ?? {}), sha256: createHash("sha256").update(p.text, "utf8").digest("hex") };
+        // The recap's write time rides its piece, so an old recap is never read as current.
+        const writtenAt = isSeatRecapAddress(p.address) ? record?.writtenAt : undefined;
+        const hashed = {
+          ...p, ...(pieceWorkMeta ?? {}), ...(writtenAt !== undefined ? { writtenAt } : {}),
+          sha256: createHash("sha256").update(p.text, "utf8").digest("hex"),
+        };
         return record
           ? { ...hashed, provenance: { nominalPath: record.nominalPath, realPath: record.realPath, escapesRoot: record.escapesRoot } }
           : hashed;

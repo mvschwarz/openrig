@@ -15,13 +15,13 @@ afterEach(async () => {
   for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   vi.restoreAllMocks(); resetFetchAllowlist(); process.exitCode = 0;
 });
-async function run(kernelState?: string, httpStatus = 200) {
+async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200) {
   const received: string[] = [];
   const server = http.createServer((request, response) => {
     received.push(request.url!);
     const kernel = request.url === "/api/kernel/status";
-    response.writeHead(kernel ? httpStatus : 200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: "fixture detail" } : request.url === "/api/rigs/summary" ? [] : { ok: true }));
+    response.writeHead(kernel ? httpStatus : request.url === "/api/rigs/summary" ? summaryStatus : 200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: "fixture detail" } : request.url === "/api/rigs/summary" ? (summaryStatus === 200 ? [] : [{ id: "restorable-rig", name: "work", nodeCount: 1, lifecycleState: "recoverable" }]) : { ok: true }));
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); servers.push(server);
   const port = (server.address() as { port: number }).port;
@@ -65,4 +65,13 @@ describe("rig start kernel wait evidence", () => {
     expect(result.errors).toBe(""); expect(result.exitCode).toBe(0);
     expect(result.received).toContain("/api/rigs/summary");
   });
+});
+
+it.each([401, 503])("does not report successful empty restore discovery after HTTP %s", async (status) => {
+  const result = await run("ready", 200, status);
+  expect(result.exitCode).toBe(1);
+  expect(result.errors).toContain(`HTTP ${status}`);
+  expect(result.received).toContain("/api/rigs/summary");
+  expect(result.received).not.toContain("/api/rigs/restorable-rig/up");
+  expect(result.received.filter((path) => path.endsWith("/up"))).toEqual([]);
 });

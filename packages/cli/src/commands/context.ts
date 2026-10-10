@@ -28,9 +28,9 @@ import { parse as parseYaml } from "yaml";
 import { assertSafeInstallRef, assertTreeHasNoSymlinks, assertDestinationNamespaceContained, validateContextPackManifestForInstall } from "../lib/context-install.js";
 import { addGitContext, inspectGitContext, updateGitContext } from "../lib/context-git.js";
 import { ConfigStore } from "../config-store.js";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, formatDaemonHostForUrl } from "../client.js";
 import { enumArg } from "../cli-error.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage} from "../daemon-lifecycle.js";
 import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
 import {
   reconcileSkillLoadout,
@@ -39,6 +39,8 @@ import {
   type SkillLoadout,
 } from "@openrig/daemon/skill-loadout";
 import { realDeps } from "./daemon.js";
+import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 import type { StatusDeps } from "./status.js";
 
 const contextRuntimeArg = enumArg(["claude-code", "claude", "codex"]);
@@ -67,6 +69,18 @@ interface ContextPackEntryWire {
   }>;
 }
 
+/** Exact retry commands for a failed project selection, one per candidate id. */
+function projectRetryCommands(
+  code: string,
+  candidates: string[] | undefined,
+  opts: { mission?: string; slice?: string },
+): string[] | undefined {
+  if (!candidates || (code !== "project_required" && code !== "project_not_found")) return undefined;
+  const word = (value: string) => /^[A-Za-z0-9._\/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  const narrowing = `${opts.mission !== undefined ? ` --mission ${word(opts.mission)}` : ""}${opts.slice !== undefined ? ` --slice ${word(opts.slice)}` : ""}`;
+  return candidates.map((id) => `rig context work-install --project ${word(id)}${narrowing}`);
+}
+
 function selectedIds(ids: string[], none: string): string {
   return ids.length > 0 ? ids.join(", ") : none;
 }
@@ -76,12 +90,12 @@ function printWorkInstallSelectors(result: WorkInstallPlan, topologySkills: stri
   const identity = world.id ? ` ${world.id}@${world.version}` : "";
   const path = world.manifestPath ? ` ${world.manifestPath}` : "";
   console.log(`system  ${world.state} [${world.source}]${identity}${path}`);
-  for (const selection of world.context) {
-    const profiles = selection.profiles
-      ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
-      : "";
-    console.log(`context system ${selection.ref}${profiles}`);
-  }
+  const profiles = (selection: { profiles?: Record<string, string | undefined> }) => selection.profiles
+    ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
+    : "";
+  for (const selection of world.context) console.log(`context system ${selection.ref}${profiles(selection)}`);
+  for (const selection of result.worlds ?? []) console.log(`context world ${selection.ref}${profiles(selection)}`);
+  if ((result.worlds ?? []).length > 0) console.log("worlds  read each with: rig context get <ref>");
   console.log(`skills  system=${selectedIds(world.skills, "(none)")}`);
   console.log(`skills  topology=${selectedIds(topologySkills, "(none)")}`);
   console.log(`skills  project=${selectedIds(result.skills, "(none)")}`);
@@ -224,7 +238,7 @@ async function resolvePack(client: DaemonClient, nameOrRef: string): Promise<Con
   return matches[0]!;
 }
 
-export function contextCommand(depsOverride?: StatusDeps): Command {
+export function contextCommand(depsOverride?: StatusDeps & { preflightExec?: (cmd: string) => Promise<string> }): Command {
   const cmd = new Command("context")
     .description("Browse, preview, compose, and manage operator-authored context packs")
     .addHelpText("after", `
@@ -237,8 +251,8 @@ Examples:
   rig context sync
   rig context profile world-public --situation fresh --runtime claude-code
   rig context work-install --runtime claude-code
-  rig context trace --rig product-team --seat orch1-lead --name LEARNED.md
-  rig context trace --rig product-team --pod delivery --seat dev1-qa --name LEARNED.md
+  rig context trace --rig factory --seat orch-lead --name LEARNED.md
+  rig context trace --rig factory --pod dev --seat dev-qa --name LEARNED.md
 `);
 
   const getDeps = (): StatusDeps => depsOverride ?? {
@@ -274,13 +288,24 @@ Examples:
         contextRoot,
         systemWorldSelection: String(systemWorldSetting.value),
         systemWorldSource: systemWorldSetting.source,
+        cwd: resolve(opts.cwd ?? process.cwd()),
+        ...(process.env["OPENRIG_SESSION_NAME"] ? { sessionName: process.env["OPENRIG_SESSION_NAME"] } : {}),
         ...(opts.project !== undefined ? { project: opts.project } : {}),
         ...(opts.mission !== undefined ? { mission: opts.mission } : {}),
         ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
       });
       if ("error" in result) {
-        if (opts.json) console.log(JSON.stringify({ ok: false, ...result }));
-        else console.error(`${result.error.code}: ${result.error.message}`);
+        const commands = projectRetryCommands(result.error.code, result.error.candidates, opts);
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, error: { ...result.error, ...(commands ? { commands } : {}) } }));
+        } else {
+          console.error(`${result.error.code}: ${result.error.message}`);
+          const choices = commands ?? result.error.candidates ?? [];
+          if (choices.length > 0) {
+            console.error(commands ? "Run one of:" : "Candidates:");
+            for (const choice of choices) console.error(`  ${choice}`);
+          }
+        }
         process.exitCode = 1;
         return;
       }
@@ -302,6 +327,11 @@ Examples:
           return;
         }
         skillLoadout = resolvedSkills.loadout;
+        // A skill with uncommitted catalog content blocks only itself: name it, project the rest, and exit non-zero
+        // when something selected it.
+        const skippedSkills = skillLoadout.skipped ?? [];
+        if (!opts.json) for (const skip of skippedSkills) console.error(`Warning: ${skip.message}`);
+        if (skippedSkills.some((skip) => skip.selectedBy.length > 0)) process.exitCode = 1;
         skillProjection = reconcileSkillLoadout({
           loadout: skillLoadout,
           runtime: opts.runtime === "codex" ? "codex" : "claude-code",
@@ -344,7 +374,13 @@ Examples:
         for (const warning of result.warnings) console.error(`Warning: ${warning}`);
         return;
       }
-      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);
+      const selectedByLabels: Record<string, string> = {
+        rig: " (selected by this rig's catalog entry)",
+        cwd: " (selected by the working directory)",
+        unclaimed: " (the only project no rig claims)",
+      };
+      const selectedBy = selectedByLabels[result.position.selectedBy] ?? "";
+      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}${selectedBy}`);
       printWorkInstallSelectors(result, (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean));
       for (const planned of result.pieces) {
         console.log(`${planned.altitude.padEnd(7)} ${planned.address} [${planned.source}] ${planned.exists ? planned.path : `(absent: ${planned.path})`}`);
@@ -360,9 +396,27 @@ Examples:
       for (const warning of result.warnings) console.error(`Warning: ${warning}`);
     });
 
-  async function getClient(): Promise<DaemonClient> {
+  async function getClient(autoStartLocal = false): Promise<DaemonClient> {
     const deps = getDeps();
-    const status = await getDaemonStatus(deps.lifecycleDeps);
+    let status = await getDaemonStatus(deps.lifecycleDeps);
+    if (autoStartLocal && (status.state === "stopped" || status.state === "stale")
+      && !readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")) {
+      // Startup uses current config. A retained endpoint must not mask an
+      // explicitly selected host when deciding whether startup is local.
+      const selection = new ConfigStore().resolveWithSource("daemon.host");
+      const host = selection.source === "default"
+        ? new URL(new DaemonClient().baseUrl).hostname
+        : new URL(`http://${formatDaemonHostForUrl(String(selection.value))}`).hostname;
+      if (["127.0.0.1", "localhost", "[::1]"].includes(host)) {
+        const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
+        if (!prepared.preflight.ready) {
+          throw new Error(prepared.preflight.checks.filter((check) => !check.ok)
+            .map((check) => `${check.name}: ${check.error}${check.fix ? ` Fix: ${check.fix}` : ""}`).join("\n"));
+        }
+        await startDaemon(prepared.options, deps.lifecycleDeps);
+        status = await getDaemonStatus(deps.lifecycleDeps);
+      }
+    }
     if (status.state !== "running" || status.healthy === false) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
@@ -466,6 +520,7 @@ Examples:
       try {
         const client = await getClient();
         const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];
         if (opts.json) {
           console.log(JSON.stringify(entries, null, 2));
@@ -671,9 +726,10 @@ Examples:
         const res = await client.get<{
           profileId?: string;
           phases?: Array<{ id: string; kind: string; sources?: string[]; estimatedTokens: number }>;
-          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
+          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number; writtenAt?: string }>;
           totalEstimatedTokens?: number;
           budget?: { limitTokens: number; overageTokens: number; dropCandidates: Array<{ atomId: string; priority: string; estimatedTokens: number }> };
+          warnings?: string[];
           provenanceWarnings?: string[];
           message?: string;
           error?: string;
@@ -695,6 +751,7 @@ Examples:
         }
         // Warnings and the budget report ride stderr so stdout is exactly the
         // composed walk an agent consumes.
+        for (const w of profile.warnings ?? []) console.error(`WARNING ${w}`);
         for (const w of profile.provenanceWarnings ?? []) console.error(`PROVENANCE ${w}`);
         if (profile.budget) {
           console.error(
@@ -708,7 +765,8 @@ Examples:
           // outside its root — self-describing payload, zero composed bytes
           // touched.
           const escaped = (p as { provenance?: { escapesRoot?: boolean } }).provenance?.escapesRoot ? " !ESCAPED-ROOT" : "";
-          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)`);
+          const written = p.writtenAt ? ` written ${p.writtenAt}` : "";
+          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)${written}`);
           console.log(p.text);
           console.log("");
         }
@@ -788,10 +846,11 @@ Examples:
     .argument("<source>", "Pack directory/manifest URL, or Git repository path/URL with --git")
     .description("Install a pack; --git discovers a pack in a Git repository and retains its update relationship")
     .option("--name <name>", "Override the install name (defaults to the manifest name / source basename)")
-    .option("--git", "Clone a Git repository path/URL with existing Git credentials; select a pack snapshot")
+    .option("--git", "Fetch a Git repository's advertised commit at depth 1 with existing credentials; select a pack snapshot")
     .option("--checkout", "With --git, select an existing checkout instead of cloning; updates may merge in it")
     .option("--pack <path>", "With --git, select a repository-relative pack; default discovers manifest.yaml or .openrig/context-packs")
     .option("--json", "JSON output")
+    .addHelpText("after", "\nGit downloads omit history and tags initially. A server that refuses shallow retrieval gets a full clone instead, with a warning on stderr (also with --json).\nExisting --checkout history is unchanged; context source update explicitly fetches and merges later revisions.\n")
     .action(async (source: string, opts: { name?: string; json?: boolean; git?: boolean; checkout?: boolean; pack?: string }) => {
       try {
         // OPR.0.5.9.5 Wave B — config-resolved context library,
@@ -801,9 +860,10 @@ Examples:
         let gitSelection: ReturnType<typeof addGitContext>["selected"] | undefined;
         if ((opts.pack || opts.checkout) && !opts.git) throw new Error("--pack and --checkout require --git.");
         if (opts.git) {
-          const gitClient = await getClient();
+          const gitClient = await getClient(true);
           assertLocalGitClient(gitClient);
-          ({ installedAt: targetDir, selected: gitSelection } = addGitContext(source, opts, targetRoot));
+          const added = addGitContext(source, { ...opts, onWarning: (message) => console.error(`Warning: ${message}`) }, targetRoot);
+          ({ installedAt: targetDir, selected: gitSelection } = added);
         } else if (isHttpUrl(source)) {
           // R4 — URL install: fetch → validate → atomic stage+rename (no partial pack).
           ({ targetDir } = await installPackFromUrl(source, opts.name, targetRoot));
@@ -835,10 +895,17 @@ Examples:
           if (targetExists) {
             throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
           }
-          cpSync(source, targetDir, { recursive: true });
+          const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
+          try {
+            cpSync(source, staging, { recursive: true });
+            mkdirSync(dirname(targetDir), { recursive: true });
+            renameSync(staging, targetDir);
+          } finally {
+            rmSync(staging, { recursive: true, force: true });
+          }
         }
         // Sync the daemon library so the new pack appears immediately.
-        const client = await getClient();
+        const client = await getClient(true);
         const syncRes = await client.post<{ count: number; errors?: Array<{ source: string; error: string }>; entries: ContextPackEntryWire[] }>("/api/context-packs/library/sync");
         if (syncRes.status !== 200) {
           // Install succeeded; sync failed → still surface install path.

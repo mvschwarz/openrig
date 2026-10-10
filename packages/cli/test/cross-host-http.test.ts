@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sendCommand, type SendDeps } from "../src/commands/send.js";
@@ -20,7 +21,7 @@ import { captureCommand, type CaptureDeps } from "../src/commands/capture.js";
 import { transcriptCommand, type TranscriptDeps } from "../src/commands/transcript.js";
 import { broadcastCommand, type BroadcastDeps } from "../src/commands/broadcast.js";
 import { resolveCrossHostTarget } from "../src/cross-host-target.js";
-import { DaemonClient, SENDER_IDENTITY_HEADER } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError, SENDER_IDENTITY_HEADER } from "../src/client.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 
@@ -323,21 +324,113 @@ describe("send --host (http branch)", () => {
   });
 
   it("network failure surfaces as remote-daemon-unreachable, host named, never a hang", async () => {
-    const h = mockClient(() => new Error("connect ECONNREFUSED"));
+    const h = mockClient(() => new DaemonConnectionError("Cannot connect to the OpenRig daemon at http://vps-b:7433: fetch failed (ECONNREFUSED)", "ECONNREFUSED"));
     const cmd = sendCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello"], { from: "user" });
     const err = captured.stderrLines.join("\n");
     expect(err).toContain("remote-daemon-unreachable");
     expect(err).toContain("host=vps-b");
+    expect(err).not.toContain("UNCONFIRMED");
     expect(process.exitCode).toBe(1);
   });
 
-  it("--wait-for-idle sizes the http deadline: waitForIdleMs + overhead", async () => {
+  it("--wait-for-idle sizes the http deadline: waitForIdleMs + the cross-host send budget", async () => {
     const h = mockClient(() => ({ status: 200, data: {} }));
     const cmd = sendCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--wait-for-idle", "30"], { from: "user" });
-    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000 + 5_000);
+    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000 + 30_000);
     expect((h.calls[0]!.body as Record<string, unknown>).waitForIdleMs).toBe(30_000);
+  });
+
+  it("a cross-host send waits 30 s for the remote to deliver, not the 5 s read default", async () => {
+    const h = mockClient(() => ({ status: 200, data: {} }));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello"], { from: "user" });
+    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000);
+  });
+
+  it("a remote that delivers after more than 5 s reports the send, not a failure", { timeout: 20_000 }, async () => {
+    // Reproduces the desktop finding: the remote answered /api/transport/send after the old 5 s client deadline.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    let sends = 0;
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (req.url !== "/api/transport/send") { res.writeHead(404).end("{}"); return; }
+        sends++;
+        setTimeout(() => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, sessionName: "dev-impl@my-rig" }));
+        }, 6_000);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const deps = httpDeps(mockClient(() => ({ status: 200, data: {} })), {
+        clientFactory: (u: string) => new DaemonClient(u) as never,
+        hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "slow-b", transport: "http", url }] } }),
+      });
+      await sendCommand(deps).parseAsync(["--host", "slow-b", "dev-impl@my-rig", "hello"], { from: "user" });
+      expect(sends).toBe(1);
+      expect(captured.stdoutLines).toContain("Sent to dev-impl@my-rig");
+      expect(captured.stderrLines.join("\n")).not.toContain("unreachable");
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it.each([
+    ["timed out", new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time: Request to http://vps-b:7433/api/transport/send timed out after 30000ms")],
+    ["had its connection dropped", new DaemonConnectionError("Cannot connect to the OpenRig daemon at http://vps-b:7433: fetch failed (UND_ERR_SOCKET)", "UND_ERR_SOCKET")],
+    ["had its connection reset", new DaemonConnectionError("Cannot connect to the OpenRig daemon at http://vps-b:7433: fetch failed (ECONNRESET)", "ECONNRESET")],
+    ["failed with no cause code", new DaemonConnectionError("Cannot connect to the OpenRig daemon at http://vps-b:7433: fetch failed")],
+    ["got an unreadable response", new DaemonResponseError(200, "")],
+  ])("a send that %s reads as unconfirmed with check-first guidance, never as unreachable", async (_label, failure) => {
+    const h = mockClient(() => failure);
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello"], { from: "user" });
+    const err = captured.stderrLines.join("\n");
+    expect(err).toContain("cross-host (host=vps-b, http://vps-b:7433): http remote-outcome-unknown:");
+    expect(err).toContain("Delivery UNCONFIRMED — the remote daemon may have received and delivered the message.");
+    expect(err).toContain("Check the target before any resend: rig capture dev-impl@my-rig --host vps-b. A resend without checking risks a duplicate.");
+    expect(err).not.toContain("remote-daemon-unreachable");
+    expect(captured.stdoutLines).not.toContain("Sent to dev-impl@my-rig");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("json: an unconfirmed send carries the outcome-unknown step and the check-first action", async () => {
+    const h = mockClient(() => new DaemonTimeoutError("The OpenRig daemon at http://vps-b:7433 did not respond in time"));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--json"], { from: "user" });
+    const parsed = JSON.parse(captured.stdoutLines[0]!) as Record<string, any>;
+    expect(parsed.result).toMatchObject({ ok: false, failedStep: "remote-outcome-unknown", outcomeUnknown: true });
+    expect(parsed.error.fact).toContain("did not respond in time");
+    expect(parsed.error.consequence).toContain("Delivery UNCONFIRMED");
+    expect(parsed.error.action).toContain("rig capture dev-impl@my-rig --host vps-b");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it.each(["EHOSTDOWN", "ENETDOWN", "EHOSTUNREACH", "EPERM"])("a code the kernel can also report on a live socket (%s) reads as unconfirmed, not unreachable", async (code) => {
+    const h = mockClient(() => new DaemonConnectionError(`Cannot connect to the OpenRig daemon at http://vps-b:7433: fetch failed (${code})`, code));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--json"], { from: "user" });
+    const parsed = JSON.parse(captured.stdoutLines[0]!) as Record<string, any>;
+    expect(parsed.result).toMatchObject({ ok: false, failedStep: "remote-outcome-unknown", outcomeUnknown: true });
+    expect(parsed.error.action).toContain("Check the target before any resend");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it.each(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"])("a connection that never reached the remote (%s) still reads as unreachable", async (code) => {
+    const h = mockClient(() => new DaemonConnectionError(`Cannot connect to the OpenRig daemon at http://vps-b:7433: fetch failed (${code})`, code));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--json"], { from: "user" });
+    const parsed = JSON.parse(captured.stdoutLines[0]!) as Record<string, any>;
+    expect(parsed.result.failedStep).toBe("remote-daemon-unreachable");
+    expect(parsed.result.outcomeUnknown).toBeUndefined();
+    expect(parsed.error).toBeUndefined();
+    expect(process.exitCode).toBe(1);
   });
 
   it("fan-out×host guard kept verbatim: --host + --rig rejected before any call", async () => {
@@ -433,6 +526,25 @@ describe("capture --host (http branch)", () => {
     await cmd.parseAsync(["--host", "vm-ssh", "dev-impl@my-rig"], { from: "user" });
     expect(h.calls.length).toBe(0); // http client never touched for an ssh host
     expect(sshCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "20"]);
+  });
+});
+
+describe("capture --host outcome status", () => {
+  it.each([false, true])("preserves HTTP-200 rig capture status with expected unavailable target and json=%s", async (json) => {
+    const h = mockClient(() => ({ status: 200, data: { results: [
+      { ok: true, sessionName: "one@rig", content: "kept bytes" },
+      { ok: false, sessionName: "two@rig", error: "external CLI capture is not available" },
+    ] } }));
+    await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "rig", ...(json ? ["--json"] : [])], { from: "user" });
+    expect(captured.stdoutLines.join("\n")).toContain("kept bytes");
+    expect(captured.stdoutLines.join("\n")).toContain("external CLI capture is not available");
+    expect(process.exitCode).toBeUndefined();
+  });
+  it("does not turn successful empty capture bytes into an error", async () => {
+    const h = mockClient(() => ({ status: 200, data: { results: [{ ok: true, sessionName: "empty@rig", content: "" }] } }));
+    await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "rig"], { from: "user" });
+    expect(captured.stdoutLines.join("\n")).not.toContain("error:");
+    expect(process.exitCode).toBeUndefined();
   });
 });
 

@@ -33,7 +33,6 @@ import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
-import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 
 function setupDb(): Database.Database {
@@ -434,9 +433,13 @@ describe("RestoreOrchestrator", () => {
       undefined,
       node.id,
       "high",
+      false, // unchanged non-interruptive setting
+      false, // this is not the kernel
+      true, // derived team launch default
     );
 
-    // Codex forwards effort
+    // Codex forwards effort; the named profile remains authoritative.
+    db.prepare("UPDATE nodes SET codex_config_profile = 'profile1' WHERE id = ?").run(node.id);
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(
       node.id,
@@ -1097,7 +1100,8 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = buildCodexResumeCore(resumeToken, "resume", false, "--add-dir /tmp/openrig-state");
+    // The observer reads ps argv after the shell has removed launch quoting.
+    const codexCommand = ["codex", "-p", "resume", "resume", "--add-dir", "/tmp/openrig-state", resumeToken].join(" ");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
@@ -1128,7 +1132,7 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = `${buildCodexResumeCore("different-thread", "resume", false, "--add-dir /tmp/openrig-state")} resume ${resumeToken}`;
+    const codexCommand = ["codex", "-p", "resume", "resume", "--add-dir", "/tmp/openrig-state", "different-thread", "resume", resumeToken].join(" ");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
@@ -1710,6 +1714,156 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
+  it.each(["exact", "requested-codex-type", "requested-legacy-type", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
+    "chooser", "login", "trust", "mcp", "error", "missing-token",
+    "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late", "hook-join", "hook-join-equal",
+    "join-native-loss", "join-native-loss-hook",
+    "join-native-loss-exited", "join-native-loss-foreign", "join-native-loss-replacement",
+    "join-metadata-exited", "join-metadata-foreign", "join-metadata-replacement"])(
+    "pod-aware headerless Claude resume keeps native proof and new-row metadata: %s", async (mode) => {
+      const { ClaudeCodeAdapter } = await import("../src/adapters/claude-code-adapter.js");
+      const token = "00000000-0000-4000-8000-000000000086";
+      const rig = rigRepo.createRig("headerless");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-headerless", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "claude-code", podId: "pod-headerless", cwd: "/fixture" });
+      rigRepo.setRigPermissionPolicy(rig.id, "builtin:yolo");
+      rigRepo.setRigPolicyProvenance(rig.id, { origin: "builtin", resolvedTarget: null, declaringDir: null, launchPosture: "full_bypass" });
+      const old = sessionRegistry.registerSession(node.id, "dev-owner@headerless");
+      sessionRegistry.updateStatus(old.id, "running");
+      if (mode !== "missing-token") sessionRegistry.updateResumeToken(old.id, mode === "requested-codex-type" ? "codex_id" : mode === "requested-legacy-type" ? "claude_name" : "claude_id", token);
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, "[]", "[]", "[]", "claude-code");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(old.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      // Controlled observations through real restore -> startup -> Claude adapter,
+      // not a native launch or proof that Claude consumed a conversation.
+      const gates: Record<string, string> = {
+        chooser: "Choose a conversation to resume:\n  1. example",
+        login: "Not logged in · Run /login", trust: "Accessing workspace:\n/fixture\n1. Yes, I trust this folder\n2. No, exit",
+        mcp: "new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm",
+        error: "No conversation found",
+      };
+      const screen = `${gates[mode] ?? "Restored conversation"}\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
+      let launched = false, samples = 0;
+      const protectedSource = mode.startsWith("hook-") ? "hook" : mode.startsWith("operator-") ? "operator" : null;
+      const protectedToken = mode.endsWith("-equal") || mode === "hook-wrong-type" ? token : "protected-other-token";
+      const identitySql = "SELECT resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?";
+      let protectedIdentity: unknown;
+      let protectedBinding: unknown;
+      let joinSessionId: string | undefined;
+      let joinIdentity: unknown;
+      let untouchedSessions: unknown;
+      const sessionsSql = "SELECT * FROM sessions ORDER BY id";
+      const lostOwnership = /-(exited|foreign|replacement)$/.test(mode);
+      const startupWrites = vi.spyOn(sessionRegistry, "updateStartupStatus");
+      const rows = managedClaudeRows(mode === "wrong-token" ? "different-session" : token);
+      rows[2]!.command = `/fixture/.local/share/claude/versions/2.1.287 --dangerously-skip-permissions --resume ${mode === "wrong-token" ? "different-session" : token} --name dev-owner@headerless`;
+      rows[2]!.executableName = mode === "foreign-process" ? "printf" : "2.1.287";
+      const listProcesses = vi.fn(async () => {
+        samples++;
+        const observed = mode.startsWith("join-native-loss") && joinSessionId ? rows.slice(0, 2) : rows;
+        return observed.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt }));
+      });
+      const tmux = {
+        ...mockTmux(),
+        createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
+        hasSession: vi.fn(async () => launched),
+        getPaneCommand: vi.fn(async (target: string) => {
+          if (mode.startsWith("join-") && target === "%1" && !joinSessionId) {
+            const current = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(node.id) as { id: string };
+            joinSessionId = current.id;
+            if (mode.endsWith("-hook") || mode.startsWith("join-metadata")) {
+              sessionRegistry.updateResumeToken(current.id, "claude_id", "protected-other-token", "hook");
+            }
+            joinIdentity = db.prepare(identitySql).get(current.id);
+            if (mode.endsWith("-exited")) sessionRegistry.updateStatus(current.id, "exited");
+            if (mode.endsWith("-foreign")) {
+              const foreign = rigRepo.addNode(rig.id, "dev.foreign", { runtime: "claude-code" });
+              db.prepare("UPDATE sessions SET node_id = ?, session_name = ? WHERE id = ?").run(foreign.id, "dev-foreign@headerless", current.id);
+            }
+            if (mode.endsWith("-replacement")) {
+              const replacement = sessionRegistry.registerSession(node.id, "dev-owner@headerless", "fresh");
+              sessionRegistry.updateStatus(replacement.id, "running");
+              sessionRegistry.updateResumeToken(replacement.id, "claude_id", "replacement-token", "operator");
+              // Ensure an unambiguous newer row even within SQLite's one-second timestamp resolution.
+              db.prepare("UPDATE sessions SET created_at = datetime('now', '+1 second') WHERE id = ?").run(replacement.id);
+            }
+            untouchedSessions = db.prepare(sessionsSql).all();
+            startupWrites.mockClear();
+          }
+          if (protectedSource && !protectedIdentity && (mode !== "hook-late" || samples > 0)
+            && (!mode.startsWith("hook-join") || target === "%1")) {
+            const latest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string };
+            sessionRegistry.updateResumeToken(latest.id, mode === "hook-wrong-type" ? "codex_id" : "claude_id", protectedToken, protectedSource);
+            protectedIdentity = db.prepare(identitySql).get(latest.id);
+            const binding = sessionRegistry.getBindingForNode(node.id)!;
+            protectedBinding = { id: binding.id, pane: binding.tmuxPane, session: binding.tmuxSession,
+              generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid };
+          }
+          return "2.1.287";
+        }),
+        capturePaneContent: vi.fn(async () => screen),
+        listPanes: vi.fn(async () => [{ id: mode === "replaced-pane" && samples > 0 ? "%2" : "%1", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+      } as unknown as TmuxAdapter;
+      const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
+        fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} },
+      });
+      const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { "claude-code": adapter } });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const outcome = result.result.nodes[0]!;
+      const latest = db.prepare("SELECT id, resume_token AS resumeToken, startup_status AS startupStatus FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string; resumeToken: string | null; startupStatus: string };
+      if (protectedSource) {
+        expect(protectedIdentity).toBeDefined();
+        expect(db.prepare(identitySql).get(latest.id)).toEqual(protectedIdentity);
+        const binding = sessionRegistry.getBindingForNode(node.id)!;
+        expect({ id: binding.id, pane: binding.tmuxPane, session: binding.tmuxSession,
+          generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid }).toEqual(protectedBinding);
+      }
+      if (mode.startsWith("join-")) {
+        expect(joinSessionId).toBeDefined();
+        expect(outcome.status).toBe("attention_required");
+        expect(db.prepare(identitySql).get(joinSessionId!)).toEqual(joinIdentity);
+        if (lostOwnership) {
+          expect(startupWrites).not.toHaveBeenCalled();
+          expect(db.prepare(sessionsSql).all()).toEqual(untouchedSessions);
+        } else {
+          expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(joinSessionId!)).toEqual({ startup_status: "attention_required" });
+          expect(startupWrites).toHaveBeenCalledExactlyOnceWith(joinSessionId, "attention_required");
+        }
+      } else if (mode === "requested-codex-type") {
+        expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+        expect(db.prepare("SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(latest.id))
+          .toEqual({ resume_type: "claude_id", resume_token: token, resume_provenance: "scrape" });
+        expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
+      } else if (mode === "exact" || mode === "requested-legacy-type" || mode.endsWith("-equal")) {
+        expect({ status: outcome.status, token: latest.resumeToken }).toEqual({ status: "resumed", token });
+        expect(latest.id).not.toBe(old.id);
+        expect(latest.startupStatus).toBe("ready");
+      } else if (protectedSource) {
+        expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+        expect(latest.resumeToken).toBe(protectedToken);
+        expect(outcome.error).toContain("session metadata");
+        if (mode !== "hook-join") expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
+        else expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
+      } else {
+        expect(outcome.status).not.toBe("resumed");
+        if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
+        else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
+        else expect(latest.resumeToken).toBeNull();
+      }
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      if (mode !== "missing-token") {
+        expect(tmux.createSession).toHaveBeenCalledTimes(1);
+        if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
+        expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
+        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
+        expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+      }
+    });
+
   // NS-T05: R1 — pod-aware restore uses launchHarness (not old helpers)
   it("pod-aware restore uses launchHarness for resume, not old helpers", async () => {
     // Create a pod-aware rig
@@ -1728,7 +1882,7 @@ describe("RestoreOrchestrator", () => {
     sessionRegistry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
-    const launchSpy = vi.fn(async () => ({ ok: true as const, resumeToken: "new-token", resumeType: "claude_id" }));
+    const launchSpy = vi.fn(async () => ({ ok: true as const, resumeToken: "resume-token-123", resumeType: "claude_id" }));
     const mockAdapter = {
       runtime: "claude-code",
       listInstalled: vi.fn(async () => []),
@@ -2867,6 +3021,29 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
+  it.each(["full", "subset"])("#729: persists startup warnings in the original %s restore receipt", async mode => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }], resumeType: "none", restorePolicy: "relaunch_fresh", edges: [] });
+    const snapshot = updateSnapshotData(snap, data => {
+      data.nodeStartupContext[data.nodes[0]!.id] = { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" };
+    });
+    const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+    const warnings = ["Existing projection warning", "Startup submission unverified in agent-a@test-rig: capture unavailable."];
+    const start = vi.spyOn(StartupOrchestrator.prototype, "startNode").mockResolvedValue({ ok: true, startupStatus: "ready", continuityOutcome: "fresh", warnings });
+    const adapter = { runtime: "claude-code" } as import("../src/domain/runtime-adapter.js").RuntimeAdapter;
+    try {
+      const orch = createOrchestrator();
+      const options = { adapters: { "claude-code": adapter }, freshLogicalIds: ["agent-a"] };
+      const result = mode === "full" ? await orch.restore(snapshot.id, options)
+        : await orch.launchNodeSubset(snapshot.rigId, ["agent-a"], { adapters: options.adapters, snapshotId: snapshot.id });
+      expect(start).toHaveBeenCalled();
+      const eventType = mode === "full" ? "restore.completed" : "restore.subset_completed";
+      const rows = db.prepare("SELECT payload FROM events WHERE type = ? ORDER BY seq DESC LIMIT 1").all(eventType) as Array<{ payload: string }>;
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.payload).result.warnings).toEqual(expect.arrayContaining(warnings));
+      expect(result.ok).toBe(true);
+    } finally { start.mockRestore(); }
+  });
+
   it("D1/D4: missing optional startup file is a warning, not a blocker", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
@@ -3280,11 +3457,11 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
     });
 
-    it("no-op when resume token was not used (precondition #3 fails)", async () => {
+    it.each(["claude", "2.1.287"])("no-op when resume token was not used, including legacy headerless recovery: %s", async (command) => {
       const tmux = mockTmuxForReconciler();
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
-      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
-      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue(command);
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(command === "claude" ? "Claude Code v2.1.89\n ❯ accept edits on" : "❯\n⏵⏵ bypass permissions on");
       const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: false });
 
@@ -4015,6 +4192,31 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       const delivered = deliverStartup.mock.calls.flatMap((c) => (c[0] as Array<{ absolutePath: string }>).map((f) => f.absolutePath));
       expect(delivered.sort()).toEqual([`${RUNNING_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, "/user-rig/CULTURE-default.md"].sort());
+    });
+
+    it("restores a stored first-project culture from the upgraded shipped tree", async () => {
+      const OLD_SPECS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/specs";
+      const RUNNING_SPECS = path.resolve(import.meta.dirname, "../specs");
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const culture = {
+        path: "CULTURE.md", absolutePath: `${OLD_SPECS}/rigs/launch/first-project/CULTURE.md`,
+        ownerRoot: `${OLD_SPECS}/rigs/launch/first-project`, deliveryHint: "guidance_merge",
+        required: true, appliesOn: ["fresh_start", "restore"],
+      };
+      const fixed = updateSnapshotData(snap, (data) => {
+        for (const context of Object.values(data.nodeStartupContext)) context.resolvedStartupFiles = [culture];
+      });
+      const result = await createOrchestrator().restore(fixed.id, {
+        adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.impl"],
+        fsOps: { exists: (p) => p.startsWith(RUNNING_SPECS) ? fs.existsSync(p) : notOld(p) },
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<typeof culture>);
+      expect(delivered).toEqual([{
+        ...culture, absolutePath: `${RUNNING_SPECS}/rigs/launch/first-project/CULTURE.md`,
+        ownerRoot: `${RUNNING_SPECS}/rigs/launch/first-project`,
+      }]);
+      expect(fs.readFileSync(delivered[0]!.absolutePath, "utf8")).toContain("ask dev-check for an independent check");
     });
 
     it("same-native resume: replay stays contained (no startup files delivered), stored built-ins notwithstanding", async () => {

@@ -69,14 +69,14 @@ describe("scopes view (store-direct render, v4 mock contract)", () => {
     expect(proofBadge(gm)).toBe("proof: 2/9 paired"); // no del token, no unproven suffix — the count speaks
   });
 
-  it("m collapses mini-requirements; n shows PROGRESS.md as narrative DISPLAY (never feeding counts)", () => {
+  it("M collapses mini-requirements; N shows PROGRESS.md as narrative DISPLAY (never feeding counts)", () => {
     const { snap, view } = openGateway();
     view.dispatch(parseCommand("reqs"));
     let out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
-    expect(out).toContain("collapsed · m expands");
+    expect(out).toContain("collapsed · M expands");
     view.dispatch(parseCommand("narrative"));
     out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
-    expect(out).toContain("PROGRESS · narrative only · n closes");
+    expect(out).toContain("PROGRESS · narrative only · N closes");
     expect(out).toContain("A2 held on arch consult");
     // the data-path rule: the narrative panel does NOT change the store-derived counts
     expect(out).toContain("PROOF 2/9");
@@ -102,4 +102,52 @@ it.each([60, 160])("joins scope states and evidence by ID at width %i, not posit
   expect(render.slice(b, a)).toContain("Only B accepted");
   expect(render.slice(a, missing)).toContain("Only A rejected");
   expect(render).toContain("UNKNOWN");
+});
+
+
+it.each([60, 100])("separates current judgment evidence from every retained round at width %i", (width) => {
+  const detail = demoSnapshot().scopes![0]!.slices[0]!;
+  const sha = "0123456789abcdef".repeat(4);
+  detail.proofContract = [{ id: "proof-a", index: 1, text: "Useful artifact", paired: true, drops: [
+    { file: "proof/old-a.md", artifactType: "review", verdict: "BLOCKING", media: ["old-output.txt"] },
+    { file: "proof/old-b.md", artifactType: "review", verdict: "CONCERNING", media: [] },
+    { file: "proof/current-c.md", artifactType: "review", verdict: "CLEAR", media: [] },
+    { file: "proof/new-uncited-d.md", artifactType: "review", verdict: "BLOCKING", media: [] },
+  ] }];
+  detail.readiness = { configured: true, state: "ready", revision: "basis", items: [{
+    id: "proof-a", index: 1, text: "Useful artifact", state: "accepted", reason: "Explicit correction accepted",
+    judgment: { id: "current-judgment", previous: "old-judgment", subject: { kind: "commit", ref: "new-candidate" },
+      evidence: [{ ref: "proof/current-c.md", sha256: sha }] },
+  }] };
+  const render = () => scopeContractLines(detail, { collapseReqs: false, narrative: false, width }).map(l => l.text).join("\n").replace(/\s/g, "");
+  const before = JSON.stringify(detail);
+  const body = render();
+  const parts = body.split("Retainedproofdrops—allrounds");
+  expect(parts).toHaveLength(2);
+  expect(parts[0]).toContain("Currentjudgment");
+  expect(parts[0]).toContain("proof/current-c.md");
+  expect(parts[0]).toContain(sha);
+  expect(parts[0]).toContain("Corrects:old-judgment");
+  expect(parts[0]).not.toMatch(/BLOCKING|CONCERNING|old-a.md|new-uncited/);
+  for (const drop of detail.proofContract[0]!.drops) expect(parts[1]).toContain(drop.file);
+  expect(parts[1]).toContain("old-output.txt");
+  expect(JSON.stringify(detail)).toBe(before);
+  detail.readiness.items[0]!.judgment!.previous = null;
+  expect(render()).not.toContain("Corrects:");
+  expect(render()).toContain("ACCEPTED");
+});
+
+it.each([60, 100])("does not promote retained drops when current evidence was not served at width %i", (width) => {
+  const detail = demoSnapshot().scopes![0]!.slices[0]!;
+  detail.proofContract = [{ id: "a", index: 1, text: "Artifact", paired: true, drops: [
+    { file: "proof/legacy.md", artifactType: "qa", verdict: "CLEAR", media: [] },
+  ] }];
+  detail.readiness = { configured: true, state: "ready", revision: "basis", items: [{
+    id: "a", index: 1, text: "Artifact", state: "accepted", reason: "accepted", judgment: { id: "receipt" },
+  }] };
+  const body = scopeContractLines(detail, { collapseReqs: false, narrative: false, width }).map(l => l.text).join("\n").replace(/\s/g, "");
+  const [current, history] = body.split("Retainedproofdrops—allrounds");
+  expect(current).toContain("Evidencereferencesnotserved");
+  expect(current).not.toContain("proof/legacy.md");
+  expect(history).toContain("proof/legacy.md");
 });

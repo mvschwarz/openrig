@@ -15,6 +15,11 @@ import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
+// A cross-host send waits for the remote to deliver, and the remote has no fixed deadline of its own (its tmux
+// calls run without a timeout), so no client budget is exact. This one sits well above a normal send, and above
+// fetch's 10 s connect timeout, so a host that never accepts the connection still reads as unreachable. A send
+// that outlasts it reads as unconfirmed, never as failed.
+const CROSS_HOST_SEND_TIMEOUT_MS = 30_000;
 
 /**
  * Wrap a `rig send` body with an email-style envelope so the recipient
@@ -231,7 +236,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--force", "Back-compat no-op: a mid-task/busy pane already sends-with-advisory by default; --force never bypasses the interactive-prompt/permission guard")
     .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending")
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
-    .option("--dangerously-interact", "DANGEROUS: deliberately drive an interactive prompt/permission block (implies --raw; requires --reason). The ONLY override of the prompt/permission guard.")
+    .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added only for the complete visibly staged answer.")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
     .option("--host <id>", "Send on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
     .option("--from <session>", "DEPRECATED + IGNORED (P21 I4). The rendered From:/actor now DERIVES from the transport identity ($OPENRIG_SESSION_NAME, stamped as X-OpenRig-Session) — never a caller-supplied string, which was specimen-5's forgeable surface. Cross-host origin is carried by the relay re-stamping from its authenticated context.")
@@ -269,8 +274,13 @@ A mid-task/busy target now sends-with-advisory by default (busy is not a block);
 guard. Use --raw to send exact text/keystrokes
 without the From/To envelope (e.g. a slash command); it is still guarded. Use
 --dangerously-interact --reason "<why>" to DELIBERATELY drive a prompt (select an
-option, approve a permission, send /compact to a blocked pane) — the only override
-of the prompt guard; it implies --raw and is audit-logged.
+option or approve a permission) — the only override of the prompt guard; it
+implies --raw and is audit-logged. The answer is typed as keystrokes: letters may
+be menu shortcuts, and CR/ESC act as keys. An Enter is added only when the complete
+answer is visibly staged in a recognized text input. Combining --verify with
+--dangerously-interact never adds an automatic submit retry, even when the daemon
+did not detect a prompt or did not report its disposition. Unknown consumption
+is not a send failure.
 
 --host sends on a remote host declared in ~/.openrig/hosts.yaml. The host
 entry's transport decides the path: ssh hosts run the same command via
@@ -489,7 +499,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // return alone when --verify asked for consumption.
       let effect: EffectCheck | undefined;
       if (opts.verify && res.status < 400) {
-        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, outboundText), waitForIdleMs);
+        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, outboundText), waitForIdleMs, res.data["promptInteraction"], opts.dangerouslyInteract);
       }
 
       if (opts.json) {
@@ -593,7 +603,18 @@ async function classifyDeliveryEffect(
   session: string,
   identity: StagedIdentity,
   waitForIdleMs?: number,
+  promptInteraction?: unknown,
+  dangerouslyInteract = false,
 ): Promise<EffectCheck> {
+  // A prompt answer can consume itself and advance to another menu. Never
+  // let generic residual matching turn observational verification into a key.
+  // Our intent also covers an older daemon that cannot report the disposition,
+  // and a flagged send that the daemon treated as ordinary (no detected prompt).
+  if (dangerouslyInteract || promptInteraction === "enter-sent" || promptInteraction === "unverified") {
+    const disposition = promptInteraction === "enter-sent" || promptInteraction === "unverified"
+      ? promptInteraction : "not reported by the daemon";
+    return { checked: false, why: `explicit interaction (${disposition}); consumption unverified; no automatic submit retry` };
+  }
   const probe = await detectStagedAtPrompt(client, session, identity);
   if (probe.state === "unchecked") return { checked: false, why: probe.why };
   if (probe.state === "not-staged") return { checked: true, state: "no-staged-residual" };
@@ -795,8 +816,8 @@ async function runCrossHostSend(
  * sender verbatim — honest provenance; unknown on the remote it degrades to
  * the shipped non-blocking advisory, never a refusal. `--verify` prints the
  * REMOTE route's verified/outcome verbatim (remote-authoritative, never
- * locally synthesized). Deadline: the read-class client default, or
- * waitForIdleMs + overhead when --wait-for-idle (the local path's math).
+ * locally synthesized). Deadline: CROSS_HOST_SEND_TIMEOUT_MS, plus waitForIdleMs
+ * when --wait-for-idle. A send that may have arrived reads as unconfirmed.
  *
  * Auth posture (named, v0): runRemoteHttpOp presents the REGISTRY bearer
  * WHEN ONE IS CONFIGURED; for a URL-only anonymous host the Authorization
@@ -832,12 +853,22 @@ async function runHttpHostSend(
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
     session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
-  }, deps, waitForIdleMs !== undefined ? { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS } : {});
+  }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
+
+  // A send that may have reached the remote is unconfirmed, not unreachable: it may have been delivered, and a
+  // resend without checking risks a duplicate.
+  const unconfirmed = !result.ok && result.outcomeUnknown === true;
+  const shown = unconfirmed ? { ...result, failedStep: "remote-outcome-unknown" as const } : result;
+  const unconfirmedGuidance = {
+    consequence: "Delivery UNCONFIRMED — the remote daemon may have received and delivered the message.",
+    action: `Check the target before any resend: rig capture ${session} --host ${host.id}. A resend without checking risks a duplicate.`,
+  };
 
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
-      result,
+      result: shown,
+      ...(unconfirmed ? { error: { fact: result.error, ...unconfirmedGuidance } } : {}),
       // S3 wave-1 fix (r2 F2): the origin host cannot run the pane-effect
       // check on a remote seat — say so, never imply effect verification.
       ...(opts.verify ? { effectCheck: { checked: false, why: "cross-host http — the pane-effect check does not run cross-host" } } : {}),
@@ -848,7 +879,11 @@ async function runHttpHostSend(
   }
 
   if (!result.ok) {
-    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, hint);
+    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), shown, false, hint);
+    if (unconfirmed) {
+      console.error(`  ${unconfirmedGuidance.consequence}`);
+      console.error(`  ${unconfirmedGuidance.action}`);
+    }
     return;
   }
 
@@ -957,9 +992,9 @@ async function runFanOutSend(params: {
   let effects: Array<{ sessionName: string; effect: EffectCheck }> | undefined;
   if (opts.verify && res.status < 400) {
     effects = [];
-    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? []).filter((r) => r.ok && r.outcome !== "retained" && r.sessionName);
+    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string; promptInteraction?: unknown }> | undefined) ?? []).filter((r) => r.ok && r.outcome !== "retained" && r.sessionName);
     for (const r of okRecipients) {
-      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message)) });
+      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message), undefined, r.promptInteraction, opts.dangerouslyInteract) });
     }
   }
   const effectBySeat = new Map((effects ?? []).map((e) => [e.sessionName, e.effect]));

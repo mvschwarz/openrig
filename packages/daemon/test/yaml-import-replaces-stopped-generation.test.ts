@@ -3,6 +3,7 @@
 // archives prior same-name generations confirmed stopped, atomically with creating the replacement.
 // Real PodRigInstantiator.instantiate over a fixture DB; tmux, runtime adapters and files are fakes.
 import { describe, it, expect, vi } from "vitest";
+import { resolve } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
@@ -17,7 +18,8 @@ import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RigSpec } from "../src/domain/types.js";
 
-const RIG_ROOT = "/project/rigs/my-rig";
+const RIG_ROOT = resolve("/project/rigs/my-rig");
+const AGENT_FILE = resolve(RIG_ROOT, "agents/impl/agent.yaml");
 const SEAT = "dev-impl@test-rig";
 type Probe = (name: string) => Promise<{ state: string; cause?: string }>;
 
@@ -60,8 +62,8 @@ function setup(probe: Probe | undefined, opts: { launchOk?: boolean; attention?:
     nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }),
     startupOrchestrator,
     fsOps: {
-      readFile: (p: string) => { if (p === `${RIG_ROOT}/agents/impl/agent.yaml`) return 'name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []'; throw new Error(`Not found: ${p}`); },
-      exists: (p: string) => p === `${RIG_ROOT}/agents/impl/agent.yaml`,
+      readFile: (p: string) => { if (p === AGENT_FILE) return 'name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []'; throw new Error(`Not found: ${p}`); },
+      exists: (p: string) => p === AGENT_FILE,
     },
     adapters: { "claude-code": runtimeAdapter(opts.launchOk ?? true) },
     tmuxAdapter: tmux,
@@ -133,10 +135,18 @@ describe("#141 explicit YAML import over a stopped same-name generation", () => 
   it("restores the prior generation when a service hook refuses the replacement", async () => {
     const f = setup(async () => ({ state: "absent" }));
     const oldId = f.priorGeneration();
-    const result = await f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: async () => ({ ok: false, code: "svc", message: "service failed" }) });
+    const historical = f.rigRepo.createRig("test-rig");
+    f.rigRepo.archiveRig(historical.id);
+    const hook = vi.fn(async (_rigId: string, replacedRigIds: readonly string[]) => {
+      expect(replacedRigIds).toEqual([oldId]);
+      expect(f.db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(oldId)).toMatchObject({ archived_at: expect.any(String) });
+      return { ok: false as const, code: "svc", message: "service failed" };
+    });
+    const result = await f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: hook });
 
     expect(result).toMatchObject({ ok: false, code: "service_boot_failed" });
-    expect(f.rigsNamed()).toEqual([{ id: oldId, archived_at: null }]);
+    expect(hook).toHaveBeenCalledOnce();
+    expect(f.rigsNamed().find(rig => rig.id === oldId)).toEqual({ id: oldId, archived_at: null });
     f.db.close();
   });
 

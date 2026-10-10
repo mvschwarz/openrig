@@ -33,6 +33,7 @@ export const REMOTE_UP_TIMEOUT_MS = 120_000;
 export interface RemoteUpBody {
   sourceRef: string;
   autoApprove?: boolean;
+  nonInterruptive?: boolean;
 }
 
 /** POST the placed entry to the remote daemon's shipped /api/up. Returns the

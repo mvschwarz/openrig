@@ -18,12 +18,17 @@ export interface JsonlExchange {
 }
 
 /** Extract the user-visible text from a message `content` field (string, or an array of blocks —
- *  join only the `text` blocks; skip thinking/tool_use). Returns "" when there is no text. */
-function extractText(content: unknown): string {
+ *  join `text` blocks, plus Codex input_text/output_text when requested; skip thinking/tool_use). Returns "" when there is no text. */
+function extractText(content: unknown, codex = false): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((b): b is { type: string; text: string } => !!b && typeof b === "object" && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
+      .filter((block): block is { type: string; text: string } => {
+        if (!block || typeof block !== "object") return false;
+        const { type, text } = block as { type?: unknown; text?: unknown };
+        const visible = type === "text" || (codex && (type === "input_text" || type === "output_text"));
+        return visible && typeof text === "string";
+      })
       .map((b) => b.text)
       .join("\n");
   }
@@ -44,7 +49,7 @@ function toExchange(obj: unknown): JsonlExchange | null {
   // codex rollout: {payload:{type:"message", role, content}}
   const payload = o.payload as { type?: unknown; role?: unknown; content?: unknown } | undefined;
   if (payload && payload.type === "message" && typeof payload.role === "string") {
-    const content = extractText(payload.content);
+    const content = extractText(payload.content, true);
     return content.length > 0 ? { role: payload.role, content } : null;
   }
   return null;

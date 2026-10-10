@@ -12,10 +12,9 @@ comes from a web page, only when that page is the OpenRig UI or a page you allow
   its own Tailscale name (for example `my-machine.your-tailnet.ts.net`, or the short `my-machine`).
   The daemon learns its own Tailscale name automatically from Tailscale on this machine.
 - The web UI, when it is turned on (`rig config set ui.enabled true`, then restart the daemon) and
-  opened at the daemon's own address and port. To open it at a non-loopback name or address, such
-  as its Tailscale name, also list that page's exact origin in `OPENRIG_ALLOWED_ORIGINS` (for
-  example `http://my-machine.your-tailnet.ts.net:7433`), then restart the daemon. Without it, the
-  UI's terminal is refused there, and at a non-loopback IPv6 address its API requests are too.
+  opened over `http` on the daemon's own port at any address the daemon accepts, including its
+  Tailscale name. A UI page served any other way, such as over `https` through your own domain,
+  also needs its exact origin in `OPENRIG_ALLOWED_ORIGINS`, then a daemon restart.
 
 ### When you see a refusal
 
@@ -35,14 +34,16 @@ The daemon answers `403` with a sentence that says what to do. There are two kin
 
 `OPENRIG_ALLOWED_HOSTS` lists names you use to reach the daemon. `OPENRIG_ALLOWED_ORIGINS` lists
 web pages allowed to call it. They are separate: a UI served through your own domain usually needs
-both. Pages on other origins cannot read the refusal; the message is for you, the CLI and agents.
+both. Separate several entries with commas. Pages on other origins cannot read the refusal; the
+message is for you, the CLI and agents.
 
 ### Limits
 
 - If you rename the machine in Tailscale, the daemon keeps accepting its previous name until it
   restarts or until it next looks its name up after seeing an unrecognized one.
-- If the daemon cannot reach Tailscale's resolver, its Tailscale name is refused until a later
-  lookup succeeds. `localhost` and IP addresses keep working.
+- If the daemon has not reached Tailscale's resolver since it started, its Tailscale name is
+  refused until a lookup succeeds. A later failed lookup keeps the name it already learned.
+  `localhost` and IP addresses keep working.
 - This protects against unknown web pages and unknown names. It is not complete browser isolation:
   a page on another site can still cause a simple read request to an address the daemon accepts,
   although it cannot read the answer. Keep the daemon on loopback or your tailnet.

@@ -1,6 +1,6 @@
 ---
 mission: {{mission_id}}
-name: {{mission_name}}
+name: {{mission_name_yaml}}
 created: {{created_date}}
 ---
 

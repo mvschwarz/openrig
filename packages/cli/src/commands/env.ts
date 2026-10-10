@@ -133,7 +133,7 @@ Examples:
         console.error((err as Error).message); process.exitCode = 1; return;
       }
 
-      const res = await client.post<{ ok: boolean; error?: string }>(
+      const res = await client.post<{ ok: boolean; error?: string; kept?: string }>(
         `/api/rigs/${encodeURIComponent(rigId)}/env/down`,
         { volumes: opts.volumes ?? false },
         { timeoutMs: LONG_RUNNING_TIMEOUT_MS },
@@ -145,7 +145,7 @@ Examples:
         return;
       }
 
-      console.log(`Services stopped for ${rig}.`);
+      console.log(res.data.kept ?? `Services stopped for ${rig}.`);
     });
 
   return cmd;

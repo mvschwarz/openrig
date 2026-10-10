@@ -168,8 +168,8 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       dangerouslyInteract: true, reason: "unblock stuck release prompt", actorSession: "orch-lead@my-rig",
     });
     expect(r.ok).toBe(true);
-    expect(sendText).toHaveBeenCalledWith("dev-impl@my-rig", "1");
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["C-m"]);
+    expect(sendText).toHaveBeenCalledWith("dev-impl@my-rig", "1", undefined, { bracketed: false });
+    expect(sendKeys).not.toHaveBeenCalled(); // A numbered choice may already have submitted.
     const events = overrideEvents();
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
@@ -226,7 +226,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
 
     const drive = await t.send(seat, "1", { dangerouslyInteract: true, reason: "approve the blocked command", actorSession: "orch-lead@my-rig" });
     expect(drive.ok).toBe(true);
-    expect(sendText).toHaveBeenCalledWith(seat, "1");
+    expect(sendText).toHaveBeenCalledWith(seat, "1", undefined, { bracketed: false });
     const ev = overrideEvents();
     expect(ev.length).toBe(1);
     expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request", overrideReason: "approve the blocked command" });
@@ -360,6 +360,72 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalled();
   });
 
+  // A latest hook that says the seat waits on a person stays authoritative past the send window when
+  // the pane cannot be read. 2026-10-08: a Claude AskUserQuestion with option previews read unknown,
+  // its permission_prompt hook was 36 s old, and a watchdog wake's Enter chose the first option.
+  // No capture of that render exists, so these use a pane the classifier cannot parse.
+  const UNRECOGNIZED_PANE = "xyzzy no prompt here";
+  function seedPersonWaitingHook(fixedNow: Date, ageMs: number) {
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt",
+      occurredAt: new Date(fixedNow.getTime() - ageMs).toISOString(),
+    });
+  }
+
+  it.each([
+    ["36 s old (past the send window)", 36_000],
+    ["10 min old (past the store's freshness window)", 600_000],
+  ])("a latest permission_prompt hook %s + an unrecognized pane refuses, nothing typed", async (_label, ageMs) => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, ageMs);
+    expect(classifyPaneActivity(UNRECOGNIZED_PANE).state).toBe("unknown");
+    const { sendText, sendKeys } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText, sendKeys }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "You are parked while holding 1 open obligation");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("target_needs_input");
+    expect(r.activity).toMatchObject({ state: "needs_input", evidenceSource: "runtime_hook" });
+    // The watchdog's parked-owner policy records this exact shape as an interactive refusal.
+    expect(r.error).toMatch(/^Refused: .* is at an interactive prompt \(permission_prompt; latest hook, pane unrecognized\)/);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a recognized empty composer sends (no new refusal at an idle prompt)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a pane showing live work sends (an approved tool is running)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const pane = "⏺ Bash(npm test)\n✻ Running… (1m 2s · esc to interrupt)";
+    expect(classifyPaneActivity(pane).state).toBe("agent_active");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale RUNNING hook + an unrecognized pane still sends (only a person-waiting hook holds)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      occurredAt: new Date(fixedNow.getTime() - 36_000).toISOString(),
+    });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
   // Codex 0.157: the empty-composer placeholder is on screen idle AND while Codex streams with its
   // Working row hidden. It may unlock a --wait-for-idle send once the hooks have aged out, never
   // while a display-fresh running hook says the turn is still in progress.
@@ -466,32 +532,37 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // (absent/failed, NOT positive picker evidence) now PROCEEDS with a non-blocking
   // advisory that still NAMES the failed producer link. Was: refused
   // target_activity_unknown. Hooks are advisory telemetry, not send authority.
-  it("Part C (inverted): unknown PROCEEDS with an advisory naming the daemon-ingest producer link (no token leak)", async () => {
+  // B1 (honest seat status): no stored hook does not prove ingest rejected one — the relay may
+  // never have posted. The advisory names the gap without blaming a link it did not observe.
+  it("Part C (inverted): unknown PROCEEDS with an advisory that no hook is stored, without claiming ingest is DOWN (no token leak)", async () => {
     const { sendText } = spies();
     const t = makeTransport(mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }));
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(true);
     expect(r.warning).toContain("producer-link:");
-    expect(r.warning).toContain("daemon-ingest link DOWN");
+    expect(r.warning).toContain("no activity hook is stored for this seat");
+    expect(r.warning).toContain("which link failed is not identified");
+    expect(r.warning).not.toContain("daemon-ingest link DOWN");
     expect(sendText).toHaveBeenCalled();
   });
 
-  // OPR.0.4.3.28 correction — when the seat env lacks the activity vars, the
-  // advisory names the SEAT-ENV link (presence-only, never the token value), and
-  // the send still PROCEEDS (was: refused).
-  it("Part C (inverted): unknown PROCEEDS with an advisory naming the seat-env link when url/token are missing", async () => {
+  // B1: only the tmux SESSION environment is inspected. Its absence alone does not establish
+  // absence from an env-prefixed agent launch, so it is UNKNOWN — never DOWN, never a relaunch order.
+  it("Part C (inverted): relay prerequisites absent from the tmux session env are UNKNOWN for the agent, never DOWN", async () => {
     const { sendText } = spies();
     const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
     const tmux = Object.assign({}, base, { hasSessionEnv: async () => false }) as unknown as TmuxAdapter;
     const t = makeTransport(tmux);
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(true);
-    expect(r.warning).toContain("seat-env link DOWN");
-    expect(r.warning).toContain("MISSING"); // names the missing var, not its value
+    expect(r.warning).toContain("seat-env UNKNOWN — relay URL, activity token, OPENRIG_RUNTIME absent from the tmux session environment");
+    expect(r.warning).toContain("the agent process environment was not inspected");
+    expect(r.warning).not.toContain("DOWN");
+    expect(r.warning).not.toContain("Relaunch");
     expect(sendText).toHaveBeenCalled();
   });
 
-  it("uses a valid activity-endpoint file when tmux env lookup cannot prove the relay vars", async () => {
+  it("uses a valid activity-endpoint file for the URL and token; the runtime is still named (the file never carries it)", async () => {
     const { sendText } = spies();
     const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
     const tmux = Object.assign({}, base, { hasSessionEnv: async () => false }) as unknown as TmuxAdapter;
@@ -500,8 +571,9 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     });
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(true);
-    expect(r.warning).toContain("daemon-ingest link DOWN");
-    expect(r.warning).not.toContain("MISSING");
+    expect(r.warning).toContain("no activity hook is stored for this seat");
+    expect(r.warning).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment");
+    expect(r.warning).not.toContain("relay URL,");
     expect(r.warning).not.toContain("Relaunch");
     expect(r.warning).not.toContain("present-but-never-rendered");
     expect(sendText).toHaveBeenCalled();
@@ -514,8 +586,8 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const t = makeTransport(tmux);
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(true);
-    expect(r.warning).toContain("seat-env link UNKNOWN");
-    expect(r.warning).not.toContain("MISSING");
+    expect(r.warning).toContain("seat-env UNKNOWN — session-environment lookup failed for relay URL, activity token, OPENRIG_RUNTIME");
+    expect(r.warning).not.toContain("absent from");
     expect(r.warning).not.toContain("Relaunch");
     expect(sendText).toHaveBeenCalled();
   });
@@ -525,15 +597,102 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
     const tmux = Object.assign({}, base, {
       hasSessionEnv: async (_sessionName: string, varName: string) =>
-        varName === "OPENRIG_PORT" || varName === "RIGGED_ACTIVITY_HOOK_TOKEN",
+        varName === "OPENRIG_PORT" || varName === "RIGGED_ACTIVITY_HOOK_TOKEN" || varName === "RIGGED_RUNTIME",
     }) as unknown as TmuxAdapter;
     const t = makeTransport(tmux);
     const r = await t.send("dev-impl@my-rig", "hi");
     expect(r.ok).toBe(true);
-    expect(r.warning).toContain("daemon-ingest link DOWN");
-    expect(r.warning).not.toContain("seat-env link DOWN");
+    expect(r.warning).toContain("no activity hook is stored for this seat");
+    expect(r.warning).not.toContain("seat-env");
     expect(r.warning).not.toContain("Relaunch");
     expect(sendText).toHaveBeenCalled();
+  });
+
+  it("B1: names a missing OPENRIG_RUNTIME (the relay posts nothing without it) when the URL and token are present", async () => {
+    const { sendText } = spies();
+    const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+    const tmux = Object.assign({}, base, {
+      hasSessionEnv: async (_sessionName: string, varName: string) =>
+        varName === "OPENRIG_URL" || varName === "OPENRIG_ACTIVITY_HOOK_TOKEN",
+    }) as unknown as TmuxAdapter;
+    const r = await makeTransport(tmux).send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment");
+    expect(r.warning).not.toContain("relay URL,");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  describe("B1: a hook's age is checked before it is called recent; its generation verdict is kept", () => {
+    const now = new Date("2026-10-03T06:00:00.000Z");
+    function storeWith(opts: { generation: string | null; live: string | null; registered?: boolean; resolver?: boolean }) {
+      return new AgentActivityStore({
+        db, eventBus, now: () => now,
+        ...(opts.resolver === false ? {} : {
+          resolveOccupantGeneration: () => opts.live,
+          isRegisteredOccupantGeneration: () => opts.registered ?? true,
+        }),
+      });
+    }
+    async function adviseWith(store: AgentActivityStore, ageMs: number, generation: string | null,
+      hasSessionEnv?: (sessionName: string, varName: string) => Promise<boolean | null>) {
+      store.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+        occurredAt: new Date(now.getTime() - ageMs).toISOString(), generation });
+      const { sendText } = spies();
+      const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+      const tmuxAdapter = (hasSessionEnv ? Object.assign({}, base, { hasSessionEnv }) : base) as unknown as TmuxAdapter;
+      const t = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, agentActivityStore: store, now: () => now, tmuxAdapter });
+      const r = await t.send("dev-impl@my-rig", "hi");
+      expect(r.ok).toBe(true);
+      expect(sendText).toHaveBeenCalled();
+      return r.warning ?? "";
+    }
+    const FOUR_DAYS = 4 * 24 * 3600 * 1000;
+
+    it("an OLD prior-generation hook is STALE with its mismatch kept — never 'a recent hook exists'", async () => {
+      const w = await adviseWith(storeWith({ generation: "dead-gen", live: "live-gen" }), FOUR_DAYS, "dead-gen");
+      expect(w).toContain("producer link STALE — the last activity hook arrived 345600s ago, beyond the 300s store window");
+      expect(w).toContain("it belongs to a PRIOR occupant generation (a dead tenure)");
+      expect(w).not.toContain("recent hook exists");
+      expect(w).not.toContain("producer link OK");
+    });
+
+    it("a RECENT prior-generation hook keeps its generation-distinct verdict, never 'producer link OK'", async () => {
+      const w = await adviseWith(storeWith({ generation: "dead-gen", live: "live-gen" }), 20_000, "dead-gen");
+      expect(w).toContain("hook received from a prior occupant — a recent hook exists (20s ago) but it belongs to a PRIOR occupant generation");
+      expect(w).not.toContain("producer link OK");
+    });
+
+    // review-r2's combined-condition regressions on #606 (66305b46): a recent hook that is not the
+    // LIVE occupant's says nothing about this occupant's producer, so the env uncertainty stays.
+    it("keeps missing-runtime uncertainty when a recent prior-generation hook is stored", async () => {
+      const w = await adviseWith(storeWith({ generation: "dead-gen", live: "live-gen" }), 20_000, "dead-gen",
+        async (_s, name) => name === "OPENRIG_URL" || name === "OPENRIG_ACTIVITY_HOOK_TOKEN");
+      expect(w).toContain("PRIOR occupant generation");
+      expect(w).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment");
+      expect(w).not.toContain("producer link OK");
+    });
+
+    it("keeps environment-lookup uncertainty with a recent unresolved-generation hook", async () => {
+      const w = await adviseWith(storeWith({ generation: "some-gen", live: null }), 20_000, "some-gen",
+        async () => { throw new Error("synthetic unavailable lookup"); });
+      expect(w).toContain("generation UNRESOLVABLE");
+      expect(w).toContain("seat-env UNKNOWN — session-environment lookup failed for relay URL, activity token, OPENRIG_RUNTIME");
+      expect(w).toContain("the agent process environment was not inspected");
+      expect(w).not.toContain("producer link OK");
+    });
+
+    it("an OLD hook with no carried generation is STALE and says so", async () => {
+      const w = await adviseWith(storeWith({ generation: null, live: "live-gen" }), FOUR_DAYS, null);
+      expect(w).toContain("producer link STALE");
+      expect(w).toContain("it carried NO occupant generation");
+      expect(w).not.toContain("recent hook exists");
+    });
+
+    it("an OLD hook with no generation gate is STALE, not 'producer link OK'", async () => {
+      const w = await adviseWith(storeWith({ generation: null, live: null, resolver: false }), FOUR_DAYS, null);
+      expect(w).toContain("producer link STALE — the last activity hook arrived 345600s ago (beyond the store window)");
+      expect(w).not.toContain("producer link OK");
+    });
   });
 
   // OPR.0.4.3.28 correction — --dangerously-interact no longer REQUIRES --reason for

@@ -48,6 +48,13 @@ export interface ViewQueryResult {
   rowCount: number;
 }
 
+interface ViewShowOptions {
+  rig?: string;
+  limit?: number;
+  mission?: string;
+  project?: ProjectRead | null;
+}
+
 export interface CustomView {
   viewId: string;
   viewName: string;
@@ -116,8 +123,12 @@ export class ViewProjector {
   /**
    * Run a view by name. Built-in names (BUILT_IN_VIEW_NAMES) dispatch to
    * hardcoded SQL; other names dispatch to custom-view lookup.
+   * Only execution is asynchronous; SQL views retain their synchronous API.
    */
-  show(viewName: string, opts?: { rig?: string; limit?: number; mission?: string; project?: ProjectRead | null }): ViewQueryResult {
+  show(viewName: "execution", opts?: ViewShowOptions): Promise<ViewQueryResult>;
+  show(viewName: Exclude<BuiltInViewName, "execution">, opts?: ViewShowOptions): ViewQueryResult;
+  show(viewName: string, opts?: ViewShowOptions): ViewQueryResult | Promise<ViewQueryResult>;
+  show(viewName: string, opts?: ViewShowOptions): ViewQueryResult | Promise<ViewQueryResult> {
     const limit = Math.max(1, Math.min(opts?.limit ?? 100, 1000));
     // S27 — the execution view is document-shaped (rows = [one JSON document])
     // and derives from fs/git/build-info legs beyond this class's SQL, so it
@@ -129,8 +140,8 @@ export class ViewProjector {
           "execution view deps are not wired on this daemon (setExecutionDeps was never called)",
         );
       }
-      const doc = buildExecutionView(opts?.project ? { ...this.executionDeps, slicesRoot: () => opts.project!.missionsRoot } : this.executionDeps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id });
-      return { viewName: "execution", generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 };
+      return buildExecutionView(opts?.project ? { ...this.executionDeps, slicesRoot: () => opts.project!.missionsRoot } : this.executionDeps, { mission: opts?.mission, rig: opts?.rig, project: opts?.project?.id })
+        .then(doc => ({ viewName: "execution", generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 }));
     }
     if ((BUILT_IN_VIEW_NAMES as readonly string[]).includes(viewName)) {
       return this.runBuiltIn(viewName as BuiltInViewName, opts?.rig, limit);

@@ -1,5 +1,6 @@
 import nodePath from "node:path";
 import * as os from "node:os";
+import { OPENRIG_HOME } from "../openrig-compat.js";
 import type { StartupBlock } from "./types.js";
 import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
@@ -118,10 +119,11 @@ export function planProjection(input: ProjectionInput): PlanResult {
       }
 
       // Plugins use a different shape: { id, source: { kind, path } } — extract path from source.
-      // Plugin paths support three forms (per DESIGN.md §5.2):
+      // Plugin paths support four forms:
       //   1. absolute system path → preserved exactly
       //   2. tilde-home-prefixed (~/... or bare ~) → expanded to os.homedir()
-      //   3. relative to spec dir → resolved against qr.sourcePath
+      //   3. openrig-home:... → relative to the configured daemon home
+      //   4. relative to spec dir → resolved against qr.sourcePath
       // ~user (with username) is NOT expanded — treated as a literal relative segment
       // per Node's nodePath convention to avoid surprising operators with implicit
       // username lookups.
@@ -130,7 +132,11 @@ export function planProjection(input: ProjectionInput): PlanResult {
       if (catKey === "plugins") {
         const pluginSource = (qr.resource as { source: { kind: string; path: string } }).source;
         resourcePath = pluginSource.path;
-        absolutePath = resolvePluginPath(resourcePath, qr.sourcePath);
+        if (resourcePath.startsWith("openrig-home:") && nodePath.isAbsolute(resourcePath.slice("openrig-home:".length))) {
+          errors.push(`Plugin "${qr.effectiveId}": openrig-home: requires a relative path.`);
+          return { ok: false, errors };
+        }
+        absolutePath = resolvePluginPath(resourcePath, qr.sourcePath, OPENRIG_HOME);
       } else {
         resourcePath = (qr.resource as { path: string }).path;
         absolutePath = nodePath.resolve(qr.sourcePath, resourcePath);
@@ -268,14 +274,16 @@ function checkAmbiguity(selected: ResolvedResources, collisions: ResourceCollisi
 
 /**
  * Resolve a plugin source.path to a concrete absolute path.
- * Three forms supported:
+ * Four forms supported:
  *   - absolute (`/abs/...`)        → preserved exactly
  *   - tilde-home (`~/...` or `~`)  → expanded to os.homedir()
+ *   - OpenRig home (`openrig-home:plugins/...`) → configured daemon home
  *   - relative (`plugins/...`)     → resolved against specSourcePath
  * `~user/...` (with explicit username) is NOT expanded; treated as a
  * literal relative segment per Node's nodePath convention.
  */
-function resolvePluginPath(rawPath: string, specSourcePath: string): string {
+export function resolvePluginPath(rawPath: string, specSourcePath: string, openrigHome: string = OPENRIG_HOME): string {
+  if (rawPath.startsWith("openrig-home:")) return nodePath.resolve(openrigHome, rawPath.slice("openrig-home:".length));
   if (rawPath === "~") return os.homedir();
   if (rawPath.startsWith("~/")) return nodePath.join(os.homedir(), rawPath.slice(2));
   if (nodePath.isAbsolute(rawPath)) return rawPath;

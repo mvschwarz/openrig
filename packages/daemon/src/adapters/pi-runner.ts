@@ -15,20 +15,22 @@
 // a dead pi process prints the EXIT/ERROR marker and records `exited` in the
 // sidecar — never a silently frozen pane.
 //
-// Only node builtins + pi-runner-protocol are imported so the compiled entry
-// stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
+// Only node builtins and local runner helpers are imported so the compiled
+// entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
 import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { piCredentialNotice } from "./pi-readiness.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
-  PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER,
+  PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
@@ -162,12 +164,24 @@ export interface MirrorAndActivity {
   errorNotice?: string;
 }
 
+// Pi reports missing credentials through RPC errors and terminal model failures.
+// Add only fixed setting/variable names; never inspect or repeat credential values.
+function piCredentialHint(message: string): string {
+  const match = /^No API key found for ([a-z0-9-]+)\b/i.exec(message.trim());
+  if (!match) return "";
+  const provider = match[1]!.toLowerCase();
+  const key = Object.hasOwn(PI_PROVIDER_ENV_VARS, provider) ? PI_PROVIDER_ENV_VARS[provider] : undefined;
+  return key
+    ? ` For managed Pi, set ${key} in the daemon environment and add ${key} to recovery.provider_auth_env_allowlist. Use model ${provider}/<id>, then restart the daemon and relaunch the seat. Default Pi logins are not automatically shared.`
+    : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
+}
+
 function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
   const text = typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "";
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
-  return `${marker} ${text.slice(0, 400) || "request failed"}`;
+  return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
 
 /** The one model-failure detector for both runtimes. Pi and OMP report a
@@ -389,7 +403,8 @@ export class RunnerCore {
 
   private handleResponse(record: Record<string, unknown>): void {
     if (record.success === false || record.error != null) {
-      const message = typeof record.error === "string" ? record.error : "request failed";
+      const detail = typeof record.error === "string" ? record.error : "request failed";
+      const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
       if (record.id === GET_STATE_ID) {
         this.ready = false;
         this.writeSidecar({});
@@ -648,7 +663,8 @@ function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; tok
   let baseUrl = env.OPENRIG_URL?.trim() || null;
   let token = env.OPENRIG_ACTIVITY_HOOK_TOKEN?.trim() || null;
   if (!baseUrl && env.OPENRIG_PORT) {
-    baseUrl = `http://${env.OPENRIG_HOST?.trim() || "127.0.0.1"}:${env.OPENRIG_PORT.trim()}`;
+    const rawHost = env.OPENRIG_HOST?.trim() || "127.0.0.1";
+    baseUrl = `http://${formatDaemonHostForUrl(rawHost)}:${env.OPENRIG_PORT.trim()}`;
   }
   if (!baseUrl || !token) {
     try {
@@ -747,6 +763,24 @@ export function resolveRuntimeExecutable(
   }
 }
 
+/** Enrich an actual CLI rejection, without guessing compatibility from a version
+ * or from help (older Pi prints help before validating unknown long flags). */
+export function piLaunchCapabilityError(
+  command: string,
+  trust: "approve" | "no-approve",
+  line: string,
+  readVersion: () => string,
+): string | undefined {
+  const diagnostic = stripVTControlCharacters(line);
+  if (!/unknown options?:/i.test(diagnostic) || !/--(?:name|approve|no-approve)(?=[\s,.:]|$)/.test(diagnostic)) return;
+  let version = "unknown version";
+  try {
+    const value = stripVTControlCharacters(readVersion()).trim();
+    if (/^[0-9][A-Za-z0-9.+_-]{0,63}$/.test(value)) version = `version ${value}`;
+  } catch { /* diagnostics only; never changes the child's outcome */ }
+  return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   let args: RunnerArgs;
   try {
@@ -795,6 +829,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     runtime,
   });
 
+  if (runtime === "pi") {
+    console.log(`[pi-runner] seat ${args.sessionName}: ${piCredentialNotice({
+      model: args.model, agentDir: paths.agentDir, env: childEnv,
+      readFile: (file) => {
+        if (fs.statSync(file).size > 1024 * 1024) throw new Error("Unbounded metadata");
+        return fs.readFileSync(file, "utf8");
+      },
+    })}`);
+  }
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
@@ -825,6 +868,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
+
+  // The child may close its pipe before the first RPC write completes.
+  child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
 
   const io: RunnerIo = {
     sendRpc: (cmd) => {
@@ -885,17 +931,38 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
+  // The last few stderr lines, so an OMP that exits during startup is
+  // reported with its own words in the error, not only above it.
+  const stderrTail: string[] = [];
+  let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
-    if (line.trim()) process.stdout.write(`[${runtime}:err] ${line}\n`);
+    if (!line.trim()) return;
+    process.stdout.write(`[${runtime}:err] ${line}\n`);
+    stderrTail.push(line.length > OMP_STDERR_TAIL_CHARS ? `${line.slice(0, OMP_STDERR_TAIL_CHARS)}...` : line);
+    if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
+    if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
+      const detail = piLaunchCapabilityError(command, args.trust, line, () => {
+        const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
+          timeout: 3000, killSignal: "SIGKILL", maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
+        if (version.error || version.status !== 0) return "";
+        // Older Pi redirects even --version to stderr when stdout is a pipe.
+        return version.stdout.trim() || version.stderr.trim();
+      });
+      if (detail) {
+        reportedPiCapability = true;
+        process.stdout.write(`[pi-runner] ${detail}\n`);
+      }
+    }
   });
   const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
   if (runtime === "pi") {
     child.on("error", (err) => {
       console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
-      core.handlePiExit(null);
+      const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
+      core.handlePiExit(code);
       input.close();
-      process.exitCode = 1;
+      process.exitCode = code;
     });
     child.on("exit", (code) => {
       core.handlePiExit(code);
@@ -906,17 +973,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  // OMP: one exit record per launch, with a launch-vs-credential diagnosis
-  // when the RPC session never became resumable.
+  // OMP: one exit record per launch. When the RPC session never became
+  // resumable, say which startup phase OMP reached and how it exited, and
+  // show its own last output; the runner does not know why OMP stopped.
   let exited = false;
-  const recordExit = (code: number | null): void => {
+  const recordExit = (code: number | null, signal?: NodeJS.Signals | null): void => {
     if (exited) return;
     exited = true;
     clearInterval(identityRetry);
     if (!core.isReady()) {
+      const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
+      const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
       console.error(transportUp
         ? "[omp-runner] ERROR OMP did not establish a resumable RPC session. Authenticate this isolated seat using HOME=<seat-root> PI_CODING_AGENT_DIR=<seat-root>/agent omp and /login, or provide its declared model provider key in the OpenRig daemon environment. Default OMP credentials are not shared."
-        : `[omp-runner] ERROR OMP exited before its RPC transport started (${command}, code ${code ?? "unknown"}). This is a launch failure, not a credential problem; see the output above.`);
+        : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
     }
     core.handlePiExit(code);
     input.close();
@@ -926,8 +996,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.error(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
     recordExit(null);
   });
-  child.on("exit", recordExit);
+  // "close" fires once OMP's stdio is drained, so its stderr is in the tail
+  // before the exit is reported. A child that inherited OMP's stdio (an LSP
+  // or MCP server) can hold "close" open, so "exit" also records the exit
+  // after a short grace period; recordExit runs once, whichever comes first.
+  child.on("close", (code, signal) => recordExit(code, signal));
+  child.on("exit", (code, signal) => { setTimeout(() => recordExit(code, signal), OMP_EXIT_GRACE_MS).unref(); });
 }
+
+/** Stderr lines kept for an OMP startup failure report, and their length cap. */
+const OMP_STDERR_TAIL_LINES = 5;
+const OMP_STDERR_TAIL_CHARS = 300;
+/** How long after OMP's own exit to wait for its stderr to drain. */
+const OMP_EXIT_GRACE_MS = 1_000;
 
 // Compiled-entry guard: run main() only when executed directly (not imported
 // by tests). import.meta.url === file URL of process.argv[1] when direct.

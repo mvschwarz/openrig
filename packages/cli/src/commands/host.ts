@@ -25,6 +25,26 @@ import { DaemonClient } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 
 // ---------------------------------------------------------------------------
+// rig host pair — the approval wait is BOUNDED.
+// ---------------------------------------------------------------------------
+
+/** The largest poll deadline honored: the 32-bit signed millisecond cap that
+ *  Node timers and `rig ask --wake-timeout` already use (2_147_483_647 ms,
+ *  ~24.8 days). Node runs a delay above it after 1 ms, and an `Infinity`
+ *  deadline would make the retry loop in `pair` never exit. */
+export const MAX_PAIR_TIMEOUT_MS = 2_147_483_647;
+
+/** Resolve `--timeout <seconds>` to a bounded millisecond offset. Preserves
+ *  today's accepted values — a blank value or `0` keeps the 600 s default, a
+ *  negative value keeps the 1 s floor — and clamps a non-finite or
+ *  millisecond-overflowing value to `MAX_PAIR_TIMEOUT_MS`, so the wait can
+ *  never be infinite. */
+export function resolvePairTimeoutMs(raw: string | undefined): number {
+  const seconds = Number(raw ?? "600") || 600;
+  return Math.min(Math.max(1, seconds) * 1000, MAX_PAIR_TIMEOUT_MS);
+}
+
+// ---------------------------------------------------------------------------
 // rig host doctor — stepwise, honest, three-valued (FR-1 + FR-2).
 // ---------------------------------------------------------------------------
 
@@ -698,7 +718,14 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         console.log(`On the target: rig queue update ${issued.approvalQitemId ?? "<qitem-id>"} --state done --closure-reason no-follow-on`);
       }
 
-      const timeoutMs = Math.max(1, Number(opts.timeout ?? "600") || 600) * 1000;
+      // The wait is BOUNDED: a non-finite or overflowing --timeout is clamped to
+      // MAX_PAIR_TIMEOUT_MS, so a target that stops answering can never spin the
+      // retry loop forever. Values that work today keep their wait. A note names
+      // the bound actually used so a clamped value is not silently absorbed.
+      const timeoutMs = resolvePairTimeoutMs(opts.timeout);
+      if (!opts.json && timeoutMs === MAX_PAIR_TIMEOUT_MS) {
+        console.log(`Waiting up to ~${(MAX_PAIR_TIMEOUT_MS / 86_400_000).toFixed(1)} days for approval on the target (--timeout capped at the maximum).`);
+      }
       const deadline = Date.now() + timeoutMs;
       let outcome: { status?: string; token?: string } = {};
       while (Date.now() < deadline) {

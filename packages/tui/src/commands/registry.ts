@@ -14,9 +14,11 @@ import { GRAPH_STYLE_NAMES } from "../topology/render-graph.js";
 export interface CompletionContext { state: ViewState; snapshot: FleetSnapshot }
 
 export function availableTabs(state: ViewState, snap: FleetSnapshot): ViewTab[] {
-  const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec"
-    && snap.specs.find((s) => s.name === state.drill.at(-1)?.name)?.kind === "rig";
-  return [...(rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "recent", "overview", "graph", "health"] : []), "pulse"] as ViewTab[];
+  const leaf = state.drill.at(-1);
+  const rigSpec = state.section === "specs" && leaf?.kind === "spec"
+    && (!leaf.specKind || leaf.specKind === "rig")
+    && snap.specs.some((s) => s.name === leaf.name && s.kind === "rig");
+  return [...(rigSpec ? ["graph", "topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "recent", "overview", "graph", "health"] : []), "pulse"] as ViewTab[];
 }
 
 function resourceNames(resource: ResourceKind, snap: FleetSnapshot): string[] {
@@ -84,9 +86,12 @@ function drillEntry(resource: ResourceKind): CommandEntry {
 }
 
 export const COMMAND_REGISTRY: readonly CommandEntry[] = [
+  { name: "launch", aliases: [], args: "", description: "prepare Launch for the selected rig spec; choose its working folder before confirming", context: "standard", sample: "launch", build: () => ({ type: "spec-launch" }) },
+  { name: "launch-folder", aliases: [], args: "<absolute path>", description: "set the launch working folder (spaces are literal; no quotes needed)", context: "standard", sample: "launch-folder /work/team", build: folder => ({ type: "launch-folder", folder }) },
+  { name: "launch-host", aliases: [], args: "<host|local>", description: "choose a launch host; no argument restores rig up's selected host", context: "standard", sample: "launch-host local", build: host => ({ type: "launch-host", host }) },
   { name: "terminals", aliases: [], args: "", description: "browse Saved and Derived terminal views; preview before explicit Open", context: "standard", sample: "terminals", build: () => ({ type: "jump", section: "terminals" }) },
   { name: "terminal-preview", aliases: [], args: "<view>", description: "passively preview a saved:id or rig:name terminal view", context: "standard", sample: "terminal-preview rig:example", build: view => view ? ({ type: "terminal-preview", view }) : ({ type: "error", message: "terminal-preview needs a view" }) },
-  { name: "terminal", aliases: [], args: "<view>", description: "open a rig:name, pod:rig/pod, mission:id, slice:id or saved:id view as tiles in the default provider (herdr)", context: "standard", sample: "terminal rig:example",
+  { name: "terminal", aliases: [], args: "<view>", description: "open a rig:name, pod:rig/pod, mission:id, slice:id or saved:id view in a new terminal (Herdr or plain tmux)", context: "standard", sample: "terminal rig:example",
     complete: ({ snapshot }) => snapshot.hosts.flatMap((h) => h.rigs.map((r) => `rig:${r.name}`)),
     build: view => view ? ({ type: "act", act: "open-terminal", view }) : ({ type: "error", message: "terminal needs a view, for example rig:<name>" }) },
   { name: "attention", aliases: ["needs", "feed"], args: "", description: "inspect human requests and outcome/health updates", context: "standard", sample: "attention", build: () => ({ type: "jump", section: "needs" }) },
@@ -258,7 +263,7 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
     build: () => ({ type: "palette-open" }),
   },
   {
-    // SCOPES view (d64d2f5c): the m-key accelerator's command form.
+    // SCOPES view (d64d2f5c): the M-key accelerator's command form.
     name: "reqs",
     aliases: [],
     args: "",

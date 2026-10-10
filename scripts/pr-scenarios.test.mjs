@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readReport, verifyRun, RESULT_PREFIX, SCENARIO } from '../packages/test-system/ci/result.mjs';
+import { readReport, verifyPassingRun, verifyRun, PASSING_CASES, RESULT_PREFIX, SCENARIO } from '../packages/test-system/ci/result.mjs';
 
 // Pure admission controls, not E2E evidence. No process, socket, native addon or DB.
 function report(mode, result, fault = null) {
@@ -74,6 +74,30 @@ test('requires the actual runner ledger to agree with the returned result', () =
   assert.throws(() => verifyRun('healthy', 0, { ...green, records: [] }));
   assert.throws(() => verifyRun('healthy', 0, { ...green, records: [red.result] }));
   assert.throws(() => verifyRun('healthy', 1, green));
+});
+test('a passing-only case admits only a clean PASS of its own scenario', () => {
+  for (const [caseName, { scenario }] of Object.entries(PASSING_CASES)) {
+    const result = { scenario, verdict: 'PASS' };
+    const pass = { mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
+    verifyPassingRun(0, pass, caseName);
+    const fail = { ...result, verdict: 'FAIL', failedStep: 2 };
+    for (const [exitCode, bad] of [
+      [1, { ...pass, result: fail, records: [fail] }],
+      [1, pass],
+      [2, { ...pass, error: 'startup failed' }],
+      [0, { ...pass, mode: 'lost-baton' }],
+      [0, { ...pass, caseName: 'library' }],
+      [0, { ...pass, scenarioSha256: undefined }],
+      [0, { ...pass, seed: { class: 'baton-drop', enabled: false } }],
+      [0, { ...pass, fault: { changedRows: 1 } }],
+      [0, { ...pass, records: [] }],
+      [0, { ...pass, result: { ...result, scenario: SCENARIO }, records: [{ ...result, scenario: SCENARIO }] }],
+    ]) {
+      assert.throws(() => verifyPassingRun(exitCode, bad, caseName));
+    }
+  }
+  assert.throws(() => verifyPassingRun(0, green, 'fixture'));
+  assert.throws(() => verifyRun('healthy', 0, green, 'transcript'));
 });
 test('only one structured outcome is allowed amid human-readable logs', () => {
   const line = RESULT_PREFIX + JSON.stringify(red);

@@ -44,7 +44,7 @@ function signal() { let release!: () => void; const ready = new Promise<void>(r 
 describe("guard-wired teardown", () => {
   it("cleans positively missing session through actual exec-to-listPanes", async () => {
     const f = fixture({ realPanes: true, exec: async () => { throw Error("can't find session: worker@fixture"); } });
-    expect(await f.teardown.teardown("r")).toMatchObject({ sessionsKilled: 1, errors: [] });
+    expect(await f.teardown.teardown("r")).toMatchObject({ sessionsKilled: 0, errors: [] });
     expect(f.sessionRegistry.getBindingForNode("a")).toBeNull();
     expect(f.db.prepare("SELECT status FROM sessions WHERE id='sa'").get()).toEqual({ status: "exited" });
     expect(f.commands).toHaveLength(1); expect(f.commands[0]).toContain("tmux list-panes"); f.db.close();

@@ -1,509 +1,298 @@
 ---
 kind: as-built
-title: Workflow Runtime + Watchdog Policies (PL-004 Phase C/D)
+title: Workflow Runtime — Specs, Packets, and Lifecycle Graphs
 status: active
-topics: [coordination, runtime-control]
+topics: [orchestration, coordination]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  Need to know how the daemon-native Workflow Runtime works — workflow specs
-  cache, instance state, step trails, the transactional-scribe projection
-  contract, or the watchdog policy set including workflow-keepalive.
-siblings: [coordination-primitive.md, mission-control.md]
-prerequisite-reads: [../README.md, coordination-primitive.md]
-last-verified-against-source: slice/opr-0.4.6.wf2-spec-language tip (base d18907ed — WF-1 merged)
-last-updated: 2026-07-06
+  Following workflow validation, instantiation, projection, routing, failure
+  recovery, lifecycle graph revisions, or the corresponding CLI/API.
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
-# Workflow Runtime + Watchdog Policies (PL-004 Phase C/D)
+# Workflow Runtime — Specs, Packets, and Lifecycle Graphs
 
-The daemon-native Workflow Runtime (PL-004 Phase D) turns an intended
-sequence of work into durable SQLite state: declarative workflow specs, live
-instance state, append-only step trails, and the load-bearing
-transactional-scribe contract. The PRD §L4 operating model is
-owner-as-author semantically plus workflow-as-transactional-scribe
-mechanically (`architecture.md` §3 L398).
+Source snapshot: `e8f0ab340db773392ec8be75b072d1c0f3068a50`. This describes the source at that commit;
+it does not establish the version or behavior of a running daemon.
 
-> Verified against source at HEAD `7eaf524c`.
+A workflow binds a specification to durable queue packets. The daemon
+records the instance, its current frontier, and the step trail; agents supply
+step outcomes and evidence. Serial workflows and dependency graphs share
+this runtime. The engine checks declared fields and recorded state; it does
+not judge the substance of a referenced proof document.
 
-## 1. The three Phase D tables (+ the diagnostic addition)
+## Source map
 
-Re-confirmed at HEAD in `packages/daemon/src/db/migrations/`:
+All paths in this table are under `packages/daemon/src/`.
 
-- **`workflow_specs`** (`033_workflow_specs.ts:33` `CREATE TABLE … workflow_specs`)
-  — a read-through cache of human-authored markdown/YAML spec files. Sources
-  are workspace-surface; the daemon caches by `(name, version)` with a
-  content `source_hash` so valid operator edits to the spec file win at next
-  read (workspace-surface reconciliation). Spec authoring stays
-  markdown-authoritative; the cache exists for fast lookup and runtime
-  resolution (`architecture.md` §3 L400).
-- **`workflow_instances`** (`034_workflow_instances.ts:45` `CREATE TABLE …
-  workflow_instances`) — live state per running workflow: `status`
-  (`active|waiting|completed|failed`), `current_frontier_json` (active qitem
-  ids), `hop_count` (loop-guard counter), `last_continuation_decision_json`.
-  Instances survive daemon restart from SQLite — no filesystem
-  reconciliation (`architecture.md` §3 L402).
-- **`workflow_step_trails`** (`035_workflow_step_trails.ts:32` `CREATE TABLE …
-  workflow_step_trails`) — append-only history of meaningful step
-  transitions. Every closure produces one trail row pairing the prior qitem
-  with the next qitem (null on terminal). `WorkflowStepTrailLog.record()` is
-  the only writer (`architecture.md` §3 L404).
-- **`040_workflow_specs_diagnostic.ts`** — slice-11 (`f68f453a`,
-  slice-00 §1.3 provenance). An `ALTER TABLE ADD COLUMN` adding
-  parser/validator diagnostic columns to `workflow_specs` (**no new table,
-  no constraint changes beyond a DEFAULT**; the cache carries the
-  parse/validation diagnostic for the UI to render — `040_..._diagnostic.ts:5–25`).
-  **This migration is net-new since `architecture.md` was last edited** and
-  is not described in any prior as-built doc (slice-00 §1.3 — `f68f453a`
-  postdates the §3 body) — authored here from source per the slice-08
-  drift-to-fix register.
+| File / symbol | Responsibility |
+|---|---|
+| [`domain/workflow-types.ts`](../../../packages/daemon/src/domain/workflow-types.ts) | Spec, instance, trail, frontier, and failure-occurrence contracts. |
+| [`WorkflowSpecCache`](../../../packages/daemon/src/domain/workflow-spec-cache.ts) | YAML parsing, source-hash cache, stored specs, diagnostics and retention. |
+| [`WorkflowValidator`](../../../packages/daemon/src/domain/workflow-validator.ts) | Roles, exits, routing/dependency edges, pins, cycles, and advisories. |
+| [`WorkflowRuntime`](../../../packages/daemon/src/domain/workflow-runtime.ts) | Instantiation, inspection, routing, resume, abort, and lifecycle facade. |
+| [`WorkflowProjector`](../../../packages/daemon/src/domain/workflow-projector.ts) | Close the current step and update its successor/frontier state. |
+| [`WorkflowInstanceStore`](../../../packages/daemon/src/domain/workflow-instance-store.ts) | Instances, guarded updates, frontier bindings, and failure occurrences. |
+| [`WorkflowStepTrailLog`](../../../packages/daemon/src/domain/workflow-step-trail-log.ts) | Append/read step history. |
+| [`workflow-reconciliation.ts`](../../../packages/daemon/src/domain/workflow-reconciliation.ts) | Inspect graph changes, apply explicit revisions, recover operation receipts. |
+| [`workflow-keepalive.ts`](../../../packages/daemon/src/domain/policies/workflow-keepalive.ts) | Watchdog evaluation and reminders. |
 
-`036_watchdog_policy_enum_extension.ts` is a documenting no-op that records
-the Phase D watchdog enum extension (Phase C uses application-layer
-enforcement via the `PHASE_D_POLICIES` array, so no DDL is needed —
-`architecture.md` §3 L363).
+## Specification and cache
 
-## 2. The transactional-scribe contract
+`parseWorkflowSpec` parses the `workflow` document and checks known key sets.
+`WorkflowValidator.validate` then checks relationships between roles, steps,
+exits, and targets. The exits are `handoff`, `waiting`, `done`, and `failed`.
+An exit-specific `next_hop.on` mapping takes precedence over structural
+routing; without a mapping, `resolveNextStep` considers `forbid`, suggested
+roles, `require`, and then the next array element.
 
-The load-bearing Phase D guarantee is implemented in
-`WorkflowProjector.project()` (`packages/daemon/src/domain/workflow-projector.ts`).
-Re-confirmed at HEAD: the projector header (`workflow-projector.ts:1–20`)
-declares "transactional-scribe contract" and `project()` runs a single
-`db.transaction` (`workflow-projector.ts:184` `const txn = this.db.transaction(...)`).
-Inside that one transaction:
+The language includes `harness`, `host`, singular `gate`, `depends_on`, typed
+`acceptance`, and waiting re-presentation settings. At this pin,
+`WORKFLOW_AGENT_HARNESSES` contains only `claude-code` and `codex`; support for
+another runtime elsewhere in OpenRig does not add it to this pin's workflow
+harness grammar. Nonlocal host pins can validate as registered names but
+`instantiate` still rejects execution with `host_pin_remote_unsupported`.
+This is a workflow-step restriction, not a claim that all queue traffic is
+local-only.
 
-1. Close the current packet (state mutation on `queue_items`).
-2. Create the next-step packet (`QueueRepository.createWithinTransaction()`,
-   `workflow-projector.ts:230`).
-3. Record the trail entry.
-4. Update the instance frontier + status.
-5. Persist workflow events.
+A step whose `allowed_exits` can neither finish it nor route it on is refused as
+`step_cannot_finish` (`workflow-validator.ts:223-236`): its exits leave out `done`, none is
+mapped in `next_hop.on`, and it allows no `handoff` that routes on. In a dependency graph,
+allowing `handoff` is enough, because handoff completes a sink. `instantiate` refuses any spec
+with a validation error.
 
-Either everything commits or everything rolls back; lost handoffs are
-impossible by design. Post-commit, subscribers are notified and the next
-owner is nudged (`architecture.md` §3 L406).
+`allowed_exits` and `max_hops` affect validation/projection. In contrast,
+`continuation_required`, `preserve_lineage`, `closure_required`, closure
+messages, `skill_refs`, and `spawn_budget` produce
+`declared_not_enforced_v1` advisories. Legacy `gates: []` and
+`next_hop.mode: prefer` are rejected by the parser rather than silently
+accepted. Prerequisite cycles are rejected; a routing cycle requires a
+`max_hops` declaration and is distinct from a prerequisite cycle.
+`re_present_after_seconds` compiles to the queue's park timer on an unrouted
+`waiting` exit, and `re_present_max_seconds` turns it into a repeating
+reminder with backoff (`workflow-projector.ts:534`–`549`); a step that cannot
+reach `waiting`, or that maps `waiting` to a branch, fails validation
+(`waiting_re_presentation_unreachable`).
 
-`WorkflowRuntime` (`packages/daemon/src/domain/workflow-runtime.ts:61`
-`export class WorkflowRuntime`) is the orchestration class above the
-projector.
+`WorkflowSpecCache.readThrough` parses the source file, hashes it, and
+updates the `(name, version)` cache row. Full `spec_json` preserves fields
+that the older scalar columns cannot represent. A same-name/same-version
+source edit can update that cache row; the version label alone is not an
+immutable content pin. `getByNameVersion` is the runtime lookup.
+Diagnostic-only rows, moved sources, and versions retained for unfinished
+work have separate paths in `readThrough`, `writeDiagnostic`, and
+`isPinnedByUnfinishedWork`.
 
-**Phase D scope boundary** (`architecture.md` §3 L412): excludes multi-hop
-chaining, gate-return-sweep, and the closure-enforcement path. The daemon's
-transactional state remains the closure authority via Phase A's hot-potato
-strict-rejection (see `coordination-primitive.md` §3); the workflow runtime
-**projects on closure, it does not gate closure**.
+## Durable state
 
-## 3. The workflow-keepalive watchdog policy
+The migration files record the storage evolution; they are not a count of
+all database migrations:
 
-`workflow-keepalive` is the Phase C-deferred watchdog policy, a TypeScript
-port of the POC `lib/policies/workflow-keepalive.mjs` adapted to read SQLite
-(`packages/daemon/src/domain/policies/workflow-keepalive.ts:1–5`).
-Re-confirmed at HEAD (`workflow-keepalive.ts:5–16`):
+| Migration | Workflow state introduced |
+|---|---|
+| [`033`](../../../packages/daemon/src/db/migrations/033_workflow_specs.ts), [`034`](../../../packages/daemon/src/db/migrations/034_workflow_instances.ts), [`035`](../../../packages/daemon/src/db/migrations/035_workflow_step_trails.ts) | Spec cache, instances/frontier/current step, and append-only trail API. |
+| [`040`](../../../packages/daemon/src/db/migrations/040_workflow_specs_diagnostic.ts), [`050`](../../../packages/daemon/src/db/migrations/050_workflow_spec_json.ts) | Cache diagnostics and complete parsed spec JSON. |
+| [`049`](../../../packages/daemon/src/db/migrations/049_workflow_instance_version.ts), [`051`](../../../packages/daemon/src/db/migrations/051_workflow_resume.ts), [`052`](../../../packages/daemon/src/db/migrations/052_workflow_instance_bound_rig.ts) | Optimistic version guard, resume/hop baseline, and bound rig. |
+| [`079`](../../../packages/daemon/src/db/migrations/079_workflow_lifecycle_parallel.ts) | Lifecycle operation key/digest/binding, packet-to-step frontier bindings, and failure occurrences. |
 
-- **LOAD-BEARING:** it MUST read `workflow_instances` directly via SQLite —
-  never the markdown source.
-- Eligibility: `status === "active" || status === "waiting"`. Else
-  `action=terminal, reason="workflow_not_active"`.
-- Frontier empty + no fallback target: skip with `reason="empty_frontier"`.
-- Resolves frontier qitem owners by querying `queue_items`; combines with
-  explicit observer/created-by targets; sends to the first resolved target.
+Current instance states include `active`, `waiting`, `completed`, `failed`,
+and `aborted`. A multi-packet frontier needs packet-to-step bindings; a
+single `current_step_id` cannot describe all parallel work.
 
-The watchdog supervision tree itself (PL-004 Phase C, `031_watchdog_jobs.ts` /
-`032_watchdog_history.ts`) records only meaningful evaluations; quiet skip
-reasons (`not_due`, `no_actionable_artifacts`, `active_wake_not_due`) are
-NOT recorded and do NOT emit `watchdog.*` events — POC parity so agents are
-not woken about scheduler polls (`architecture.md` §3 L362). The Phase D
-policy enum extends Phase C's three values with `workflow-keepalive`.
+## Instantiation and owner selection
 
-## 4. Workflow events
+`WorkflowRuntime.instantiate` resolves a cached spec name or explicit path,
+validates it, resolves the rig and the entry owner, then creates the instance
+and its single entry packet (for `steps[0]`) through the transactional
+event/queue path (`workflow-runtime.ts:433`, `:757`). The entry packet gets a
+best-effort post-commit nudge with no staged wake intent (`:843`–`845`); its
+keepalive, armed in the same transaction, and the boot sweep cover a lost
+entry nudge. An explicit
+unknown `targetRig` fails; an unknown spec-default rig produces an advisory
+and falls back to unbound operation. A bound rig without a required declared
+role is a different error.
 
-> Drift-fix D8 / OPEN-4 (carried verbatim, slice-00): `architecture.md` §3
-> L410 says "Existing 20 PL-004 events are unchanged" — internally
-> inconsistent with L394's "32 PL-004 events untouched". **Do NOT carry
-> either number.** The current `RigEvent` union
-> (`packages/daemon/src/domain/types.ts:94`) has **73 members** total
-> (slice-00 §1.8, re-confirmed at HEAD). The additive Phase D `workflow.*`
-> events are described below WITHOUT asserting a contested PL-004 sub-count.
+`resolveDefaultOwner` uses declared `preferred_targets` first, applying a
+harness match when pinned. With no preferred targets and a bound rig, it uses
+[`selectRoleSeat`](../../../packages/daemon/src/domain/workflow-role-resolver.ts):
+a running managed agent with the declared role and required runtime, ordered
+by pending-only backlog and then canonical coordinate. Infrastructure and
+unresolvable/adopted coordinates do not become implicit replacement agents.
+Explicit owner overrides are reconciled with harness pins. Declared
+`preferred_targets` are not checked for liveness; validate and instantiate
+only warn (`role_no_live_preferred_target`) when none of a role's targets has
+a running session. A structured gate compiles by target kind (`compileGate`):
+for a human-seat target, the packet goes to the gated step's own owner and is
+parked `blocked_on` that human seat in the same transaction (summary and
+`evidence_ref` required), and the instance waits until the park is resolved;
+for a declared role, an ordinary packet goes to that handler role's seat
+(`workflow-projector.ts:1659`–`1778`).
 
-Phase D extends `RigEvent` with the additive `workflow.*` events
-(re-confirmed `domain/types.ts:196–201`): `workflow.instantiated`,
-`workflow.step_closed`, `workflow.next_qitem_projected`,
-`workflow.completed`, `workflow.failed`, `workflow.routing_table_changed`
-(6 members; a separate `workflow_spec` event also exists in the union).
+Instantiation also emits advisories for missing members in otherwise
+registered target rigs. That member check is advisory and does not imply
+all preferred targets received a live-readiness test.
 
-## 5. Route surface
+## Projection, waiting, and concurrency
 
-`/api/workflow` (`server.ts:495`) — `POST /validate`
-(`routes/workflow.ts:82`), `POST /instantiate` (`:93`,
-`getRuntime(c).instantiate(...)`), `POST /project` (`:118`,
-`getRuntime(c).project(...)` — the transactional-scribe entry),
-`GET /:instance_id/trace` (instance + trail), `POST /:instance_id/continue`
-(idempotent inspect). Surface enumerated `routes/workflow.ts:21–28`.
-Cross-ref: the `rig workflow` CLI surface — see `../cli-reference.md`.
+`WorkflowProjector.project` checks active/waiting status, frontier membership,
+packet-to-step identity, allowed exits, and applicable evidence requirements.
+For a successful advance, queue closure, successor creation, trail entries,
+frontier/version updates, durable events, and wake intent staging share the
+transactional notification envelope. Terminal delivery happens after the
+commit, and the runtime awaits it, so project, route, resume and exception
+responses return after the delivery attempt; a terminal close without its
+successor's staged intent rolls back. A committed packet or staged wake is
+not evidence that its recipient consumed the message.
 
-## 6. The WF-1 failure envelope (OPR.0.4.6.WF1)
+Each exit closes the packet through the queue's own closure path
+(`updateWithinTransaction`, hot-potato rules intact): `handoff` records
+`handed-off` with `handed_off_to` the next owner; `waiting` records `blocked`
+with `blocked_on` the supplied blocker, or `external-gate` when none is given;
+`done` records `done` with `no-follow-on`; and `failed` records `done` with
+`denied` and the result note as target (`workflow-projector.ts:1571`–`1631`).
+A dependency-graph handoff that fans out to more than one successor, or to
+none, closes the packet `done` with `no-follow-on`.
 
-Added on top of the kept Phase D core (nothing above was re-specced;
-FR-1 regression tests pin it):
+Both executors absorb an identical waiting replay by matching the stored
+closure intent; changed wait data is a new decision. A consumed terminal
+packet is no longer on the frontier and is refused. On the serial path a
+routed close moves the frontier to the new packet and leaves the instance
+`active`, or `waiting` when the target step is gated; an unrouted `waiting`
+keeps the closed packet on the frontier so the keepalive can find its owner;
+`failed` sets `failed`, and `done` with nothing left sets `completed`. A
+dependency graph is `waiting` while every frontier packet is blocked, and
+`failed` when the frontier empties with an unresolved occurrence.
+`max_hops` constrains routing relative to the current drive's baseline: a
+route that would exceed it becomes a `failed` exit with a `max_hops_exceeded`
+note and evidence, the packet closes and no successor is created
+(`workflow-projector.ts:419`–`443`); resume establishes a new bounded drive
+rather than erasing history.
 
-- **Step deadlines (FR-2, derived — never stored):**
-  `workflow-deadline.ts` classifies every active|waiting instance's
-  frontier packet by anchor — claimed w/ `closure_required_at` ·
-  claimed w/ NULL deadline (`claimed_at` + threshold; workflow packets
-  ship tier `mode2`, which has no SLA entry) · never-claimed
-  (`created_at` + threshold) · unclaimed-after-claim (`created_at`;
-  unclaim NULLs `claimed_at`). `WORKFLOW_STEP_STUCK_THRESHOLD_SECONDS`
-  (4h, = the routine-tier SLA) is THE single threshold home; WF-5
-  binds to it. Stuck self-clears on normal re-projection.
-- **Keepalive auto-arm (FR-3):** instantiate + every handoff ensure
-  ONE per-instance `workflow-keepalive` watchdog job INSIDE the scribe
-  transaction; terminal exits disarm it. Auto-armed jobs carry
-  `context.deadline_gated: true` — quiet while healthy, and their
-  overdue send targets the stuck packet's owner with re-project
-  steering. Operator-registered jobs keep exact POC always-send parity.
-- **Boot sweep (FR-4):** `workflow-boot-sweep.ts` at daemon startup —
-  re-arms missing keepalives, reissues LOST post-commit nudges
-  (pending frontier packet with `last_nudge_attempt` NULL = the
-  commit-then-crash window, detected from the nudge ledger), surfaces
-  stuck instances; one summary log line.
-- **Real idempotency (FR-5):** waiting-replay ABSORPTION under the
-  full closure-intent identity (exit/packet/step/actor/resultNote/
-  effective-blocker/evidence deep-equal) — exact replay = zero writes;
-  any mismatch = a new decision via the normal path. Migration 049
-  adds `workflow_instances.version`: every guarded advance bumps it
-  `WHERE version = ?`; a stale writer gets structured
-  `instance_version_conflict` and its whole transaction rolls back.
-- **max_hops enforced (FR-6):** compared at projection via
-  `exceedsMaxHops(hopCount, baseline, maxHops)` (v1 baseline = 0; the
-  baseline is WF-5's resume seam). Exceeding converts the handoff to
-  an honest structured failure (packet closed, instance failed, guard
-  evidence in trail + `workflow.failed`). Migration 050 adds
-  `workflow_specs.spec_json` — before it, `loop_guards`/`invariants`/
-  `closure`/`entry` were silently DROPPED at projection-time
-  rehydration (column-only rebuild); legacy rows self-heal on
-  readThrough and degrade VISIBLY (named once-per-spec advisory).
-- **Validation (FR-7):** `parseWorkflowSpec` rejects unknown keys loud
-  at every level against EXPORTED closed keysets (WF-2 extends them);
-  the validator walks reachability/cycles over the projector's own
-  exported `resolveNextStep` — unreachable steps fail; a cycle without
-  `max_hops` fails naming the fix; with it, sanctioned.
-- **`continue` honesty (FR-8):** relabeled to its real read-only
-  inspector semantics everywhere (CLI description/outcome, route
-  comment); `project` remains the sole advance write path.
-- **The v2 dispositions (FR-9):** every declared-but-unenforced key —
-  `invariants.{continuation_required,preserve_lineage,closure_required}`,
-  `closure.*`, step `gates[]`, role `skill_refs`, `next_hop.mode:
-  prefer`, `loop_guards.spawn_budget` — produces the fail-open
-  `declared_not_enforced_v1` validator advisory (warning; never
-  blocks). `spawn_budget`'s advisory names its WF-2/WF-6
-  parallel-frontier acceptance pointer (arch ruling 2026-07-06).
-  `fallbackSynthesis` (instance column, never written) is dispositioned
-  in the `workflow-types.ts` JSDoc.
+Presence of `depends_on` selects `projectDependencyGraph`. It uses durable
+packet bindings to advance eligible successors and record per-occurrence
+failures without treating an unrelated live branch as completed. A step's
+completion counts only while it is later, in trail append order, than its
+prerequisites' latest completions, so a prerequisite re-run through a routed
+exit sends its dependents round again (`workflow-projector.ts:1004`–`1019`).
+Inspection reports unknown bindings rather than inventing a step from trail order.
 
-## 7. The WF-2 spec language (OPR.0.4.6.WF2)
+The injected [`createWorkflowFrontierPredicate`](../../../packages/daemon/src/domain/workflow-frontier-guard.ts)
+lets the queue refuse ordinary terminal closure of live workflow packets.
+Workflow mutations use the explicit workflow path; the queue does not need
+to import the workflow domain to evaluate that predicate.
 
-WF-2 grows the language the ratified WF-1 engine speaks. ONE named
-engine extension (branch execution); everything else is language +
-compilation onto shipped seams.
+## Recovery operations
 
-**Conditional-on-outcome branching (FR-1).** A step may declare
-`next_hop.on: {<exit>: <step-id>}` — branch keys are the recorded exit
-enum ONLY (`handoff|waiting|done|failed`; closed set, enforced at
-parse — `spec_branch_key_invalid`). A MAPPED exit routes to its target
-INSIDE the same scribe transaction: next qitem created in-txn, instance
-stays ACTIVE bound to the target, hop count + version guard bumped
-identically to a linear advance, and the taken branch recorded
-ADDITIVELY (`lastContinuationDecision.branchTaken` + the trail row's
-`closure_evidence.branch_taken`) — never in `closure_reason` (closed
-Phase-A enum). An UNMAPPED `failed`/`done` stays terminal exactly as
-before; unmapped `waiting` stays a park. The `max_hops` guard fires on
-ANY route (branch routes create the canonical remediation cycles);
-cycle detection at validation runs over the structural ∪ branch edge
-union and requires a declared `max_hops` to sanction any cycle.
-Routing seam: `resolveNextStep(spec, step, recordedExit?)` — one
-exported function, structural default when no exit supplied (the
-validator's path).
+`WorkflowRuntime` distinguishes these operations:
 
-**Per-step `harness:` pin (FR-2).** `claude-code | codex` (agent
-harnesses only — `terminal` rejected at parse with a teaching error; Pi
-joins in 0.4.7). Owner resolution picks the first `preferred_target`
-whose node `runtime` column matches (`nodeRuntimeOf`: latest session →
-node join); no match = structured `harness_pin_unsatisfied` naming the
-pin + every candidate's runtime. Explicit owner overrides are
-reconciled too — an override can never silently defeat a pin. Static
-check at instantiate for every pinned step; re-checked at each route.
+| Operation | Meaning |
+|---|---|
+| `route` | Replace a current packet's owner while retaining the step. This is not step advancement. Multiple frontier packets require an explicit packet selection. |
+| `resume` | Redrive failed work to a newly resolved owner, recording the optional `--decision` text. A serial instance must be `failed` (`instance_not_failed`). Resume re-resolves the owner rather than copying it, re-bases `hops_baseline`, increments `resume_count`, and closes that occurrence's open exception items. Dependency failures use occurrence identity; multiple unresolved failures require selection. Identical occurrence/decision replay returns the recorded redrive, while changed decision bytes conflict. |
+| `abort` | Explicitly stop unfinished work with an actor and reason: cancels every frontier packet, records a `failed` trail row per packet, sets `aborted`, and emits `workflow.failed` with reason `aborted: <reason>`. Refused only for `completed` or `aborted` instances. |
+| `continue` | Read-only inspection of instance, trail, guidance, reconciliation, frontier, failures, unknowns, and boundary obligations. It does not mechanically advance a step. |
 
-**Per-step `host:` pin (FR-3).** `local`/absent = full execution today.
-A registry id validates against `~/.openrig/hosts.yaml` (daemon
-read-only twin; unknown id = `host_not_registered` naming registered
-ids) but a remote pin fails loud at INSTANTIATE with
-`host_pin_remote_unsupported` naming the MH-3 boundary + workaround —
-the queue is local-only until MH-3; no qitem is ever minted into a
-queue that cannot route it, and there is no silent local fallback.
+## Deadlines and exceptions
 
-**Structured step-level `gate:` (FR-5 — the socket; WF-5 owns
-semantics).** Singular per step, closed keyset `{target, summary,
-evidence_ref}`. HUMAN target (the shipped human-seat predicate) →
-compiles to a human-routed item (tier `human-gate` + summary +
-evidence_ref — the shipped 0.4.4 write path), resolved by the shipped
-`resolve` verb; HANDLER-ROLE target → an ordinary agent item to the
-role's resolved seat. Routing INTO a gated step creates the gate item
-as the frontier packet and parks the instance `waiting`; resolve/close
-continues the flow from that step (the WF-1 unpark — no restart). A
-gated ENTRY step parks from birth.
+[`evaluateStepDeadline`](../../../packages/daemon/src/domain/workflow-deadline.ts)
+derives overdue state from frontier queue rows. Claimed work uses its closure
+deadline, otherwise its claim time plus **4 hours** (creation time if the
+claim time is absent). Pending work uses creation time plus **4 hours**.
+Blocked waits are not overdue under this evaluator. This is a diagnostic,
+not a substitute for packet existence or binding checks.
 
-**Dispositions (FR-4) — the inert third state is dead.** The legacy
-step `gates: [...]` string list is REMOVED at parse
-(`spec_gates_removed`, what/why/fix naming the new `gate:` object);
-`next_hop.mode: prefer` is REMOVED at parse
-(`spec_prefer_mode_removed` — it never had distinct behavior).
-`skill_refs` / `closure.*` / `invariants.{continuation_required,
-preserve_lineage,closure_required}` keep their WF-1 FR-9 explicitly-v2
-advisories; `spawn_budget` stays explicitly-v2 (WF-6/parallel-frontier
-acceptance pointer). Every key is consumed, removed, or
-machine-readably advisory — zero silently-inert keys.
+Instantiate and every routed projection arm a `workflow-keepalive` watchdog
+job in the same transaction (one per live packet for dependency graphs, one
+per instance for serial specs), evaluated every 15 minutes and quiet until the
+step is overdue (`workflow-keepalive-arming.ts:38`). At each daemon start the
+boot sweep re-arms keepalives for live instances, re-nudges pending frontier
+packets that were never nudged, and surfaces overdue instances
+(`workflow-boot-sweep.ts`). Neither path advances a step.
 
-**Versioning honesty (FR-6).** New strictness lands at
-`parseWorkflowSpec` (the only seam that sees raw keys; the WF-1
-exported closed keysets extended with `harness`/`host`/`gate` +
-`next_hop.on`) and applies at validate/instantiate/re-parse. A LIVE
-instance pinned to a pre-WF-2 spec version keeps executing un-failed
-(project() has no validation gate, by design; stored `spec_json` blobs
-missing the new optional fields read fine); the same spec FILE
-re-validated fails under the new rules.
+There are three exception classes: `unmapped_failed`, `stuck_overdue` and
+`human_gate_trip` (`workflow-exception.ts:34`–`38`). An unrouted `failed`
+exit creates one urgent `workflow-exception` queue item in the same
+transaction, with evidence `rig workflow trace <instance>` and a body naming
+the `rig workflow resume` command; a human gate's own parked packet carries the
+`human_gate_trip` identity, so no second item is created.
 
-**Hand-authorability (FR-6).** Three shipped example shapes at
-`packages/daemon/src/builtins/workflow-specs/`: `linear-build.yaml`
-(zero WF-2 features — the zero-regression reference),
-`gated-release.yaml` (human gate + harness pins),
-`branched-remediation.yaml` (bounded failed-path remediation loop).
+[`resolveExceptionRoute`](../../../packages/daemon/src/domain/workflow-exception-router.ts)
+selects per-class configuration, then workflow default, host default, and
+finally orchestrator-first behavior. An unresolved orchestrator route falls
+back to registered-human selection. A human gate is intrinsically human
+routed. Agent-routed exceptions use the ordinary workflow tier; human-routed
+ones use `human-gate`.
 
-**The composed RSI example (OPR.0.4.6.FAC2).** `factory-rsi.yaml` is the
-single-rig recursive-self-improvement factory MVP: it composes the branch +
-gate + guard primitives into the inner loop — `plan → implement → qa_check →
-review → release_prep` — where `qa_check`/`review` branch `failed` back to
-`implement` (bounded remediation) and `release_prep` (the release-manager
-prepares artifacts, un-gated) hands off to a human-gated `release_signoff`.
-Dogfood is decoupled from this gated loop: the dogfood seat runs out-of-band
-against the shipped product and feeds its findings into the next plan (the RSI
-edge, ungated). The remediation loops are sanctioned only by the enforceable
-`loop_guards.max_hops`; a trip is a WF-5 exception (orchestrator-first via
-`exception_routing`). It targets the shipped `factory-rsi` launch starter
-(`specs/rigs/launch/factory-rsi/`) whose seats pin 1:1 to its roles via
-`preferred_targets` — the v0 hardcode seam, no binding layer.
+[`workflow-human-destination.ts`](../../../packages/daemon/src/domain/workflow-human-destination.ts)
+handles human selection: the registered human named by
+`workspace.operator_seat_name`, or the only registered human when it is unset;
+any other case fails with `workflow_human_destination_unavailable` (409). The
+host default dial is the setting `workflow.exception_routing`
+(`orchestrator` or `human_only`), read per exception. A valid agent route need
+not have a human fallback configured. If fallback is needed, missing/ambiguous selection is an explicit
+error, not an invented destination. Failure admission is transactional;
+overdue detection is handled by boot/keepalive paths. Runtime reconciliation
+closes recovered overdue occurrences against their own packets, preserving
+unresolved siblings and unknown provenance.
 
-## The CLI surface (OPR.0.4.6.WF3)
+## Project lifecycle graphs
 
-WF-3 made the CLI the primary human/agent driving surface. Render-side
-by rule (BR-2): `run`/`watch` consume the shipped SSE endpoints
-(snapshot-first-then-stream, priorQitemId dedup, reconnect → announced
-poll fallback, outcome-as-exit-code: 0 completed / 3 failed);
-`trace`/`list`/`show` human modes are formatted (argo-shape tree, ps-
-mechanics columns, ATTN markers) while `--json` stays byte-stable;
-`status` composes the needs-attention rollup CLI-SIDE from the
-API-carried `instance.deadline` classification (one threshold home —
-the CLI never recomputes a class). The two daemon additions:
+`compileLifecycle` delegates to
+[`compileProjectLifecycle`](../../../packages/daemon/src/domain/project-lifecycle-compiler.ts).
+`instantiateLifecycle` requires an operation key and compiled input digest.
+An exact replay retrieves the recorded instance/entry packet; changed input
+under the same key conflicts. Compilation and an eligible result do not by
+themselves launch work.
 
-- **`route`** (`POST /api/workflow/:id/route`, runtime `route()`):
-  close+recreate+rebind in ONE scribe transaction — honest
-  `handed_off_to` closure with provenance, successor recreate (same
-  step; `current_step_id` unchanged; no hop bump — route is not an
-  advance), frontier rebind under the version guard, keepalive
-  re-target in-txn. Advance-authority revocation is STRUCTURAL: the
-  old packet leaves the frontier in the transaction, so a zombie
-  owner's stale `project` hits the shipped `packet_not_on_frontier`
-  409.
-- **The frontier close-path guard** (`workflow-frontier-guard.ts` →
-  INJECTED into `QueueRepository` at startup; the queue never imports
-  the workflow domain): terminal closure of a live frontier packet
-  from non-workflow verbs rejects `workflow_frontier_packet` with a
-  what/why/fix naming `rig workflow project` / `route`. Workflow
-  writers pass `viaWorkflowVerb`; non-workflow qitems see zero new
-  behavior.
+`inspectGraph`, `reviseGraph`, and `recoverGraphOperation` in
+[`workflow-reconciliation.ts`](../../../packages/daemon/src/domain/workflow-reconciliation.ts)
+separate inspection from explicit graph revision and operation recovery.
+Inspection reports `current`, `source-only`, `compatible`, `incompatible`,
+`unavailable` or `unbound`. Only a live, manifest-bound instance whose specs
+are explicit dependency graphs without `next_hop.on` can be revised; a
+revision may add steps and change unstarted ones, but may not remove steps,
+touch a step with completed, live or failed work, drop a required obligation
+or its order, change workflow-wide fields other than `exception_routing`, or
+add an unstarted step with no outstanding prerequisite. A changed
+`exception_routing` applies to future occurrences only; existing obligations
+keep their owners. Applying needs the inspected version and digest, an
+operation key, an actor and a reason; the receipt is kept in the instance's
+`revisionHistory`, and replaying the same key with a different decision is
+refused with `lifecycle_revision_conflict` (`workflow-reconciliation.ts:12`,
+`:113`–`223`).
+`guidance` reads context and current packet information without interpreting
+an agent's substantive judgment.
 
-## The exception + human-gate model (OPR.0.4.6.WF5)
+For lifecycle steps that require a receipt, a `done`/`handoff` projection
+requires an `evidence_ref`. Typed acceptance gates additionally compare the
+submitted candidate, allowed verdict, and evidence reference against the
+step declaration. These are mechanical identity/presence checks; the
+projector does not read the referenced prose to decide whether the work is
+good or ready to publish.
 
-The deterministic engine's exception layer: the happy path stays
-orchestrator-free and PROVEN so; every exception becomes exactly one
-durable attention item the moment it exists; the responder resolves it
-and the flow resumes from where it stopped.
+## CLI and HTTP surface
 
-- **The taxonomy** (`workflow-exception.ts`): three closed classes as
-  pure predicates over recorded state — `unmapped_failed` (recorded
-  `status=failed`; a WF-2-mapped `failed` routes to remediation and is
-  NOT an exception), `stuck_overdue` (the WF-1 deadline evaluator's
-  verdict consumed verbatim — the single threshold home), and
-  `human_gate_trip` (WF-2 HUMAN gates; the compiled park IS the item).
-  Handler-role gate-trips are deterministic handoffs, not exceptions —
-  classes (a)/(b) backstop the handler's own step. The occurrence key
-  is the recorded packet id of the episode: re-detections dedupe,
-  resolve+resume closes, a fresh packet is a NEW occurrence.
-- **The maturity dial** (`workflow-exception-router.ts` + the
-  `exception_routing` spec grammar + the `workflow.exception_routing`
-  settings key): target resolution = spec per-class → spec default →
-  host dynamic key → ORCHESTRATOR-FIRST (the declared orchestrator
-  role via the same `preferred_targets` pick step owners use) →
-  registered-human selection (`workflow-human-destination.ts`). THE TIER SPLIT: `human-gate` rides
-  ONLY human-routed positions — an orchestrator-routed item carries
-  the ordinary tier so the shipped attention union (which matches on
-  tier regardless of destination) never leaks it into NEEDS-YOU. The
-  shipped attention predicate is untouched.
-- **Class (a) born-in-txn**: serial failure and unhandled dependency-branch
-  failure share exception admission. The failed packet, dependency occurrence,
-  owning item and staged wake commit together, even while an unrelated frontier
-  keeps the instance active. Mapped remediation remains ordinary workflow work;
-  an unmapped or max-hop failure requires an owner. An agent destination rejected
-  as an unknown rig tries registered-human selection. Selection, admission,
-  or storage failure rolls back the close; it never commits a phantom
-  human alert. Other errors retain their original diagnosis. **Class (b) at detection**: the boot sweep and the keepalive
-  evaluation call the injected ensurer (`workflow-exception-
-  escalation.ts`) — occurrence-deduped against OPEN items by tag
-  query, scoped to the exact workflow, instance and packet; the crash-surviving
-  sweep re-creates a missed item. Normal projection, keepalive (including
-  healthy/terminal returns), and boot (including completed instances) reconcile
-  each overdue item's own packet. A resolved wait, completion or obsolete
-  frontier packet closes only that occurrence with a retained transition;
-  an overdue sibling stays open. Unknown provenance is retained. A later
-  overdue episode can create a fresh item even when it reuses the same packet.
-- **Human selection and failure**: the existing `workspace.operator_seat_name`
-  setting selects a registered human; when unset, exactly one registered human
-  is required. No `human@host` alias is invented and no arbitrary choice is made
-  among several humans. The setting and registry are read at fallback time,
-  so a valid configured agent route needs no human registry. Missing, ambiguous,
-  invalid or unavailable selection produces `workflow_human_destination_unavailable`
-  (HTTP 409 for failed projection). Fix the registration/selection and retry.
-  Detection-time admission failures are logged by boot and included in the
-  keepalive's existing owner nudge and evaluation notes; later detection retries.
-  A registered destination still uses the gateway's ordinary delivery rules and
-  receipt ledger. Admission is not proof of posting or readership.
-  A capability inventory or detector instance-binding read failure propagates
-  instead of becoming a no-match:
-  failed projection returns HTTP 500 and rolls back its packet, instance and
-  history writes; overdue detection surfaces the read error without an exception
-  item. An evidenced no-match still uses registered-human selection.
-- **`resume`** (`POST /api/workflow/:id/resume`, runtime `resume()`,
-  `rig workflow resume`): redrive semantics in ONE scribe transaction —
-  failed→active REBOUND to the recorded failed step; the owner is
-  RE-RESOLVED through the projection resolver (never copied from the
-  stale destination — resume is the one sanctioned re-resolution
-  point); `--decision` lands durably in the redrive packet; the
-  occurrence's open items close with provenance; the trail is
-  preserved, never rewritten. For a dependency graph, `--occurrence <failed-qitem-id>`
-  selects the episode (required with several unresolved failures). Its resolution,
-  redrive packet/wake and exact instance/occurrence exception closure share one
-  transaction; siblings remain intact. An identical occurrence/decision retry
-  returns the existing redrive; changed decision bytes conflict without mutation.
-  THE LIVELOCK RAIL (migration 051):
-  `hops_baseline` re-anchors the max_hops guard at resume so each
-  redrive gets exactly one bounded window; `resume_count` is the
-  recorded redrive fact; re-exceeding raises an honest NEW occurrence.
-- **The workflow-aware ▲ band** (`review/compose.ts
-  deriveWorkflowExceptions` + the gatherer source): the missing-item
-  backstop row, the stuck row with evaluator evidence, the
-  frontier-non-open ANOMALY row (detection behind WF-3 FR-6's
-  prevention), and THE AWARENESS ROW — an orchestrator-routed
-  exception renders holder + age in the human band (one identity, two
-  projections, count = 1); human-routed items render nothing there
-  (the ● item is the row). Recomposition clears on state-exit.
+The [CLI inventory](../cli-reference.md#workflow) lists every registered
+`rig workflow` subcommand and option. The implementation is
+[`packages/cli/src/commands/workflow.ts`](../../../packages/cli/src/commands/workflow.ts).
+The [`workflow` routes](../../../packages/daemon/src/routes/workflow.ts)
+are mounted under `/api/workflow`:
 
-## The workflow ↔ rig binding layer (OPR.0.4.6.FAC1)
+| Method | Suffixes |
+|---|---|
+| `POST` | `/validate`, `/compile`, `/instantiate`, `/instantiate-lifecycle`, `/project` |
+| `GET` | `/list`, `/specs`, `/operations/:key`, `/:instance_id`, `/:instance_id/trace`, `/:instance_id/guidance`, `/:instance_id/revision` |
+| `POST` | `/:instance_id/route`, `/:instance_id/resume`, `/:instance_id/abort`, `/:instance_id/continue`, `/:instance_id/revision` |
+| `GET` | `/sse`, `/watch` (same live event stream handler) |
 
-Run any workflow on any rig that can support it, without editing the
-spec — the self-driving factory's binding substrate. Three seams:
+The stream carries the 8 `workflow.*` events (`instantiated`, `step_closed`,
+`next_qitem_projected`, `completed`, `failed`, `resumed`,
+`routing_table_changed`, `revised`); it is not a general queue stream or a
+stored-history replay. Route error mapping distinguishes missing
+records, authoring errors, state/version conflicts, and internal failures.
+See the source mapping before assigning a meaning to a nonzero CLI result.
 
-- **A1 — bind at instantiation** (migration 052,
-  `workflow_instances.bound_rig`): the effective binding =
-  `--rig`/`targetRig` override `?? spec.target.rig ?? null`; the spec
-  field stays a DEFAULT (no routing path reads it — display only). The
-  rig NAME persists (the durable operator-space coordinate); name→id
-  re-resolves fresh at each resolution site — a vanished rig fails loud
-  (`bound_rig_not_found`), never silently. NULL = unbound =
-  byte-identical pre-FAC-1 behavior. **Unknown-rig validation SPLITS by
-  PROVENANCE** (arch ruling 2026-07-07, target-rig zero-regression):
-  an explicit operator `--rig`/`targetRig` is AUTHORITATIVE — unknown →
-  `bound_rig_unknown` HARD-FAIL before any mutation; a spec-default
-  `target.rig` is ADVISORY (authored under the pre-FAC-1 regime where the
-  field was ignored at runtime) — unknown → DEGRADE to unbound + a LOUD
-  `advisories` notice on the instantiate result (surfaced by route + CLI
-  stderr), never a hard-fail. This preserves AC-1 zero-regression for
-  shipped/example specs that declare a descriptive `target.rig` AND route
-  via `preferred_targets` (e.g. `conveyor`): they instantiate exactly as
-  pre-FAC-1. A spec that genuinely needs a bound rig still fails loudly,
-  per-step (entry at instantiate, later role-only steps at projection) —
-  the degrade is to honest per-step failure with a heads-up, never to
-  silence.
-- **A2 — role→seat capability resolution**
-  (`workflow-role-resolver.ts` pure policy +
-  `workflow-role-context.ts` lazy sync snapshot): TIER 3 inside
-  `resolveDefaultOwner`, activating ONLY when a role declares zero
-  `preferred_targets` AND the instance is bound. Tier order is sacred:
-  explicit owner → gate compile → declared `preferred_targets`
-  (byte-identical, never inventory-filtered) → capability → loud null.
-  The CLOSED fact set: role (`nodes.role`, declared per pod member —
-  seat-side, opt-in) · nodeKind · lifecycleState (`running` only) ·
-  runtime (harness-pin aware) · sync `pendingWorkCount` (pending-only
-  backlog) · the derived canonical coordinate. Async
-  `attachAgentActivity`/tmux probes are structurally absent from the
-  transaction. Managed seats only: adopted seats are excluded LOUDLY
-  (`adopted_seat_not_role_resolvable_v1`). Selection = least backlog,
-  plain-codepoint coordinate tiebreak (`driver10@rig < driver2@rig`).
-  Resolution runs ONCE at step-close (after the frontier + absorption
-  guards — replays perform zero inventory reads) and records as the
-  packet destination; the WF-5 resume is the one re-resolution point,
-  now capability-aware. All SIX owner-resolution sites carry the
-  context: projector next-step, human-gate parked-packet owner,
-  handler-role gate destination (no-targets + bound → capability),
-  runtime entry (live + recorded), the eager instantiate loop
-  (STRUCTURAL zero-role-coverage check only — `bound_rig_role_uncovered`;
-  no live resolution of future steps; a warming rig instantiates), and
-  resume. The WF-5 exception dial's orchestrator-role position resolves
-  capability-aware on the bound rig at both homes (in-txn class-(a) +
-  detection-time class-(b)), then uses registered-human selection if no
-  agent resolves. Failures are loud-with-candidates: structured
-  per-candidate disqualifiers + a named zero-candidate message; never a
-  spawn, never auto-`add_member`, never a dead-seat route. Additive
-  `owner_resolution` trail evidence records `{mode, role, boundRig?,
-  seat}` per routing decision.
-- **A3 — roles bind to SEATS, never occupants**: the ONE string rule —
-  the derived canonical coordinate `{pod}-{member}@{rig}` is both the
-  tiebreak key and the recorded destination, so an agent handover
-  behind the seat never strands the workflow (raw occupant-era session
-  names are never recorded as role-resolution destinations).
-
-## The member-exists instantiate advisory (OPR.0.4.6.FAC3 — engine bit)
-
-The queue transport validates the RIG of a destination, never the member
-(`topologyValidateRig` is rig-exists-only by design — hardening it would
-gate every queue write and break legitimate non-managed destinations),
-so a declared `preferred_target` naming a registered rig but a typo'd or
-stale MEMBER would mint an orphan packet, visible only later as a WF-5
-stuck exception. FAC-3 catches it at the earliest knowable moment: at
-instantiate, for every step-referenced role (each step's `actor_role`
-plus a handler gate's target role — the same reference set the
-structural coverage check walks), each declared `preferred_target` that
-parses CANONICAL and names a rig registered on this daemon is probed
-for member existence (`rigMemberExists` beside `rigDeclaresRole` —
-sync SQL, the derived canonical coordinate per the FAC-1 Q5 one-string
-rule, existence at ANY lifecycle state and node kind; liveness stays
-projection's business). An unknown member yields ONE aggregated
-advisory per unique target — naming every declaring step/role pair, the
-consequence (the work will not be claimed; it will surface as a stuck
-exception), and the fix hint — pushed into the shipped
-`InstantiateResult.advisories` list (the FAC-1 `target.rig`-degrade
-surface: one list, now two producers; rendered by the route body + CLI
-stderr, zero new surface). ADVISORY-NEVER-DENY: instantiate always
-proceeds. Skips (in order): human-seat refs (classified BEFORE parse,
-the queue-gate archetype), non-canonical raw/adopted destinations (the
-inventory cannot vouch for them), unregistered rigs (the transport
-already rejects those loudly at queue-write — no double advisory).
-
-## See also
-
-- `coordination-primitive.md` — PL-004 Phase A; the closure authority the
-  runtime projects against.
-- `mission-control.md` — PL-005 queue observability + 7-verb contract.
-- Source roots: `packages/daemon/src/domain/{workflow-projector,
-  workflow-runtime,workflow-instance-store,workflow-spec-cache,
-  workflow-step-trail-log,workflow-validator}.ts`,
-  `packages/daemon/src/domain/policies/workflow-keepalive.ts`,
-  `packages/daemon/src/domain/{workflow-exception,workflow-exception-router,
-  workflow-exception-escalation}.ts`, `packages/daemon/src/routes/workflow.ts`.
+For authoring examples and project-level boundaries, use
+[product journey SDLC](../../reference/product-journey-sdlc.md) and
+[release boundaries](../../reference/release-boundary.md).

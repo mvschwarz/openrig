@@ -183,6 +183,7 @@ export class NodeLauncher {
           sessionName,
           transcriptPath,
           getTranscriptRotationOptionsFromEnv(),
+          getTranscriptRotationOptionsFromEnv,
         );
       } else {
         launchWarnings.push(`Transcript directory creation failed for rig ${rig.rig.name}`);
@@ -209,6 +210,7 @@ export class NodeLauncher {
         if (!paneObservation.ok) {
           new SeatIdentityStore(this.db).upsert(paneObservationVerdict({
             nodeId: node.id,
+            sessionId: session.id,
             sessionName,
             observation: paneObservation,
           }));

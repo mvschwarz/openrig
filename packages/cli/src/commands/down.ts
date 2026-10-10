@@ -15,6 +15,40 @@ interface TeardownResult {
   errors: string[];
 }
 
+interface DownAgentEntry {
+  nodeKind: string;
+  logicalId: string;
+  canonicalSessionName?: string | null;
+  sessionStatus: string | null;
+  activityState?: { display?: string } | null;
+  agentActivity?: { state?: string };
+}
+
+/** Best-effort facts from the ordinary inventory, before teardown changes it. */
+async function showAgentsBeforeDown(rigId: string, readInventory: () => Promise<unknown>): Promise<void> {
+  let facts = "agent sessions unknown; work status unknown";
+  try {
+    const inventory = await readInventory();
+    if (Array.isArray(inventory) && inventory.every(n => n && typeof n.nodeKind === "string"
+      && typeof n.logicalId === "string" && (n.sessionStatus === null || typeof n.sessionStatus === "string"))) {
+      const agents = (inventory as DownAgentEntry[]).filter(n => n.nodeKind === "agent"
+        && ["running", "idle", "unknown"].includes(n.sessionStatus ?? ""));
+      facts = agents.length === 0 ? "no agent sessions reported live" : "recorded agent sessions: " + agents.map(n => {
+        // A running process or an assigned queue row does not prove work in progress.
+        // Prefer the daemon's arbitrated activity; older daemons expose agentActivity.
+        const activity = n.activityState
+          ? n.activityState.display
+          : n.agentActivity?.state === "running" ? "working"
+          : n.agentActivity?.state === "idle" ? "idle"
+          : n.agentActivity?.state === "needs_input" ? "needs-input" : "unknown";
+        const work = ["working", "idle", "needs-input"].includes(activity ?? "") ? activity : "unknown";
+        return `${n.canonicalSessionName || n.logicalId} (activity: ${work})`;
+      }).join(", ");
+    }
+  } catch { /* Unavailable inventory is an unknown fact, never a teardown gate. */ }
+  console.error(`Before stopping ${rigId}: ${facts}.`);
+}
+
 const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
 interface RigSummaryEntry {
@@ -97,7 +131,13 @@ async function resolveRigHandle(client: DaemonClient, handle: string): Promise<H
  * @returns Commander command
  */
 export function downCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("down").description("Tear down a rig");
+  const cmd = new Command("down").description("Tear down a rig")
+    .addHelpText("after", `
+rig down stops every agent in the rig: their sessions end, and any work in progress stops with them.
+Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
+don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
+rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
+--delete the rig record is removed too, so it can't be brought back that way.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
@@ -123,6 +163,12 @@ export function downCommand(depsOverride?: StatusDeps): Command {
           process.exitCode = 1;
           return;
         }
+        if (!opts.json) {
+          await showAgentsBeforeDown(rigIdResult.rigId, async () => {
+            const inventory = await runRemoteHttpOp(opts.host!, "GET", `/api/rigs/${encodeURIComponent(rigIdResult.rigId)}/nodes`, undefined, deps, { timeoutMs: 2_000 });
+            return inventory.ok ? inventory.data : undefined;
+          });
+        }
         const result = await runRemoteHttpOp(opts.host, "POST", `/api/down`, { rigId: rigIdResult.rigId, delete: opts.delete, force: opts.force, snapshot: opts.snapshot }, deps, opts);
         if (opts.json) {
           console.log(JSON.stringify(result));
@@ -132,6 +178,10 @@ export function downCommand(depsOverride?: StatusDeps): Command {
         } else {
           console.error(`Error on host ${opts.host}: ${result.error}`);
           process.exitCode = 1;
+        }
+        if (result.ok) {
+          const teardown = result.data as Partial<TeardownResult> | undefined;
+          if (teardown?.errors && teardown.errors.length > 0) process.exitCode = 2;
         }
         return;
       }
@@ -180,6 +230,13 @@ export function downCommand(depsOverride?: StatusDeps): Command {
       // unavailable; daemon resolves by exact id, 404s if absent). Either way
       // the SAME existing teardown path + guards run below - no forked path.
       const rigId = resolution.kind === "resolved" ? resolution.id : resolution.handle;
+
+      if (!opts.json) {
+        await showAgentsBeforeDown(rigId, async () => {
+          const inventory = await client.get<unknown>(`/api/rigs/${encodeURIComponent(rigId)}/nodes`, { timeoutMs: 2_000 });
+          return inventory.status === 200 ? inventory.data : undefined;
+        });
+      }
 
       const res = await client.post<TeardownResult | { error: string }>("/api/down", {
         rigId,

@@ -131,6 +131,9 @@ function recentChange(row: RecentQueueTransitionRow): string | null {
  * Append-only transition log. Domain code MUST NOT update or delete rows here.
  * This log is the authoritative audit trail for queue state evolution.
  */
+/** The prefix `rig queue block --continuation` writes on the park transition, matched exactly. */
+const CONTINUATION_MARKER = "continuation: ";
+
 export class QueueTransitionLog {
   readonly db: Database.Database;
   /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
@@ -206,6 +209,29 @@ export class QueueTransitionLog {
     return rows.map((r) => this.rowToTransition(r));
   }
 
+  /**
+   * OPR.0.7.0.12 — the continuation `rig queue block --continuation` recorded for the row's
+   * CURRENT park. The current park is the trailing run of `blocked` transitions: the daemon
+   * appends its own later blocked transitions (e.g. "parked-owner episode closed"), so the latest
+   * one is not the park, and an earlier park's plan must never resurface.
+   *
+   * One newest-first seek on idx_queue_transitions_qitem_id_order (migration 098) that stops at
+   * the first non-blocked transition, so the work is bounded by the current park, not the row's
+   * history. The marker match is exact-case, as `rig queue block` writes it. The live table
+   * suffices: retention archives only terminal rows, and a parked row is not terminal.
+   */
+  currentParkContinuation(qitemId: string): string | null {
+    const newestFirst = this.db.prepare(
+      "SELECT state, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC",
+    );
+    // Leaving the loop early releases the statement (better-sqlite3 closes the iterator).
+    for (const row of newestFirst.iterate(qitemId) as Iterable<{ state: string; transition_note: string | null }>) {
+      if (row.state !== "blocked") return null;
+      if (row.transition_note?.startsWith(CONTINUATION_MARKER)) return row.transition_note.slice(CONTINUATION_MARKER.length);
+    }
+    return null;
+  }
+
   /** Bounded source adapter: apply the time window and limit before materializing rows. */
   listForQitemWindow(qitemId: string, startedAt: string, endedAt: string, limit: number): QueueTransition[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 10001) throw new Error("Invalid transition window limit");
@@ -259,6 +285,8 @@ export class QueueTransitionLog {
     const sessionPatterns = rigNames.map((rig) => `%@${rig.replace(/%/g, "\\%").replace(/_/g, "\\_")}`);
     const scopeSql = sessionPatterns.map(() => "(q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')").join(" OR ");
     const scopeParams = sessionPatterns.flatMap((pattern) => [pattern, pattern]);
+    // Keep display metadata out of the full-history window/sort. Fetch it only
+    // for the qualified window; limiting raw history would change predecessors.
     const rows = this.db.prepare(`
       WITH rig_history AS (
         SELECT
@@ -269,10 +297,6 @@ export class QueueTransitionLog {
           t.actor_session,
           t.closure_reason,
           t.closure_target,
-          q.tags,
-          q.summary,
-          q.destination_session,
-          q.source_session,
           LAG(t.state) OVER (
             PARTITION BY t.qitem_id
             ORDER BY t.transition_id
@@ -288,13 +312,17 @@ export class QueueTransitionLog {
            OR (state = 'done' AND closure_reason = 'no-follow-on')
            OR state IN ('failed', 'denied', 'canceled')
            OR closure_reason IN ('denied', 'canceled', 'escalation')
+      ), latest AS (
+        SELECT * FROM qualifying
+        ORDER BY ts DESC, transition_id DESC
+        LIMIT ?
       )
-      SELECT transition_id, qitem_id, ts, state, actor_session,
-             closure_reason, closure_target, tags, summary, previous_state,
-             destination_session, source_session
-      FROM qualifying
-      ORDER BY ts DESC, transition_id DESC
-      LIMIT ?
+      SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session,
+             t.closure_reason, t.closure_target, q.tags, q.summary, t.previous_state,
+             q.destination_session, q.source_session
+      FROM latest t
+      JOIN queue_items q ON q.qitem_id = t.qitem_id
+      ORDER BY t.ts DESC, t.transition_id DESC
     `).all(...scopeParams, limit) as RecentQueueTransitionRow[];
 
     return rows.reverse().flatMap((row) => {

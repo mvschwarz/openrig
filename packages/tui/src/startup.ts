@@ -98,10 +98,9 @@ export class StartupController {
       if (this.state.rig && this.state.rigs.some((r) => r.id === this.state.rig!.rigId)) await this.readRig(this.state.rig.rigId);
       else { this.state.page = "rigs"; this.state.selected = 0; }
       this.state.notice = "Daemon connected. Choose what to bring back.";
-      // The served fold is running only for a nonempty rig whose nodes are all
-      // observed running. Missing, stopped, degraded and unverified are not proof.
-      const running = rigs.find(r => r.lifecycleState === "running");
-      if (this.automaticEntry && this.state.open && running) {
+      // Connected users can inspect work regardless of the rigs' lifecycle states.
+      // Setup and recovery remain deliberate choices through Start and return.
+      if (this.automaticEntry && this.state.open) {
         this.automaticEntry = false;
         this.state.open = false;
         this.deps.onWork();
@@ -218,20 +217,29 @@ export class StartupController {
     await this.run(async () => {
       this.state.notice = `${action === "resume" ? "Resuming" : "Starting"} ${seat.logicalId}…`;
       this.changed();
+      let warnings: string[] = [];
       try {
-        const result = await this.deps.client.startupRequest<{ message?: string; status?: string; code?: string }>(
+        const result = await this.deps.client.startupRequest<{ message?: string; status?: string; code?: string; warnings?: string[] }>(
           `/${encodeURIComponent(rigId)}/${encodeURIComponent(seat.logicalId)}`, { action, revision: seat.revision });
         this.state.notice = action === "fresh" ? "A new conversation was started with the configured context. Previous history is retained." : result.message ?? result.status ?? result.code ?? "Launch finished; inspect the observed state.";
+        warnings = result.warnings ?? [];
+        this.state.notice = [this.state.notice, ...warnings].join("\n");
       } catch (error) {
         // Read effects after every failed/lost response. Never automatically replay a POST.
         await this.readRig(rigId).catch(() => {});
         throw error;
       }
       const notice = this.state.notice;
-      await this.readRig(rigId);
+      try {
+        await this.readRig(rigId);
+      } catch (error) {
+        // The launch response is known; only this later observation failed.
+        this.state.notice = `${notice}\nStatus refresh unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        return;
+      }
       this.state.selected = Math.max(0, this.state.rig!.seats.findIndex((s) => s.nodeId === seat.nodeId));
       const observed = this.state.rig!.seats[this.state.selected]?.observed;
-      this.state.notice = observed && observed.state !== "running" ? observed.detail : notice;
+      this.state.notice = observed && observed.state !== "running" ? [observed.detail, ...warnings].join("\n") : notice;
     });
   }
 }

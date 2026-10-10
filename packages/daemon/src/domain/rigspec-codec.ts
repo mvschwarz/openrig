@@ -102,6 +102,7 @@ export class RigSpecCodec {
     if (spec.cultureFile) doc["culture_file"] = spec.cultureFile;
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
+    if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
@@ -192,6 +193,7 @@ function serializeStartupBlock(startup: import("./types.js").StartupBlock): Reco
   return {
     files: startup.files.map((f) => {
       const file: Record<string, unknown> = { path: f.path };
+      if (f.orientation) file["orientation"] = f.orientation;
       if (f.deliveryHint !== "auto") file["delivery_hint"] = f.deliveryHint;
       if (!f.required) file["required"] = false;
       if (f.appliesOn.length !== 2 || !f.appliesOn.includes("fresh_start") || !f.appliesOn.includes("restore")) {

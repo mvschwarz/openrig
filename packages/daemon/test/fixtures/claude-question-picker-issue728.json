@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/mvschwarz/openrig/issues/728#issuecomment-5987837127",
+  "runtime": "Claude Code 2.1.289",
+  "platform": "macOS",
+  "columns": 160,
+  "rows": 50,
+  "excerptStartLine": 17,
+  "capturedExcerpt": " ☐ Region\n\nWhich deployment region do you prefer?\n\n❯ 1. us-east\n     Eastern United States with low latency for US East Coast users.\n  2. us-west\n     Western United States providing optimal performance for West Coast customers.\n  3. eu-central\n     Central Europe offering compliance and fast access for European users.\n  4. ap-south\n     South Asia delivering low-latency service to the Asia-Pacific region.\n  5. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  6. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel",
+  "constructedWrappedDescriptionExcerpt": " ☐ Region\n\nWhich deployment region do you prefer?\n\n❯ 1. us-east\n     Eastern United States with low latency for US East Coast users.\n     (wrapped second line of the description)\n  2. us-west\n     Western United States providing optimal performance for West Coast customers.\n  3. eu-central\n     Central Europe offering compliance and fast access for European users.\n  4. ap-south\n     South Asia delivering low-latency service to the Asia-Pacific region.\n  5. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  6. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+}

@@ -10,6 +10,8 @@
 //
 // All probes + the clock are injected so the verdict is deterministically testable.
 
+import { formatDaemonHostForUrl } from "./daemon-url.js";
+
 export type DaemonState = "up" | "down" | "unverified";
 
 /** The /healthz probe outcome — distinguishes a REFUSED connection (strong down) from a TIMEOUT
@@ -49,7 +51,7 @@ function healthzUrl(deps: ClassifyDaemonDeps, state: DaemonStateFile | undefined
   }
   const host = state?.host ?? DEFAULT_HOST;
   const port = state?.port ?? DEFAULT_PORT;
-  return `http://${host}:${port}/healthz`;
+  return `http://${formatDaemonHostForUrl(host)}:${port}/healthz`;
 }
 
 /**

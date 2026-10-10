@@ -9,6 +9,7 @@ import type { RigSpec, StartupBlock } from "./types.js";
 export interface PodAssemblerFsOps extends AgentResolverFsOps {
   /** Raw bytes, for files the bundle copies verbatim (agent packages, culture, docs, startup files). */
   readFileBuffer(path: string): Uint8Array;
+  realpath(path: string): string;
   mkdirp(path: string): void;
   /** Source permission bits, used to preserve executable bundle assets. */
   fileMode?(path: string): number;
@@ -239,13 +240,20 @@ export class PodBundleAssembler {
   }
 
   private collectRigFile(relPath: string, rigRoot: string, outputDir: string, collected: string[]): void {
-    const absPath = nodePath.resolve(rigRoot, relPath);
-    if (!absPath.startsWith(rigRoot)) {
+    const root = nodePath.resolve(rigRoot);
+    const absPath = nodePath.resolve(root, relPath);
+    if (absPath !== root && !absPath.startsWith(nodePath.join(root, nodePath.sep))) {
       throw new Error(`Path traversal detected: "${relPath}" escapes rig root`);
     }
     if (!this.fs.exists(absPath)) return; // optional files may not exist
-    const content = this.fs.readFileBuffer(absPath);
-    const mode = this.fs.fileMode?.(absPath);
+    const realRoot = this.fs.realpath(root);
+    const realPath = this.fs.realpath(absPath);
+    if (realPath !== realRoot && !realPath.startsWith(nodePath.join(realRoot, nodePath.sep))) {
+      throw new Error(`"${relPath}" resolves outside the rig root through a symlink; copy the file into the rig to bundle it`);
+    }
+    const content = this.fs.readFileBuffer(realPath);
+    const sourceMode = this.fs.fileMode?.(realPath);
+    const mode = sourceMode === undefined ? undefined : sourceMode | 0o600;
     assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
     this.fs.writeFile(nodePath.join(outputDir, relPath), content, mode);
@@ -278,7 +286,9 @@ export class PodBundleAssembler {
     for (const { file, content, mode } of sources) {
       const destPath = nodePath.join(destDir, file);
       this.fs.mkdirp(nodePath.dirname(destPath));
-      this.fs.writeFile(destPath, content, mode);
+      // Staging may rewrite this file later; keep execute/access bits while
+      // allowing the staging owner to read and write read-only sources.
+      this.fs.writeFile(destPath, content, mode === undefined ? undefined : mode | 0o600);
       collected.push(nodePath.join(relPrefix, file).replace(/\\/g, "/"));
     }
   }

@@ -343,6 +343,23 @@ mission carries its intent and mission-level specification in the same authored
 `mission-slice-sop` and any explicit mode overlay; mission specification is not a
 requirement to repeat every slice detail.
 
+### Project knowledge: three kinds, three homes
+
+Before you write down something you learned about a project, decide which kind it is.
+
+- **Product facts** say what is true of the software at a version: commands, behaviour, formats. They live in the
+  product's own documentation, versioned with the code and checked against source. Anywhere else, link to them
+  rather than copying them; a copy stops following releases.
+- **Project judgment** says how to work on the project now: intent, workflow, priorities, routes, who decides what.
+  It lives in the project's world pack and its work tree, and it can change without a release.
+- **Machine-local state** is true of one instance only: paths, hosts, live rosters, counts, credentials. It belongs
+  in configuration, in a seat's `LEARNED.md`, or as the command that derives it. It never goes into shipped content
+  or a shared world.
+
+Agents find a project's declared context with `rig context work-install`, which lists what the project declares:
+its intent, the context files in its `project.yaml` `install` block, and its skills. When project knowledge should
+reach every agent working on the project, add it to that declaration rather than starting a second index.
+
 ### The other axis: AUDIENCE is not MATURITY
 
 These are independent, and merging them is seductive because the merged version is prettier.

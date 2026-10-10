@@ -6,6 +6,8 @@
 // dispatcher and the REAL tick.
 
 import type { QueueItem, QueueRepository } from "../queue-repository.js";
+import { DispatchBuffer } from "./dispatch-buffer.js";
+import type { DispatchResult } from "./dispatcher.js";
 import type { LoadResult } from "./human-registry.js";
 import { loadHumanRegistry } from "./human-registry.js";
 import { loadConfig } from "./slack/config.js";
@@ -20,7 +22,7 @@ export interface OperatorDeliveryEngine {
   dispatchEscalation: (
     row: QueueItem,
     reason: string,
-  ) => Promise<{ decision: string; resolved: boolean; notificationKey?: string }>;
+  ) => Promise<{ decision: string; resolved: boolean; notificationKey?: string; dispatched?: boolean; decisionId?: string }>;
 }
 
 /** The T+30 fire payload: the ADVERTISED op's shape, the EPISODE key carried
@@ -49,23 +51,38 @@ function describeDecision(d: DeliveryDecision): string {
  *  delivery leg). It decides via the one engine, dispatches the escalation
  *  through the REAL gateway on the advertised op, and returns resolved=false so
  *  the ladder exhausts only on the episode's own receipt/termination evidence
- *  (the AM-F3 resolution pass). A dispatch refusal returns resolved=true with
- *  the refusal named — the honest exhaust, equivalent to the pre-engine floor's
- *  visibility, never a silent wait. */
+ *  (the AM-F3 resolution pass). Before acceptance, missing/unavailable routing
+ *  remains unresolved. The ladder may re-resolve it; accepted delivery stays
+ *  with the gateway until its receipt or explicit termination. */
 export function makeOperatorDeliveryEngine(deps: {
   home: string;
   queueRepo: QueueRepository;
-  dispatch: (op: string, entityBindingRef: string, payload: unknown) => { ok: boolean; error?: string };
+  dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => DispatchResult;
   registry?: { loadHumanRegistry: () => LoadResult };
 }): OperatorDeliveryEngine {
   return {
     async dispatchEscalation(row: QueueItem, _reason: string) {
-      const reg = deps.registry ? deps.registry.loadHumanRegistry() : loadHumanRegistry(deps.home);
-      const human = reg.ok ? reg.entities[0] : undefined;
+      // The episode identity the receipt must carry (Slice 14's ledger accepts
+      // only the current qitemId:transitionId key; a baton row with no owner
+      // transition gets the stable synthetic operator-rung episode).
+      const owner = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
+      const notificationKey = owner ? `${row.qitemId}:${owner.transitionId}` : `${row.qitemId}:operator-rung`;
+
+      const decisionId = `operator:${notificationKey}`;
+      const accepted = () => new DispatchBuffer(deps.home).pending().some(d => d.decisionId === decisionId);
+      // An accepted decision belongs to the gateway even if registry access or
+      // routing changes before the ladder records its dispatch marker.
+      if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };
+      let reg: LoadResult;
+      try {
+        reg = deps.registry ? deps.registry.loadHumanRegistry() : loadHumanRegistry(deps.home);
+      } catch {
+        return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
+      }
+      if (!reg.ok) return { decision: "unavailable:human-registry", resolved: false, dispatched: false };
+      const human = reg.entities[0];
       if (!human) {
-        // No registered human: the single-human floor has nobody to deliver to —
-        // exhaust honestly (same visibility as the pre-engine floor).
-        return { decision: "undeliverable:no-registered-human", resolved: true };
+        return { decision: "undeliverable:no-registered-human", resolved: false, dispatched: false };
       }
       const cfg = loadConfig(deps.home);
       const decision = decideDelivery({
@@ -81,11 +98,6 @@ export function makeOperatorDeliveryEngine(deps: {
           minimumLevelThatInterrupts: cfg.minimumLevelThatInterrupts,
         },
       });
-      // The episode identity the receipt must carry (Slice 14's ledger accepts
-      // only the current qitemId:transitionId key; a baton row with no owner
-      // transition gets the stable synthetic operator-rung episode).
-      const owner = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
-      const notificationKey = owner ? `${row.qitemId}:${owner.transitionId}` : `${row.qitemId}:operator-rung`;
 
       const payload = {
         qitemId: row.qitemId,
@@ -98,11 +110,18 @@ export function makeOperatorDeliveryEngine(deps: {
         ownerNotificationKind: "human-required",
         tags: [...new Set([...(row.tags ?? []), "escalation"])],
       };
-      const res = deps.dispatch(OUTBOUND_OP, human.address, payload);
-      if (!res.ok) {
-        return { decision: `dispatch-refused:${res.error ?? "unknown"}`, resolved: true, notificationKey };
+      let res: DispatchResult;
+      try {
+        res = deps.dispatch(OUTBOUND_OP, human.address, payload, { decisionId });
+      } catch (error) {
+        // A transport throw after durable enqueue is not a routing refusal.
+        if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };
+        throw error;
       }
-      return { decision: describeDecision(decision), resolved: false, notificationKey };
+      if (!res.ok) {
+        return { decision: `dispatch-refused:${res.error ?? "unknown"}`, resolved: false, dispatched: false, notificationKey };
+      }
+      return { decision: describeDecision(decision), resolved: false, dispatched: true, notificationKey, decisionId: res.decisionId };
     },
   };
 }

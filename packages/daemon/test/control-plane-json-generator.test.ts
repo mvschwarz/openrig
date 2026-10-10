@@ -39,90 +39,23 @@ describe("control-plane JSON generator", () => {
     expect(rootPackage.devDependencies?.yaml).toBeUndefined();
   });
 
-  it("parses canon YAML and emits deterministic JSON plus edge digests", async () => {
+  it("reads product JSON and preserves authority bytes while refreshing digests", async () => {
     const generator = await loadGenerator();
     const root = tempRoot();
-    const conventions = join(root, "conventions");
-    const output = join(root, "scripts");
-
-    const membershipPath = join(conventions, "product-public-skills.yaml");
-    const denylistPath = join(conventions, "internal-tokens.yaml");
-    const layoutPath = join(conventions, "skill-edge-layout.yaml");
-    write(
-      membershipPath,
-      [
-        "version: 0",
-        "provisional: true",
-        "owner: pm-lead@example",
-        "product_public:",
-        "  clean: [alpha]",
-        "  ship_after_fix: [beta]",
-        "  ship_misses_add: []",
-        "  sanitize_borderlines_ship: []",
-        "vendored_ship_with_provenance: []",
-        "not_public:",
-        "  reclass_host_only: [private]",
-        "pending_author_public: [future]",
-        "",
-      ].join("\n"),
-    );
-    write(
-      denylistPath,
-      [
-        "version: 1",
-        "path_prefixes: [openrig-work/]",
-        "seat_and_rig_patterns: ['operator-agent@']",
-        "host_patterns: [mm2-]",
-        "charged_terms: [founder]",
-        "frontmatter_drop_keys: [source_evidence]",
-        "internal_path_globs: ['*.internal.*', '**/internal/**', '*-internal/**']",
-        "section_fence:",
-        "  begin: '<!-- internal:begin -->'",
-        "  end: '<!-- internal:end -->'",
-        "allowed_context_substrings: [do not ship]",
-        "",
-      ].join("\n"),
-    );
-    write(layoutPath, layoutYaml());
+    const input = seedGeneratorInput(root);
     seedEdges(root);
-    const sourcePaths = [membershipPath, denylistPath, layoutPath];
+    const sourcePaths = [input.membershipPath, input.denylistPath, input.layoutPath];
     const sourceBytes = sourcePaths.map((path) => readFileSync(path));
 
-    await generator.generateControlPlaneJson({
-      repoRoot: root,
-      membershipPath,
-      denylistPath,
-      layoutPath,
-      outputDir: output,
-    });
-    const first = readGenerated(output);
-    await generator.generateControlPlaneJson({
-      repoRoot: root,
-      membershipPath,
-      denylistPath,
-      layoutPath,
-      outputDir: output,
-    });
-    const second = readGenerated(output);
-
-    expect(second).toEqual(first);
-    expect(first.membership).not.toHaveProperty("owner");
-    expect(first.layout).not.toHaveProperty("owner");
+    await generator.generateControlPlaneJson(input);
+    const first = readGenerated(input.outputDir);
+    await generator.generateControlPlaneJson(input);
+    expect(readGenerated(input.outputDir)).toEqual(first);
     expect(sourcePaths.map((path) => readFileSync(path))).toEqual(sourceBytes);
     expect(first.membership.product_public.clean).toEqual(["alpha"]);
-    expect(first.membership.not_public.reclass_host_only).toEqual(["private"]);
-    expect(first.denylist.section_fence.begin).toBe("<!-- internal:begin -->");
-    expect(first.layout.skills.alpha).toEqual({
-      edges: ["canonical", "plugin", "spec"],
-      category: "core",
-    });
-    expect(first.layout.skills.pluginOnly).toEqual({
-      edges: ["plugin"],
-      category: null,
-    });
-    expect(first.digests.edges.plugin["alpha/SKILL.md"]).toBe(
-      sha256("# Plugin alpha\n"),
-    );
+    expect(first.denylist.allowed_context_lines).toEqual(["  Generic <path> placeholder"]);
+    expect(first.layout.skills.alpha).toEqual({ edges: ["canonical", "plugin", "spec"], category: "core" });
+    expect(first.digests.edges.plugin["alpha/SKILL.md"]).toBe(sha256("# Plugin alpha\n"));
   });
 
   it("exact-tree extraction ignores illustrative layout and applies only forward_overrides", async () => {
@@ -241,46 +174,15 @@ describe("control-plane JSON generator", () => {
     );
   });
 
-  it("fails closed on malformed membership and denylist schemas with source paths", async () => {
+  it("reports malformed product policy with its product path", async () => {
     const generator = await loadGenerator();
-    const root = tempRoot();
-    const conventions = join(root, "conventions");
-    const output = join(root, "scripts");
-    const membershipPath = join(conventions, "product-public-skills.yaml");
-    const denylistPath = join(conventions, "internal-tokens.yaml");
-    const layoutPath = join(conventions, "skill-edge-layout.yaml");
-    write(layoutPath, layoutYaml());
-    seedEdges(root);
-
-    write(membershipPath, "version: 0\nowner: pm\n");
-    write(
-      denylistPath,
-      "version: 1\npath_prefixes: []\nseat_and_rig_patterns: []\nhost_patterns: []\ncharged_terms: []\nfrontmatter_drop_keys: []\ninternal_path_globs: []\nsection_fence: {begin: a, end: b}\nallowed_context_substrings: []\n",
-    );
-    await expect(
-      generator.generateControlPlaneJson({
-        repoRoot: root,
-        membershipPath,
-        denylistPath,
-        layoutPath,
-        outputDir: output,
-      }),
-    ).rejects.toThrow(/product-public-skills\.yaml.*product_public|product_public.*product-public-skills\.yaml/i);
-
-    write(
-      membershipPath,
-      "version: 0\nproduct_public: {clean: [], ship_after_fix: [], ship_misses_add: [], sanitize_borderlines_ship: []}\nvendored_ship_with_provenance: []\nnot_public: {}\npending_author_public: []\n",
-    );
-    write(denylistPath, "version: 1\ncharged_terms: not-an-array\n");
-    await expect(
-      generator.generateControlPlaneJson({
-        repoRoot: root,
-        membershipPath,
-        denylistPath,
-        layoutPath,
-        outputDir: output,
-      }),
-    ).rejects.toThrow(/internal-tokens\.yaml.*charged_terms|charged_terms.*internal-tokens\.yaml/i);
+    const input = seedGeneratorInput(tempRoot());
+    const original = readFileSync(input.membershipPath);
+    write(input.membershipPath, JSON.stringify({ version: 0 }));
+    await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/product-public-skills\.generated\.json.*product_public/);
+    writeFileSync(input.membershipPath, original);
+    write(input.denylistPath, JSON.stringify({ charged_terms: "not-an-array" }));
+    await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/internal-tokens\.generated\.json.*charged_terms/);
   });
 
   it("rejects edge file symlinks before digesting outside-root bytes", async () => {
@@ -303,6 +205,18 @@ describe("control-plane JSON generator", () => {
     expect(
       existsSync(join(input.outputDir, "skill-edge-digests.generated.json")),
     ).toBe(false);
+  });
+
+  it("rejects malformed optional exact-line allowances", async () => {
+    const generator = await loadGenerator();
+    const root = tempRoot();
+    const input = seedGeneratorInput(root);
+    seedEdges(root);
+    const original = JSON.parse(readFileSync(input.denylistPath, "utf8"));
+    for (const value of [null, "text", [42], [""], ["two\nlines"], ["two\rlines"]]) {
+      write(input.denylistPath, JSON.stringify({ ...original, allowed_context_lines: value }));
+      await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/allowed_context_lines/);
+    }
   });
 
   it("rejects edge directory symlinks before traversal or digesting outside-root bytes", async () => {
@@ -380,51 +294,26 @@ function seedGeneratorInput(root: string): {
   layoutPath: string;
   outputDir: string;
 } {
-  const conventions = join(root, "conventions");
-  const membershipPath = join(conventions, "product-public-skills.yaml");
-  const denylistPath = join(conventions, "internal-tokens.yaml");
-  const layoutPath = join(conventions, "skill-edge-layout.yaml");
-  write(
-    membershipPath,
-    "version: 0\nproduct_public: {clean: [alpha], ship_after_fix: [], ship_misses_add: [], sanitize_borderlines_ship: []}\nvendored_ship_with_provenance: []\nnot_public: {}\npending_author_public: []\n",
-  );
-  write(
-    denylistPath,
-    "version: 1\npath_prefixes: []\nseat_and_rig_patterns: []\nhost_patterns: []\ncharged_terms: []\nfrontmatter_drop_keys: []\ninternal_path_globs: []\nsection_fence: {begin: '<!-- internal:begin -->', end: '<!-- internal:end -->'}\nallowed_context_substrings: []\n",
-  );
-  write(layoutPath, layoutYaml());
-  return {
-    repoRoot: root,
-    membershipPath,
-    denylistPath,
-    layoutPath,
-    outputDir: join(root, "scripts"),
-  };
-}
-
-function layoutYaml(): string {
-  return [
-    "version: 0",
-    "owner: skills-architect@example",
-    "edges:",
-    "  spec:",
-    "    path: packages/daemon/specs/agents/shared/skills",
-    "    layout: categorized",
-    "  canonical:",
-    "    path: skills/_canonical",
-    "    layout: mirror-of-spec",
-    "  plugin:",
-    "    path: packages/daemon/assets/plugins/openrig-core/skills",
-    "    layout: flat",
-    "extract_from_committed_trees: true",
-    "forward_overrides: {}",
-    "reference_layout_da101b29:",
-    "  spec_categorized:",
-    "    pm: [alpha]",
-    "    core: [stale-only]",
-    "  plugin_flat: [stale-only]",
-    "",
-  ].join("\n");
+  const scripts = join(root, "scripts");
+  const membershipPath = join(scripts, "product-public-skills.generated.json");
+  const denylistPath = join(scripts, "internal-tokens.generated.json");
+  const layoutPath = join(scripts, "skill-edge-layout.generated.json");
+  write(membershipPath, JSON.stringify({
+    version: 0,
+    product_public: { clean: ["alpha"], ship_after_fix: [], ship_misses_add: [], sanitize_borderlines_ship: [] },
+    vendored_ship_with_provenance: [], not_public: {}, pending_author_public: [],
+  }));
+  write(denylistPath, JSON.stringify({
+    version: 1, path_prefixes: [], seat_and_rig_patterns: [], host_patterns: [], charged_terms: [],
+    frontmatter_drop_keys: [], internal_path_globs: [],
+    section_fence: { begin: "<!-- internal:begin -->", end: "<!-- internal:end -->" },
+    allowed_context_substrings: [], allowed_context_lines: ["  Generic <path> placeholder"],
+  }));
+  write(layoutPath, JSON.stringify({
+    version: 0, edges: edgeConfig(),
+    skills: { alpha: { edges: ["canonical", "plugin", "spec"], category: "core" } },
+  }));
+  return { repoRoot: root, membershipPath, denylistPath, layoutPath, outputDir: join(root, "export") };
 }
 
 function edgeConfig(): Record<string, unknown> {

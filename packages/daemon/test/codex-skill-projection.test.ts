@@ -24,6 +24,7 @@ if (start < 0 || end < start) throw new Error("Production projection planning bl
 const buildPlan = new Function(
   "planProjection", "claudeConflictTargetPath", "projectionConflictWarnings", "nodePath",
   "input", "configResult", "resolveResult", "projectionManifest", "launchResult", "canonicalSessionName", "adapter",
+  "keptSkillWarnings",
   instantiator.slice(start, end) + "\nreturn planResult.plan;",
 );
 
@@ -63,7 +64,7 @@ function fixture(target: "absent" | "identical" | "edited", runtime = "codex", f
     claudeConflictTargetPath, projectionConflictWarnings, nodePath,
     { member: { runtime }, rigId: "fixture", force }, { config }, { collisions: [] },
     { lastHash: (path: string) => path === codexFile ? hashContent(sourceText) : null },
-    { warnings: [] }, "dev-check@fixture", {},
+    { warnings: [] }, "dev-check@fixture", {}, [],
   );
   const adapter = new CodexRuntimeAdapter({
     fsOps,
@@ -147,7 +148,7 @@ describe("OMP skill projection in a shared project", () => {
       { deps: { fsOps, rigRepo: { getRigClaudeManagedBlockFile: () => null } } },
       planProjection, claudeConflictTargetPath, projectionConflictWarnings, nodePath,
       { member: { runtime }, rigId: "fixture" }, { config: { ...config, runtime } }, { collisions: [] },
-      { lastHash: () => null }, { warnings: [], binding: { tmuxSession: seat } }, seat, adapter,
+      { lastHash: () => null }, { warnings: [], binding: { tmuxSession: seat } }, seat, adapter, [],
     );
     const binding = { tmuxSession: seat, cwd: config.cwd } as NodeBinding;
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
+import { SSEStreamingApi } from "hono/streaming";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -50,6 +51,62 @@ describe("chat routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each([false, true])("watch drains buffered messages before switching to live delivery (late arrival: %s)", async lateArrival => {
+    const history = [chatRepo.send(rigId, "alice", "history one"), chatRepo.send(rigId, "alice", "history two")];
+    const expected = [...history];
+    const send = (body: string) => {
+      const message = chatRepo.send(rigId, "bob", body);
+      expected.push(message);
+      eventBus.emit({ type: "chat.message", rigId, messageId: message.id, sender: message.sender,
+        kind: message.kind, body: message.body });
+    };
+    const original = SSEStreamingApi.prototype.writeSSE;
+    let initialInjected = false;
+    let lateInjected = false;
+    // Observe real Hono writes, retaining its TransformStream/backpressure.
+    // Schedule arrivals at replay and drain boundaries instead of racing sleeps.
+    const writes = vi.spyOn(SSEStreamingApi.prototype, "writeSSE").mockImplementation(function (message) {
+      const body = JSON.parse(String(message.data)).body;
+      const writing = original.call(this, message);
+      if (!initialInjected) {
+        initialInjected = true;
+        send("buffered one");
+        send("buffered two");
+      } else if (lateArrival && body === "buffered one" && !lateInjected) {
+        lateInjected = true;
+        send("arrived during drain");
+      }
+      return writing;
+    });
+    const before = eventBus.subscriberCount;
+    const response = await app.request(`/api/rigs/${rigId}/chat/watch`);
+    const reader = response.body!.getReader();
+    const observed: string[] = [];
+    let buffer = "";
+    const decoder = new TextDecoder();
+    try {
+      while (observed.length < (lateArrival ? 5 : 4)) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop()!;
+        for (const frame of frames) {
+          const data = frame.split("\n").find(line => line.startsWith("data: "));
+          if (data) observed.push(JSON.parse(data.slice(6)).id);
+        }
+      }
+      expect(observed).toEqual(expected.map(message => message.id));
+      expect(new Set(observed).size).toBe(observed.length);
+      expect(chatRepo.history(rigId).map(message => message.id)).toEqual(observed);
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+      writes.mockRestore();
+      await vi.waitFor(() => expect(eventBus.subscriberCount).toBe(before));
+    }
   });
 
   it("watch disconnect during history releases the subscription", async () => {
@@ -238,6 +295,72 @@ describe("chat routes", () => {
     const res2 = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("2020-01-01T00:00:00Z")}`);
     const data2 = await res2.json();
     expect(data2).toHaveLength(2);
+  });
+
+  it("GET /history?since refuses an unparseable cutoff instead of silently returning no rows", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+
+    // julianday('garbage') is NULL, so this used to report success with zero
+    // rows — indistinguishable from a genuinely empty room.
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("garbage")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(String(data.error)).toContain("since");
+
+    const res2 = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("not a timestamp")}`);
+    expect(res2.status).toBe(400);
+  });
+
+  it("GET /history?since keeps an empty value as no filter and refuses whitespace", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+    chatRepo.send(rigId, "bob", "msg2");
+
+    // An empty value never filtered (the repository skips a falsy since), so it
+    // must keep returning the whole history rather than becoming a 400.
+    const empty = await app.request(`/api/rigs/${rigId}/chat/history?since=`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toHaveLength(2);
+
+    // Whitespace is not empty: it was unparseable before and matched no rows.
+    const blank = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("   ")}`);
+    expect(blank.status).toBe(400);
+  });
+
+  it("GET /history?since escapes control characters in the rejected value", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\nb\x1bc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // The CLI prints this message verbatim, so a raw newline or ESC would reach
+    // the terminal; they must appear as visible escapes instead.
+    expect(String(data.error)).toContain("a\\x0ab\\x1bc");
+    expect(String(data.error)).not.toContain("\n");
+  });
+
+  it("GET /history?since escapes C1 control characters and keeps other non-ASCII text", async () => {
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("a\u009bbéc")}`);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    // U+009B is a single-byte CSI that some terminals act on; an accented letter is ordinary text.
+    expect(String(data.error)).toContain("a\\x9bbéc");
+    expect(String(data.error)).not.toContain("\u009b");
+  });
+
+  it("GET /history?since still accepts the cutoff formats SQLite parses", async () => {
+    chatRepo.send(rigId, "alice", "msg1");
+
+    // A past cutoff deterministically includes the just-sent row.
+    for (const since of ["2020-01-01", "2020-01-01 00:00:00"]) {
+      const res = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent(since)}`);
+      expect(res.status, `since=${since}`).toBe(200);
+      const data = await res.json();
+      expect(data.length, `since=${since}`).toBeGreaterThanOrEqual(1);
+    }
+
+    // 'now' parses, so the guard must keep accepting it; row visibility at a
+    // subsecond cutoff depends on the second-precision created_at stamp, so
+    // only the status is asserted here.
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?since=now`);
+    expect(res.status).toBe(200);
   });
 
   it("POST /clear removes messages and returns count", async () => {

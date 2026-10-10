@@ -31,7 +31,8 @@ import { QueueWakeRepository } from "./queue-wake-repository.js";
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -68,8 +69,8 @@ export interface ExecutionViewDeps {
   };
   now?: () => Date;
   buildInfo?: BuildInfo;
-  /** Injectable for tests. Same signature subset as node's execFileSync. */
-  exec?: (cmd: string, args: string[]) => string;
+  /** Injectable for tests; synchronous fakes are also accepted. */
+  exec?: (cmd: string, args: string[]) => string | Promise<string>;
   /** Injectable rigs root for review-artifact scanning (tests). */
   rigsRoot?: () => string;
 }
@@ -90,8 +91,11 @@ interface QueueRowLite {
   post_claim_motion?: number;
 }
 
-function defaultExec(cmd: string, args: string[]): string {
-  return execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+const execFileAsync = promisify(execFile);
+
+async function defaultExec(cmd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(cmd, args, { encoding: "utf8", timeout: 5000 });
+  return stdout.trim();
 }
 
 function parseTags(raw: string | null): string[] {
@@ -143,16 +147,16 @@ function extractShaToken(raw: string | null): string | null {
 /** Resolve a (possibly abbreviated) sha token to its full commit id via the repo
  *  context. Ambiguous or non-resolving tokens return null — raw prefix string
  *  equality is never accepted as commit identity. */
-function resolveCommit(
-  exec: (cmd: string, args: string[]) => string,
+async function resolveCommit(
+  exec: NonNullable<ExecutionViewDeps["exec"]>,
   repoCtx: string,
   token: string,
   cache: Map<string, string | null>,
-): string | null {
+): Promise<string | null> {
   if (cache.has(token)) return cache.get(token) ?? null;
   let full: string | null = null;
   try {
-    full = exec("git", ["-C", repoCtx, "rev-parse", "--verify", `${token}^{commit}`]).toLowerCase();
+    full = (await exec("git", ["-C", repoCtx, "rev-parse", "--verify", `${token}^{commit}`])).toLowerCase();
   } catch {
     full = null; // ambiguous, unknown, or malformed at the object store — floors honestly
   }
@@ -264,15 +268,28 @@ interface ArrangementSlice {
   dependsOn?: string[];
 }
 
+function isValidGitRef(ref: string): boolean {
+  if (typeof ref !== "string" || !ref || ref.startsWith("-") || ref === "@") return false;
+  if (ref.startsWith("/") || ref.endsWith("/") || ref.includes("//")) return false;
+  if (ref.includes("..") || ref.includes("@{") || ref.endsWith(".")) return false;
+  if (/[\s\x00-\x1f\x7f~^:?*\[\\]/.test(ref)) return false;
+  const parts = ref.split("/");
+  for (const part of parts) {
+    if (part.startsWith(".") || part.endsWith(".lock") || part === "") return false;
+  }
+  return true;
+}
+
 type ArrangementData =
   | { state: "missing"; missionPath: string }
-  | { state: "malformed"; missionPath: string; warning: string }
+  | { state: "malformed"; missionPath: string; warning: string; declaredIntegrationRef?: string }
   | {
       state: "valid";
       missionPath: string;
       byId: Map<string, ArrangementSlice>;
       byDir: Map<string, ArrangementSlice>;
       guidance: Array<{ label: string; text: string; source: string; wave?: string }>;
+      integrationRef?: string;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -450,9 +467,17 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   const missionRoot = path.join(missionsRoot, mission);
   const missionPath = path.join(missionRoot, "mission.yaml");
   if (!fs.existsSync(missionPath)) return { state: "missing", missionPath };
+  let declaredIntegrationRef: string | undefined;
   try {
     const manifest = parseYaml(fs.readFileSync(missionPath, "utf8")) as unknown;
     if (!isRecord(manifest)) throw new Error("root is not a mapping");
+    const arrangement = manifest["arrangement"];
+    if (isRecord(arrangement) && isRecord(arrangement["source"])) {
+      const raw = arrangement["source"]["integration_ref"];
+      if (raw !== undefined) {
+        declaredIntegrationRef = typeof raw === "string" ? raw : String(raw);
+      }
+    }
     const compositionMembers = validateMissionComposition(manifest, missionPath);
     const waveReview = new Map<string, string>();
     const waveBySlice = new Map<string, string>();
@@ -463,15 +488,25 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
         ...(wave ? { wave } : {}),
       });
     };
-    const arrangement = manifest["arrangement"];
-    if (isRecord(arrangement)) for (const [field, label, key] of [
-      ["source", "Integration decision", "rule"],
-      ["planning_posture", "Planning posture", "rule"],
-      ["execution_posture", "Execution posture", "parallelism"],
-      ["integration_exit", "Shared acceptance", "rule"],
-    ] as const) {
-      const value = arrangement[field];
-      if (isRecord(value)) addGuidance(label, value[key], `${field}.${key}`);
+    let integrationRef: string | undefined;
+    if (isRecord(arrangement)) {
+      for (const [field, label, key] of [
+        ["source", "Integration decision", "rule"],
+        ["planning_posture", "Planning posture", "rule"],
+        ["execution_posture", "Execution posture", "parallelism"],
+        ["integration_exit", "Shared acceptance", "rule"],
+      ] as const) {
+        const value = arrangement[field];
+        if (isRecord(value)) addGuidance(label, value[key], `${field}.${key}`);
+      }
+      const source = arrangement["source"];
+      if (isRecord(source) && source["integration_ref"] !== undefined) {
+        const raw = source["integration_ref"];
+        if (typeof raw !== "string" || !isValidGitRef(raw.trim())) {
+          throw new Error("arrangement.source.integration_ref must be a valid Git ref name not starting with '-'");
+        }
+        integrationRef = raw.trim();
+      }
     }
     if (isRecord(arrangement) && arrangement["waves"] != null) {
       if (!Array.isArray(arrangement["waves"])) throw new Error("arrangement.waves is not a list");
@@ -539,12 +574,13 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
       byDir.set(dir, entry);
       if (facts && facts.id !== INDETERMINATE) byId.set(facts.id, entry);
     }
-    return { state: "valid", missionPath, byId, byDir, guidance };
+    return { state: "valid", missionPath, byId, byDir, guidance, ...(integrationRef ? { integrationRef } : {}) };
   } catch (err) {
     return {
       state: "malformed",
       missionPath,
       warning: err instanceof Error ? err.message : String(err),
+      ...(declaredIntegrationRef !== undefined ? { declaredIntegrationRef } : {}),
     };
   }
 }
@@ -624,23 +660,24 @@ function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[], proofDir:
 
 type Rung =
   | { value: boolean; basis: string }
-  | { value: Indeterminate; basis: string };
+  | { value: Indeterminate | "NOT_APPLICABLE"; basis: string };
 
-function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha: string, ref: string): Rung {
+async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha: string, ref: string, declaredRef?: string): Promise<Rung> {
   const run = exec ?? defaultExec;
   try {
-    run("git", ["-C", repoCtx, "merge-base", "--is-ancestor", sha, ref]);
+    await run("git", ["-C", repoCtx, "merge-base", "--is-ancestor", sha, ref]);
     return { value: true, basis: `git -C ${repoCtx} merge-base --is-ancestor ${sha} ${ref} (exit 0)` };
   } catch (err) {
-    const status = (err as { status?: number }).status;
-    if (status === 1) {
+    const { code, status } = err as { code?: string | number; status?: number };
+    if (code === 1 || status === 1) {
       return { value: false, basis: `git -C ${repoCtx} merge-base --is-ancestor ${sha} ${ref} (exit 1)` };
     }
-    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx}: ${(err as Error).message?.slice(0, 120)}` };
+    const refContext = declaredRef ? ` (${declaredRef})` : "";
+    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx}${refContext}: ${(err as Error).message?.slice(0, 120)}` };
   }
 }
 
-export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: string; rig?: string; project?: string }): Record<string, unknown> {
+export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: string; rig?: string; project?: string }): Promise<Record<string, unknown>> {
   const now = deps.now ?? (() => new Date());
   const exec = deps.exec ?? defaultExec;
   const buildInfo = deps.buildInfo ?? BUILD_INFO;
@@ -734,7 +771,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     const m = r.body?.match(WORKTREE_LINE);
     if (!m?.[1]) continue;
     try {
-      exec("git", ["-C", m[1], "rev-parse", "--git-dir"]);
+      await exec("git", ["-C", m[1], "rev-parse", "--git-dir"]);
       repoCtx = m[1];
       break;
     } catch {
@@ -754,8 +791,8 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       worktreePath = wtMatch[1];
       joinBasis = "EC-3 worktree_path field on the row body";
       try {
-        branch = exec("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
-        headSha = exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+        branch = await exec("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
+        headSha = await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
         if (!repoCtx) repoCtx = worktreePath;
       } catch {
         branch = INDETERMINATE;
@@ -810,6 +847,15 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
+  const declaredRef = arrangement?.state === "valid"
+    ? arrangement.integrationRef
+    : arrangement?.state === "malformed"
+      ? arrangement.declaredIntegrationRef
+      : undefined;
+  const isUnusableDeclaration = arrangement?.state === "malformed" && arrangement.declaredIntegrationRef !== undefined;
+  const targetRef = arrangement?.state === "valid" && arrangement.integrationRef
+    ? arrangement.integrationRef
+    : "main";
   const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission, opts?.project);
   const arrangementSlice = (id: string, dir?: string): ArrangementSlice | null => {
     if (arrangement?.state !== "valid") return null;
@@ -841,7 +887,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   // ---- Q4 ladder (also feeds Q2's deps-folded) ----
   const rigsRoot = (deps.rigsRoot ?? resolveLegacyTopologyRigsRoot)();
   const commitCache = new Map<string, string | null>();
-  const ladderOf = (facts: SliceFacts): Record<string, unknown> => {
+  const ladderOf = async (facts: SliceFacts): Promise<Record<string, unknown>> => {
     const fm = facts.frontmatter;
     const locked: Rung = typeof fm["approved-spec-at"] === "string"
       ? { value: true, basis: `frontmatter approved-spec-at=${fm["approved-spec-at"]}` }
@@ -867,7 +913,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     // commit id through the repo context; raw prefix string equality is never
     // commit identity.
     const builtToken = extractShaToken(candidateSha);
-    const builtResolved = builtToken && repoCtx ? resolveCommit(exec, repoCtx, builtToken, commitCache) : null;
+    const builtResolved = builtToken && repoCtx ? await resolveCommit(exec, repoCtx, builtToken, commitCache) : null;
     const built = candidateSha
       ? {
           candidate_sha: builtToken ?? candidateSha,
@@ -896,19 +942,20 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       };
     } else {
       const excluded: { path: string; reason: string }[] = [];
-      const atCommit = artifacts.filter((a) => {
+      const atCommit: ReviewArtifactFact[] = [];
+      for (const a of artifacts) {
         const token = extractShaToken(a.candidateSha);
         if (!token) {
           excluded.push({ path: a.path, reason: "malformed candidate_sha (no sha token)" });
-          return false;
+          continue;
         }
-        const resolved = resolveCommit(exec, repoCtx!, token, commitCache);
+        const resolved = await resolveCommit(exec, repoCtx!, token, commitCache);
         if (!resolved) {
           excluded.push({ path: a.path, reason: `token ${token} did not resolve to a commit` });
-          return false;
+          continue;
         }
-        return resolved === builtResolved;
-      });
+        if (resolved === builtResolved) atCommit.push(a);
+      }
       reviewed = atCommit.length === 0
         ? { value: INDETERMINATE, basis: `no review artifact resolves to the built commit ${builtResolved.slice(0, 9)} on the registry surface checked`, legs: [], excluded }
         : {
@@ -918,35 +965,41 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
             excluded,
           };
     }
-    // folded / adopted need a repo context — any reachable EC-3 worktree shares refs.
-    let folded: Rung;
-    let adopted: Rung;
-    if (!candidateSha) {
-      folded = { value: INDETERMINATE, basis: "no candidate sha to test" };
-      adopted = { value: INDETERMINATE, basis: "no candidate sha to test" };
-    } else if (!repoCtx) {
-      folded = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
-      adopted = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
-    } else {
-      folded = gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, "main");
-      adopted = buildInfo.commit
-        ? gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
-        : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
-    }
+    // The selected project has no binding to the OpenRig daemon's source.
+    // Missing Git objects cannot establish applicability. Keep daemon ancestry
+    // only on the legacy unscoped view, with its existing unknown/false rules.
+    const folded: Rung = isUnusableDeclaration
+      ? { value: INDETERMINATE, basis: `declared integration_ref unusable (${declaredRef})` }
+      : !candidateSha
+        ? { value: INDETERMINATE, basis: "no candidate sha to test" }
+        : !repoCtx
+          ? { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" }
+          : await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, targetRef, declaredRef);
+    const adopted: Rung = opts?.project
+      ? { value: "NOT_APPLICABLE", basis: "selected project has no binding to the OpenRig daemon source; daemon adoption is not project progress" }
+      : !candidateSha || !repoCtx
+        ? { value: INDETERMINATE, basis: folded.basis }
+        : buildInfo.commit
+          ? await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
+          : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
     return { slice_id: facts.id, dir: facts.dir, locked, built, reviewed, folded, adopted };
   };
 
   const ladderCache = new Map<string, Record<string, unknown>>();
-  const ladderFor = (facts: SliceFacts): Record<string, unknown> => {
+  const ladderFor = async (facts: SliceFacts): Promise<Record<string, unknown>> => {
     const key = facts.specPath;
-    if (!ladderCache.has(key)) ladderCache.set(key, ladderOf(facts));
+    if (!ladderCache.has(key)) ladderCache.set(key, await ladderOf(facts));
     return ladderCache.get(key)!;
   };
 
-  const q4 = slices.map((s) => ladderFor(s));
+  // Keep Git children serial and bounded per call; caches belong to this read,
+  // so mutable refs (HEAD/main) are observed again on the next request.
+  const q4: Record<string, unknown>[] = [];
+  for (const s of slices) q4.push(await ladderFor(s));
 
   // ---- Q2 sequencing ----
-  const q2 = slices.map((s) => {
+  const q2 = [];
+  for (const s of slices) {
     const fm = s.frontmatter;
     const arranged = typeof s.id === "string" ? arrangementSlice(s.id, s.dir) : null;
     const dependsOn = arranged?.dependsOn ?? parseArrayField(fm["depends_on"]);
@@ -959,6 +1012,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
         && ["pending", "in-progress", "blocked"].includes(r.state))
       .map((r) => ({ qitem_id: r.qitem_id, blocked_on: r.blocked_on }));
     const claimedLane = lanes.some((l) => l.slice === s.id || l.slice === s.dir);
+    const ownFolded = (await ladderFor(s))["folded"] as Rung;
     let nextUp: boolean | Indeterminate;
     let nextUpBasis: string;
     if (dependsOn === INDETERMINATE) {
@@ -970,14 +1024,14 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     } else if (claimedLane) {
       nextUp = false;
       nextUpBasis = "already claimed in-progress";
-    } else if ((ladderFor(s)["folded"] as Rung).value === true) {
+    } else if (ownFolded.value === true) {
       nextUp = false;
-      nextUpBasis = "own candidate already folded to main — nothing left to dispatch";
-    } else if ((ladderFor(s)["folded"] as Rung).value === INDETERMINATE) {
+      nextUpBasis = `own candidate already folded to ${targetRef} — nothing left to dispatch`;
+    } else if (ownFolded.value === INDETERMINATE) {
       // Unknown own-completion must never read as dispatchable — INDETERMINATE
       // is the honest verdict, not true (the S24/S25 live false-green class).
       nextUp = INDETERMINATE;
-      nextUpBasis = `own completion rung INDETERMINATE (${(ladderFor(s)["folded"] as Rung).basis})`;
+      nextUpBasis = `own completion rung INDETERMINATE (${ownFolded.basis})`;
     } else {
       nextUp = true;
       nextUpBasis = "unblocked, unclaimed";
@@ -988,7 +1042,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
           nextUpBasis = `dep ${dep} unresolvable on this missions root`;
           break;
         }
-        const depLadder = ladderFor(depFacts);
+        const depLadder = await ladderFor(depFacts);
         const foldedRung = depLadder["folded"] as Rung;
         if (foldedRung.value === INDETERMINATE) {
           nextUp = INDETERMINATE;
@@ -1003,7 +1057,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       }
     }
     const wave = typeof s.id === "string" ? waveOfSlice(s.id) : null;
-    return {
+    q2.push({
       slice_id: s.id,
       dir: s.dir,
       planned_owners: arranged?.plannedOwners ?? [],
@@ -1023,8 +1077,8 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
         wave_map_row: waveMap.rowId,
         ...(arranged ? { arrangement_path: arranged.path } : {}),
       },
-    };
-  });
+    });
+  }
 
   // ---- Q3 care dial ----
   const q3 = slices.map((s) => {
@@ -1184,7 +1238,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
             }
           : {}),
       git: { basis: repoCtx ? `per-lane git -C; repo context ${repoCtx}` : "no reachable repo context", asof: asof() },
-      build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof() },
+      build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof(), basis: "OpenRig daemon source build; not a selected project deployment" },
       review_artifacts: { root: rigsRoot, asof: asof() },
       disk: { asof: asof() },
       workflow_lifecycle: {

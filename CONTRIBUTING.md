@@ -8,12 +8,12 @@ change in with the least friction on both sides.
 ## Before you start
 
 - **Bugs:** open an issue with the bug template. Include your OpenRig version (`rig --version`),
-  OS, Node version, which harnesses are involved (or none), and the relevant command and output.
+  OS, Node and tmux versions, which harnesses are involved (or none), and the relevant command and output.
   Reports are public: remove credentials, private prompts, personal details and private paths
   before posting. Share a small reproduction rather than a full transcript or instance dump.
-- **Features and behaviour changes:** open an issue or a Discussion in *Ideas* first. A short
-  "what I am trying to do and what stops me" saves both of us a rewrite. Small, obvious fixes do
-  not need an issue.
+- **Features and behaviour changes:** open an issue or a Discussion in *Ideas* first. Search issues
+  and Discussions, and check ROADMAP.md, before proposing a feature. A short "what I am trying to do
+  and what stops me" saves both of us a rewrite. Small, obvious fixes do not need an issue.
 - **Questions:** use [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a),
   not an issue.
 
@@ -45,20 +45,29 @@ Node `^22 || ^24` and a working `tmux` are required. Then:
 ```bash
 git clone https://github.com/mvschwarz/openrig.git
 cd openrig
-npm install
+npm ci                 # exactly what package-lock.json records
 npm run build          # all workspaces
 npm test               # repo checks + daemon, cli, tui test suites
 npm run lint           # typecheck every package
 ```
 
+`npm ci` installs the locked versions and never rewrites `package-lock.json`, which is what CI
+runs too. Use `npm install <package>` only when you're adding or changing a dependency, and commit
+the lockfile change with it.
+
 `npm test` builds the daemon and runs repository checks before the package suites. Read the
 specific failure. A shipped skill may exist in more than one copy (see ARCHITECTURE.md): edit every copy, then run
-`node scripts/regen-edge-digests.mjs` (the full `npm run mirror-skills` apply needs maintainer-only
-inputs; see "A shipped skill" in [ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)).
-`npm run generate-context-packs` updates generated packs. Review the generated diff; neither
-fixes every documentation failure. The UI unit-test suite is advisory and separate:
-`npm run test:ui`. [docs/as-built/test-layers.md](docs/as-built/test-layers.md) lists every test
-layer, what CI runs, and what each layer can and cannot prove.
+`node scripts/regen-edge-digests.mjs` and commit the digest file it changes (the full
+`npm run mirror-skills` apply needs maintainer-only inputs; see "A shipped skill" in
+[ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)). The repository checks include a docs guard: a
+tracked file under `docs/` must be in `docs/as-built/`, `docs/reference/` or `docs/releases/`
+(`docs/DESIGN.md` is the one exception). They check that shipped first-run text names only teams, skills and
+commands that exist, and they validate the context-pack sources;
+`npm run generate-context-packs` rebuilds the generated packs locally, which aren't committed.
+The UI unit-test suite is separate from `npm test`: run `npm run test:ui`. CI runs it on every pull
+request as `package-tests (ui)`, so a change has to pass it.
+[docs/as-built/test-layers.md](docs/as-built/test-layers.md) lists every test layer, what CI runs,
+and what each layer can and cannot prove.
 
 For hands-on development, read the [check requirements](docs/reference/developing.md),
 [worktree setup](docs/reference/worktree-builds.md), and
@@ -80,7 +89,7 @@ your working copy.
 - Do not bump versions.
 - Match the surrounding style. `npm run lint` typechecks; it does not format code.
 - Write commit messages in the form the log already uses: `fix(cli): …`, `feat(daemon): …`,
-  `docs(reference): …`, `harness: …`.
+  `docs(reference): …`, `test: …`.
 
 ## The pull request
 
@@ -114,7 +123,8 @@ clarifying question or run the reproduction; a maintainer makes the merge decisi
   when they work in this checkout (`.claude/skills/` and `.agents/skills/`). It points at the maps
   above and at what to run before you push.
 - Repository reference: `docs/reference/`; user documentation: [openrig.dev/docs](https://openrig.dev/docs).
-- Skills: `packages/daemon/specs/agents/shared/skills/` and plugin skills under
-  `packages/daemon/assets/plugins/`; static context-pack sources: `packages/daemon/context-packs-src/`.
+- Skills: `packages/daemon/specs/agents/shared/skills/`, plugin skills under
+  `packages/daemon/assets/plugins/`, and `skills/_canonical/`; static context-pack sources:
+  `packages/daemon/context-packs-src/`.
   Generated packs live in `packages/daemon/context-packs/` and are not hand-edited or committed.
 - Releases: [GitHub Releases](https://github.com/mvschwarz/openrig/releases) and npm `@openrig/cli`.

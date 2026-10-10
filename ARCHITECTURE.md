@@ -3,14 +3,14 @@
 > **This map is not the territory.** It is a zoomed-out guide for finding your way around the
 > code. It is incomplete by design and it may be stale. Where it disagrees with the code, the code
 > is right; please fix the page. Every path, symbol, count and command below was checked against
-> commit `1347d825` (`v0.6.3-33-g1347d825c`). Each count shows the command that produced it, so you
+> commit `c750304f` (0.6.6 development). Each count shows the command that produced it, so you
 > can re-run it.
 
 ## What OpenRig is
 
 OpenRig runs a team of coding agents on your machine as one system. A local daemon keeps the team's
 state in SQLite and runs each agent as an ordinary Claude Code or Codex session (or a plain
-terminal, a Pi runner, or a scripted test stub) inside tmux. People and agents drive it through the
+terminal, a Pi or Oh My Pi (OMP) runner, or a scripted test stub) inside tmux. People and agents drive it through the
 `rig` CLI, a terminal UI (TUI) and an MCP server, all of which talk to the daemon over local HTTP.
 The agents themselves are unmodified. What OpenRig adds is the coordination around them: launching
 and restoring agents, delivering messages, keeping durable work in a queue, and giving each agent
@@ -34,9 +34,9 @@ build goes to `ui/dist`; the TUI build goes to `tui/dist`. So `docs/reference/` 
 user; `docs/as-built/` and this file do not.
 
 **Sharing code between packages.** The CLI and TUI import daemon code only through the subpaths in
-the `exports` field of `packages/daemon/package.json` (18 at this commit), for example
+the `exports` field of `packages/daemon/package.json` (21 at this commit), for example
 `@openrig/daemon/attention`, which points at `packages/daemon/src/attention-surface.ts`. The CLI
-uses 16 of them and the TUI uses 2. In development they resolve through the npm workspace. At
+uses 19 of them and the TUI uses 2. In development they resolve through the npm workspace. At
 package time `scripts/rewrite-daemon-imports.mjs` rewrites them to the shipped `daemon/dist` copy
 and fails the build on a specifier with no `exports` entry. To share new daemon code, add a
 `*-surface.ts` file and an `exports` entry.
@@ -55,7 +55,7 @@ and fails the build on a specifier with no `exports` entry. To share new daemon 
   packages/daemon/src/domain/        services, repositories, orchestrators, event bus
               /                 |                  \
      SQLite (db/)       tmux (adapters/tmux.ts)    runtime adapters (adapters/*-adapter.ts)
-                                                     claude-code, codex, pi, terminal, stub
+                                                     claude-code, codex, pi, omp, terminal, stub
 ```
 
 **Inside the daemon** (`packages/daemon/src/`):
@@ -65,7 +65,8 @@ and fails the build on a specifier with no `exports` entry. To share new daemon 
   database (`db/connection.ts`: WAL mode, foreign keys on), runs `migrate(db, ALL_MIGRATIONS)`,
   constructs every service and adapter, and passes them to `createAppWithWebSocket(deps)` in
   `server.ts`.
-- **`server.ts`.** In `createApp(deps)`, the first `app.use("*", ...)` middleware puts each
+- **`server.ts`.** In `createApp(deps)`, an early `app.use("*", ...)` middleware (after the
+  request-phase observer and the JSON body-parse tracker) puts each
   service on the request context (`c.set("<name>" as never, deps.<name>)`), serves `/healthz`, and
   mounts each router with `app.route("/api/<area>", ...)`. Unknown `/api/*` paths get a JSON 404;
   other GET requests serve the web UI's built files.
@@ -78,8 +79,8 @@ and fails the build on a specifier with no `exports` entry. To share new daemon 
   `seat-delivery-guard.ts`) and events (`event-bus.ts`). Larger areas have their own
   subdirectories, such as `gateway/`, `provider/`, `policies/`, `scope/`, `context-packs/` and
   `mission-control/`.
-- **`adapters/`.** The outside world. `tmux.ts` wraps tmux. The five `RuntimeAdapter`
-  implementations launch each runtime and project skills and files into it. `cmux.ts` and
+- **`adapters/`.** The outside world. `tmux.ts` wraps tmux. The six `RuntimeAdapter`
+  implementations (OMP's extends Pi's) launch each runtime and project skills and files into it. `cmux.ts` and
   `compose-services-adapter.ts` cover other integrations.
 - **`db/`.** `connection.ts`, `migrate.ts`, `all-migrations.ts` and `migrations/`.
 - **`middleware/auth-bearer-token.ts`.** The bearer-token check for operator write routes, plus
@@ -112,19 +113,19 @@ that is already running keeps running the code it started with.
 
 ## Key counts
 
-At commit `1347d825`. Run these from the repository root to refresh them.
+At commit `c750304f`. Run these from the repository root to refresh them.
 
 | What | Count | Command |
 |---|---|---|
-| Database migrations | 89 (latest: `089_classification_identity_provenance.ts`) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
+| Database migrations | 94 files (latest: `095_rig_non_interruptive.ts`; there is no 093) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
 | Files in `routes/` | 67 | `git ls-files packages/daemon/src/routes \| wc -l` |
 | ... of which create a Hono router | 65 | `git grep -l 'new Hono' -- packages/daemon/src/routes \| wc -l` |
 | `app.route(...)` mounts in `server.ts` | 69 | `grep -c 'app.route(' packages/daemon/src/server.ts` |
-| Top-level `rig` commands | 85 | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
-| Runtime adapters | 5 (`claude-code`, `codex`, `pi`, `terminal`, `stub`) | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
+| Top-level `rig` commands | 87 | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
+| Runtime adapters | 6 (`claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`); the command counts 5 because `OmpRuntimeAdapter` extends `PiRuntimeAdapter` | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
 | MCP tools | 18 | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
-| Daemon `exports` subpaths | 18 | `node -p 'Object.keys(require("./packages/daemon/package.json").exports).length'` |
-| Library scenarios | 11 | `grep -l '^scenario:' packages/test-system/scenarios/*.yaml \| wc -l` |
+| Daemon `exports` subpaths | 21 | `node -p 'Object.keys(require("./packages/daemon/package.json").exports).length'` |
+| Library scenarios | 15 | `grep -l '^scenario:' packages/test-system/scenarios/*.yaml \| wc -l` |
 
 ## Where to add things
 
@@ -168,7 +169,7 @@ the authority.
 1. Create `packages/daemon/src/db/migrations/<NNN>_<name>.ts` exporting a `Migration`
    (`{ name: "<NNN>_<name>.sql", sql: "..." }`; the type is in `packages/daemon/src/db/migrate.ts`).
    `089_classification_identity_provenance.ts` is a one-line example.
-2. Take the next number after the highest on `main` (089 at this commit). Parallel pull requests
+2. Take the next number after the highest on `main` (095 at this commit). Parallel pull requests
    often pick the same number, so check again and renumber if `main` moved before you merge.
 3. Import it in `packages/daemon/src/db/all-migrations.ts` and append it to `ALL_MIGRATIONS`.
    Startup runs exactly that list (`startup-migrations-mirror.test.ts` pins this).
@@ -267,11 +268,13 @@ and no model cost.
    inside tmux, including an agent's pane. It supplies no fault controller, so a
    `seed_regression` step fails there; the seeded pair runs in the container path.
 6. **CI.** The `installed-scenario` job runs `scripts/run-pr-scenarios.sh` in disposable,
-   network-less containers built from the packed package. It runs two cases, both built around
-   queue durability (`library` is `queue-baton-survives-restart.yaml`). Adding a case today means
-   changing three files: the `--case` list in `scripts/run-pr-scenarios.sh`, `CASES` in
+   network-less containers built from the packed package. It runs four cases: `fixture` and `library`
+   (`queue-baton-survives-restart.yaml`), each with a healthy run and a seeded lost-baton run, plus
+   `transcript` and `capture`, healthy runs only. Adding a seeded case means changing three files:
+   the `--case` list in `scripts/run-pr-scenarios.sh`, `CASES` in
    `packages/test-system/ci/result.mjs`, and the fault controller in
-   `packages/test-system/ci/run.mjs`. [docs/as-built/test-layers.md](docs/as-built/test-layers.md)
+   `packages/test-system/ci/run.mjs`; a healthy-only case goes in `PASSING_CASES` in the first two
+   and needs no fault controller. [docs/as-built/test-layers.md](docs/as-built/test-layers.md)
    covers both run modes, running a case on your own Docker host, and what a stub can and cannot
    prove.
 
@@ -302,6 +305,10 @@ packages.
 - **Generated files.** Do not hand-edit `scripts/*.generated.json` or anything under
   `packages/daemon/context-packs/`. The skill-edge digests are the one generated file a contributor
   refreshes, with `node scripts/regen-edge-digests.mjs` (see "A shipped skill").
+  The internal-token rules support optional `allowed_context_lines` for reviewed generic
+  examples: the complete line must match exactly, including indentation and case. Unlike
+  `allowed_context_substrings`, this does not exempt a line with added or substituted text;
+  internal-path checks and the substance gate's human-review dispositions still apply.
 - **Hosted CI** (`.github/workflows/tests.yml`): `build-and-package`, `typecheck`, `repo-checks`,
   `package-tests` (macOS; daemon, CLI, TUI and UI suites with no credentials and no external
   network) and `installed-scenario`.
@@ -310,15 +317,14 @@ packages.
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, what a pull request needs, what to expect from review.
 - [docs/reference/developing.md](docs/reference/developing.md): which checks block and which are
-  advisory. It predates the hosted Tests workflow; `.github/workflows/tests.yml` is current.
+  advisory, and what `.github/workflows/tests.yml` runs.
 - [docs/reference/worktree-builds.md](docs/reference/worktree-builds.md): building in a git
-  worktree, with its own `npm install` rather than a symlinked `node_modules`.
+  worktree, with its own `npm ci` rather than a symlinked `node_modules`.
 - [docs/reference/](docs/reference/): user and operator reference; it ships with the package.
 - [docs/as-built/](docs/as-built/README.md): module-by-module descriptions of the system. **These
-  are being re-verified.** Most modules were last verified against `7eaf524c` (2026-05-16, around
-  v0.3.1); the two pages this change adds, `arteries.md` and `test-layers.md`, are verified against
-  `1347d825`. The older modules' counts are historical: `architecture/daemon-core.md`
-  describes 40 migrations, and there are 89 today. Use them for orientation, then check the code.
+  are being re-verified for 0.6.6.** Each page's `last-verified-against-source` names the commit it was
+  checked against; until a page is re-verified, treat its counts as historical. Use them for
+  orientation, then check the code.
 - [docs/as-built/test-layers.md](docs/as-built/test-layers.md): what each test layer covers and
   what it cannot catch.
 - [docs/as-built/arteries.md](docs/as-built/arteries.md): the areas where a small change has a

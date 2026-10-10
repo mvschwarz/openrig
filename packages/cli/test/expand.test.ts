@@ -50,7 +50,7 @@ const OK_RESPONSE = {
   podId: "pod-123",
   podNamespace: "infra",
   nodes: [{ logicalId: "infra.server", nodeId: "n1", status: "launched", sessionName: "infra-server@test" }],
-  warnings: [],
+  warnings: ["Startup submission unverified in worker@fixture"],
   retryTargets: [],
 };
 
@@ -142,6 +142,7 @@ describe("rig expand", () => {
     });
     expect(logs.join("\n")).toContain("infra");
     expect(logs.join("\n")).toContain("ok");
+    expect(logs.join("\n")).toContain("Startup submission unverified in worker@fixture");
   });
 
   // T2: --json returns raw API response

@@ -10,13 +10,17 @@ import { parseAgentSpec, validateAgentSpec } from "../src/domain/agent-manifest.
 const SPECS_ROOT = resolve(import.meta.dirname, "../specs");
 
 const RIG_SPECS = [
-  "rigs/launch/conveyor/rig.yaml",
-  "rigs/launch/implementation-pair/rig.yaml",
-  "rigs/focused/adversarial-review/rig.yaml",
-  "rigs/focused/research-team/rig.yaml",
-  "rigs/launch/demo/rig.yaml",
-  "rigs/preview/product-team/rig.yaml",
+  "rigs/launch/starter/rig.yaml",
+  "rigs/launch/factory/rig.yaml",
+  "rigs/focused/code-review/rig.yaml",
+  "rigs/focused/research/rig.yaml",
+  "rigs/focused/pm/rig.yaml",
+  "rigs/launch/kernel/rig.yaml",
+  "rigs/launch/kernel/rig-claude-only.yaml",
+  "rigs/launch/kernel/rig-codex-only.yaml",
   "rigs/launch/secrets-manager/rig.yaml",
+  // Retained for the world migration, deliberately absent from the built-in shelf.
+  "rigs/launch/factory-rsi/world-bundle.yaml",
 ];
 const PROOF_RIG_SPECS: string[] = [];
 
@@ -194,15 +198,9 @@ describe("Starter specs", () => {
     lib.scan();
 
     const rigs = lib.list({ kind: "rig" });
-    expect(rigs.length).toBeGreaterThanOrEqual(7);
-    const names = rigs.map((e) => e.name);
-    expect(names).toContain("conveyor");
-    expect(names).toContain("implementation-pair");
-    expect(names).toContain("adversarial-review");
-    expect(names).toContain("research-team");
-    expect(names).toContain("demo");
-    expect(names).toContain("product-team");
-    expect(names).toContain("secrets-manager");
+    expect(rigs.map((entry) => entry.name).sort()).toEqual([
+      "code-review", "factory", "kernel", "pm", "research", "secrets-manager", "starter",
+    ]);
   });
 
   it("service-backed rigs expose hasServices, non-service rigs do not", () => {
@@ -214,12 +212,12 @@ describe("Starter specs", () => {
 
     const rigs = lib.list({ kind: "rig" });
     const secretsManager = rigs.find((entry) => entry.name === "secrets-manager");
-    const demo = rigs.find((entry) => entry.name === "demo");
+    const starter = rigs.find((entry) => entry.name === "starter");
 
     expect(secretsManager).toBeDefined();
     expect(secretsManager!.hasServices).toBe(true);
-    expect(demo).toBeDefined();
-    expect(demo!.hasServices).toBeFalsy();
+    expect(starter).toBeDefined();
+    expect(starter!.hasServices).toBeFalsy();
   });
 
   it("secrets-manager rig uses canonical vault.specialist topology", () => {
@@ -242,30 +240,12 @@ describe("Starter specs", () => {
     expect(summary).toContain("specialist");
   });
 
-  it("starter summaries position conveyor as the generic starter and product-team as the advanced product lane", () => {
-    const lib = new SpecLibraryService({
-      roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
-      specReviewService,
-    });
+  it("starter and factory summaries describe their different team sizes", () => {
+    const lib = new SpecLibraryService({ roots: [{ path: SPECS_ROOT, sourceType: "builtin" }], specReviewService });
     lib.scan();
-
     const rigs = lib.list({ kind: "rig" });
-    const conveyor = rigs.find((entry) => entry.name === "conveyor");
-    const implementationPair = rigs.find((entry) => entry.name === "implementation-pair");
-    const demo = rigs.find((entry) => entry.name === "demo");
-    const productTeam = rigs.find((entry) => entry.name === "product-team");
-
-    expect(conveyor?.summary?.toLowerCase()).toContain("station pipeline");
-    expect(conveyor?.summary?.toLowerCase()).toContain("starter");
-    expect(implementationPair?.summary?.toLowerCase()).toMatch(/implementation and qa capabilities/);
-    expect(implementationPair?.summary?.toLowerCase()).toMatch(/components choose the work/);
-    expect(implementationPair?.summary?.toLowerCase()).toMatch(/no composition means light part a/);
-    expect(demo?.summary?.toLowerCase()).toContain("launch-grade");
-    expect(demo?.summary?.toLowerCase()).not.toContain("advanced preview");
-    expect(productTeam?.summary?.toLowerCase()).toContain("advanced product-development starter");
-    expect(productTeam?.summary?.toLowerCase()).not.toContain("demo");
-    expect(productTeam?.summary?.toLowerCase()).not.toContain("advanced preview");
-    expect(productTeam?.summary?.toLowerCase()).not.toContain("happy-path starter");
+    expect(rigs.find((entry) => entry.name === "starter")?.summary).toContain("Claude Code builder and a Codex reviewer");
+    expect(rigs.find((entry) => entry.name === "factory")?.summary).toContain("PM advisor");
   });
 
   it("all rig specs pass canonical rigPreflight with explicit cwdOverride", async () => {
@@ -470,11 +450,11 @@ describe("Starter specs", () => {
       ],
       [
         "agents/development/implementer/agent.yaml",
-        ["development-team", "test-driven-development", "systematic-debugging", "verification-before-completion"],
+        ["development-team", "systematic-debugging", "verification-before-completion"],
       ],
       [
         "agents/development/qa/agent.yaml",
-        ["development-team", "test-driven-development", "systematic-debugging", "verification-before-completion", "agent-browser", "dogfood"],
+        ["development-team", "systematic-debugging", "verification-before-completion", "agent-browser", "dogfood"],
       ],
       [
         "agents/review/independent-reviewer/agent.yaml",
@@ -534,7 +514,7 @@ describe("Starter specs", () => {
       id: "openrig-core",
       source: {
         kind: "local",
-        path: "~/.openrig/plugins/openrig-core",
+        path: "openrig-home:plugins/openrig-core",
       },
     });
   });
@@ -779,8 +759,8 @@ describe("Starter specs", () => {
     expect(roleContent.toLowerCase()).toContain("principles");
   });
 
-  it("demo and orchestration enter selected work without waiting for unneeded seats", () => {
-    const demoCulture = readFileSync(join(SPECS_ROOT, "rigs/launch/demo/CULTURE.md"), "utf-8").replace(/\s+/g, " ");
+  it("factory and orchestration enter selected work without waiting for unneeded seats", () => {
+    const demoCulture = readFileSync(join(SPECS_ROOT, "rigs/launch/factory/CULTURE.md"), "utf-8").replace(/\s+/g, " ");
     const orchestrationSkill = readFileSync(
       join(SPECS_ROOT, "agents/shared/skills/pods/orchestration-team/SKILL.md"),
       "utf-8",

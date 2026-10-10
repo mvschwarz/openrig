@@ -21,12 +21,12 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
-export interface TerminalDeps extends StatusDeps {}
+export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
 
 /** The one shared open-result shape (mirrors the daemon `OpenViewResult`). */
-interface OpenViewResult {
+export interface OpenViewResult {
   provider: string;
   ok: boolean;
   opened: string[];
@@ -36,7 +36,15 @@ interface OpenViewResult {
   error?: string;
   code?: string;
   notes?: string[];
+  window?: { app: string; surface: string };
+  reusedWorkspace?: { id: string; tabId: string; view: string };
+  /** On window failures, false means no desktop launch was attempted. */
+  windowAttempted?: boolean;
 }
+
+// Opening applies pages through several bounded provider round trips; it is
+// an operation, not a read that can share the client's five-second default.
+const TERMINAL_OPEN_TIMEOUT_MS = 45_000;
 
 async function withClient<T>(
   deps: TerminalDeps,
@@ -59,11 +67,16 @@ function humanOpen(r: OpenViewResult): string {
   const lines: string[] = [];
   const tiled = r.opened.length;
   lines.push(
-    tiled > 0
-      ? `Opened ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
-      : `No tiles opened in ${r.provider}.`,
+    r.code === "terminal_window_failed" && r.error
+      ? r.error
+      : r.ok && r.reusedWorkspace
+        ? `Terminal window requested. Reused herdr workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
+        : tiled > 0
+          ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
+          : `No tiles opened in ${r.provider}.`,
   );
-  if (r.error) lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
+  if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
+  if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
   for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — skipped (${d.host}): ${d.reason}`);
@@ -71,23 +84,22 @@ function humanOpen(r: OpenViewResult): string {
   return lines.join("\n");
 }
 
-/** Open exit rule: exit 0 iff at least one pane was tiled (partial-with-names is success). */
+/** A successful existing-workspace selection also needs no new panes. */
 function printOpen(json: boolean, r: OpenViewResult, status: number): void {
   if (json) {
     console.log(JSON.stringify(r));
   } else {
     console.log(humanOpen(r));
   }
-  // A 4xx/5xx (bad input / unknown view / service down) OR a zero-pane open is a failure.
-  if (status >= 400 || r.opened.length === 0) {
+  if (status >= 400 || (r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }
 
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
-    "Open OpenRig views (agent terminals) as tiles in a terminal provider (herdr / cmux)",
-  );
+    "Open the OpenRig view and agent conversations in terminal tiles",
+  ).addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Uses herdr when installed, otherwise the same layout in plain tmux.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  On a desktop, the agent opens the view; it does not finish by printing a command to copy.\n");
 
   const getDeps = (): TerminalDeps =>
     depsOverride ?? {
@@ -98,14 +110,23 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
   cmd
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
-    .description("Open every live agent in the view as an interactive terminal tile")
-    .option("--provider <name>", "terminal provider: herdr (default) or cmux (best-effort)")
+    .description("Open a desktop terminal showing the view's live agents as interactive tiles")
+    .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
+    .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
+    .option("--expected-plan <id>", "Open only if the view still matches this preview")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; json?: boolean }) => {
+    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}) };
-        const res = await client.post<OpenViewResult>("/api/terminal/open", body);
+        // Herdr's control socket can answer with no desktop client attached.
+        // The default requests a desktop; an explicit provider reuses its workspace.
+        if (opts.window || !opts.provider) {
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan);
+          printOpen(opts.json ?? false, result, 200);
+          return;
+        }
+        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) };
+        const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
         if (!Array.isArray(res.data?.opened)) {
           printResult(opts.json ?? false, res.data, res.status);
           return;

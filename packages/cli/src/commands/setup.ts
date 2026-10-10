@@ -2,22 +2,15 @@ import { Command } from "commander";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
 import path from "node:path";
+import { homedir } from "node:os";
+import { shellQuote } from "../cross-host-executor.js";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
-import { formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
-import {
-  CMUX_SETTINGS_DISCLOSURE_PATH,
-  isCmuxSocketControlCompatible,
-  readCmuxSocketControlModeFromText,
-  resolveCmuxSettingsPath,
-  upsertCmuxSocketControlMode,
-} from "../cmux-config.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
-import { parse as parseToml } from "smol-toml";
-import { resolveCodexHome } from "../lib/codex-auth.js";
+import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 
 export interface SetupStep {
   id: string;
@@ -64,50 +57,18 @@ export interface SetupDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-/** Issue #194 — how the Codex provider selected in `$CODEX_HOME/config.toml`
- *  authenticates. Only an explicit provider entry with
- *  `requires_openai_auth = false` and an `env_key` uses its credential
- *  variable; every unresolved case keeps the OpenAI login check. Other Codex
- *  config layers are not resolved here. The daemon's kernel probe
- *  (`selectCodexProviderAuth` in kernel-boot.ts) carries the same rule. */
-export type CodexProviderAuth =
-  | { kind: "openai-login"; unresolved?: string }
-  | { kind: "env-key"; providerId: string; envKey: string };
-
-export function selectCodexProviderAuth(configToml: string | null): CodexProviderAuth {
-  if (configToml === null) return { kind: "openai-login" };
-  let config: Record<string, unknown>;
-  try {
-    config = parseToml(configToml) as Record<string, unknown>;
-  } catch {
-    return { kind: "openai-login", unresolved: "config.toml could not be parsed" };
-  }
-  if (Object.hasOwn(config, "profile")) {
-    return { kind: "openai-login", unresolved: "config.toml selects a legacy profile, which is not resolved here" };
-  }
-  const providerId = config["model_provider"];
-  const providers = config["model_providers"];
-  if (typeof providerId !== "string" || !providers || typeof providers !== "object" || !Object.hasOwn(providers, providerId)) {
-    return { kind: "openai-login" };
-  }
-  const entry = (providers as Record<string, unknown>)[providerId];
-  if (!entry || typeof entry !== "object") return { kind: "openai-login" };
-  const { requires_openai_auth: requiresOpenAiAuth, env_key: envKey } = entry as Record<string, unknown>;
-  if (requiresOpenAiAuth !== false || typeof envKey !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
-    return { kind: "openai-login" };
-  }
-  return { kind: "env-key", providerId, envKey };
-}
+// Preserve the setup module's existing selector export.
+export { selectCodexProviderAuth, type CodexProviderAuth } from "../provider-auth.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const INSTALL_COMMAND_TIMEOUT_MS = 5 * 60_000;
-const CMUX_READY_ATTEMPTS = 5;
-const CMUX_READY_DELAY_MS = 1_000;
+const HERDR_INSTALL_COMMAND = "curl -fsSL https://herdr.dev/install.sh | sh";
 
 const CORE_STEP_IDS = [
   "brew",
   "tmux_install",
-  "cmux_install",
+  "herdr_install",
+  "ghostty_install",
   "claude_install",
   "claude_auth",
   "codex_install",
@@ -116,21 +77,26 @@ const CORE_STEP_IDS = [
   "verify",
 ];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
+const BREW_PLATFORM_SKIP = "Skipped: Homebrew setup path is only used on macOS.";
+/** Homebrew is only used by the macOS setup path. Herdr also installs on Linux. */
+const NON_DARWIN_DRY_RUN_SKIPS: Record<string, string> = {
+  brew: BREW_PLATFORM_SKIP,
+};
 const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   // OPR.0.4.8.2 agnostic rip-out: OpenRig no longer writes ~/.claude/settings.json — the global
   // permission allow-list (C2) is removed, so that global file is no longer touched at all.
   {
     scope: "global",
     runtime: "claude-code",
-    path: "~/.claude.json",
-    purpose: "Pre-trust managed workspaces and mark Claude onboarding complete.",
+    path: "~/.claude.json or <CLAUDE_CONFIG_DIR>/.claude.json",
+    purpose: "Pre-trust managed workspaces and mark Claude onboarding complete. Explicit permission modes use the launch-selected HOME/config; classic startup uses the daemon home.",
   },
   {
     scope: "project",
     runtime: "claude-code",
     path: ".claude/settings.local.json",
     purpose:
-      "Apply context-collector statusLine config and the acceptEdits floor fragment. OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface.",
+      "Apply context-collector statusLine config and the acceptEdits floor fragment. The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.",
   },
   {
     scope: "project",
@@ -141,17 +107,10 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   {
     scope: "global",
     runtime: "codex",
-    path: "~/.codex/config.toml",
+    path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
     purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
   },
 ];
-
-const DARWIN_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure = {
-  scope: "global",
-  runtime: "cmux",
-  path: CMUX_SETTINGS_DISCLOSURE_PATH,
-  purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
-};
 
 export function defaultDeps(): SetupDeps {
   return {
@@ -172,90 +131,67 @@ function installCommand(deps: SetupDeps, cmd: string): string {
   return deps.exec(cmd, { timeoutMs: INSTALL_COMMAND_TIMEOUT_MS });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForCmuxCapabilities(deps: SetupDeps, attempts = CMUX_READY_ATTEMPTS): Promise<boolean> {
-  for (let index = 0; index < attempts; index += 1) {
+/** Probe without starting a server or taking over the installing terminal. */
+function findHerdrCommand(deps: SetupDeps): string | null {
+  const env = deps.env ?? process.env;
+  const installDir = env["HERDR_INSTALL_DIR"] ?? path.join(env["HOME"] ?? homedir(), ".local", "bin");
+  for (const command of ["herdr", shellQuote(path.join(installDir, "herdr"))]) {
     try {
-      deps.exec("cmux capabilities --json");
-      return true;
-    } catch {
-      if (index < attempts - 1) {
-        await sleep(CMUX_READY_DELAY_MS);
-      }
-    }
+      deps.exec(`${command} --version`);
+      return command;
+    } catch { /* Try the installer's default path if it is not on PATH. */ }
   }
-  return false;
+  return null;
 }
 
-async function tryEnableCmuxControl(deps: SetupDeps, platform: NodeJS.Platform): Promise<boolean> {
-  if (platform !== "darwin") return false;
-
-  const settingsPath = resolveCmuxSettingsPath();
-  const settingsText = deps.readFile(settingsPath);
-  const currentMode = readCmuxSocketControlModeFromText(settingsText);
-  if (currentMode.error) {
-    return false;
+function installHerdr(deps: SetupDeps, platform: NodeJS.Platform): SetupStep {
+  if (platform !== "darwin" && platform !== "linux") {
+    return { id: "herdr_install", status: "skipped", message: "Automatic herdr installation is supported on macOS and Linux." };
   }
-
+  let command = findHerdrCommand(deps);
+  const present = command !== null;
   try {
-    deps.mkdirp?.(path.dirname(settingsPath));
-    const next = upsertCmuxSocketControlMode(settingsText, "automation");
-    if (next.changed) {
-      deps.writeFile(settingsPath, next.content);
+    if (!command) {
+      installCommand(deps, HERDR_INSTALL_COMMAND);
+      command = findHerdrCommand(deps);
+      if (!command) throw new Error("The installer returned, but the herdr binary could not be verified.");
     }
-  } catch {
-    return false;
+    return {
+      id: "herdr_install",
+      status: present ? "pass" : "applied",
+      message: `${present ? "Found" : "Installed"} herdr (${command}). No terminal or view was opened.`,
+      ...(command !== "herdr" ? { fixHint: `Use ${command} when opening the view, or add its directory to your shell PATH.` } : {}),
+    };
+  } catch (err) {
+    return {
+      id: "herdr_install", status: "warn",
+      message: `Could not install or verify herdr: ${(err as Error).message}`,
+      reason: "The OpenRig view can use plain tmux without herdr. Existing cmux workflows remain available.",
+      fixHint: `Retry \`${HERDR_INSTALL_COMMAND}\`, or follow https://herdr.dev/docs/install/.`,
+    };
   }
-
-  const shellReady = await waitForCmuxCapabilities(deps, 1);
-  if (shellReady) {
-    try {
-      deps.exec("cmux reload-config");
-    } catch {
-      // Best effort: if reload fails, the daemon-side verification will surface it honestly.
-    }
-    return waitForCmuxCapabilities(deps, 1);
-  }
-
-  try {
-    deps.exec("open -a /Applications/cmux.app");
-  } catch {
-    // Best effort: cmux may already be running or the app open may be blocked; capability probe decides readiness.
-  }
-
-  return waitForCmuxCapabilities(deps);
 }
 
-function buildRuntimeConfigDisclosure(platform: NodeJS.Platform): RuntimeConfigDisclosure[] {
-  return platform === "darwin"
-    ? [...BASE_RUNTIME_CONFIG_DISCLOSURE, DARWIN_RUNTIME_CONFIG_DISCLOSURE]
-    : [...BASE_RUNTIME_CONFIG_DISCLOSURE];
-}
-
-async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"available" | "unavailable" | "skipped"> {
-  const fetchFn = doctorDeps?.fetch;
-  if (!fetchFn) return "skipped";
-  const config = doctorDeps.configStore.resolve();
-  const host = config.daemon.host;
-  const port = config.daemon.port;
-
+/** The installing agent asks once; only an explicit Yes installs the optional Mac terminal. */
+function installGhostty(deps: SetupDeps, platform: NodeJS.Platform, choice?: boolean): SetupStep {
+  const id = "ghostty_install";
+  if (platform !== "darwin") return { id, status: "skipped", message: "The Ghostty offer is for macOS; existing Linux terminals remain available." };
+  if (choice === false) return { id, status: "skipped", message: "Ghostty declined (--no-ghostty). Terminal.app remains available." };
+  const home = (deps.env ?? process.env)["HOME"] ?? homedir();
+  const locations = ["/Applications/Ghostty.app", path.join(home, "Applications/Ghostty.app")];
+  if (locations.some(deps.exists)) return { id, status: "pass", message: "Ghostty is already installed. No terminal was opened." };
+  if (choice !== true) return {
+    id, status: "skipped",
+    message: "Installing agent: ask once, 'Install Ghostty for the OpenRig view?'",
+    fixHint: "On Yes, rerun rig setup with --ghostty, preserving earlier choices such as --no-herdr. On No, use --no-ghostty; Terminal.app remains available. The person types no command.",
+  };
   try {
-    const healthRes = await fetchFn(`http://${formatDaemonHostForUrl(host)}:${port}/healthz`);
-    if (!healthRes.ok) return "skipped";
-  } catch {
-    return "skipped";
-  }
-
-  try {
-    const cmuxRes = await fetchFn(`http://${formatDaemonHostForUrl(host)}:${port}/api/adapters/cmux/status`);
-    if (!cmuxRes.ok || !cmuxRes.json) return "unavailable";
-    const data = (await cmuxRes.json()) as { available?: boolean };
-    return data.available ? "available" : "unavailable";
-  } catch {
-    return "unavailable";
+    installCommand(deps, "brew install --cask ghostty");
+    if (!locations.some(deps.exists)) throw new Error("The installer returned, but Ghostty.app was not found.");
+    return { id, status: "applied", message: "Installed Ghostty. No terminal was opened." };
+  } catch (err) {
+    return { id, status: "fail", message: `Could not install or verify Ghostty: ${(err as Error).message}`,
+      fixHint: "Check Homebrew and https://ghostty.org/docs/install/binary. Terminal.app remains available; no view was opened." };
   }
 }
 
@@ -268,7 +204,7 @@ async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"availabl
 //   deliberate-none  -> permission_policy: none             (origin deliberate_none; floor==absent)
 // P3: the record runs ONLY on an explicit --policy selection, NEVER on skip/quit/timeout (no flag =>
 // no step => bare setup byte-unchanged). P1: no path here upgrades an absent spec to deliberate_none.
-export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "none"] as const;
+export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "auto", "none"] as const;
 export type PolicyChoice = (typeof POLICY_CHOICES)[number];
 
 // Root-spec filenames, matching the CLI's established file-or-directory spec convention
@@ -318,7 +254,7 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
       status: "fail",
       message: "No existing rig spec to record the policy into.",
       reason:
-        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — the usability floor holds by absence.",
+        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — team seats keep the team default.",
       fixHint: "Point --spec at an existing rig.yaml (or a directory containing one), then re-run `rig setup --policy`.",
     };
   }
@@ -353,16 +289,23 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
   };
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
-  const runtimeConfig = buildRuntimeConfigDisclosure(platform);
+  const runtimeConfig = [...BASE_RUNTIME_CONFIG_DISCLOSURE];
   const stepIds = opts.full ? [...CORE_STEP_IDS, ...FULL_EXTRA_STEP_IDS] : [...CORE_STEP_IDS];
   const steps: SetupStep[] = [];
 
   if (opts.dryRun) {
     for (const id of stepIds) {
-      steps.push({ id, status: "skipped", message: `Dry run: ${id} would be attempted.` });
+      const platformSkip = id === "herdr_install" && opts.herdr === false ? "Skipped: herdr installation declined (--no-herdr)."
+        : id === "herdr_install" && !["darwin", "linux"].includes(platform) ? "Automatic herdr installation is supported on macOS and Linux."
+        : id === "ghostty_install" ? (platform !== "darwin" ? "The Ghostty offer is for macOS."
+          : opts.ghostty === false ? "Ghostty declined (--no-ghostty)."
+          : opts.ghostty === true ? "Dry run: Ghostty installation would be attempted."
+          : "Dry run: the installing agent offers Ghostty once; only Yes installs it.")
+        : platform !== "darwin" ? NON_DARWIN_DRY_RUN_SKIPS[id] : undefined;
+      steps.push({ id, status: "skipped", message: platformSkip ?? `Dry run: ${id} would be attempted.` });
     }
     if (opts.policy !== undefined) {
       steps.push({ id: "policy_record", status: "skipped", message: `Dry run: would record permission_policy for '${opts.policy}'.` });
@@ -377,7 +320,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({
       id: "brew",
       status: "skipped",
-      message: "Skipped: Homebrew setup path is only used on macOS.",
+      message: BREW_PLATFORM_SKIP,
     });
   } else {
     try {
@@ -389,7 +332,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         id: "brew",
         status: "fail",
         message: "Homebrew not found.",
-        reason: "Homebrew is required to install tmux and cmux on macOS.",
+        reason: "Homebrew is required to install tmux on macOS.",
         fixHint: "Install Homebrew: https://brew.sh",
       });
     }
@@ -421,119 +364,12 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: "tmux_install", status: "pass", message: "tmux available." });
   }
 
-  // 3. cmux
-  const daemonCmuxBefore = await probeDaemonCmuxStatus(opts.doctorDeps);
-  if (await waitForCmuxCapabilities(deps, 1)) {
-    const socketMode = readCmuxSocketControlModeFromText(deps.readFile(resolveCmuxSettingsPath()));
-    if (platform === "darwin" && socketMode.error) {
-      steps.push({
-        id: "cmux_install",
-        status: "fail",
-        message: "cmux settings file is unreadable.",
-        reason: `OpenRig could not parse ${CMUX_SETTINGS_DISCLOSURE_PATH}: ${socketMode.error}`,
-        fixHint: "Repair or remove the cmux settings file, then rerun `rig setup`.",
-      });
-    } else if (platform === "darwin" && !isCmuxSocketControlCompatible(socketMode.mode)) {
-      if (await tryEnableCmuxControl(deps, platform)) {
-        const daemonCmuxAfter = await probeDaemonCmuxStatus(opts.doctorDeps);
-        if (daemonCmuxAfter === "unavailable") {
-          steps.push({
-            id: "cmux_install",
-            status: "fail",
-            message: "OpenRig updated cmux settings, but the running daemon still cannot control cmux.",
-            reason: "The cmux settings file is now compatible, so the remaining blocker is in the live daemon/cmux session state.",
-            fixHint: "Restart the daemon with `rig daemon start`, then rerun `rig doctor` to confirm cmux daemon control.",
-          });
-        } else {
-          steps.push({
-            id: "cmux_install",
-            status: "applied",
-            message: "Normalized cmux socket control to automation mode in ~/.config/cmux/settings.json.",
-          });
-        }
-      } else {
-        steps.push({
-          id: "cmux_install",
-          status: "fail",
-          message: "cmux shell control works, but OpenRig could not normalize cmux socket control.",
-          reason: "OpenRig needs a compatible cmux socket control mode so the daemon can open CMUX surfaces reliably.",
-          fixHint: `Set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then rerun \`rig setup\` or \`rig doctor\`.`,
-        });
-      }
-    } else if (daemonCmuxBefore === "unavailable") {
-      steps.push({
-        id: "cmux_install",
-        status: "fail",
-        message: "cmux shell control works, but the running daemon still cannot control cmux.",
-        reason: "Current cmux settings already look compatible, so the remaining blocker is outside the cmux settings file OpenRig can repair automatically.",
-        fixHint: "Run `rig doctor` for the exact daemon cmux diagnosis, then restart the daemon after clearing the underlying blocker.",
-      });
-    } else {
-      steps.push({ id: "cmux_install", status: "pass", message: "cmux available." });
-    }
-  } else {
-    try {
-      deps.exec("cmux --help");
+  // 3. Herdr is the default view provider. Leave optional cmux installations untouched.
+  steps.push(opts.herdr === false
+    ? { id: "herdr_install", status: "skipped", message: "Skipped: herdr installation declined (--no-herdr)." }
+    : installHerdr(deps, platform));
+  steps.push(installGhostty(deps, platform, opts.ghostty));
 
-      if (await tryEnableCmuxControl(deps, platform)) {
-        const daemonCmuxAfter = await probeDaemonCmuxStatus(opts.doctorDeps);
-        if (daemonCmuxAfter === "unavailable") {
-          steps.push({
-            id: "cmux_install",
-            status: "fail",
-            message: "OpenRig enabled cmux socket control, but the running daemon still cannot control cmux.",
-            reason: "The cmux app and settings are now in place, so the remaining blocker is in the live daemon/cmux session state.",
-            fixHint: "Restart the daemon with `rig daemon start`, then rerun `rig doctor` to confirm cmux daemon control.",
-          });
-        } else {
-          steps.push({
-            id: "cmux_install",
-            status: "applied",
-            message: "Enabled cmux socket control in ~/.config/cmux/settings.json.",
-          });
-        }
-      } else {
-        steps.push({
-          id: "cmux_install",
-          status: platform === "darwin" ? "fail" : "warn",
-          message: "cmux installed but control unavailable.",
-          reason: "Open CMUX workflows need cmux socket control to be enabled.",
-          fixHint: platform === "darwin"
-            ? `Set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then rerun \`rig setup\` or \`rig doctor\`.`
-            : "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
-        });
-      }
-    } catch {
-      if (!brewOk) {
-        steps.push({ id: "cmux_install", status: "skipped", message: "Skipped: Homebrew not available." });
-      } else {
-        try {
-          installCommand(deps, "brew install --cask cmux");
-          if (await tryEnableCmuxControl(deps, platform) || await waitForCmuxCapabilities(deps, 1)) {
-            steps.push({ id: "cmux_install", status: "applied", message: "Installed cmux with Homebrew." });
-          } else {
-            steps.push({
-              id: "cmux_install",
-              status: platform === "darwin" ? "fail" : "warn",
-              message: "Installed cmux, but control is still unavailable.",
-              reason: "Open CMUX workflows need the cmux app to expose socket control after installation.",
-              fixHint: "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
-            });
-          }
-        } catch (err) {
-          steps.push({
-            id: "cmux_install",
-            status: "fail",
-            message: `Failed to install cmux: ${(err as Error).message}`,
-            reason: "Open CMUX workflows stay unavailable until the cmux app and CLI are installed.",
-            fixHint: "Retry `brew install --cask cmux` after connectivity stabilizes, or install cmux manually.",
-          });
-        }
-      }
-    }
-  }
-
-  // 4. tmux config
   // 4. Claude Code runtime
   let claudeInstalled = false;
   try {
@@ -557,27 +393,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     }
   }
 
-  if (claudeInstalled) {
-    try {
-      deps.exec("claude auth status");
-      steps.push({ id: "claude_auth", status: "pass", message: "Claude Code authentication available." });
-    } catch (err) {
-      steps.push({
-        id: "claude_auth",
-        status: "fail",
-        message: `Claude Code is installed but not ready to launch: ${(err as Error).message}`,
-        reason: "Claude Code seats cannot launch until the Claude CLI is logged in and usable.",
-        fixHint: "Run `claude auth login` or open `claude` once to complete authentication, then rerun `rig setup` or `rig doctor`.",
-      });
-    }
-  } else {
-    steps.push({
-      id: "claude_auth",
-      status: "skipped",
-      message: "Skipped: Claude Code is not installed.",
-      reason: "Authentication cannot be checked until the Claude Code CLI is installed.",
-    });
-  }
+  const { name: claudeName, fix: claudeFix, ...claudeAuth } = checkClaudeAuth(deps, claudeInstalled);
+  steps.push({ id: claudeName, ...claudeAuth, ...(claudeFix ? { fixHint: claudeFix } : {}) });
 
   // 5. Codex runtime
   let codexInstalled = false;
@@ -602,48 +419,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     }
   }
 
-  if (codexInstalled) {
-    const env = deps.env ?? process.env;
-    const codexAuth = selectCodexProviderAuth(deps.readFile(path.join(resolveCodexHome(env).codexHome, "config.toml")));
-    if (codexAuth.kind === "env-key") {
-      if (env[codexAuth.envKey]?.trim()) {
-        steps.push({
-          id: "codex_auth",
-          status: "pass",
-          message: `Codex provider "${codexAuth.providerId}" does not use an OpenAI login, and its credential variable ${codexAuth.envKey} is set. This confirms a local credential is available, not that the provider accepts it or that managed seats receive it.`,
-        });
-      } else {
-        steps.push({
-          id: "codex_auth",
-          status: "fail",
-          message: `Codex provider "${codexAuth.providerId}" needs ${codexAuth.envKey}, which is not set in this environment.`,
-          reason: "Codex seats using this provider cannot authenticate without that variable.",
-          fixHint: `Export ${codexAuth.envKey} in the environment that runs rig setup and the OpenRig daemon, then rerun \`rig setup\`.`,
-        });
-      }
-    } else {
-      try {
-        deps.exec("codex login status");
-        steps.push({ id: "codex_auth", status: "pass", message: "Codex authentication available." });
-      } catch (err) {
-        const unresolved = codexAuth.unresolved ? ` (${codexAuth.unresolved}, so the OpenAI login was checked)` : "";
-        steps.push({
-          id: "codex_auth",
-          status: "fail",
-          message: `Codex is installed but not ready to launch${unresolved}: ${(err as Error).message}`,
-          reason: "Codex seats cannot launch until the Codex CLI is logged in and usable.",
-          fixHint: "Run `codex login` and complete authentication, then rerun `rig setup` or `rig doctor`.",
-        });
-      }
-    }
-  } else {
-    steps.push({
-      id: "codex_auth",
-      status: "skipped",
-      message: "Skipped: Codex is not installed.",
-      reason: "Authentication cannot be checked until the Codex CLI is installed.",
-    });
-  }
+  const { name: codexName, fix: codexFix, ...codexAuth } = checkCodexAuth(deps, codexInstalled);
+  steps.push({ id: codexName, ...codexAuth, ...(codexFix ? { fixHint: codexFix } : {}) });
 
   // 6. tmux config
   const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
@@ -682,7 +459,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   steps.push({
     id: "verify",
     status: anyFail ? "warn" : "pass",
-    message: anyFail ? "Some setup steps failed. Run `rig doctor` for detailed diagnostics." : "Core setup verified.",
+    message: anyFail ? "Some setup steps failed; follow their Fix hints." : "Core setup verified.",
   });
 
   // Full profile extras
@@ -710,7 +487,14 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   let verification: SetupResult["verification"];
   if (!opts.dryRun && opts.doctorDeps) {
     const doctorDeps = opts.doctorDeps;
-    const doctor = runDoctorChecks(doctorDeps);
+    // Reuse the post-install facts above; do not repeat login probes during verification.
+    const providerChecks = steps
+      .filter((step) => ["claude_install", "claude_auth", "codex_install", "codex_auth"].includes(step.id))
+      .map(({ id, status, fixHint, ...check }) => ({
+        name: id, status: status === "applied" ? "pass" as const : status,
+        ...check, ...(fixHint ? { fix: fixHint } : {}),
+      }));
+    const doctor = runDoctorChecks(doctorDeps, providerChecks);
     const asyncResults = await Promise.all(doctor.asyncChecks);
     const allDoctorChecks = [...doctor.checks, ...asyncResults];
     verification = {
@@ -770,14 +554,44 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
  */
 export function goldenPathNextSteps(): string[] {
   return [
-    "Next steps (the guided path; full reference: docs/reference/getting-started.md):",
-    "  1. cd <your-repository>             Choose the code the team will work on",
-    "  2. Choose first-project (two Codex), first-project-claude (two Claude), or first-project-mixed; check only selected logins",
-    "     Preview rig up <starter> --cwd . --plan, then rig up <starter> --cwd .; daemon and kernel start automatically",
-    "  3. rig status                       Check daemon/kernel readiness; rig ps --nodes --rig <starter> checks the team",
-    "  4. rig send dev-owner@<starter> '<one useful change, boundaries, and how to check it>'",
-    "  5. rig tui --shared                  Join the kernel dashboard; plain rig tui opens your own view",
-    "  Next: rig queue list --destination dev-owner@<starter>; rig workspace doctor; rig scope ...; rig workflow specs",
+    "Next steps (guidance only; full reference: rig context get reference/getting-started.md):",
+    "  1. Check only selected logins: claude auth status or codex login status; one working provider is enough",
+    "  2. rig daemon start                 If stopped; a fresh instance also starts the kernel, including operator and advisor",
+    "     The kernel is part of installation. Keep it for normal setup; --no-kernel is for automation or when requested",
+    "  3. rig status                       Read the kernel boot state; rig ps --nodes --rig kernel checks its seats",
+    "     Started is not ready. The view may open while agents finish starting; report their actual state",
+    "     For an existing kernel or blocked startup: rig context get reference/getting-started.md#incomplete-setup-and-restart",
+    "  4. Show the person OpenRig: open the OpenRig TUI and operator for them now. Say so first; it's the next step, not a question",
+    "     It opens a NEW terminal tab/window, or a space in their current Herdr, and preserves this terminal",
+    "     rig terminal open saved:kernel --window --json (TUI and operator, advisor on its own tab; herdr, otherwise plain tmux)",
+    "     rig context get reference/getting-started.md#open-the-kernel-conversations",
+    "     If they said not now: give the command to open it later. Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command",
+    "     Herdr needs a terminal the person can see; switching the shared TUI to :terminals does not open one",
+    "     No, SSH and headless use are fine background outcomes; do not report an unseen window as opened",
+    "     On a desktop, no copying or typing for the person; check the result notes, not just CLI success",
+    "     On a Mac, offer Ghostty once: on Yes run rig setup --ghostty; preserve earlier choices such as --no-herdr",
+    "     On No use --no-ghostty; Terminal.app remains available",
+    "     Setup installs herdr by default; use --no-herdr if the person declines. Plain tmux remains available",
+    "     Only if the window cannot open: rig tui --shared is the dashboard-only fallback, not the operator's conversation",
+    "     If opening fails, inspect any new surface before retrying; report the error and finish the local action",
+    "     Do not replace a failed desktop action with commands for the person to copy or type",
+    "  5. Installing agent: ask the person's goal and project folder, then hand them to the ready operator",
+    "     Find operator.agent with rig ps --nodes --rig kernel --json; use its canonicalSessionName with rig send",
+    "     Send the goal and folder, or have the person type them in the operator pane; show where it answers",
+    "     In the message, say: This is the agent that installed OpenRig. The person will answer in your pane",
+    "     Do not implement the person's project yourself. The operator helps them choose and start a team",
+    "     If the person gives you a goal later, forward it and the folder with rig send; leave the work with the operator's team",
+    "     Finish installation when the operator is ready and the person is talking to it; daemon health alone is not completion",
+    "     If they choose to talk later, leave the exact connection step and name the pending handoff",
+    "     The operator handles team choice, launch and goal delivery. The installing agent stops at the handoff",
+    "  Manual path (without the operator):",
+    "  1. Pick a first team, then cd <your-repository>",
+    "     Teams: starter (a Claude builder and a Codex reviewer), workshop (a rig bundle) or factory (seven agents)",
+    "     With one provider, use a team adapted to it; first-project is starter's old name",
+    "     Preview rig up <team> --cwd . --plan; with your yes, rig up <team> --cwd .",
+    "     rig ps --nodes --rig <team> checks the project seats before giving them work",
+    "  2. rig send dev-build@starter '<one useful change, boundaries, and how to check it>' (workshop, factory: orch-lead@<team>)",
+    "  Next: rig queue list --destination dev-build@starter; rig workspace doctor; rig scope ...; rig workflow specs",
   ];
 }
 
@@ -789,13 +603,17 @@ export function goldenPathNextSteps(): string[] {
  * skip-line phrasing, NO pre-selected default, and `Standard` carries the ⭐ recommendation marker.
  * REGISTER RULE (pm-lead): factual + version-neutral — never "treacherous"/editorializing/
  * founder-internal wording. Recording is a thought, never a gate — `rig up` always works bare.
+ * 0.6.7: the question, the deliberate-none line and the skip line now state the team launch default
+ * (#893) that ships with 0.6.6, matching docs/reference/getting-started.md and the
+ * applying-a-permission-policy skill. The labels, marker and register are unchanged.
  */
 export function permissionPolicyMenuLines(): string[] {
   return [
-    "Before team launch, your agent asks once (reuse an existing explicit choice):",
-    "  Allow your agents to run OpenRig commands without repeated permission prompts?",
-    "  Yes — recommended / No — keep prompts. No answer leaves settings unchanged too.",
-    "  Includes all rig verbs, lifecycle/config changes and launching processes; not global YOLO or authority to invent work.",
+    "Before team launch, your agent recommends keeping the team default (reuse an existing explicit choice):",
+    "  Claude team seats with no policy or explicit seat choice run ordinary rig commands, project reads and common tests without prompts; lifecycle commands such as rig up and rig down still ask.",
+    "  Only if you want more, it offers once: Remember these selected OpenRig commands in your native settings for this project?",
+    "  Yes / No — keep the team default. No answer leaves settings unchanged too.",
+    "  A remembered allowance can cover all rig verbs, but Claude team seats still ask before lifecycle commands; not global YOLO or authority to invent work.",
     "  Personal project scope unless you explicitly choose user-wide sessions. On Yes, the agent adds native rules, preserving stricter rules.",
     "  Procedure: rig context get skills/applying-a-permission-policy/SKILL.md",
     "  Undo: ask your agent to remove only the OpenRig command allowances added by this setup.",
@@ -807,12 +625,12 @@ export function permissionPolicyMenuLines(): string[] {
     "    Standard  ⭐      The recommended balanced built-in policy.",
     "    Open              The least restrictive built-in policy.",
     "  YOLO Mode           The full-bypass built-in policy.",
-    "  No policy — deliberate choice (recorded)",
+    "  No policy — deliberate choice (recorded): the floor, without the team allowances",
     "",
-    "  If you skip: OpenRig sets nothing — the usability floor only",
+    "  If you skip: nothing is recorded; team seats launch with the team default unless a seat choice or named Codex profile applies",
     "",
     "  To record a choice into an existing spec:",
-    "    rig setup --policy <locked|standard|open|yolo|none> --spec <path>",
+    "    rig setup --policy <locked|standard|open|yolo|auto|none> --spec <path>",
   ];
 }
 
@@ -823,15 +641,18 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--dry-run", "Show the plan without making changes")
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
+    .option("--no-herdr", "Skip the default herdr installation; the OpenRig view can use plain tmux")
+    .option("--ghostty", "Install Ghostty on macOS after the person accepts the offer")
+    .option("--no-ghostty", "Decline Ghostty; Terminal.app remains available on macOS")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
-    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; policy?: string; spec?: string }) => {
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; policy?: string; spec?: string }) => {
       const deps = depsOverride ?? defaultDeps();
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, doctorDeps });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, doctorDeps });
 
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));
         if (!opts.dryRun && !result.ready) process.exitCode = 1;
         return;
       }
@@ -851,21 +672,29 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
         if (step.fixHint) console.log(`       Fix: ${step.fixHint}`);
       }
 
-      // Surface the permission-policy choice (the 0.4.8 onboarding "menu" is calm-register narrative,
-      // not a TUI). Recording is optional and never a gate.
-      console.log("");
-      for (const line of permissionPolicyMenuLines()) console.log(line);
-
       // OPR.0.3.3.04.2 (AC-1): the canonical ordered golden path. `rig setup` is
       // the primary surface for the new-operator sequence (status/doctor only
       // HINT back to it; the durable reference is docs/reference/getting-started.md).
       if (result.ready) {
         console.log("\nSetup complete.\n");
-        for (const line of goldenPathNextSteps()) console.log(line);
       } else {
-        console.log("\nSome steps need attention. Run `rig doctor` for detailed diagnostics.");
-        console.log("Once setup is healthy, follow the guided path: docs/reference/getting-started.md");
+        console.log("\nSome steps need attention:");
+        if (opts.dryRun) console.log("Plan only: no setup changes were made; readiness was not checked.");
+        for (const step of result.steps.filter(step => step.status === "fail")) {
+          console.log(`  ${step.id}: ${step.message}`);
+          if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
+        }
+        console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
+        console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
+      // Keep the conversation route available even after a dry run or incomplete setup,
+      // before the optional menu so a short output read still includes the handoff.
+      console.log("");
+      for (const line of goldenPathNextSteps()) console.log(line);
+
+      // This printed menu records no choice and changes no native permissions.
+      console.log("");
+      for (const line of permissionPolicyMenuLines()) console.log(line);
       if (!opts.dryRun && !result.ready) process.exitCode = 1;
     });
 

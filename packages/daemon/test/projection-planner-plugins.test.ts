@@ -3,19 +3,22 @@
 // 2026-05-10: tests for ~, absolute, relative path resolution before
 // any further impl on this surface.
 //
-// Plugin source.path can take three shapes (per DESIGN.md §5.2 example):
+// Plugin source.path can take four shapes:
 //   1. absolute system path  e.g.  /Users/op/.openrig/plugins/openrig-core
 //   2. tilde-home-prefixed   e.g.  ~/.openrig/plugins/openrig-core
-//   3. relative to spec dir  e.g.  ./plugins/openrig-core
+//   3. daemon home  e.g.  openrig-home:plugins/openrig-core
+//   4. relative to spec dir  e.g.  ./plugins/openrig-core
 //
 // Each must resolve to a single concrete absolute entry.absolutePath the
 // adapter can use to copy the plugin tree. Tilde expansion is required
 // because vendored plugins live at ~/.openrig/plugins/<id>/ by convention
 // and operators write that literal path in their agent.yaml resources.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { normalizeAgentSpec, parseAgentSpec } from "../src/domain/agent-manifest.js";
 import { planProjection, type ProjectionInput, type ProjectionFsOps } from "../src/domain/projection-planner.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "../src/domain/profile-resolver.js";
 
@@ -55,6 +58,58 @@ function mockFs(): ProjectionFsOps {
 }
 
 describe("Projection planner — plugin path semantics", () => {
+  it("resolves the shipped shared agent's core plugin under the configured OpenRig home", async () => {
+    const home = mkdtempSync(nodePath.join(os.tmpdir(), "builtin-plugin-home-"));
+    vi.stubEnv("OPENRIG_HOME", home);
+    vi.resetModules();
+    try {
+      const sourcePath = nodePath.resolve(import.meta.dirname, "../specs/agents/shared");
+      const spec = normalizeAgentSpec(parseAgentSpec(readFileSync(nodePath.join(sourcePath, "agent.yaml"), "utf8")));
+      const config = makeConfig(spec.resources.plugins.map(resource => ({
+        effectiveId: resource.id, sourceSpec: spec.name, sourcePath, resource,
+      })));
+      const { planProjection: configuredPlan } = await import("../src/domain/projection-planner.js");
+      const result = configuredPlan({ config, collisions: [], fsOps: mockFs() });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.plan.entries).toMatchObject([{
+          category: "plugin", effectiveId: "openrig-core",
+          absolutePath: nodePath.join(home, "plugins/openrig-core"),
+        }]);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["OPENRIG_HOME", "RIGGED_HOME"])("resolves openrig-home: from configured %s, not later shell values", async key => {
+    const config = makeConfig([makePluginQR("openrig-core", "openrig-home:plugins/openrig-core")]);
+    vi.stubEnv("OPENRIG_HOME", "");
+    vi.stubEnv("RIGGED_HOME", "");
+    vi.stubEnv(key, "/isolated/daemon-home");
+    vi.resetModules();
+    try {
+      const { planProjection: configuredPlan } = await import("../src/domain/projection-planner.js");
+      vi.stubEnv("OPENRIG_HOME", "/wrong-shell-home");
+      vi.stubEnv("RIGGED_HOME", "/wrong-legacy-shell-home");
+      vi.stubEnv("HOME", "/wrong-user-home");
+      const result = configuredPlan({ config, collisions: [], fsOps: mockFs() });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.plan.entries[0]!.absolutePath).toBe("/isolated/daemon-home/plugins/openrig-core");
+        expect(result.plan.entries[0]!.resourcePath).toBe("openrig-home:plugins/openrig-core");
+      }
+    } finally { vi.unstubAllEnvs(); vi.resetModules(); }
+  });
+
+  it("rejects an absolute suffix in the home-relative form", () => {
+    const result = planProjection({ config: makeConfig([makePluginQR("p", "openrig-home:/elsewhere")]), collisions: [], fsOps: mockFs() });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain('Plugin "p": openrig-home: requires a relative path.');
+  });
+
   // ============================================================
   // Absolute paths — preserved exactly
   // ============================================================

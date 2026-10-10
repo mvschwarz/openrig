@@ -113,13 +113,15 @@ export function projectsRoutes(): Hono {
     return c.json(capture?.status() ?? {enabled: false, error: c.get("shadowCaptureError" as never) ?? null});
   });
   app.post("/shadow/drain", async c => {
-    const actor = sender(c, undefined); if (!actor.ok) return actor.response;
+    const body = await c.req.json<{ actor?: unknown }>().catch(() => ({} as never));
+    const actor = sender(c, body.actor, "actor"); if (!actor.ok) return actor.response;
     const capture = c.get("shadowCapture" as never) as ShadowCapture | undefined;
     if (!capture) return c.json({enabled: false, error: c.get("shadowCaptureError" as never) ?? null}, 409);
     return c.json(await capture.drain());
   });
   app.post("/shadow/stop", async c => {
-    const actor = sender(c, undefined); if (!actor.ok) return actor.response;
+    const body = await c.req.json<{ actor?: unknown }>().catch(() => ({} as never));
+    const actor = sender(c, body.actor, "actor"); if (!actor.ok) return actor.response;
     const capture = c.get("shadowCapture" as never) as ShadowCapture | undefined;
     return c.json(capture ? await capture.stop() : {enabled: false, error: c.get("shadowCaptureError" as never) ?? null});
   });

@@ -75,6 +75,93 @@ import { autoGridCols } from "../cmux-layout-service.js";
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
 const HERDR_SURFACE_HOST = "herdr";
 
+/** The degrade reason for a seat whose pane was already gone right after its page applied (#707). */
+export const HERDR_PANE_EXITED_REASON = "the pane had already exited when OpenRig checked right after herdr opened it";
+
+/** The note when the pane listing can't confirm a page's panes; its seats stay listed as opened. */
+export const HERDR_PANES_UNCONFIRMED_NOTE = "herdr's pane list couldn't confirm the panes after layout, so those seats are listed as opened without that check.";
+
+const normalLabel = (label: string): string => label.trim().replace(/\s+/g, " ");
+
+/** A listed label matches a composed one exactly, or as a prefix (a truncated label, with or without a trailing ellipsis). */
+function labelMatches(listed: string, composed: string): boolean {
+  const shown = normalLabel(listed).replace(/(…|\.\.\.)$/, "").trimEnd();
+  const full = normalLabel(composed);
+  return shown.length > 0 && (shown === full || full.startsWith(shown));
+}
+
+/**
+ * #707 — `layout.apply` acknowledges the tab, not that each pane's command stayed alive. One read of
+ * the workspace's panes right after a page applies finds seats whose pane is already gone. There is
+ * no wait, so only a pane that exited before this read is seen.
+ *
+ * It fails safe: a seat is degraded only when the listing positively shows the page's tab, and
+ * either another seat's label from the same apply is matched there (so labels compare) or the tab
+ * holds nothing but blank filler panes. A missing tab, an empty or unreadable listing, or labels
+ * that match nothing keep today's `opened`, with a note.
+ */
+export async function exitedSeats(
+  transport: HerdrTransport,
+  workspaceId: string,
+  tabId: string,
+  pagePanes: ComposedPane[],
+  blanks: number,
+  notes: string[],
+): Promise<Set<string>> {
+  const gone = new Set<string>();
+  const unconfirmed = (): Set<string> => {
+    if (!notes.includes(HERDR_PANES_UNCONFIRMED_NOTE)) notes.push(HERDR_PANES_UNCONFIRMED_NOTE);
+    return gone;
+  };
+  let listed: unknown;
+  try {
+    listed = (await transport.request("pane.list", { workspace_id: workspaceId }))["panes"];
+  } catch {
+    return unconfirmed();
+  }
+  if (!Array.isArray(listed)) return unconfirmed();
+  const live = listed.filter((p): p is Record<string, unknown> =>
+    p !== null && typeof p === "object" && (p as Record<string, unknown>)["tab_id"] === tabId);
+  if (live.length === 0) return unconfirmed();
+  if (!live.every((p) => typeof p["label"] === "string")) {
+    // Panes without labels can't be told apart, so a loss is only counted.
+    const missing = pagePanes.length + blanks - live.length;
+    if (missing > 0) notes.push(`${missing} pane(s) exited right after opening. herdr's pane list doesn't say which, so those seats stay listed as opened.`);
+    return gone;
+  }
+  const liveLabels = live.map((p) => p["label"] as string);
+  // A seat whose label is blank can't be matched, and can't be told apart from a filler pane.
+  const blankSeats = pagePanes.filter((pane) => normalLabel(pane.label) === "");
+  // Blank filler panes run `sh` and stay. A tab holding exactly the fillers, all blank-labelled, has
+  // lost every seat pane. Labels are read first: a seat label anywhere means this rule doesn't apply,
+  // and neither does a blank-labelled seat, which would look like a filler.
+  if (blankSeats.length === 0 && live.length === blanks && liveLabels.every((l) => normalLabel(l) === "")) {
+    for (const pane of pagePanes) gone.add(pane.seat);
+    return gone;
+  }
+  if (blankSeats.length > 0) unconfirmed();
+  if (!pagePanes.some((pane) => liveLabels.some((l) => labelMatches(l, pane.label)))) return unconfirmed();
+  const perLabel = new Map<string, ComposedPane[]>();
+  for (const pane of pagePanes) {
+    const key = normalLabel(pane.label);
+    if (key === "") continue; // never attributed; the note above says so
+    perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
+  }
+  const shared: string[] = [];
+  for (const [label, seats] of perLabel) {
+    const alive = liveLabels.filter((l) => labelMatches(l, label)).length;
+    if (seats.length === 1) {
+      if (alive === 0) gone.add(seats[0]!.seat);
+    } else if (alive < seats.length) {
+      shared.push(label);
+    }
+  }
+  if (shared.length > 0) {
+    notes.push(`A pane labelled ${shared.map((l) => `"${l}"`).join(", ")} exited right after opening. Several seats share that label, so they stay listed as opened.`);
+  }
+  return gone;
+}
+
 /** A herdr layout-tree pane leaf — `command` is an ARGV array (capture-verified). */
 export interface HerdrPaneNode {
   type: "pane";
@@ -121,8 +208,8 @@ function herdrPaneCommand(pane: ComposedPane): string {
 }
 
 /**
- * Build the EQUAL auto-grid layout tree for one page of panes. PURE. The grid
- * shape matches the UI TerminalLauncher `suggestLayout` exactly —
+ * Build an equal grid for one page. Explicit columns are capped to its pane
+ * count, as in cmux; otherwise use the UI TerminalLauncher `suggestLayout` —
  * cols = ceil(sqrt(N)), rows = ceil(N/cols): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3
  * (cols×rows). An incomplete rectangle is padded with inert blank panes so
  * every cell is the same size; blanks are layout filler only — they are never
@@ -132,8 +219,8 @@ function herdrPaneCommand(pane: ComposedPane): string {
  * hint. Rows are built as equal `right` strips,
  * then combined with equal `down` strips.
  */
-export function buildGridRoot(panes: ComposedPane[]): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
-  const cols = autoGridCols(panes.length);
+export function buildGridRoot(panes: ComposedPane[], columns?: number): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
+  const cols = Math.min(columns ?? autoGridCols(panes.length), panes.length || 1);
   const rows = Math.ceil(panes.length / cols);
   const blanks = rows * cols - panes.length;
   const leaves: HerdrLayoutNode[] = panes.map((pane) => ({
@@ -165,9 +252,14 @@ export interface HerdrLayoutPlan {
   pages: HerdrPagePlan[];
 }
 
+/** A named view's tab: its panes' names in reading order, such as "dashboard · operator". */
+export function namedTabLabel(page: ComposedPane[]): string {
+  return page.map((pane) => pane.label).join(" · ");
+}
+
 /**
  * Build the herdr socket plan for a composed view. PURE — no I/O. Each page
- * gets a fresh tab labeled `${tabPrefix}:${view.id}#${launchToken}/<pageIndex>`;
+ * gets a fresh tab labeled `${tabPrefix}:${view.id}#<plan>#${launchToken}/<pageIndex>`;
  * two calls with different `launchToken`s produce DIFFERENT labels, which is
  * exactly the fresh-tab-on-relaunch (not-replace) invariant.
  */
@@ -176,14 +268,16 @@ export function planHerdrLayout(
   launchToken: string,
   tabPrefix: string = "openrig",
 ): HerdrLayoutPlan {
-  const base = `${tabPrefix}:${view.id}#${launchToken}`;
-  // The workspace is named for people: the rig name for a rig view, else the view id.
-  // Tab labels keep the launch token, so every open is still a fresh, distinct space.
-  const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;
+  // Older callers without a preview fingerprint still get fresh, non-reusable tabs.
+  const base = `${tabPrefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
+  // The workspace is named for people: a named view's own label, the rig name for a rig view, else the view id.
+  // Tab labels keep the launch token, so every open is still a fresh, distinct space. A named view's
+  // tabs carry their panes' names instead; the CLI confirms reuse by live attachments, not labels.
+  const workspaceLabel = view.spaceLabel ?? (view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id);
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
-    const grid = buildGridRoot(page);
+    const grid = buildGridRoot(page, view.columns);
     return {
-      tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
+      tabLabel: view.spaceLabel ? namedTabLabel(page) : view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
       root: grid.root,
       blanks: grid.blanks,
     };
@@ -218,6 +312,7 @@ export function extractWorkspaceId(result: HerdrResult): string | null {
 
 export interface HerdrAdapterDeps {
   transportFactory: HerdrTransportFactory;
+  launch?: ProviderStatus["launch"];
   /**
    * Mint a fresh launch token per `openView` so a relaunch creates a new tab
    * (BR-5). Injectable for deterministic tests. Default: a per-instance
@@ -273,6 +368,7 @@ export class HerdrAdapter implements TerminalProvider {
       const probe = await this.transport.probe();
       return {
         provider: this.name,
+        ...(this.deps.launch ? { launch: this.deps.launch } : {}),
         available: probe.alive,
         ...(probe.version ? { version: probe.version } : {}),
         // The socket answering ping IS the capability surface: layout.apply is
@@ -282,7 +378,7 @@ export class HerdrAdapter implements TerminalProvider {
       };
     } catch {
       // An unreachable socket (herdr not running) = honestly unavailable.
-      return { provider: this.name, available: false, capabilities: {} };
+      return { provider: this.name, available: false, capabilities: {}, ...(this.deps.launch ? { launch: this.deps.launch } : {}) };
     }
   }
 
@@ -423,8 +519,18 @@ export class HerdrAdapter implements TerminalProvider {
           root: pagePlan.root,
         });
         const tabId = extractTabId(applied);
-        if (tabId) { appliedTabIds.push(tabId); firstPopulatedTabId ??= tabId; } else everyPageKnown = false;
-        for (const pane of pagePanes) opened.push(pane.seat);
+        // Without a tab id the page's panes can't be told apart from other tabs, so no check runs.
+        const gone = tabId
+          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes)
+          : new Set<string>();
+        if (tabId) {
+          appliedTabIds.push(tabId);
+          if (pagePanes.some((pane) => !gone.has(pane.seat))) firstPopulatedTabId ??= tabId;
+        } else everyPageKnown = false;
+        for (const pane of pagePanes) {
+          if (gone.has(pane.seat)) degraded.push({ seat: pane.seat, host: HERDR_SURFACE_HOST, reason: HERDR_PANE_EXITED_REASON });
+          else opened.push(pane.seat);
+        }
       } catch (err) {
         everyPageKnown = false;
         // The whole page failed to apply — degrade its seats honestly.

@@ -89,7 +89,10 @@ you should know which pillar you're operating in:
 OpenRig manages topology and exposes public context through `rig context`.
 Project-authored sources supply project-specific knowledge; transcripts retain
 recorded work. These sources already coexist. Discover the configured library
-and selected task context rather than assuming a particular private corpus.
+and selected task context rather than assuming a particular private corpus:
+`rig context list` shows the configured packs, and `rig context work-install`
+lists what the current project declares (intent, context files, skills), so you
+read only the pieces a task needs.
 
 ---
 
@@ -193,7 +196,7 @@ rig whoami --json         # know who you are
 rig send <session> "msg"  # talk to a peer
 rig capture <session>     # see a peer's terminal
 rig transcript <session>  # read a peer's history
-rig down <rigId>          # snapshot and tear down
+rig down <rigId>          # snapshot and stop every agent; check rig ps first, only when asked
 rig up <rig-name>         # restore from snapshot
 ```
 

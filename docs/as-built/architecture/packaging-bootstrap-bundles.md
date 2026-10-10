@@ -5,139 +5,310 @@ status: active
 topics: [specification-and-bundles, release-and-versioning]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  Need to know how rig/pod bundles are assembled (schema-version-2 vs legacy
-  v1), how bundle create/inspect/install and /api/up route across source kinds,
-  the staged BootstrapOrchestrator plan/apply flow, or which legacy install-
-  engine seams still ship for pre-reboot data.
+  Locate npm package assembly, topology-bundle creation and validation,
+  source routing, bootstrap plan/apply, or the retained package install engine.
 siblings: [agent-spec-and-startup.md, plugin-agent-image-context-pack.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
-# Packaging, Bootstrap, Bundles, Legacy Install Engine
+# Packaging, bootstrap and bundles
 
-How OpenRig packages a topology into a shareable bundle and reconstitutes it
-on another host. Fully dual-format: schema-version-2 pod bundles plus legacy
-v1 artifacts, routed deterministically by the bootstrap orchestrator.
+This module describes source at main commit
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`. Source paths below are repository-relative.
+An npm CLI artifact and a `.rigbundle` have different builders and consumers; neither
+source verification nor archive integrity establishes that a daemon has adopted an artifact.
 
-> Verified against source at HEAD `7eaf524c` (`git describe` →
-> `v0.3.1-6-g7eaf524c`). Package version **0.3.1** (slice-00 §1.1). Source
-> located by `architecture.md` headings (§5 Bundles/bootstrap/legacy
-> compatibility, §6 Bundle create/inspect/install + /api/up, §11 Compat
-> note 3) per slice-08 §10.1 — line numbers advisory only.
+## npm CLI assembly
 
-## 1. Bundle, bootstrap, legacy domain services
+`scripts/build-package.sh` builds the daemon, web UI, TUI and CLI, then assembles their
+outputs under `packages/cli`. The publishable file list and binary declarations live in
+`packages/cli/package.json`.
 
-(`architecture.md` §5 "Bundles, bootstrap, and legacy compatibility")
+The assembler writes generated `BUILD_INFO` modules into the daemon and CLI outputs with
+the package version, Git commit, dirty flag and build time. The dirty check covers tracked
+and untracked inputs under `packages/` and `scripts/`; it is not a whole-worktree status
+claim.
 
-- `pod-bundle-assembler.ts` — schema-version-2 bundle assembler.
-  Re-confirmed: emits `schemaVersion: 2` (`pod-bundle-assembler.ts:167`).
-- `bundle-types.ts` — v1 and v2 manifest types plus parse/validate/serialize.
-  Re-confirmed: v2 `PodBundleManifest` type carries `schemaVersion: 2`
-  (`:23`); `validatePodBundleManifest` rejects unless `schema_version === 2`
-  (`:38`); `serializePodBundleManifest` writes `schema_version: 2` (`:62`);
-  `parsePodBundleManifest` (`:87`); legacy path
-  `validateLegacyBundleManifest` (`:143`) — both formats live in one file.
-- `bundle-source-resolver.ts` — `LegacyBundleSourceResolver`
-  (`bundle-source-resolver.ts:25`) plus `PodBundleSourceResolver` (`:132`).
-- `bootstrap-orchestrator.ts` — staged bootstrap flow with direct pod-aware
-  rig and v2 bundle delegation. `BootstrapMode = "plan" | "apply"`
-  (`bootstrap-orchestrator.ts:26`).
-- `up-command-router.ts` — spec/bundle source classification for `/api/up`.
-  `SourceKind = "rig_spec" | "rig_bundle" | "rig_name"`
-  (`up-command-router.ts:6`).
+The same script:
 
-All re-confirmed present in `packages/daemon/src/domain/` @HEAD.
+- Generates shipped context packs through `scripts/generate-context-packs.mjs`.
+- Copies daemon output, assets, specs, context packs, policies and `docs/reference/`.
+- Checks the specs staging input with `scripts/check-internal-leak-guard.mjs` and writes
+  the staged substance-root inventory into the package.
+- Copies the web UI and TUI outputs.
+- Runs `scripts/rewrite-daemon-imports.mjs` so staged CLI/TUI JavaScript resolves the
+  shipped daemon output rather than an unpublished workspace package.
 
-## 2. Bundle create / inspect / install
+This is the build layout. Native dependency installation and consumer runtime behavior need
+their own checks; this document does not infer them from a successful assembly.
 
-(`architecture.md` §6 "Bundle create / inspect / install")
+## Topology-bundle creation
 
-`routes/bundles.ts` is fully dual-format:
+`packages/daemon/src/routes/bundles.ts` mounts create, inspect, install and history handlers
+under `/api/bundles` (the mount is in `packages/daemon/src/server.ts`).
 
-- **create** — detects a pod-aware RigSpec and uses `PodBundleAssembler`
-  (accepts an optional `rigRoot`); legacy create still uses
-  `LegacyBundleAssembler`.
-- **inspect** — safely extracts the archive, detects `schema_version`; v2
-  returns `schemaVersion: 2`, `agents[]`, and integrity data; v1 returns the
-  legacy manifest shape.
-- **install** — uses the full bootstrap plan/apply; bootstrap peeks the
-  manifest and routes deterministically to `pod_bundle` or `rig_bundle`.
-  Re-confirmed at source: `bootstrap-orchestrator.ts:134-143` — when
-  `sourceKind === "rig_bundle"` it unpacks to a temp peek dir, reads
-  `bundle.yaml`, and calls `parsePodBundleManifest(...)` to detect the
-  schema version before routing.
+The create handler validates the source spec before comparing it with recorded live topology.
+A divergent spec is refused unless the request explicitly allows drift; an allowed divergence
+is recorded in the bundle's provenance notes. The exported spec is not silently rewritten
+from live state.
 
-## 3. `/api/up` source routing
+| Source shape | Builder and output |
+|---|---|
+| Pod-aware rig spec | `packages/daemon/src/domain/pod-bundle-assembler.ts`: `PodBundleAssembler.assemble()` produces schema-version-2 metadata, vendors resolved agent trees, and rewrites agent references to local paths. |
+| Legacy rig spec | `packages/daemon/src/domain/bundle-assembler.ts`: `LegacyBundleAssembler` (imported as `BundleAssembler` by the route) collects the referenced legacy packages and produces the legacy manifest shape. |
 
-(`architecture.md` §6 "`/api/up`")
+The pod builder collects culture, docs and startup material, preserves file bytes, and skips
+vendoring the terminal sentinel as an agent. A copied file keeps its source mode with owner
+read and write added. Required document collection failures stop assembly; missing declared
+skills can instead produce warnings, which are also written into the provenance notes.
+Inspect the builder's collection helpers when changing these distinctions.
 
-`UpCommandRouter` + `BootstrapOrchestrator` own:
+Both route branches can consume a source-root `bundle.yaml` to carry declared skills,
+plugins, workflow specs, context packs, agent images and preconditions into staging before
+computing integrity. Manifest types, validation and serialization are in
+`packages/daemon/src/domain/bundle-types.ts`. Provenance and compatibility are metadata;
+provenance is not an author signature.
 
-- direct pod-aware rig specs,
-- legacy rig specs,
-- v1 bundle installs,
-- v2 pod-bundle installs.
+Preconditions are carried as data. Commands containing shell operators produce a warning,
+inspect reports the block, and the behaviour view lists it under needs. The install and
+bootstrap code do not reference preconditions.
 
-Plan mode and apply mode both work across those source kinds.
+Two more inputs are accepted only for a pod-aware spec; the legacy branch refuses them with
+a 400:
 
-> Definitional note (carried, not a numeric drift) — `architecture.md` §6
-> describes bootstrap routing to `pod_bundle` / `rig_bundle`. The
-> `UpCommandRouter` *classification* enum is `SourceKind = "rig_spec" |
-> "rig_bundle" | "rig_name"` (`up-command-router.ts:6`); the
-> `pod_bundle`-vs-`rig_bundle` distinction is resolved one layer deeper in
-> `bootstrap-orchestrator.ts` by peeking the manifest schema version
-> (`:134-143`). Both statements are accurate at different layers; documented
-> here so the layering is explicit rather than appearing contradictory.
+- `--context-pack <dir>` (`vendorContextPackDir()` in
+  `packages/daemon/src/domain/bundle-carried-context-pack.ts`) carries a pack's
+  `manifest.yaml` and its declared files to `context-packs/<manifest name>/`. The pack may
+  sit outside the rig folder.
+- `--project-dir <dir>` (`vendorProjectDir()` in
+  `packages/daemon/src/domain/bundle-carried-project.ts`) carries a folder with a
+  `project.yaml` to `project/`.
 
-## 4. Legacy install engine (still ships)
+Create also refuses content it must not ship. `computeIntegrity()` in
+`packages/daemon/src/domain/bundle-integrity.ts` throws on sensitive paths (`.env` files,
+`*.pem`, `*.key`, `*.p12`, `credentials.*`, `tokens.*`, `.git/` and `node_modules/`).
+`assertShippableSubstance()` in `packages/daemon/src/domain/agent-resolver.ts` runs on
+vendored content and on the final staging tree, and refuses text containing
+`substrate/shared-docs/` and files declaring `taxonomy: lore`.
 
-(`architecture.md` §5 "Legacy systems that still ship" + §11 compat note 3)
+### Configurations and package identity
 
-These pre-reboot seams remain active for backward compatibility:
+A bundle folder may declare alternate team configurations in `configurations.yaml` beside
+`rig.yaml` (`packages/cli/src/lib/bundle-configuration.ts`). `rig bundle configurations
+<spec>` lists them. `rig bundle create --preset <name>` or `--seat <member=runtime>` resolves
+one and stages a copy of the rig folder in a temporary directory with the chosen runtimes and
+profiles, so the author's folder is never changed. With a GitHub folder link, `rig up`,
+`rig bundle create`, `inspect` and `install` take the same two options and stage a copy of the
+whole checkout (`importGitHubBundle()` in `packages/cli/src/lib/bundle-source.ts`).
 
-- package install engine: `package-install-service.ts`,
-  `package-manifest.ts`, `package-repository.ts`, `install-engine.ts`,
-  `conflict-detector.ts`, `role-resolver.ts` (all re-confirmed present
-  @HEAD).
-- bootstrap and requirement-probe support.
-- discovery and claim services.
-- tmux/cmux adapters and resume adapters.
+`packages/daemon/src/domain/bundle-identity.ts` defines the two identity values:
 
-> Drift-check D-pkg — `architecture.md` §5/§6 carries no slice-00 numeric
-> drift in this content; the v2 bundle-assembler + dual-format flows were
-> verified accurate at HEAD (§1–§3 above). The footprint/migration counts
-> that ARE stale land in `daemon-core.md`, not here.
+- `configurationId()`: every member's `pod.member=runtime`, sorted and joined with `,`.
+  Create computes it from the normalized spec and returns a 400 if the client sent a
+  different one.
+- `packageDigest()`: SHA-256 over the sorted `integrity.files` entries (coverage label
+  `openrig.package-digest/v1`). It covers every packaged file's bytes; it does not cover
+  `bundle.yaml`, the junk files the integrity walk skips, or file modes.
 
-Compat note 3 (carried verbatim, `architecture.md` §11): "Legacy
-compatibility seams still ship for pre-reboot data and v1 artifacts." (The
-full §11 list lives in `architecture-rules-and-event-system.md`.)
+Create and inspect responses carry the source, configuration ID, package digest, archive
+hash and assembler version.
 
-> Provenance note (carried, not asserted): `bootstrap-orchestrator.ts:3-5`
-> still imports `LegacyRigSpec` / `LegacyRigSpecCodec` / `LegacyRigSpecSchema`
-> with in-source `TODO: AS-T08b — migrate to pod-aware RigSpec` markers, and
-> `:16` `TODO: AS-T12 — migrate to pod-aware bundle source resolver`. The
-> legacy seam is intentional, in-progress migration scaffolding — recorded
-> as-is, not smoothed.
+### Archive checks
 
-## OPEN / carried items
+`packages/daemon/src/domain/bundle-archive.ts` owns `pack()` and `unpack()`;
+`packages/daemon/src/domain/bundle-integrity.ts` owns the per-file integrity map.
 
-- **D-pkg (resolved-as-current):** no slice-00 numeric drift in this
-  module's split content; v2 assembler + dual-format flows verified accurate
-  at HEAD. Bundle-routing layering documented explicitly to pre-empt an
-  apparent §6-vs-source contradiction.
-- Legacy-migration TODOs carried from source verbatim (AS-T08b / AS-T12).
+Packing requires a `.rigbundle` output path, sorts entries, uses portable tar metadata, a
+fixed tar timestamp and gzip level 9, and writes a sibling SHA-256 file. Unpacking checks that
+digest, rejects archive links and unsafe entry paths before extraction, requires
+`bundle.yaml` and its integrity section, and verifies the extracted file inventory. Hashes
+establish consistency with the supplied manifest and digest; they do not authenticate
+whoever supplied both.
 
-## See also
+The inspect handler does not call `unpack()`, because it must report a broken bundle rather
+than refuse it. It reports a missing or mismatched digest as `digestValid: false`, applies the
+same unsafe-entry pre-scan (`collectUnsafeArchiveEntries()`) and extraction filter, and runs
+`verifyIntegrity()` to report an `integrityResult`. A syntactically valid manifest alone is
+not an inspected archive.
 
-- `agent-spec-and-startup.md` — `RigInstantiator` / `PodRigInstantiator` and
-  the dual-format spec seam that bundles wrap.
-- `plugin-agent-image-context-pack.md` — the 0.3.0/0.3.1 reusable
-  starter-state / content-provenance cluster (authored separately in 8.4b).
-- `daemon-core.md` — `/api/up` + `/api/bundles` are among the 49 route
-  mounts; `BootstrapOrchestrator` is constructed in the createDaemon
-  sequence.
-- Source roots: `packages/daemon/src/domain/{pod-bundle-assembler,
-  bundle-types,bundle-source-resolver,bootstrap-orchestrator,
-  up-command-router}.ts`, `packages/daemon/src/routes/{bundles,up}.ts`.
+Inspect also returns a behaviour view, `describeBundleBehaviour()` in
+`packages/daemon/src/domain/bundle-behaviour.ts` (schema `openrig.bundle-behaviour/v1`). It
+reads the extracted archive only, through `bundle-behaviour-inspect.ts` (regular UTF-8 files,
+at most 1 MiB each and 8 MiB in total, opened without following links). It lists the team,
+each seat's permission posture, the files seats are told to read, what else runs, where
+content is written, literal outside addresses, needs, and what can't be known before launch.
+A schema-1 archive gets `state: not_generated`. Posture comes from the member's or rig's
+`permission_policy`: `builtin:yolo` is full bypass and `builtin:auto` is auto, both by launch
+flag; `builtin:locked`, `builtin:standard` and `builtin:open` are configuration; a policy file
+is read from the archive or marked unresolved; no policy means the product default. A rig-level
+`non_interruptive` boolean is reported on each full-bypass Claude Code or Codex seat as
+`nonInterruptiveDefault`, and `true` drops the Claude bypass first-run warning. The CLI prints
+the view before `rig bundle install` and `rig up` as diagnostics only; it never changes the
+request or the exit code.
+
+## Source routing and bootstrap
+
+`packages/daemon/src/domain/up-command-router.ts` classifies a source as
+`rig_spec`, `rig_bundle`, `rig_name` or `topology`. It recognizes named rigs,
+spec paths, `.rigbundle`, `.rigtopology`, and YAML with a top-level rigs list;
+extensionless paths also have content detection.
+
+`packages/daemon/src/routes/up.ts` then selects the execution path:
+
+| Input | Consumer |
+|---|---|
+| Existing rig name | Existing-rig restore path; unarchived rigs of that name are preferred. |
+| Single rig spec or bundle | `BootstrapOrchestrator.bootstrap()` in `packages/daemon/src/domain/bootstrap-orchestrator.ts`. |
+| Topology manifest | `MultiRigLauncher`, with a single-rig bootstrap or remote-up leaf per entry. |
+
+Topology plan mode is rejected. Placement belongs on the individual topology entries; a
+top-level host flag is rejected. The selected topology parser/route also rejects nested
+topologies, existing-rig-name entries and `.rigbundle` entries: topology entries are spec
+paths only. This is narrower than the single-rig `up` surface.
+
+Bootstrap distinguishes pod-aware and legacy specs, and inspects a bundle manifest to choose
+`PodBundleSourceResolver` or `LegacyBundleSourceResolver` from
+`packages/daemon/src/domain/bundle-source-resolver.ts`. Thus the router's
+`rig_bundle` kind does not imply a legacy manifest.
+
+For pod-aware specs, plan mode validates and runs preflight probes; apply delegates to
+`PodRigInstantiator`. Plan mode still records a bootstrap run/result: it is not a pure
+file read. Apply reports partial completion when nodes fail or require attention, preserving
+the created rig identity rather than claiming every member launched. Apply's non-interruptive
+choice is the request's, else the spec's top-level `non_interruptive`, else the
+`launch.non_interruptive` setting.
+
+### Durable install target
+
+Bundle apply requires an explicit target root at the HTTP boundary. The CLI supplies the
+current directory as the default for `rig up <file>.rigbundle` and for a GitHub link through
+`rig up` or `rig bundle install`. `rig bundle install` with a local `.rigbundle` sends no
+default, so apply without `--target` gets a 400. For a pod bundle,
+`materializePodBundle()` copies the verified extraction into that durable root before
+instantiation, so local agent references and relative working directories survive removal
+of the extraction directory. It checks destination conflicts before copying, preserves
+identical files, and refuses differing files or incompatible destination types.
+
+When an unarchived or running team already has the bundle's rig name (`bundleInstallContext()`
+in `packages/daemon/src/domain/bundle-install-context.ts`), pod-bundle apply refuses before
+writing if any of them is running. If the target is that team's own install folder (its
+`bundle.yaml` names the offered schema-2 bundle, or `my-bundle` or `github-bundle`, the default
+names before 0.6.7, and it is the folder recorded in `rigs.install_root` when any of those teams
+recorded one; `isExistingBundleTarget()`), bootstrap first
+confirms the old sessions are stopped; materialization then copies each conflicting path to a
+`bundle-backups/reinstall-*` folder under the OpenRig home, with a `RESTORE.json`, before
+replacing it, and leaves unrelated files in place. Any other target keeps the conflict refusal.
+The instantiator archives the stopped earlier generation. Pod-bundle apply records the
+target's real path as the new rig's `install_root` (migration `096`).
+
+Pod bundles containing service definitions are refused by bootstrap; their service path
+requires a stable spec directory. Direct spec bootstrap has separate service prelaunch
+handling. See [agent-spec-and-startup.md](agent-spec-and-startup.md) for instantiation.
+
+## GitHub folder links and the bundle check
+
+`packages/cli/src/lib/bundle-source.ts` lets `rig up`, `rig bundle create`, `inspect` and
+`install` take a GitHub folder link (`isGitHubBundleLink()`). Only a credential-free
+`https://github.com/owner/repo[/tree/<ref>/<folder>]` link is accepted. The ref is resolved to
+the longest matching branch or tag, or taken as a full commit hash. The import:
+
+- needs a healthy local daemon whose `selfHostId` matches the local origin;
+- runs Git with credential helpers, hooks and non-HTTPS protocols disabled;
+- shallow-fetches the exact commit into `bundle-imports/` under the OpenRig home, requires a
+  `rig.yaml` in the folder, and refuses symlinks or agent and package references that resolve
+  outside the checkout;
+- posts the folder to `/api/bundles/create` with the source recorded in provenance, refuses a
+  response without a package digest or with a different source commit, and writes
+  `source.json` and `build.json` in the import folder.
+
+`rig bundle check <folder>` (`checkBundleFolder()` in `packages/cli/src/lib/bundle-check.ts`)
+is an advisory, file-read-only check against `openrig.bundle-standard/v1`; it makes no daemon,
+launch or provider call. Its rules are `pod_aware_rig`, `readme_in_docs`, `referenced_files`,
+`portable_agents`, `minimum_versions`, `configurations` and `credential_paths` (a filename scan
+bounded at 10,000 entries that skips `.git`, `node_modules` and symlinks). `readme_coverage`
+and `embedded_secrets` are always reported as not checked, and host-resolved resources are
+reported as checked at launch (`host_resources`). Any finding sets exit code 1.
+
+## Install checks and content routing
+
+The install handler in `packages/daemon/src/routes/bundles.ts` obtains a source-path
+lock, reads validated metadata, checks compatibility, and checks a declared rig name
+against same-name rigs with running sessions before bootstrap; a stopped team of that name
+doesn't block it. A conflict returns a 400 with `status: "not_attempted"`, the installed team
+and the offered bundle, and three choices: use the existing team, stop it and retry to replace
+it, or cancel. The compatibility override `skipVersionCheck` and name-conflict override `force`
+are explicit request fields; neither skips the metadata pass, which always validates the
+manifest.
+
+`packages/daemon/src/domain/bundle-conflict-detector.ts` implements the rig-name check.
+It is not a complete agent, port or filesystem collision audit; a missing rig name supplies
+no name comparison. Target-file conflicts are handled separately by materialization.
+Skipping these prechecks does not skip archive validation in bootstrap.
+
+Declared content is routed by `routeBundleContents()` in
+`packages/daemon/src/domain/bundle-content-routing.ts`, which unpacks the bundle once and
+routes each kind independently. When it runs depends on the bundle schema:
+
+- **Pod-aware (schema 2):** bootstrap runs it as `PodRigInstantiator`'s prelaunch hook, after
+  the rig record exists and before any seat launches, so every seat's first turn can see the
+  content.
+- **Legacy (schema 1):** there is no hook, so the install route routes after bootstrap, and
+  only when the status is `completed`.
+
+| Manifest content | Destination |
+|---|---|
+| `skills` | The OpenRig `packages` cache, stripping the legacy `packages/` prefix; this does not import a complete harness skill into the managed skill catalog. |
+| `plugins` | The OpenRig `plugins` root, through local plugin references. |
+| `workflow_specs` | `workflows/` beneath the resolved `workspaceSpecsRoot`. If that setting is empty, this kind is recorded as a routing failure. |
+| `context_packs` | The configured `context.root`, matching context-library discovery. |
+| `agent_images` | The OpenRig `agent-images` root; declarations address image directories containing a manifest. |
+| `project` | Registered in the workspace catalog (`workspace.catalog_path`) with the rig associated, and its files placed under `workspace.projects_root/<id>` (`registerBundleProject()` in `packages/daemon/src/domain/workspace/project-registration.ts`). A conflict changes nothing and is a routing failure. |
+
+Context packs are never merged into an installed pack of the same name: an identical one is
+reported as `already_installed`, a different one is kept unchanged as `kept_existing`. After
+routing, the live context library rescans, and a routed pack it can't load becomes a routing
+failure.
+
+The per-kind implementations are the `bundle-skills-router.ts`, `bundle-plugins-router.ts`,
+`bundle-workflow-specs-router.ts`, `bundle-context-packs-router.ts` and
+`bundle-agent-images-router.ts` files under `packages/daemon/src/domain/`. Routing is best
+effort in both cases: the hook always lets the launch continue, and a failure never rolls back
+or fails the install. Failures appear in the result's `routingFailures` and `warnings`, in a
+`route_bundle_contents` stage for the hook, and in the install audit record.
+
+Install audit records are appended best effort to `bundle-audit.jsonl` under the OpenRig
+home; the history endpoint reads that audit. Bootstrap run state and action journals are
+separate, repository-backed records.
+
+## Legacy package install path
+
+The legacy path remains executable, not just an archive parser.
+`packages/daemon/src/routes/packages.ts` is mounted at `/api/packages`, and legacy
+bootstrap calls `PackageInstallService` in
+`packages/daemon/src/domain/package-install-service.ts`.
+
+The source chain is package resolution/manifest validation, planning and conflict policy,
+then apply/verification with repository records:
+
+- `resolvePackage()` in `packages/daemon/src/domain/package-resolve-helper.ts`, which reads
+  and validates through `package-manifest.ts`. `package-resolver.ts` supplies the types; its
+  `PackageResolver` class has no production caller.
+- `packages/daemon/src/domain/install-planner.ts`, `conflict-detector.ts` and
+  `install-policy.ts`. The planner refuses any planned destination outside the install
+  target.
+- `packages/daemon/src/domain/install-engine.ts`, `install-verifier.ts`,
+  `install-repository.ts` and `package-repository.ts`.
+
+Legacy bootstrap also probes requirements and records staged outcomes before rig
+instantiation. A failed package installation prevents that path from importing the rig.
+This compatibility implementation does not imply that pod-aware bundles use the same
+package-install stages.
+
+## Related maps
+
+- [plugin-agent-image-context-pack.md](plugin-agent-image-context-pack.md): content library
+  consumers and their state boundaries.
+- [daemon-core.md](daemon-core.md): bootstrap construction and HTTP wiring.
+- [agent-spec-and-startup.md](agent-spec-and-startup.md): spec resolution, projection and launch.

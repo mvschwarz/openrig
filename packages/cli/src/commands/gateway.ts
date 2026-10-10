@@ -97,7 +97,13 @@ export async function daemonQueueRows(address: string): ReturnType<HumanRowsLook
       const res = await client.get<Array<{ qitemId?: string; state?: string; summary?: string | null }>>(
         `/api/queue/list?destinationSession=${encodeURIComponent(address)}&state=pending,in-progress,blocked&limit=${limit}&compact=1`,
       );
-      const data = Array.isArray(res.data) ? res.data : [];
+      if (res.status !== 200) {
+        throw new Error(`HTTP ${res.status}: queue enumeration refused`);
+      }
+      if (!Array.isArray(res.data)) {
+        throw new Error("HTTP 200: malformed queue enumeration response");
+      }
+      const data = res.data;
       if (data.length < limit) {
         return {
           ok: true,
@@ -156,8 +162,9 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
       if (existing.humans.length > 0 && !existing.humans.some((h) => h.entityId === entityId)) {
         const ids = existing.humans.map((h) => h.entityId).join(", ");
         console.error(
-          `refused: a human is already configured (${ids}) — 0.5.5 ships the SIMPLE SINGLE-HUMAN surface (amendment A1, founder R5), so \`rig gateway human add\` manages one human. ` +
-          `If you truly need several, hand-author a fragment YAML under ${registry.humansDir()} (several fragments are displayed honestly, with an advisory); multi-human MANAGEMENT arrives in 0.5.7.`,
+          `refused: a human is already configured (${ids}). OpenRig supports one configured human, so \`rig gateway human add\` manages one; ` +
+          `to register someone else, remove the existing one first (\`rig gateway human remove <entityId>\`). Fragments hand-authored under ${registry.humansDir()} ` +
+          `are displayed as found, with an advisory, but no command manages several.`,
         );
         process.exitCode = 1;
         return;
@@ -212,7 +219,7 @@ Example:
 
   human
     .command("list")
-    .description("Show the configured human (single-human surface per A1/R5; several fragments render honestly with a 0.5.7 advisory)")
+    .description("Show the configured human (OpenRig supports one; extra hand-authored fragments are listed with an advisory)")
     .option("--json", "Complete record(s) as JSON")
     .action(async (opts: { json?: boolean }) => {
       const { listHumans } = await import("@openrig/daemon/gateway-human-registry");

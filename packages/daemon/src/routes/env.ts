@@ -26,15 +26,20 @@ export function envRoutes(): Hono {
     }
 
     // Refresh receipt with honest probe tracking
-    let receipt = record.latestReceiptJson ? JSON.parse(record.latestReceiptJson) : null;
+    let receipt: unknown = null;
     let probeStatus: "fresh" | "stale" | "no_orchestrator" = "no_orchestrator";
     let probeError: string | undefined;
+    if (record.latestReceiptJson) {
+      try { receipt = JSON.parse(record.latestReceiptJson); }
+      catch { probeError = "Cached service receipt could not be parsed"; }
+    }
     if (serviceOrchestrator) {
       try {
         const fresh = await serviceOrchestrator.captureReceipt(rigId);
         if (fresh) {
           receipt = fresh;
           probeStatus = "fresh";
+          probeError = undefined;
         } else {
           probeStatus = "stale";
           probeError = "Probe returned no receipt — services record may no longer exist";
@@ -117,9 +122,10 @@ export function envRoutes(): Hono {
       return c.json({ error: "Service orchestrator not available" }, 500);
     }
 
-    const body = await c.req.json<{ volumes?: boolean }>().catch(() => ({} as { volumes?: boolean }));
+    const body = await c.req.json<{ volumes?: unknown } | null>().catch(() => null);
+    const volumes = body?.volumes;
 
-    const result = body.volumes
+    const result = volumes === true
       ? await serviceOrchestrator.teardown(rigId, { policyOverride: "down_and_volumes" })
       : await serviceOrchestrator.teardown(rigId);
 
@@ -127,7 +133,7 @@ export function envRoutes(): Hono {
       return c.json({ ok: false, error: result.error }, 500);
     }
 
-    return c.json({ ok: true });
+    return c.json({ ok: true, ...(result.kept ? { kept: result.kept } : {}) });
   });
 
   return app;

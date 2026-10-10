@@ -124,6 +124,48 @@ and provenance results independently. A help listing or dry-run is not proof of 
 successful transition. The linked cutover SOP supplies the operator mechanics
 and required effect checks after the named owner authorizes the action.
 
+## Write the seat's recap before a handover
+
+A `rebuild` primes the successor from the seat's durable artifacts, highest trust
+first:
+1. the authored `RECAP.md`;
+2. `LEARNED.md`;
+3. the latest restore packet, when one is marked;
+4. the superseded recaps.
+
+A missing `RECAP.md` is recorded as a gap. The successor is directed to the remaining
+available artifacts in that order. So before a handover, a compaction or a long pause,
+the sitting occupant writes its recap alongside `LEARNED.md`:
+
+```sh
+rig context recap-write --rig <rig> --seat <seat> --file <draft.md>
+```
+
+- `<seat>` is the seat's folder under `rigs/<rig>/seats/`, the part of its session
+  name before `@`.
+- The command reads `topology.root` and doesn't need the daemon.
+- Each write moves the previous recap into the seat's `recap-superseded/` chain,
+  which later rebuilds also read. Write through this command, not a file tool, so
+  the chain is kept.
+
+**The store refuses the write, and writes nothing,** when a section can't be
+addressed. Only H2 and H3 headings are sections. Addresses lowercase the title,
+remove Markdown formatting markers, replace remaining runs outside `a-z`/`0-9` with
+a hyphen, and trim edge hyphens. Duplicate section paths, a nonblank H2/H3 title
+that normalizes to an empty slug, and an unclosed code fence are refused. A
+duplicate path is two H2s with the same address, or two H3s with the same address
+under one H2. Blank headings are retained as scope boundaries.
+
+**It writes, with an advisory on stderr,** when:
+- no H2 or H3 title contains "decision";
+- a line mentions "unverified" without the exact marker `UNVERIFIED:`.
+
+**A recap that passes the first time** has:
+- a short summary;
+- a `## Decisions, with reasons` section, each decision with its reason;
+- what's in flight and who owns the next step;
+- an `UNVERIFIED:` line for each fact you haven't checked yourself.
+
 ## Why load-bearing for RSI
 
 Any recursive seat-refresh loop must be able to replace an occupant

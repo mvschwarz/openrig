@@ -61,7 +61,22 @@ healthy control or arms the stopped-DB mutation. Unknown classes, a missing seed
 an injection failure, a surviving fault, or an unrelated failing observation fail
 the job. Assertions continue to use the shipped queue read, never a fake observer.
 
-The other ten library scenarios are **unadmitted**. Several need step-time `emit`,
+## Stub-script scenarios, passing form
+
+The same job then runs `../scenarios/transcript-reads-addressed-seat.yaml` and
+`../scenarios/capture-returns-addressed-seat.yaml` once each, healthy only, in their own
+fresh containers. Each brings up a two-seat stub rig whose seats print their own token from
+an `env.stub_scripts` script, and reads it back through the shipped `rig transcript` or
+`rig capture`. `verifyPassingRun` in `result.mjs` accepts only a clean PASS of the named
+scenario: one ledger record matching the result, the scenario SHA256, exit 0, and no error,
+seed or fault.
+
+Their planted failures are product-code mutations (the transcript response dropping its
+content, and capture resolving a seat by member-name prefix). The read-only installed image
+can't carry them, so they stay per-PR evidence outside CI. A green run here shows the
+passing leg only.
+
+The other library scenarios are **unadmitted**. Several need step-time `emit`,
 `policy`, `mutate`, or `restore`. Others have incomplete assertions or setup:
 clean-lifecycle has no post-down residue assertion, ps-scope neither brings up its
 second topology nor excludes extra rows, and the home/preseed and send/render

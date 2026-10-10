@@ -20,6 +20,7 @@ import {
   buildOrientedMap,
   computeContractHash,
   computeExpectedAnswer,
+  STARTUP_PROOF_INSTRUCTION_LINE,
 } from "../src/domain/startup-proof.js";
 import { activityRoutes } from "../src/routes/activity.js";
 
@@ -302,5 +303,16 @@ describe("startup-proof — authenticated route ingestion", () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ ok: false, code: "identity_mismatch" });
     expect(deriveOriented(ctx.db, ctx.nodeId)).not.toBe("verified");
+  });
+});
+
+describe("startup-proof — the Claude instruction line", () => {
+  it("is one short line with no challenge id or answer, so a proof still means the startup text was read", () => {
+    expect(STARTUP_PROOF_INSTRUCTION_LINE).not.toContain("\n");
+    expect(STARTUP_PROOF_INSTRUCTION_LINE.length).toBeLessThan(300);
+    expect(STARTUP_PROOF_INSTRUCTION_LINE).not.toMatch(/[0-9a-f]{32}/);
+    expect(STARTUP_PROOF_INSTRUCTION_LINE).not.toContain("--answer");
+    expect(STARTUP_PROOF_INSTRUCTION_LINE).not.toContain("--challenge-id");
+    expect(STARTUP_PROOF_INSTRUCTION_LINE).toContain("OpenRig");
   });
 });

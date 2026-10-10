@@ -115,6 +115,9 @@ function scanHeaders(lines: string[]): HeaderScan {
       const marker = fenceMatch[1]![0]!;
       const length = fenceMatch[1]!.length;
       if (!fence) {
+        // Backticks in an opener's info string prevent a fenced block.
+        // Do not let inline code spans hide the following real headings.
+        if (marker === "`" && line.slice(fenceMatch[0].length).includes("`")) continue;
         fence = { marker, length, line: i };
       } else if (fence.marker === marker && length >= fence.length
         && /^[ \t\r]*$/.test(line.slice(fenceMatch[0].length))) {
@@ -123,8 +126,9 @@ function scanHeaders(lines: string[]): HeaderScan {
       continue;
     }
     if (fence) continue;
-    const header = line.match(/^(#{1,6})\s+(.*\S)\s*$/);
-    if (header) hits.push({ level: header[1]!.length, title: header[2]!, line: i });
+    // Empty ATX headings still end spans and change the parent scope.
+    const header = line.match(/^ {0,3}(#{1,6})(?:\s+(.*\S))?\s*$/);
+    if (header) hits.push({ level: header[1]!.length, title: header[2] ?? "", line: i });
   }
   return { hits, unterminatedFenceLine: fence?.line ?? null };
 }
@@ -142,7 +146,7 @@ export function parseMarkdownSections(text: string): MarkdownSection[] {
   for (let idx = 0; idx < headers.length; idx++) {
     const h = headers[idx]!;
     if (h.level < MIN_LEVEL || h.level > MAX_LEVEL) {
-      if (h.level < MIN_LEVEL) currentH2 = null; // an H1 resets the H2 scope
+      if (h.level < MIN_LEVEL) currentH2 = h.title.length === 0 ? "" : null; // a blank H1 keeps children unaddressable
       continue;
     }
     const slug = slugifyHeader(h.title);
@@ -210,7 +214,7 @@ export type AddressabilityFinding =
  *  the caller decides the gate. */
 export function validateMarkdownAddressability(text: string): AddressabilityFinding[] {
   const lines = text.split("\n");
-  const { unterminatedFenceLine } = scanHeaders(lines);
+  const { hits: headers, unterminatedFenceLine } = scanHeaders(lines);
   const sections = parseMarkdownSections(text);
   const findings: AddressabilityFinding[] = [];
   // r1 F1: an unclosed fence swallows every later header; resolution stays honest
@@ -220,9 +224,19 @@ export function validateMarkdownAddressability(text: string): AddressabilityFind
     findings.push({ kind: "unterminated-fence", line: unterminatedFenceLine });
   }
   const seen = new Map<string, number[]>();
+  let blankParentScope = false;
+  let headerIndex = 0;
   for (const s of sections) {
-    // r1 F2 family rule: ANY empty segment makes a section unreachable by a legal
-    // address (parseAddress rejects empty segments) — flag parent AND children.
+    while (headerIndex < headers.length && headers[headerIndex]!.line <= s.headerLine) {
+      const header = headers[headerIndex++]!;
+      if (header.level <= 2) blankParentScope = header.title.length === 0;
+    }
+    // Blank headings are scope boundaries, not names to validate. Preserve
+    // recap-write compatibility for their content without promoting children
+    // into a preceding section or the top-level address space.
+    if (s.title.length === 0 || (blankParentScope && s.headerPath.length === 2 && s.headerPath[1]!.length > 0)) continue;
+    // r1 F2 family rule: for remaining named headers, any empty segment makes
+    // the section unreachable by a legal address — flag parent AND children.
     if (s.headerPath.some((segment) => segment.length === 0)) {
       findings.push({ kind: "unaddressable-header", headerPath: s.headerPath.join("/"), line: s.headerLine, title: s.title });
       continue;

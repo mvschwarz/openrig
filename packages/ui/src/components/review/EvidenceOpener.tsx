@@ -7,7 +7,7 @@
 //   video    → inline <video playsinline preload="metadata"> via /api/files/asset
 //   folder   → ArtifactsNavigator scoped to the folder (OPENRIG_FILES_ALLOWLIST-governed)
 //   .html    → rendered page in a NEW TAB via ?render=1 (the named net-new opt-in;
-//              CSP posture is a documented advisory, not a gate)
+//              supports scripted mockups in the daemon origin)
 // Dead code (ProofImageViewer / TestsVerificationTab viewer / DocsTab) stays dead.
 
 import { useState } from "react";

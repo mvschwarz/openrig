@@ -2,11 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import {
   RestoreCheckService,
   type RestoreCheckDeps,
   type NodeInventoryEntry,
 } from "../src/domain/restore-check-service.js";
+
+const RELAY_PATH = "/custom-instance/state/claude-activity-hooks/activity-relay.cjs";
 
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   schemaVersion: 1,
@@ -89,6 +94,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
   getStartupContext: (nodeId: string) => unknown;
 }>): RestoreCheckDeps {
   return {
+    stateDir: "/custom-instance",
     listRigs: () => [{ rigId: "rig-1", name: "test-rig" }],
     getNodeInventory: () => [
       {
@@ -103,6 +109,14 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
       } as NodeInventoryEntry,
     ],
     hasSnapshot: () => true,
+    // Independent fixture for the newly shared snapshot pre-validation.
+    getRestoreInputs: (rigId) => ({
+      snapshot: { id: "snap-1", kind: "full", data: {
+        rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
+        nodes: [], sessions: [], edges: [], checkpoints: {},
+      } },
+      servicesRecord: null,
+    }),
     getLatestSnapshot: () => null,
     probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running on port 7433" }),
     exists: () => true,
@@ -115,6 +129,55 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
 }
 
 describe("RestoreCheckService", () => {
+  it.each(["ready", "failed", "attention_required"])("identity projection advice preserves the stored %s outcome", stored => {
+    const db = createFullTestDb();
+    try {
+      db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'test-rig')").run();
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-1','rig-1','dev.impl','claude-code')").run();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES ('session-1','node-1','dev-impl@test-rig','running',?,'2026-07-01 00:00:00')").run(stored);
+      db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('binding-1','node-1','tmux','dev-impl@test-rig','%1')").run();
+      new SeatIdentityStore(db).upsert({
+        nodeId: "node-1", verdict: "mismatch", evidenceSource: "pane_process", reason: "process_identity_ambiguous",
+        evidence: { registeredPane: "%1", observedPid: 123, observedCommand: "node", matchedLayer: null },
+        sessionName: "dev-impl@test-rig", observedAt: "2026-07-02T12:00:00.000Z",
+      });
+      const service = new RestoreCheckService(mockDeps({ getNodeInventory: rigId => getNodeInventory(db, rigId) }));
+      const result = service.check({ noQueue: true, noHooks: true }) as any;
+      const check = result.checks.find((entry: { check: string }) => entry.check === "seat.dev-impl@test-rig.readiness");
+      expect(check.status).toBe("red");
+      expect(check.remediationSafe).toBe(false);
+      if (stored === "ready") {
+        expect(check.evidence).toContain("verdict=mismatch reason=process_identity_ambiguous");
+        expect(check.remediation).toContain("Verify the current pane identity");
+        expect(check.remediation).toContain("rig seat clear-attention");
+        expect(check.remediation).not.toMatch(/relaunch/i);
+      } else {
+        expect(check.remediation).toContain("Restore or relaunch");
+      }
+    } finally { db.close(); }
+  });
+
+  it("missing-session identity advice offers recovery and conditional pane rebinding", () => {
+    const node = claudeNode({
+      storedStartupStatus: "ready", startupStatus: "attention_required",
+      identityVerdict: {
+        nodeId: "node-1", verdict: "pane_missing", evidenceSource: "tmux_session", reason: "session_missing",
+        evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+        sessionName: "dev-impl@test-rig", observedAt: "2026-07-02T12:00:00.000Z",
+      },
+    });
+    const result = new RestoreCheckService(mockDeps({ getNodeInventory: () => [node] }))
+      .check({ noQueue: true, noHooks: true }) as any;
+    const check = result.checks.find((entry: { check: string }) => entry.check === "seat.dev-impl@test-rig.readiness");
+    expect(check.status).toBe("red");
+    expect(check.remediationSafe).toBe(false);
+    expect(check.evidence).toContain("verdict=pane_missing reason=session_missing");
+    expect(check.remediation).toContain("restore or relaunch");
+    expect(check.remediation).toContain("another pane of its session");
+    expect(check.remediation).toContain("rig seat clear-attention");
+    expect(check.remediation).toContain("rerun rig restore-check");
+  });
+
   let previousOpenRigHome: string | undefined;
   let testOpenRigHome: string | null;
 
@@ -496,6 +559,33 @@ describe("RestoreCheckService", () => {
     }
   });
 
+  it("accepts real OPENRIG_HOME evidence inside a literal dot-prefixed directory", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-dot-prefix-"));
+    const evidence = path.join(root, "..cache", "launchd.plist");
+    const declaration = path.join(root, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = root;
+    fs.mkdirSync(path.dirname(evidence));
+    fs.writeFileSync(evidence, "synthetic local launch evidence");
+    fs.writeFileSync(declaration, v2HostInfraDeclaration({
+      daemonEvidencePaths: ["${OPENRIG_HOME}/..cache/launchd.plist"], supportingInfra: [],
+    }));
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        listRigs: () => [], exists: fs.existsSync,
+        readFile: (candidate) => fs.readFileSync(candidate, "utf8"),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+      expect(check?.status).toBe("green");
+      expect(check?.evidence).toContain(evidence);
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("schemaVersion 2 missing daemon evidence path is yellow with exact path", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-missing-daemon-"));
     const declarationPath = path.join(tmpDir, "host-infra.json");
@@ -752,14 +842,20 @@ describe("RestoreCheckService", () => {
 
   // --- Rig spec/root checks ---
 
-  it("missing rig root produces spec-present red", () => {
+  it("missing rig root is a not-checked caveat, not a blocker (#130: rigs launch from specs elsewhere)", () => {
     const service = new RestoreCheckService(mockDeps({
+      substrateRoot: "/shared-docs",
       exists: (p) => !p.includes(path.join("rigs", "test-rig")),
     }));
-    const result = service.check({});
+    const result = service.check({ noHooks: true });
     const spec = result.checks.find((c) => c.check === "rig.test-rig.spec-present");
-    expect(spec?.status).toBe("red");
-    expect(spec?.evidence).toContain("Rig root missing");
+    expect(spec?.status).toBe("yellow");
+    expect(spec?.evidence).toContain("Not checked: no launch spec location could be established");
+    expect(spec?.evidence).toContain(path.join("/shared-docs", "rigs", "test-rig", "rig.yaml"));
+    expect(spec?.remediationSafe).toBe(true);
+    expect(result.counts.red).toBe(0);
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.rigs[0]).toEqual(expect.objectContaining({ status: "ready_with_caveats", blockingChecks: [] }));
   });
 
   it("rig root exists but rig.yaml missing produces spec-present yellow", () => {
@@ -853,7 +949,7 @@ describe("RestoreCheckService", () => {
   it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"])("checks usable selected activity-hook matcher %s", (matcher) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const events = ["SessionStart", "UserPromptSubmit"];
     const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ matcher, hooks: [
       { type: "command", command: `node '${relayPath}'` },
@@ -878,7 +974,7 @@ describe("RestoreCheckService", () => {
   it.each(["disabled", "compact-only", "prompt-handler", "invalid-matcher", "substring-matcher"])("keeps %s selected activity hooks as a caveat", (kind) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-unusable");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{
@@ -905,7 +1001,7 @@ describe("RestoreCheckService", () => {
   it("does not accept a similarly named command as the projected Claude activity hook", () => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-lookalike");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{
@@ -927,7 +1023,7 @@ describe("RestoreCheckService", () => {
   it("warns when a selected Claude activity hook event is not projected", () => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-partial");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{
@@ -944,6 +1040,26 @@ describe("RestoreCheckService", () => {
     const hook = service.check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
     expect(hook?.status).toBe("yellow");
     expect(hook?.evidence).toContain("UserPromptSubmit");
+  });
+
+  it("does not count stale project-local commands as delivered instance hooks", () => {
+    const cwd = "/project";
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const legacy = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{
+        absolutePath: "/source/openrig-core", category: "runtime_resource", resourceType: "claude_activity_hooks",
+      }] }),
+      getClaudeActivityHookEvents: () => ["Stop"],
+      exists: () => true,
+      readFile: candidate => candidate === settingsPath
+        ? JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `node '${legacy}'` }] }] } })
+        : VALID_HOST_INFRA_DECLARATION,
+    }));
+    const hook = service.check({}).checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("yellow");
+    expect(hook?.evidence).toContain("missing relay entries for: Stop");
   });
 
   it("treats deliberately unselected Claude activity hooks as not applicable", () => {
@@ -1399,7 +1515,7 @@ describe("RestoreCheckService", () => {
     expect(result.recovery.status).toBe("not_needed");
   });
 
-  it("stopped rig without latest snapshot is actionable when durable current state is present", () => {
+  it("stopped rig without a usable snapshot is unknown because auto-rehydrate is not inspected", () => {
     const service = new RestoreCheckService(mockDeps({
       hasSnapshot: () => false,
       getNodeInventory: () => [claudeNode({
@@ -1409,25 +1525,27 @@ describe("RestoreCheckService", () => {
         tmuxAttachCommand: null,
       })],
       getLatestSnapshot: () => null,
+      getRestoreInputs: () => ({ unavailable: "No usable snapshot; current-state auto-rehydrate is not inspected" }),
     }));
 
     const result = service.check({ noHooks: true }) as any;
 
+    // The stopped-seat red still wins the aggregate; the input unknown stays named.
     expect(result.readiness.status).toBe("not_ready");
+    expect(result.rigs[0].status).toBe("unknown");
     expect(result.recovery).toEqual({
-      status: "actionable",
-      summary: expect.stringContaining("1 rig can be recovered"),
-      actions: [
+      status: "unknown",
+      summary: expect.stringContaining("1 unknown"),
+      actions: [],
+      unknown: [
         expect.objectContaining({
           scope: "rig",
           rigId: "rig-1",
           rigName: "test-rig",
-          command: "rig up --existing test-rig",
-          reason: expect.stringContaining("current DB state"),
+          reason: expect.stringContaining("auto-rehydrate is not inspected"),
         }),
       ],
       blocked: [],
-      unknown: [],
     });
   });
 

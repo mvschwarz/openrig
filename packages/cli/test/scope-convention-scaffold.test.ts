@@ -18,10 +18,12 @@ import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
 import {
   renderCapabilityDeltaTemplate,
+  renderNotesTemplate,
   renderSliceProofTemplate,
   renderSliceTemplate,
 } from "../src/lib/scope/templates.js";
 import { MISSION_TEMPLATE_KINDS, SLICE_TEMPLATE_KINDS } from "../src/lib/scope/types.js";
+import { validateWorkspaceFrontmatter } from "../../daemon/src/domain/workspace/frontmatter-validator.js";
 import { renderMissionTemplate } from "../src/lib/scope/templates.js";
 
 const CONVENTION_SECTIONS = ["## Intent", "## Mini-requirements", "## Proof contract"] as const;
@@ -241,6 +243,66 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
         composition: { mission_markdown: { spec: "SPEC.md" }, slices: [] },
       });
     }
+  });
+
+  it("quotes a YAML-hostile mission title in NOTES.md so it round-trips and validates clean", async () => {
+    const title = 'Release 9.9.9: a "test" # title';
+    const r = await run(["mission", "create", "release-9.9.9", "--title", title, "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const missionPath = JSON.parse(r.stdout).mission.path as string;
+
+    expect(readFrontmatter(path.join(missionPath, "NOTES.md"))).toMatchObject({ name: title });
+    expect(validateWorkspaceFrontmatter({ root: missionPath }).gaps).toEqual([]);
+  });
+
+  const literalValues = [
+    { label: "double-dollar", title: "Document $$ shell PID", intent: "Use $$ for the child PID" },
+    { label: "match", title: "Document $& replacement", intent: "Preserve $& exactly" },
+    { label: "suffix", title: "Show $' substitution", intent: "String $' stays literal" },
+    { label: "prefix", title: "Show $` substitution", intent: "String $` stays literal" },
+    { label: "braces", title: "Document {{intent}} and {{created_date}}", intent: "Keep {{depends_on}} and {{release_version}} literal" },
+    { label: "ordinary", title: "Document shell PID", intent: "Use the child PID" },
+    { label: "ordinary-dollar", title: "Document $1 and $5 values", intent: "Cost $50 without replacement" },
+  ];
+
+  it.each(literalValues)("preserves authored mission scaffold literals: $label", async ({ title, intent }) => {
+    const result = await run([
+      "mission", "create", "release-9.9.9", "--title", title, "--intent", intent, "--json",
+    ], substrate.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const missionPath = JSON.parse(result.stdout).mission.path as string;
+    const specPath = path.join(missionPath, "SPEC.md");
+    const spec = fs.readFileSync(specPath, "utf8");
+    expect(readFrontmatter(specPath).intent).toBe(intent);
+    expect(spec.split("\n").find((line) => line.startsWith("# "))).toContain(title);
+    expect(spec).toContain(`\n${intent}\n`);
+    expect(readFrontmatter(path.join(missionPath, "NOTES.md")).name).toBe(title);
+    expect(fs.readFileSync(path.join(missionPath, "NOTES.md"), "utf8")).toContain(`# Notes — ${title}\n`);
+    expect(fs.readFileSync(path.join(missionPath, "PROGRESS.md"), "utf8")).toContain(`# Progress — ${title}\n`);
+  });
+
+  it.each(literalValues)("preserves authored slice scaffold literals: $label", async ({ title, intent }) => {
+    const result = await run([
+      "slice", "create", "release-0.4.4", "literal-probe", "--title", title, "--intent", intent, "--json",
+    ], substrate.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const slicePath = JSON.parse(result.stdout).slice.path as string;
+    const specPath = path.join(slicePath, "SPEC.md");
+    const spec = fs.readFileSync(specPath, "utf8");
+    expect(readFrontmatter(specPath).intent).toBe(intent);
+    expect(spec.split("\n").find((line) => line.startsWith("# "))).toContain(title);
+    expect(spec).toContain(`\n${intent}\n`);
+    expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain(title);
+    expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain(`# Progress — ${title}\n`);
+  });
+
+  it("retains unknown custom notes tokens and does not interpolate tokens in the authored name", () => {
+    const template = path.join(substrate.root, "custom-notes.md");
+    fs.writeFileSync(template, "{{mission_name}}\n{{mission_name_yaml}}\n{{created_date}}\n{{unknown}} {{constructor}} {{__proto__}}\n");
+    const name = "$$ $& {{created_date}}";
+    const result = renderNotesTemplate({ mission_id: "OPR.9.9.9", mission_name: name, created_date: "2026-10-07" }, template);
+    expect(result.resolvedFrom).toBe("env");
+    expect(result.rendered).toBe(`${name}\n${JSON.stringify(name)}\n2026-10-07\n{{unknown}} {{constructor}} {{__proto__}}\n`);
   });
 });
 

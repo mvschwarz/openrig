@@ -178,6 +178,30 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(unchanged.skipped).toBe(1);
   });
 
+  it("hashes the same-second check the way the cache hashes (UTF-8 text)", () => {
+    const file = join(folder, "wf.yaml");
+    // A lone 0xFF byte hashes differently as raw bytes vs UTF-8 text; the
+    // cache stores the text digest, so the check must compare the text digest.
+    writeFileSync(file, Buffer.concat([Buffer.from(VALID_YAML, "utf-8"), Buffer.from([0xff])]));
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const before = db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as {cached_at: string};
+    // Unchanged content, mtime pinned inside the cached second bucket.
+    const sameSecond = new Date(Math.floor(Date.parse(before.cached_at) / 1000) * 1000 + 999);
+    utimesSync(file, sameSecond, sameSecond);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.scanned).toBe(1);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("keeps scanning the folder when recording one file's parse error fails", () => {
+    writeFileSync(join(folder, "a-bad.yaml"), INVALID_YAML);
+    writeFileSync(join(folder, "b-good.yaml"), VALID_YAML);
+    cache.writeDiagnostic = () => { throw new Error("diagnostic write failed"); };
+    let result: ReturnType<typeof scanWorkflowSpecFolder> | undefined;
+    expect(() => { result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }); }).not.toThrow();
+    expect(result).toMatchObject({ scanned: 2, valid: 1, errors: 1 });
+  });
+
   it("removes cache row when file disappears (OQ-4)", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);

@@ -2,12 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
+import { OPENRIG_HOME } from "../openrig-compat.js";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry, type StartupContextProbeResult } from "../domain/restore-check-service.js";
 import { deriveRelayEvents } from "../domain/claude-activity-hooks.js";
 import { getNodeInventory } from "../domain/node-inventory.js";
 import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-store.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 
 function getDeps(c: { get(key: never): unknown }): {
   rigRepo: RigRepository;
@@ -151,6 +153,7 @@ export function createRestoreCheckService(
   snapshotRepo: SnapshotRepository,
 ): RestoreCheckService {
   const serviceDeps: RestoreCheckDeps = {
+    stateDir: OPENRIG_HOME,
     substrateRoot: dirname(resolveLegacyTopologyRigsRoot()),
     probeQueueStore: () => {
       try {
@@ -189,6 +192,18 @@ export function createRestoreCheckService(
     getLatestSnapshot: (rigId: string) => {
       const snapshot = snapshotRepo.getLatestSnapshot(rigId);
       return snapshot ? { id: snapshot.id, kind: snapshot.kind } : null;
+    },
+    getRestoreInputs: (rigId: string) => {
+      const rig = rigRepo.getRig(rigId);
+      if (!rig) return { unavailable: `Rig ${rigId} no longer exists` };
+      const selected = snapshotRepo.selectRestoreUsable(rigId);
+      if (!selected.ok || !snapshotMatchesCurrentOccupants(snapshotRepo.db, rig, selected.snapshot)) {
+        return {
+          currentStateRehydrate: assessCurrentStateRehydrateEligibility(snapshotRepo.db, rig),
+          reason: selected.ok ? "Selected snapshot names an older occupant" : selected.message,
+        };
+      }
+      return { snapshot: selected.snapshot, servicesRecord: rigRepo.getServicesRecord(rigId) };
     },
     probeDaemonHealth: () => {
       // We're inside the daemon — if this route is responding, daemon is healthy

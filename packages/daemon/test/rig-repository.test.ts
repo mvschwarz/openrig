@@ -122,6 +122,25 @@ describe("RigRepository", () => {
     expect(names).toContain("rig-c");
   });
 
+  it("finds an older live project when a later generation was re-archived", () => {
+    const live = repo.createRig("same-name");
+    const predecessor = repo.createRig("same-name");
+    db.prepare("UPDATE rigs SET created_at = ? WHERE id = ?").run("2026-01-01T00:00:00Z", live.id);
+    db.prepare("UPDATE rigs SET created_at = ? WHERE id = ?").run("2026-01-02T00:00:00Z", predecessor.id);
+    for (const rig of [live, predecessor]) {
+      repo.setServicesRecord(rig.id, {
+        kind: "compose",
+        specJson: "{}",
+        rigRoot: "/tmp",
+        composeFile: "compose.yaml",
+        projectName: "shared-project",
+      });
+    }
+    expect(repo.archiveRig(predecessor.id)).toBe(true);
+
+    expect(repo.getLiveServicesSuccessor(predecessor.id, "shared-project")).toEqual({ id: live.id, name: "same-name" });
+  });
+
   it("deleteRig cascades — nodes and edges gone", () => {
     const rig = repo.createRig("test-rig");
     const n1 = repo.addNode(rig.id, "orchestrator");

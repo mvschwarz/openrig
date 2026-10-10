@@ -7,7 +7,7 @@
 // `scripts/build-package.sh`). Before the fix on baseline-fix-packaging,
 // `rig daemon start` from a monorepo checkout launched the stale
 // vendored daemon, so /api/rig-policy/* (slice 09) and the
-// review-feedback fix in the conveyor spec (slice 01) were
+// review-feedback fix in the starter spec (slice 01) were
 // unreachable through the user-facing CLI path even though the
 // source-of-truth carried them.
 //
@@ -22,11 +22,8 @@
 //      include the rig-policy route module + its registration in
 //      server.js. (qitem-20260518054224)
 //
-//   2. Slice 01 conveyor cycle regression — vendored conveyor spec
-//      MUST carry the review.reviewer → build.builder edge as
-//      `can_observe` (the slice-01 fix at f3449baf), NOT
-//      `delegates_to` (which would make `rig up conveyor` reject with
-//      cycle_error). (qitem-20260518054046)
+//   2. The current built-in team specs and kernel variants must ship byte-for-byte.
+//      Old provider-specific starter entries must not survive in the package.
 //
 // The runtime resolveDaemonPath fix means `rig daemon start` from the
 // monorepo prefers source even when vendored is stale, so the user
@@ -67,51 +64,25 @@ test("baseline-fix-packaging guard: vendored daemon dist carries slice-09 rig-mo
   );
 });
 
-test("baseline-fix-packaging guard: vendored conveyor spec carries slice-01 can_observe edge when assembled (qitem-20260518054046)", () => {
-  // Skip ONLY when no vendored bundle has been assembled at all
-  // (fresh clone / clean state). Per guard verdict
-  // qitem-20260518055713: an assembled bundle (dist present) that is
-  // missing the conveyor spec is a stale/incomplete artifact and MUST
-  // fail this gate, not skip silently.
-  if (!vendoredAssembled()) {
-    return;
+test("vendored built-in teams match source and omit retired shelf entries when assembled", () => {
+  if (!vendoredAssembled()) return;
+  for (const rel of [
+    "launch/starter/rig.yaml", "launch/factory/rig.yaml", "focused/code-review/rig.yaml",
+    "focused/research/rig.yaml", "focused/pm/rig.yaml", "launch/kernel/rig.yaml",
+    "launch/kernel/rig-claude-only.yaml", "launch/kernel/rig-codex-only.yaml",
+    "launch/factory-rsi/world-bundle.yaml", "launch/secrets-manager/rig.yaml",
+  ]) {
+    const source = path.join(SRC_SPECS, "rigs", rel);
+    const vendored = path.join(VEND_SPECS, "rigs", rel);
+    assert.ok(fs.existsSync(vendored), `Assembled package is missing ${rel}; rebuild with scripts/build-package.sh.`);
+    assert.equal(fs.readFileSync(vendored, "utf8"), fs.readFileSync(source, "utf8"), `Stale packaged spec: ${rel}`);
   }
-  const vendoredSpecPath = path.join(VEND_SPECS, "rigs/launch/conveyor/rig.yaml");
-  assert.ok(
-    fs.existsSync(vendoredSpecPath),
-    `Vendored daemon dist is assembled but packages/cli/daemon/specs/rigs/launch/conveyor/rig.yaml is missing. scripts/build-package.sh assembles BOTH dist + specs; an assembled bundle without specs is an incomplete artifact that would break \`rig up conveyor\`. Re-run scripts/build-package.sh.`,
-  );
-  const vendoredSpec = fs.readFileSync(vendoredSpecPath, "utf-8");
-
-  // Slice 01's review feedback fix: review.reviewer → build.builder is
-  // can_observe (NOT delegates_to). A vendored spec that still says
-  // `delegates_to` here is pre-slice-01 stale and `rig up conveyor`
-  // will reject with cycle_error.
-  //
-  // Discriminator: locate the edge by from/to anchors and confirm its
-  // `kind:` line is `can_observe`. Match the exact YAML block shape
-  // used in the spec.
-  const cycleReviewerToBuilder = /from:\s*review\.reviewer\s*\n\s*to:\s*build\.builder/m.test(vendoredSpec);
-  if (!cycleReviewerToBuilder) {
-    // Spec may have been restructured; verify against source and let
-    // the second guard test catch sync drift below.
-    return;
-  }
-
-  // Find the kind line that IMMEDIATELY precedes the `from:
-  // review.reviewer / to: build.builder` block. .match() without the
-  // global flag returns the FIRST match, so walking backward requires
-  // matchAll + take-last.
-  const idx = vendoredSpec.search(/from:\s*review\.reviewer\s*\n\s*to:\s*build\.builder/);
-  const before = vendoredSpec.slice(0, idx);
-  const kindMatches = [...before.matchAll(/kind:\s*(\w+)/g)];
-  const lastKind = kindMatches[kindMatches.length - 1];
-  assert.ok(lastKind, "Could not locate kind for review.reviewer→build.builder edge in vendored conveyor spec.");
-  assert.strictEqual(
-    lastKind[1],
-    "can_observe",
-    `Vendored conveyor spec has review.reviewer→build.builder as '${lastKind[1]}', expected 'can_observe' (slice 01 fix at f3449baf). 'delegates_to' here triggers cycle_error on \`rig up conveyor --yes\`. Re-run scripts/build-package.sh.`,
-  );
+  for (const rel of [
+    "launch/first-project", "launch/first-project-claude", "launch/first-project-mixed",
+    "launch/conveyor", "launch/demo", "launch/implementation-pair", "preview/product-team",
+    "focused/adversarial-review", "focused/research-team", "focused/pm-team",
+    "launch/factory-rsi",
+  ]) assert.equal(fs.existsSync(path.join(VEND_SPECS, "rigs", rel, "rig.yaml")), false, `Retired shelf entry still packaged: ${rel}`);
 });
 
 test("baseline-fix-packaging guard: vendored daemon dist+specs match source when both exist (general staleness)", () => {
@@ -140,22 +111,4 @@ test("baseline-fix-packaging guard: vendored daemon dist+specs match source when
     );
   }
 
-  // Same check for the conveyor spec (the slice-01-aware artifact).
-  // Per guard verdict qitem-20260518055713: when the bundle is
-  // assembled and source has the spec, vendored MUST have it too —
-  // missing = fail, not skip.
-  const conveyorRel = "rigs/launch/conveyor/rig.yaml";
-  const srcConveyor = path.join(SRC_SPECS, conveyorRel);
-  const vendConveyor = path.join(VEND_SPECS, conveyorRel);
-  if (fs.existsSync(srcConveyor)) {
-    assert.ok(
-      fs.existsSync(vendConveyor),
-      `Source conveyor spec exists but vendored copy at packages/cli/daemon/specs/${conveyorRel} is missing. Assembled bundle is incomplete; run scripts/build-package.sh to assemble both dist + specs.`,
-    );
-    assert.strictEqual(
-      fs.readFileSync(vendConveyor, "utf-8"),
-      fs.readFileSync(srcConveyor, "utf-8"),
-      `Vendored conveyor spec differs from source. Re-run scripts/build-package.sh to refresh both dist and specs.`,
-    );
-  }
 });

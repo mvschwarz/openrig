@@ -187,7 +187,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
   // rig spec validate <path>
   cmd
     .command("validate <path>")
-    .description("Validate a rig spec (pure schema validation)")
+    .description("Validate a rig spec locally (no daemon required)")
     .option("--json", "JSON output")
     .action(async (filePath: string, opts: { json?: boolean }) => {
       const deps = getDeps();
@@ -201,31 +201,26 @@ export function rigCommand(depsOverride?: RigDeps): Command {
         return;
       }
 
-      const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (!daemonStatusGuard(status)) return;
-
-      const client = deps.clientFactory(getDaemonUrl(status));
-
-      const res = await client.postText<{ valid?: boolean; errors?: string[]; name?: string; advisories?: string[] }>("/api/rigs/import/validate", yaml);
+      const { RigSpecParseError, validateRigSpecImport } = await import("@openrig/daemon/spec-validation");
+      let data: ReturnType<typeof validateRigSpecImport>;
+      try {
+        data = validateRigSpecImport(yaml);
+      } catch (err) {
+        if (!(err instanceof RigSpecParseError)) {
+          const error = "Internal validator error; validation did not complete.";
+          if (opts.json) console.log(JSON.stringify({ error }));
+          else console.error(error);
+          process.exitCode = 1;
+          return;
+        }
+        data = { valid: false, errors: [err.message] };
+      }
 
       if (opts.json) {
-        console.log(JSON.stringify(res.data));
-        if (res.status >= 400 || !res.data.valid) process.exitCode = 1;
+        console.log(JSON.stringify(data));
+        if (!data.valid) process.exitCode = 1;
         return;
       }
-
-      if (res.status >= 400) {
-        const data = res.data;
-        if (data.errors && data.errors.length > 0) {
-          console.error(`Rig spec invalid:\n${data.errors.map((e) => `  ${e}`).join("\n")}\nFix: update ${filePath} and re-validate.`);
-        } else {
-          console.error(`Validation failed (HTTP ${res.status}). Check rig spec YAML syntax.`);
-        }
-        process.exitCode = 1;
-        return;
-      }
-
-      const data = res.data;
       // OPR.0.5.3.3 — advisories are printed regardless of validity (fail-open; never an error).
       if (data.advisories && data.advisories.length > 0) {
         for (const a of data.advisories) console.error(`⚠ spec advisory: ${a}`);

@@ -33,6 +33,7 @@ async function fixture() {
   const hooks: { write?: (path: string) => void; exec?: (command: string) => void } = {};
   const tmux = new TmuxAdapter(async command => {
     commands.push(command); hooks.exec?.(command);
+    if (command.includes("#{pane_current_command}")) return "bash";
     if (command.startsWith("tmux new-session")) { panes.set("worker@fixture", "%0"); return ""; }
     if (command.startsWith("tmux has-session") || command.startsWith("tmux list-panes")) {
       // Both exact session probes (=name) and window-targeted pane listings
@@ -132,14 +133,16 @@ describe("shell launch after cold pane reuse (#141)", () => {
     expect(await f.tmux.sendShellCommand("sibling@fixture", "inert launch")).toEqual({ ok: true });
   });
 
-  it.each(["script", "payload", "load", "paste"])("fences an occupant replacement during %s preparation", async boundary => {
+  it.each(["script", "payload", "load", "paste"].flatMap(boundary => [
+    { boundary, sourceInPane: false }, { boundary, sourceInPane: true },
+  ]))("fences an occupant replacement during $boundary preparation (source=$sourceInPane)", async ({ boundary, sourceInPane }) => {
     const f = await fixture();
     const replace = () => f.db.prepare(`INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind)
       VALUES ('replacement',?,100,'replacement','adopt')`).run(f.nodes.worker!.id);
     let writes = 0;
     f.hooks.write = () => { writes++; if ((boundary === "script" && writes === 1) || (boundary === "payload" && writes === 2)) replace(); };
     f.hooks.exec = command => { if ((boundary === "load" && command.includes("load-buffer")) || (boundary === "paste" && command.includes("paste-buffer"))) replace(); };
-    expect(await f.tmux.sendShellCommand("worker@fixture", "old command")).toMatchObject({ ok: false, code: "guard_target_changed" });
+    expect(await f.tmux.sendShellCommand("worker@fixture", "old command", undefined, { sourceInPane })).toMatchObject({ ok: false, code: "guard_target_changed" });
     expect(f.commands.filter(c => c.includes("paste-buffer"))).toHaveLength(boundary === "paste" ? 1 : 0);
     expect(f.commands.some(c => c.includes("send-keys"))).toBe(false);
     expect(f.files.size).toBe(0);

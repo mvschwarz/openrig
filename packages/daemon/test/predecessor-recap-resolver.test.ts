@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makePredecessorRecapResolver } from "../src/domain/predecessor-recap-resolver.js";
 
 // Production resolver for the seat-handover boot recap (the permanent claude-runtime leg of
@@ -7,6 +10,40 @@ import { makePredecessorRecapResolver } from "../src/domain/predecessor-recap-re
 // and parse the last N exchanges. Pure + injected deps → unit-testable without a live daemon.
 
 describe("makePredecessorRecapResolver", () => {
+  it("reads native Codex input/output blocks through the real on-disk recap parser", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-recap-"));
+    try {
+      const path = join(dir, "rollout.jsonl");
+      // Codex ContentItem and RolloutRecorder use these response_item block types.
+      const lines = [
+        { type: "session_meta", payload: { id: "departing-thread" } },
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "finish the review" }, { type: "input_image", image_url: "not text" }] } },
+        { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "first result" }, { type: "reasoning", text: "private reasoning" }, { type: "output_text", text: "second result" }] } },
+      ];
+      writeFileSync(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+      const resolve = makePredecessorRecapResolver({
+        readClaudeRecord: () => { throw new Error("must not read Claude sidecar"); },
+        readCodexTranscriptPath: ({ threadId }) => threadId === "departing-thread" ? path : null,
+        lookupResumeToken: () => "departing-thread",
+        maxExchanges: 2,
+      });
+      expect(resolve({ nodeId: "n", runtime: "codex", sessionName: "worker@rig" })).toEqual({
+        recordPath: path,
+        recap: [{ role: "user", content: "finish the review" }, { role: "assistant", content: "first result\nsecond result" }],
+      });
+      const bounded = makePredecessorRecapResolver({
+        readClaudeRecord: () => ({ transcriptPath: null, sessionId: null }),
+        readCodexTranscriptPath: () => path,
+        lookupResumeToken: () => "departing-thread",
+        maxExchanges: 1,
+        maxCharsPerExchange: 5,
+      })({ nodeId: "n", runtime: "codex", sessionName: "worker@rig" });
+      expect("recap" in bounded && bounded.recap).toEqual([{ role: "assistant", content: "first… [truncated; full text in the predecessor record]" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("claude: reads the sidecar record and parses the last-N exchanges (no codex probe)", () => {
     const readClaudeRecord = vi.fn(() => ({ transcriptPath: "/home/.claude/projects/x/abc.jsonl", sessionId: "sid-1" }));
     const readCodexTranscriptPath = vi.fn(() => null);

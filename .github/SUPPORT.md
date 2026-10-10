@@ -4,9 +4,12 @@
   troubleshooting. An index linking to agent-friendly documentation is at
   https://openrig.dev/llms.txt.
 - **Agents helping a user:** read [docs/reference/help.md](../docs/reference/help.md), or run `rig context get help`.
+  The same guide is at https://www.openrig.dev/help/agents.
+- **Email:** hello@openrig.dev, which needs no GitHub account.
 - **Questions:** [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a).
 - **Bugs:** [open an issue](https://github.com/mvschwarz/openrig/issues/new/choose) with the bug
-  template. Include `rig --version`, your OS and Node versions, and relevant redacted command output.
+  template. Include `rig --version`, your OS, Node and tmux versions, the harnesses involved, and
+  relevant redacted command output.
   Reports are public: remove credentials, private prompts and personal information.
 - **Ideas and setups:** [Ideas](https://github.com/mvschwarz/openrig/discussions/categories/ideas)
   and [Show and tell](https://github.com/mvschwarz/openrig/discussions/categories/show-and-tell).

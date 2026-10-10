@@ -109,7 +109,7 @@ export function viewsRoutes(): Hono {
 
   // GET /:viewName — run a view (built-in or custom).
   // Comes LAST so /list, /sse, /watch, /:viewName/sse all win.
-  app.get("/:viewName", (c) => {
+  app.get("/:viewName", async (c) => {
     const viewName = c.req.param("viewName");
     const rig = c.req.query("rig") || undefined;
     const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
@@ -122,7 +122,7 @@ export function viewsRoutes(): Hono {
         project = viewName === "execution" ? selectedProject(c) : null;
         if (project && mission) projectMission(project, mission);
       } catch (err) { return projectReadResponse(err); }
-      const result = getProjector(c).show(viewName, { rig, limit, mission, project });
+      const result = await getProjector(c).show(viewName, { rig, limit, mission, project });
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);

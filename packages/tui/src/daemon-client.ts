@@ -13,7 +13,9 @@ export interface DaemonClientOptions {
 
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
-    super(String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`));
+    super([String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`),
+      ...(Array.isArray(result.warnings) ? result.warnings.filter((w): w is string => typeof w === "string") : []),
+    ].join("\n"));
   }
 }
 
@@ -40,6 +42,7 @@ export interface TerminalOpenResult {
   error?: string;
   code?: string;
   notes?: string[];
+  reusedWorkspace?: { id: string; tabId: string; view: string };
 }
 
 export interface LaunchNodeResult {
@@ -47,12 +50,14 @@ export interface LaunchNodeResult {
   code?: string;
   launched?: Array<{ logicalId?: string }>;
   alreadyRunning?: Array<{ logicalId?: string }>;
+  warnings?: string[];
 }
 
 export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
-  return result.code === "already_running"
+  const notice = result.code === "already_running"
     ? `agent already running: ${agent}`
     : `agent run requested: ${agent}`;
+  return [notice, ...(result.warnings ?? [])].join("\n");
 }
 
 export class DaemonClient {
@@ -82,16 +87,26 @@ export class DaemonClient {
   /** S19 AM-R18 — open the oracle's SSE event stream (FR-8: HTTP stays in THIS module).
    *  FEATURE-DETECTED: a non-OK or non-event-stream answer (an older daemon, a foreign
    *  server) returns null — the caller disables the leg permanently and the TUI behaves
-   *  exactly as S16 shipped it (click-to-refresh). Never retried on null. */
+   *  exactly as S16 shipped it (click-to-refresh). Never retried on null. Opening
+   *  timeouts/network errors reject so the subscriber can back off and retry. */
   async openActivityEvents(): Promise<Response | null> {
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 5_000);
+    deadline.unref?.();
     try {
       const res = await this.fetchImpl(`${this.baseUrl}/api/activity/events`, {
         headers: { ...this.headers, accept: "text/event-stream" },
+        signal: controller.signal,
       });
-      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) return null;
+      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+        // No subscriber will own a rejected body; release its connection now.
+        void res.body?.cancel().catch(() => {});
+        return null;
+      }
       return res;
-    } catch {
-      return null; // unreachable daemon at open — the leg stays off; refresh still works
+    } finally {
+      // Bound only opening headers; an established SSE stream stays live.
+      clearTimeout(deadline);
     }
   }
 

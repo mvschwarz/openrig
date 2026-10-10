@@ -27,6 +27,23 @@ beforeEach(() => { seatDir = mkdtempSync(join(tmpdir(), "s05-recap-")); });
 afterEach(() => rmSync(seatDir, { recursive: true, force: true }));
 
 describe("writeSeatRecap — superseded-chain retention (Q2-Amendment 1(b))", () => {
+  it.each(["##", "##\n### Child\nchild prose", "###", "#", "#\n### Next\n## Next"])("retains a recap containing the blank heading boundary %j", (heading) => {
+    writeSeatRecap({ seatDir, content: GOOD_RECAP, now: () => 1 });
+    const content = `## Recent Decisions\nOwned decision\n${heading}\nUnaddressed prose\n`;
+    writeSeatRecap({ seatDir, content, now: () => 2 });
+    expect(readFileSync(join(seatDir, "RECAP.md"), "utf-8")).toBe(content);
+    const chain = listRecapChain(seatDir);
+    expect(chain).toHaveLength(1);
+    expect(readFileSync(chain[0]!.path, "utf-8")).toBe(GOOD_RECAP);
+  });
+
+  it("still refuses a named unaddressable heading after a blank boundary", () => {
+    writeSeatRecap({ seatDir, content: GOOD_RECAP, now: () => 1 });
+    expect(() => writeSeatRecap({ seatDir, content: "##\n### ???\nunaddressable title", now: () => 2 })).toThrow(/unaddressable-header/);
+    expect(readFileSync(join(seatDir, "RECAP.md"), "utf-8")).toBe(GOOD_RECAP);
+    expect(listRecapChain(seatDir)).toHaveLength(0);
+  });
+
   it("first write creates RECAP.md; a second write supersedes the first INTO the chain, byte-preserved", () => {
     let t = 1000;
     writeSeatRecap({ seatDir, content: "## Recent Decisions\nfirst era", now: () => t });

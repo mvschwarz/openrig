@@ -4,6 +4,14 @@ import type { EventBus } from "../domain/event-bus.js";
 import type { ChatRepository } from "../domain/chat-repository.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 
+/** Render control characters (newline, ESC, DEL and the C1 range, whose U+009B
+ *  is a single-byte CSI) as visible \x0a / \x1b / \x9b text so a rejected value
+ *  cannot smuggle line breaks or terminal escapes into a diagnostic the CLI
+ *  prints verbatim. */
+function escapeControlChars(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
 export function chatRoutes(): Hono {
   const app = new Hono();
 
@@ -59,6 +67,12 @@ export function chatRoutes(): Hono {
     const limit = limitStr ? parseInt(limitStr, 10) : undefined;
 
     const chatRepo = getChatRepo(c);
+    // An unparseable since silently matches no rows (julianday returns NULL),
+    // which reads as an empty room — refuse it instead. An empty value is not a
+    // cutoff: the repository treats a falsy since as no filter, so keep that.
+    if (since && !chatRepo.timestampParses(since)) {
+      return c.json({ error: `since must be a datetime SQLite can parse, such as 'YYYY-MM-DD HH:MM:SS'; got '${escapeControlChars(since)}'` }, 400);
+    }
     const messages = chatRepo.history(rigId, { topic, limit, after, since, sender });
 
     return c.json(messages);
@@ -111,12 +125,14 @@ export function chatRoutes(): Hono {
         }
 
         // Flush any messages received during initial batch, dedup by ID
-        initialDone = true;
         for (const pending of pendingMessages) {
           if (!sentIds.has(pending.id)) {
             await stream.writeSSE(pending);
           }
         }
+        // Arrivals during an awaited flush must join its tail, not bypass
+        // older buffered messages through the live write path.
+        initialDone = true;
 
         await aborted;
       } finally {

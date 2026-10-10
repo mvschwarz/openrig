@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   assessNativeResumeProbe,
@@ -5,6 +6,27 @@ import {
   buildCodexResumeCore,
   isProbeShellReady,
 } from "../src/domain/native-resume-probe.js";
+
+import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
+
+const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+
+describe("default-path consent", () => {
+  it.each([CLAUDE_BYPASS_CONSENT, CLAUDE_BYPASS_CONSENT.replace("    No, exit\n  ❯ Yes, I accept", "  ❯ No, exit\n    Yes, I accept")])("recognizes the current consent menu", screen => {
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: screen,
+      claudeResumeIdentityVerified: true })).toMatchObject({ status: "attention_required", code: "bypass_consent_gate" });
+  });
+  it.each([
+    "I saw Yes, I accept and No, exit in Bypass Permissions mode.",
+    CLAUDE_BYPASS_CONSENT + "\n❯ ",
+    CLAUDE_BYPASS_CONSENT.split("\n").map(line => "> " + line).join("\n"),
+    "```\n" + CLAUDE_BYPASS_CONSENT + "\n```",
+    CLAUDE_BYPASS_CONSENT.replace("❯ Yes", "Yes"),
+    CLAUDE_BYPASS_CONSENT.replace("in Bypass Permissions mode.", "in another mode."),
+  ])("does not treat prose or an inactive menu as consent", screen => {
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: screen }).code).not.toBe("bypass_consent_gate");
+  });
+});
 
 describe("native resume probe", () => {
   describe("headerless Claude auto-mode requires managed identity proof", () => {
@@ -103,6 +125,7 @@ describe("native resume probe", () => {
     it.each([
       ["Do you trust the contents of this directory?\n  Yes, continue", "trust_gate"],
       ["Update available!", "update_gate"],
+      [currentUpdatePrompt.trimEnd(), "update_gate"],
     ])("does not let a custom footer dismiss an unresolved gate: %s", (gate, code) => {
       expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
         paneContent: `› Earlier conversation prompt\n${gate}\n${reportedFooter}`,
@@ -501,12 +524,27 @@ describe("native resume probe", () => {
     });
   });
 
-  it("classifies Codex update prompts as inconclusive", () => {
+  it("keeps a current update menu after an earlier composer gated", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex",
+      paneContent: `› Earlier conversation prompt\n${currentUpdatePrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "update_gate" });
+  });
+
+  it.each(["›", "»"])("ignores a copied current menu before a later %s composer and custom footer", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex",
+      paneContent: `${currentUpdatePrompt.trimEnd()}\n${prompt} Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it.each([
+    ["legacy", "✨ Update available! 0.117.0 -> 0.118.0\nPress enter to continue"],
+    ["current", currentUpdatePrompt],
+  ])("classifies %s Codex update prompts as inconclusive", (_layout, paneContent) => {
     expect(
       assessNativeResumeProbe({
         runtime: "codex",
         paneCommand: "codex-aarch64-a",
-        paneContent: "✨ Update available! 0.117.0 -> 0.118.0\nPress enter to continue",
+        paneContent,
       })
     ).toEqual({
       status: "inconclusive",

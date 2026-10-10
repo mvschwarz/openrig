@@ -101,13 +101,12 @@ export class CmuxProviderAdapter implements TerminalProvider {
     for (let pageIndex = 0; pageIndex < view.pages.length; pageIndex++) {
       const page = view.pages[pageIndex]!;
       const workspaceName = view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base;
-      // The applied grid matches the modal Auto-grid preview (PM ruling):
-      // cols = ceil(sqrt(N)) — N=2 → 1×2, N=5 → 2×3, N=7 → 3×3.
+      // Use the composed layout's columns, or the same auto-grid as preview.
       const build = await this.deps.layoutService.buildWorkspacePanes(
         workspaceName,
         undefined,
         page.map((pane) => pane.paneCommand),
-        autoGridCols(page.length),
+        view.columns ?? autoGridCols(page.length),
       );
       if (build.ok) {
         pagesPainted += 1;

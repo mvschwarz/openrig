@@ -34,6 +34,7 @@ describe("Up API route", () => {
   let sessionRegistry: SessionRegistry;
   let snapshotCapture: SnapshotCapture;
   let restoreOrchestrator: RestoreOrchestrator;
+  let tmuxAdapter: ReturnType<typeof createTestApp>["tmuxAdapter"];
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -45,6 +46,7 @@ describe("Up API route", () => {
     sessionRegistry = setup.sessionRegistry;
     snapshotCapture = setup.snapshotCapture;
     restoreOrchestrator = setup.restoreOrchestrator;
+    tmuxAdapter = setup.tmuxAdapter;
   });
 
   afterEach(() => {
@@ -72,6 +74,56 @@ describe("Up API route", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("not found");
+  });
+
+  it("does not let an archived namesake make a live rig name ambiguous", async () => {
+    const archived = rigRepo.createRig("restore-name");
+    rigRepo.archiveRig(archived.id);
+    rigRepo.createRig("restore-name");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "restore-name" }),
+    });
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("no_snapshot");
+  });
+
+  it("restores the sole archived rig by name when no active rig has that name", async () => {
+    const rig = rigRepo.createRig("archived-restore");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@archived-restore");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-archived", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    rigRepo.archiveRig(rig.id);
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "archived-restore" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "restored", rigId: rig.id });
+  });
+
+  it("keeps two active rigs with the same name ambiguous", async () => {
+    rigRepo.createRig("ambiguous-restore");
+    rigRepo.createRig("ambiguous-restore");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "ambiguous-restore" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("ambiguous_name");
   });
 
   // T6: Startup wiring
@@ -114,6 +166,63 @@ describe("Up API route", () => {
     expect(body.nodes[0].status).toBe("fresh-primed");
   });
 
+  it.each(["cli", "explorer"])("%s up selects the pre-down snapshot for plan and apply after a fresh occupant stops", async (entryPoint) => {
+    const rig = rigRepo.createRig("fresh-down-up");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@fresh-down-up", "fresh");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_name", "fresh-native-session", "hook");
+    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, 'seat.fresh_launched', ?)").run(rig.id, JSON.stringify({
+      nodeId: node.id, sessionId: session.id, newGeneration: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid,
+    }));
+    const down = await app.request("/api/down", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rigId: rig.id, force: true }),
+    });
+    expect(down.status).toBe(200);
+    const { snapshotId, errors } = await down.json();
+    expect(errors).toEqual([]);
+    expect(sessionRegistry.getSessionsForRig(rig.id)[0]!.status).toBe("exited");
+    const beforePlan = db.prepare("SELECT total_changes() AS count").get();
+    const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
+    const up = (plan: boolean) => app.request(entryPoint === "cli" ? "/api/up" : `/api/rigs/${rig.id}/up`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: rig.name, plan }),
+    });
+
+    const plan = await up(true);
+    expect(plan.status).toBe(200);
+    expect(await plan.json()).toMatchObject({
+      snapshot: { id: snapshotId }, wouldCaptureCurrentState: false,
+      nodes: [{ occupantSessionId: session.id, intendedAction: "resume-original" }],
+    });
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(beforePlan);
+
+    const restored = await up(false);
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({ status: "restored", snapshotKind: "auto-pre-down" });
+    expect(restoreSpy).toHaveBeenCalledWith(snapshotId, expect.any(Object));
+    expect(tmuxAdapter.sendText).toHaveBeenCalledWith("r00-fresh-down-up-worker", expect.stringContaining("--resume 'fresh-native-session'"));
+  });
+
+  it.each([[false, true, true], [true, undefined, true], [true, false, false], [false, undefined, false]] as const)("non-interruptive stored %s / option %s restores as %s; plan does not write", async (stored, option, expected) => {
+    const rig = rigRepo.createRig("saved-choice");
+    rigRepo.setRigNonInterruptive(rig.id, stored);
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@saved-choice");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "retained", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const request = (plan: boolean) => app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: "saved-choice", nonInterruptive: option, plan }) });
+    expect((await request(true)).status).toBe(200);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(stored);
+    const response = await request(false);
+    expect(response.status).toBe(200);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(expected);
+    if (expected) expect((await response.json()).warnings.join(" ")).toContain("saved for this rig");
+  });
+
   it("POST /api/up restoring an existing rig name returns validation blockers", async () => {
     const rig = rigRepo.createRig("restore-blocked");
     const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });
@@ -144,7 +253,7 @@ describe("Up API route", () => {
     const res = await app.request("/api/up", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceRef: "restore-blocked" }),
+      body: JSON.stringify({ sourceRef: "restore-blocked", nonInterruptive: true }),
     });
 
     expect(res.status).toBe(409);
@@ -153,6 +262,7 @@ describe("Up API route", () => {
     expect(body.code).toBe("pre_restore_validation_failed");
     expect(body.rigResult).toBe("not_attempted");
     expect(body.blockers[0].path).toBe(missingPath);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(false);
   });
 
   // L3b: rig-name path falls back to manual snapshot when no auto-pre-down exists.

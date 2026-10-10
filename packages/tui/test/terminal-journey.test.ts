@@ -8,6 +8,7 @@ import { hydrateSnapshot } from "../src/hydrate.js";
 import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
 import { terminalLines } from "../src/terminals/terminal-model.js";
+import { terminalWindowNotice } from "../src/terminals/open-window.js";
 import { parseCommand } from "../src/grammar.js";
 import type { FleetSnapshot, ViewStateStore } from "../src/types.js";
 
@@ -55,7 +56,7 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(view.get().terminalView).toBe("saved:fixture");
     let screen = draw(cols, rows);
     expect(screen.lines.every(line => line.length <= cols && !/[\r\n]/.test(line))).toBe(true);
-    expect(screen.lines.join("\n")).toContain("Open in Herdr");
+    expect(screen.lines.join("\n")).toContain("Open terminals");
     const preview = snap.terminals!.preview!;
     // OPR.0.6.0.8: Herdr pages hold 16 (4×4); 19 openable members → 16 + 3 (2×2, one blank).
     expect(preview.grids.map(g => [g.columns, g.rows, g.blanks])).toEqual([[4, 4, 0], [2, 2, 1]]);
@@ -99,13 +100,46 @@ describe("terminal browser → preview → explicit Open", () => {
     expect((await client.openTerminal(fresh.view, fresh.planId)).opened).toHaveLength(18); // 19 openable, one now down
   });
 
-  it("keeps unavailable-provider preview useful with no Open or recovery effect", async () => {
+  it("offers the same explicit window action without Herdr, before any effect", async () => {
     providerAlive = false;
     view.dispatch({ type: "terminal-preview", view: "saved:fixture" }); await refresh();
     const lines = terminalLines(view.get(), snap, 70);
-    expect(lines.map(l => l.text).join("\n")).toContain("Herdr unavailable");
-    expect(lines.some(l => l.action?.type === "act")).toBe(false);
+    expect(lines.map(l => l.text).join("\n")).toContain("Open terminals");
+    expect(lines.find(l => l.action?.type === "act")?.action).toEqual({
+      type: "act", act: "open-terminal", view: "saved:fixture", expectedPlan: snap.terminals!.preview!.planId,
+    });
     expect(lines.some(l => l.action?.type === "back")).toBe(true);
+    const narrow = terminalLines(view.get(), snap, 54).map(line => line.text).join(" ").replace(/\s+/g, " ");
+    expect(narrow).toContain("On a desktop");
+    expect(narrow).toContain("otherwise the same layout in plain tmux");
+    const screen = draw(80, 24);
+    expect(screen.lines.join("\n")).toContain("Open terminals");
+    expect(screen.contentTargets.some(t => t.action.type === "act" && t.action.act === "open-terminal")).toBe(true);
+    expect(lines.findIndex(l => l.action?.type === "act")).toBeLessThan(lines.findIndex(l => l.text.startsWith("Page ")));
+    expect(effects).toEqual([]);
+  });
+
+  it("keeps the selected daemon explicit in desktop guidance for remote members", async () => {
+    providerAlive = false;
+    const remote = { id: "remote view", name: "Remote", members: [{ seat: "quoted-seat", tmuxSession: "seat with spaces", host: "remote", readOnly: true }] };
+    const provider = new HerdrAdapter({ transportFactory: () => ({ probe: async () => ({ alive: false, version: null, protocol: null }), request: async () => { throw new Error("must remain passive"); } }) });
+    service = new TerminalService({ resolveProvider: () => provider, viewsStore: { get: () => remote, list: () => [remote] }, listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null, listScopeSeats: () => null, resolveHost: () => ({ id: "remote", transport: "ssh", target: "other.example", user: "viewer" }) as any, hasSession: () => { throw new Error("remote is not a local session"); } });
+    client = new DaemonClient({ baseUrl: "http://selected.example:7654", fetchImpl: (async (url, init) => {
+      const u = new URL(String(url));
+      const app = new Hono(); app.use("*", async (c, next) => { c.set("terminalService" as never, service); await next(); }); app.route("/api/terminal", terminalRoutes());
+      return app.request(u.pathname + u.search, init);
+    }) as typeof fetch });
+    view.dispatch({ type: "terminal-preview", view: "saved:remote view" }); await refresh();
+    const text = terminalLines(view.get(), snap, 1000).map(line => line.text).join("\n");
+    expect(text).toContain("http://selected.example:7654");
+    expect(text).toContain("saved:remote view");
+    expect(text).toContain("selected daemon's desktop");
+    expect(text).toContain("Headless or remote");
+    const command = snap.terminals!.preview!.composed.pages[0]![0]!.paneCommand;
+    expect(text).toContain(`env -u TMUX ${command.replace(/^ssh /, "ssh -t ")}`);
+    expect(text).toContain("viewer@other.example");
+    expect(text).toContain("seat with spaces");
+    expect(text).toContain("attach -r");
     expect(effects).toEqual([]);
   });
 
@@ -120,5 +154,19 @@ describe("terminal browser → preview → explicit Open", () => {
     view.dispatch({ type: "terminal-result", view: "saved:fixture", message: "Partial Open: 9 opened, 1 absent, 6 degraded. Herdr refused page two." });
     draw(80, 24); await refresh(); draw(80, 24);
     expect(terminalLines(view.get(), snap, 40).map(l => l.text).join(" ").replace(/\s+/g, " ")).toContain("Herdr refused page two.");
+  });
+
+  it("shows the window outcome in the content pane for direct rig actions, across refresh", async () => {
+    const message = terminalWindowNotice("rig:fixture", {
+      provider: "tmux", ok: true, opened: ["advisor", "operator"], absent: [], degraded: [], pages: 1,
+      notes: ["Check the new terminal shows the intended view."],
+    });
+    view.dispatch({ type: "notice", message });
+    draw(80, 24); await refresh();
+    const screen = draw(80, 24);
+    expect(screen.lines.join("\n")).toContain("ACTION RESULT");
+    expect(screen.lines.join("\n")).toContain("2 tiles prepared");
+    expect(screen.lines.every(line => !/[\r\n]/.test(line))).toBe(true);
+    expect(view.get().notice).toBe(message);
   });
 });

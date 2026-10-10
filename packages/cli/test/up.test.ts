@@ -71,6 +71,12 @@ describe("Up CLI", () => {
 
       if (req.url === "/api/up" && req.method === "POST") {
         const parsed = JSON.parse(body);
+        if (String(parsed.sourceRef).includes("reinstall-cause")) {
+          const code = String(parsed.sourceRef).match(/reinstall-cause-([\w]+)\.rigbundle$/)?.[1];
+          res.writeHead(code ? 400 : 500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "failed", code, errors: ["Install target has different content at README.md"], warnings: ["Original files are kept at /fixture/backup"], stages: [] }));
+          return;
+        }
         if (parsed.plan) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "planned", runId: "run-1", stages: [{ stage: "resolve_spec", status: "ok" }], errors: [], warnings: [] }));
@@ -95,6 +101,20 @@ describe("Up CLI", () => {
     prog.addCommand(upCommand(runningDeps(port)));
     return prog;
   }
+
+  it("local bundle reinstall renders errors[] and file disposition instead of unknown error", async () => {
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "up", "reinstall-cause.rigbundle"]).then(() => {}));
+    expect(exitCode).toBe(2);
+    expect(logs.join("\n")).toContain("different content at README.md");
+    expect(logs.join("\n")).toContain("Original files are kept at /fixture/backup");
+    expect(logs.join("\n")).not.toContain("unknown error");
+  });
+
+  it.each(["validation_failed", "preflight_failed", "cycle_error", "generation_unconfirmed", "target_conflict"])("round 2: %s prints file disposition once", async code => {
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "up", `reinstall-cause-${code}.rigbundle`]).then(() => {}));
+    expect(exitCode).toBe(2);
+    expect(logs.join("\n").match(/Original files are kept at \/fixture\/backup/g)).toHaveLength(1);
+  });
 
   it("renders structured remote up failures and attention hints as text", () => {
     const lines = formatRemoteUpFailure("build-host", {
@@ -247,6 +267,21 @@ describe("Up CLI", () => {
     expect(output).toContain("local: agent_ref paths resolve relative to the rig spec directory");
     expect(exitCode).toBe(2);
     failServer.close();
+  });
+
+  it("prints the Compose project conflict and retry instruction without generic boot failure", async () => {
+    const message = "Replacement has multiple predecessor Compose projects (rig-1: old; rig-2: other). Set services.project_name in the rig spec YAML to the project you intend to use, then re-run the same command. No services were started.";
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(upCommand({ ...runningDeps(port), clientFactory: () => ({
+      post: async () => ({ status: 400, data: { status: "failed", code: "compose_project_conflict", stages: [], errors: [message] } }),
+    } as unknown as DaemonClient) }));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
+    });
+    expect(logs.join("\n")).toContain(message);
+    expect(logs.join("\n")).not.toContain("unknown error");
+    expect(exitCode).toBe(2);
   });
 
   // T13: Relative path resolved to absolute before sending
@@ -463,13 +498,13 @@ describe("Up CLI", () => {
   // and trip getOpenRigInstallCwdError at preflight. The bare-name form
   // is already rescued at the resolveLibrarySpec branch (covered by the
   // earlier library-name test); this pins the path-form gap.
-  it("up path-form spec inside install root defaults cwdOverride to caller cwd and prints notice", async () => {
+  it.each(["rigs", "..cache"])("up path-form spec inside install root (%s) defaults cwdOverride to caller cwd and prints notice", async (directory) => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const os = await import("node:os");
 
     const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), "up-bug3-install-"));
-    const specPath = path.join(installRoot, "rigs", "demo", "rig.yaml");
+    const specPath = path.join(installRoot, directory, "demo", "rig.yaml");
     fs.mkdirSync(path.dirname(specPath), { recursive: true });
     fs.writeFileSync(specPath, "version: '0.2'\nname: demo\npods: []\nedges: []\n");
 
@@ -694,7 +729,7 @@ describe("Up CLI", () => {
             status: "completed", runId: "run-3", rigId: "rig-2",
             stages: [{ stage: "import_rig", status: "ok" }],
             errors: [],
-            warnings: ["Transcript capture failed for dev-impl@test-rig: pipe-pane failed"],
+            warnings: ["Transcript capture failed for dev-impl@test-rig: pipe-pane failed", "Startup submission unverified in dev-impl@test-rig: capture unavailable"],
           }));
         } else {
           res.writeHead(404).end();
@@ -707,6 +742,7 @@ describe("Up CLI", () => {
     });
     const output = logs.join("\n");
     expect(output).toContain("warning: Transcript capture failed");
+    expect(output).toContain("Startup submission unverified in dev-impl@test-rig");
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
@@ -991,6 +1027,56 @@ describe("Up CLI", () => {
     expect(logs.join("\n")).not.toContain("rename or remove");
     expect(startupRequests).toBe(0);
     expect(exitCode).toBe(1);
+  });
+
+  it.each([
+    ["fresh alias", [], [], false, 0, "first-project"],
+    ["existing starter", [{ id: "new-rig", name: "starter" }], [], false, 1, "first-project"],
+    ["existing old name", [{ id: "old-rig", name: "first-project" }], [], false, 1, "first-project"],
+    ["archived starter", [], [{ id: "archived-new", name: "starter" }], false, 1, "first-project"],
+    ["archived old name", [], [{ id: "archived-old", name: "first-project" }], false, 1, "first-project"],
+    ["explicit old restore", [{ id: "old-rig", name: "first-project" }], [], true, 0, "first-project"],
+    ["explicit library ID", [{ id: "new-rig", name: "starter" }], [], false, 0, "starter-spec"],
+  ] as const)("first-project routing: %s", async (_label, active, archived, existing, exit, input) => {
+    const originalListeners = server.listeners("request").slice();
+    server.removeAllListeners("request");
+    const posts: Array<Record<string, unknown>> = [];
+    const requests: string[] = [];
+    server.on("request", async (req, res) => {
+      requests.push(req.url ?? "");
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (req.url === "/api/rigs/summary") res.end(JSON.stringify(active));
+      else if (req.url === "/api/rigs/summary?archived=only") res.end(JSON.stringify(archived));
+      else if (req.url?.startsWith("/api/specs/library")) res.end(JSON.stringify([{
+        id: "starter-spec", name: "starter", kind: "rig", sourceType: "builtin", sourcePath: "/builtin/starter/rig.yaml",
+      }]));
+      else if (req.url === "/api/up") {
+        posts.push(JSON.parse(body));
+        res.end(JSON.stringify({ status: "planned", runId: "alias-plan", stages: [], errors: [], warnings: [] }));
+      } else res.end("{}");
+    });
+    try {
+      const result = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", input, "--plan", "--json", ...(existing ? ["--existing"] : [])]);
+      });
+      expect(result.exitCode ?? 0).toBe(exit);
+      if (exit) {
+        expect(posts).toHaveLength(0);
+        if (archived.length) expect(result.logs.join("\n")).toContain(`rig unarchive ${archived[0]!.id}`);
+        else expect(result.logs.join("\n")).toContain(`rig up ${active[0]!.name} --existing`);
+      } else {
+        expect(posts).toHaveLength(1);
+        expect(posts[0]!.sourceRef).toBe(existing ? "first-project" : "/builtin/starter/rig.yaml");
+        if (existing) expect(requests.some((url) => url.startsWith("/api/specs/library"))).toBe(false);
+        else expect(posts[0]!.cwdOverride).toBe(process.cwd());
+        expect(result.logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))).toHaveLength(1);
+      }
+    } finally {
+      server.removeAllListeners("request");
+      for (const listener of originalListeners) server.on("request", listener as (req: http.IncomingMessage, res: http.ServerResponse) => void);
+    }
   });
 
   it("up resolves a same-name rig and workflow to the rig library entry", async () => {

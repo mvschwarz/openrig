@@ -160,24 +160,40 @@ export class QueueWakeRepository {
     });
   }
 
-  /** Rows that attached an OPERATOR watchdog to this job, whatever their state.
-   *  A park-generated timer and an operator attachment can share one job id:
-   *  `--wake-watchdog` accepts any active job whose target matches the parked
-   *  owner, including the job another row's `--wake-after` produced, and that
-   *  second binding persists as wake_kind = 'watchdog' against the same
-   *  wake_ref. This lookup is how the timer backstop learns the job is not
-   *  solely its own to retire. */
-  findQitemsByAttachedWatchdog(jobId: string): Array<{ qitemId: string; state: string }> {
+  /** A current attachment keeps a shared generated job alive until consumed.
+   *  Failed or retained repeating deliveries keep ownership for the next retry. */
+  findLiveQitemsByAttachedWatchdog(jobId: string): Array<{ qitemId: string; state: string }> {
     if (!this.available) return [];
     return this.db.prepare(
       `SELECT DISTINCT w.qitem_id, q.state
          FROM queue_transition_wakes w
          JOIN queue_items q ON q.qitem_id = w.qitem_id
-        WHERE w.phase = 'armed' AND w.wake_ref = ? AND w.wake_kind = 'watchdog'`,
-    ).all(jobId).map((row) => {
+        WHERE w.phase = 'armed' AND w.wake_ref = ? AND w.wake_kind = 'watchdog'
+          AND q.state = 'blocked'
+          AND w.transition_id = (
+            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+             WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM queue_transition_wakes f
+             WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
+               AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
+               AND (? = 0 OR f.delivery_status IS NULL OR (
+                 f.delivery_status != 'failed' AND f.delivery_status NOT LIKE 'failed:%'
+                 AND f.delivery_status != 'retained'
+               ))
+          )`,
+    ).all(jobId, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {
       const r = row as { qitem_id: string; state: string };
       return { qitemId: r.qitem_id, state: r.state };
     });
+  }
+
+  /** The generating row retains timer lifecycle only while its current park
+   *  uses this job, including an explicit reattachment to the same job. */
+  findCurrentQitemsByGeneratedTimer(jobId: string): Array<{ qitemId: string; state: string }> {
+    return this.findQitemsByGeneratedTimer(jobId).filter(row =>
+      row.state === "blocked" && this.getStatus(row.qitemId)?.ref === jobId);
   }
 
   /** Active park-generated timers that are still their blocked row's current wake and still target the

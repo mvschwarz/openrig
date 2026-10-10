@@ -54,7 +54,8 @@ export class AgentActivityStore {
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
-  private readonly freshnessMs: number;
+  /** The window within which a stored hook counts as recent (read-only for diagnostics). */
+  readonly freshnessMs: number;
   private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   private readonly isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
 
@@ -318,6 +319,55 @@ export class AgentActivityStore {
   }
 }
 
+/** The activity a runtime hook event means, before freshness or generation checks. The one mapping behind
+ *  ingest, the send gate and the wake ladder. `seatRuntime` is the managed seat's runtime: runtime_error is
+ *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. */
+export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+  if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
+  // OPR.0.4.1.10 — Codex's official approval hook (openai/codex PR #17563). A PermissionRequest
+  // means the agent is BLOCKED waiting on a command / patch / network approval = needs_input. This is
+  // the HOOK-PRIMARY signal for Codex, which emits no Claude-style Notification; classifySendReadiness
+  // already prefers a fresh runtime_hook needs_input runtime-agnostically, so wiring this event makes
+  // the Codex rig-send guard hook-primary by construction (capture-pane scan stays as the fallback).
+  // The official payload carries session_id/turn_id/cwd/model/permission_mode/tool_name/tool_input;
+  // the relay forwards tool_name as the subtype, so `evidence` names the tool being approved.
+  if (rawEvent === "PermissionRequest") return "needs_input";
+  if (rawEvent === "Notification") {
+    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
+    return rawSubtype === "idle_prompt" ? "idle" : "unknown";
+  }
+  if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") return "idle";
+  return "unknown";
+}
+
+/** A runtime hook that leaves the agent waiting on a person: an approval, a picker or an elicitation. */
+export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): boolean {
+  return hookEventState(rawEvent, rawSubtype, seatRuntime) === "needs_input";
+}
+
+/** What the store's latest hook for a seat says: its current state, or, past the freshness window, what its
+ *  retained raw event means. Generation-mismatched or unresolvable evidence says nothing ("unknown"). */
+function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+  if (activity?.evidenceSource !== "runtime_hook") return "unknown";
+  if (activity.stale !== true) return activity.state;
+  return activity.reason === "stale_runtime_hook" ? hookEventState(activity.rawEvent, activity.rawSubtype, seatRuntime) : "unknown";
+}
+
+/** The store's latest hook still says the seat waits on a person. Nothing newer was recorded, so nothing
+ *  answered it. Shared by the send gate and the wake ladder. */
+export function latestHookWaitsOnPerson(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
+  return latestHookState(activity, seatRuntime) === "needs_input";
+}
+
+/** The store's latest hook shows the seat moved on after `since`: observed after it, generation-valid, and
+ *  meaning work started or the turn ended. Older, absent, mismatched or unknown evidence does not. */
+export function latestHookMovedOn(activity: AgentActivity | null | undefined, since: string, seatRuntime: string | null): boolean {
+  const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
+  if (!(observedAt > Date.parse(since))) return false;
+  const state = latestHookState(activity, seatRuntime);
+  return state === "running" || state === "idle";
+}
+
 function normalizeHookActivity(input: {
   runtime: string | null;
   /** The managed seat's runtime, never a hook's claim. */
@@ -332,39 +382,15 @@ function normalizeHookActivity(input: {
   const rawSubtype = input.subtype;
   const reason = normalizeReason(rawSubtype ?? rawEvent);
   const runtime = input.runtime;
-  let state: AgentActivity["state"] = "unknown";
+  const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime);
   let normalizedReason = reason;
-
-  if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") {
-    state = "running";
-  } else if (rawEvent === "PermissionRequest") {
-    // OPR.0.4.1.10 — Codex's official approval hook (openai/codex PR #17563). A PermissionRequest
-    // means the agent is BLOCKED waiting on a command / patch / network approval = needs_input. This is
-    // the HOOK-PRIMARY signal for Codex, which emits no Claude-style Notification; classifySendReadiness
-    // already prefers a fresh runtime_hook needs_input runtime-agnostically, so wiring this event makes
-    // the Codex rig-send guard hook-primary by construction (capture-pane scan stays as the fallback).
-    // The official payload carries session_id/turn_id/cwd/model/permission_mode/tool_name/tool_input;
-    // the relay forwards tool_name as the subtype, so `evidence` names the tool being approved.
-    state = "needs_input";
+  if (rawEvent === "PermissionRequest") {
     normalizedReason = "permission_request";
   } else if (rawEvent === "Notification") {
-    // runtime_error is an OMP runner signal; a hook claiming OMP on another
-    // runtime's seat must not escalate it.
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (input.seatRuntime === "omp" && rawSubtype === "runtime_error")) {
-      state = "needs_input";
-    } else if (rawSubtype === "idle_prompt") {
-      state = "idle";
-    } else {
-      state = "unknown";
-      normalizedReason = rawSubtype ? reason : "notification";
-    }
-  } else if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") {
-    state = "idle";
+    if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";
   } else if (rawEvent === "SessionStart") {
-    state = "unknown";
     normalizedReason = "session_start_observed";
-  } else {
-    state = "unknown";
+  } else if (state === "unknown") {
     normalizedReason = "unmapped_runtime_hook";
   }
 

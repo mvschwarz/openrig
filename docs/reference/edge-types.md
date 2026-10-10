@@ -1,8 +1,7 @@
 # Edge Types Reference
 
-Version: 0.2.0
-Last validated against code: 2026-04-11
-Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/rigspec-instantiator.ts`
+Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; its sources unchanged in edge behaviour since then)
+Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/rigspec-instantiator.ts`, `packages/daemon/src/domain/queue-owner.ts`
 
 ---
 
@@ -17,17 +16,18 @@ See `docs/reference/rig-spec.md` for the YAML syntax.
 
 ## Edge Kinds
 
-Five edge kinds are accepted by the validator:
+Five edge kinds are accepted by the pod-aware validator (the legacy flat-node format accepts only `delegates_to`,
+`spawned_by` and `can_observe`):
 
 | Kind | Accepted | Has Runtime Behavior | Description |
 |------|----------|---------------------|-------------|
-| `delegates_to` | yes | **yes — affects launch order** | Source delegates work to target |
-| `spawned_by` | yes | **yes — affects launch order** | Target was spawned by source |
+| `delegates_to` | yes | **yes — launch order and queue escalation** | Source delegates work to target |
+| `spawned_by` | yes | **yes — affects launch order** | Source was spawned by target |
 | `can_observe` | yes | no | Source can observe target's output |
 | `collaborates_with` | yes | no | Peer collaboration |
 | `escalates_to` | yes | no | Source escalates to target |
 
-## What Edges Actually Do Today (OpenRig 0.1.x)
+## What Edges Actually Do Today
 
 ### Launch ordering
 
@@ -36,9 +36,15 @@ Only `delegates_to` and `spawned_by` affect runtime behavior. They constrain the
 - **`delegates_to`**: source launches BEFORE target. The delegator must be up before the delegate.
 - **`spawned_by`**: target (parent) launches BEFORE source (child). The parent must be up before the child it spawned.
 
-This ordering is enforced in both `PodRigInstantiator` (initial launch) and `RestoreOrchestrator` (restore from snapshot). The code uses topological sort over the dependency graph — if there's a cycle, instantiation fails.
+This ordering is enforced in both `PodRigInstantiator` (initial launch) and `RestoreOrchestrator` (restore from snapshot). The code uses topological sort over the dependency graph — if there's a cycle, instantiation fails with `cycle_error` before the rig is created. A `delegates_to` or `spawned_by` edge from a member to itself counts as a cycle. Restore uses the same sort but has no cycle check of its own.
 
 All other edge kinds (`can_observe`, `collaborates_with`, `escalates_to`) do NOT constrain launch order.
+
+### Queue escalation
+
+`delegates_to` also names a seat's orchestrator for the queue: the source of the `delegates_to` edge into a seat. The
+wake ladder escalates an unacknowledged row to that orchestrator, and stuck-row findings and recovery go to it. A seat
+with no incoming `delegates_to` edge has no default orchestrator. `spawned_by` plays no part here.
 
 ### Graph visualization
 
@@ -50,13 +56,15 @@ All edges appear in `rig whoami --json` output under `edges.outgoing` and `edges
 
 ### Attach hint heuristic
 
-The post-command handoff (the "Attach:" line after `rig up` and `rig restore`) uses edges to prefer the orchestrator as the default attach target. The heuristic looks for the first node with `delegates_to` outgoing edges.
+The post-command handoff (the "Attach:" line after `rig up` and `rig restore`) doesn't use edges. It names the first
+node, in creation order, whose session is running, or else the first node with a session name.
 
 ## What Edges Do NOT Do Today
 
 Edges do NOT currently:
 
-- **Route messages** — `rig send` can target any session, regardless of edges
+- **Route messages** — `rig send` can target any session, regardless of edges (queue escalation, above, is the one
+  daemon path that follows `delegates_to`)
 - **Enforce delegation** — an agent can communicate with any peer, not just its edge targets
 - **Control permissions** — there's no edge-based access control
 - **Affect transport** — `rig capture`, `rig broadcast`, etc. work based on session identity, not edge topology

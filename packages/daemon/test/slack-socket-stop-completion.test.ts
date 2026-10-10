@@ -109,3 +109,93 @@ it("settles an already connected native WebSocket loop on repeated stop", async 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+it("abandons a native WebSocket whose upgrade never answers and opens a new one", async () => {
+  const home = mkdtempSync(join(tmpdir(), "openrig-socket-open-timeout-"));
+  const held = new Set<import("node:stream").Duplex>();
+  let upgrades = 0;
+  const server = createServer((_req, res) => {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing fixture address");
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, url: `ws://127.0.0.1:${address.port}/socket` }));
+  });
+  // Accept the TCP connection and the upgrade request, then never answer it.
+  server.on("upgrade", (_request, socket) => {
+    upgrades++;
+    held.add(socket);
+    socket.on("close", () => held.delete(socket));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  let handle: SocketInboundHandle | undefined;
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing fixture address");
+    const router = new InboundRouter({
+      queue: { createQitem: async () => { throw new Error("unexpected inbound event"); } },
+      seen: new SeenStore(join(home, "seen.jsonl")),
+      deadLetter: new DeadLetterStore<SlackEvent>(join(home, "dead.jsonl")),
+      destination: "operator-agent@kernel",
+      resolveSender: () => ({ admitted: true, source: "human-fixture@external" }),
+    });
+    handle = startSocketInbound("synthetic-app-token", router, {
+      fetchImpl: (_url, init) => fetch(`http://127.0.0.1:${address.port}`, init),
+      openTimeoutMs: 200,
+      inboundMaxConnects: 2,
+    });
+    await expect.poll(() => upgrades).toBe(1);
+    expect(handle.status().state).toBe("connecting"); // the server holds the upgrade unanswered
+    // The timeout abandons it and, after the first backoff, a second socket really dials.
+    await expect.poll(() => upgrades, { timeout: 3000 }).toBe(2);
+    await handle.done; // the second attempt times out too, ending the allowed attempts
+    expect(handle.status()).toMatchObject({ generation: 2, state: "disconnected" });
+  } finally {
+    handle?.stop();
+    for (const socket of held) socket.destroy();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+it("retries when a native WebSocket handshake is refused, though Node fires no close for it", async () => {
+  const home = mkdtempSync(join(tmpdir(), "openrig-socket-refused-"));
+  // A port with nothing listening: the handshake is refused at once.
+  const vacant = createServer();
+  vacant.listen(0, "127.0.0.1");
+  await once(vacant, "listening");
+  const vacantAddress = vacant.address();
+  if (!vacantAddress || typeof vacantAddress === "string") throw new Error("missing fixture address");
+  await new Promise<void>((resolve) => vacant.close(() => resolve()));
+  const server = createServer((_req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, url: `ws://127.0.0.1:${vacantAddress.port}/socket` }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  let handle: SocketInboundHandle | undefined;
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing fixture address");
+    const router = new InboundRouter({
+      queue: { createQitem: async () => { throw new Error("unexpected inbound event"); } },
+      seen: new SeenStore(join(home, "seen.jsonl")),
+      deadLetter: new DeadLetterStore<SlackEvent>(join(home, "dead.jsonl")),
+      destination: "operator-agent@kernel",
+      resolveSender: () => ({ admitted: true, source: "human-fixture@external" }),
+    });
+    handle = startSocketInbound("synthetic-app-token", router, {
+      fetchImpl: (_url, init) => fetch(`http://127.0.0.1:${address.port}`, init),
+      openTimeoutMs: 60_000, // far beyond the test: the refusal alone must end the attempt
+      inboundMaxConnects: 2,
+    });
+    await handle.done; // both attempts end on the refusal, without the timeout
+    expect(handle.status()).toMatchObject({ generation: 2, state: "disconnected" });
+  } finally {
+    handle?.stop();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});

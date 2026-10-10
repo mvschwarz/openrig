@@ -79,6 +79,11 @@ Missing or malformed selections fail; absence is never inferred as disablement.
 `rig context work-install --json` reports the effective state, source, manifest,
 context selectors, and skills. With `--runtime`, its managed skill loadout then
 combines System World, topology, and Project World selectors with provenance.
+The catalog is a Git checkout. A skill folder with uncommitted or untracked content is
+skipped by itself and named. With `--runtime`, work-install reports selected skips with
+exit 1. It inspects by default; `--apply-skills` projects the remaining clean skills while
+keeping any previously projected copy of the skipped skill. An uncommitted change directly
+in the catalog root, such as `catalog.yaml`, still makes the whole catalog unavailable.
 
 For a pre-0.5.9 home, use the `openrig-upgrade` skill's
 `migrate-telemetry-state-0.5.9.mjs` helper as an Agent-Operated Migration. Its
@@ -104,3 +109,14 @@ runtime reads for compatibility. Treat the two-home state as an explicit
 limitation: use the live spec-library commands to determine where a spec is
 served from, and do not infer convergence merely because the canonical
 directory exists.
+
+Config updates publish a complete replacement file atomically where directory
+permissions and the filesystem allow it. On POSIX systems, replacement preserves
+the existing owner, group, and read/write/execute permission bits. If creating or
+preparing the replacement, or renaming it, fails with `EACCES`, `EPERM`, or `EBUSY`,
+the stores write the writable target in place, preserving compatibility with
+unwritable directories and single-file bind mounts. This fallback is not atomic
+and retains the previous partial-write risk. Read-only config files are refused.
+Other errors, including `ENOSPC`, leave the original file intact on the atomic
+path. Atomic replacement does not carry extended ACLs or other inode metadata;
+a hard-linked second name continues to refer to the previous file.

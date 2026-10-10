@@ -229,7 +229,7 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
   it.each(unprovedClaude)("#197 distinguishes missing evidence from a conflict: %s", async (label, mutate) => {
     const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () => mutate(claudeProcesses())));
     const result = await transport.send("dev-check@my-rig", "existing review");
-    const conflict = ["wrong Claude identity", "ambiguous native children"].includes(label);
+    const conflict = label === "ambiguous native children";
     expect(result.ok).toBe(!conflict);
     if (conflict) expect(result.reason).toBe("target_runtime_conflict");
     else expect(result.warning).toContain("without verified native identity");
@@ -260,26 +260,29 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  it.each([true, false])("#197 queue handoff records actual wrapper delivery (matching identity: %s)", async matching => {
+  it.each(["matching", "historical-token", "different-runtime"])("queue handoff records actual wrapper delivery (%s)", async identity => {
     migrate(db, [outboxEntriesSchema]);
     const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () =>
-      claudeProcesses(`--resume ${matching ? nativeToken : "other"}`)));
+      claudeProcesses(`--resume ${identity === "matching" ? nativeToken : "other"}`).map(row =>
+        identity === "different-runtime" && row.pid === 1205
+          ? { ...row, executableName: "codex", command: "codex resume other" } : row)));
     const repo = new QueueRepository(db, new EventBus(db), {
       transport, loadHumanRegistry: () => ({ ok: true, entities: [] }),
     });
     repo.attachOutbox(new OutboxHandler(db));
     const source = await repo.create({ sourceSession: "orch@my-rig", destinationSession: "dev-owner@my-rig", body: "review", nudge: false });
     const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "dev-owner@my-rig", toSession: "dev-check@my-rig" });
+    await vi.waitFor(() => expect(repo.getById(created.qitemId)!.lastNudgeAttempt).not.toBeNull());
     const stored = repo.getById(created.qitemId)!;
     expect(stored.lastNudgeAttempt).not.toBeNull();
-    if (matching) {
+    if (identity !== "different-runtime") {
       expect(stored.lastNudgeResult).toBe("delivered-ack-pending");
       expect(sendText).toHaveBeenCalledOnce();
       expect(sendText).toHaveBeenCalledWith("dev-check@my-rig", expect.stringContaining(`Queue handoff: ${created.qitemId}`));
       expect(sendKeys).toHaveBeenCalledOnce();
     } else {
       expect(stored.lastNudgeResult).toContain("failed:");
-      expect(stored.lastNudgeResult).toContain("different Claude conversation");
+      expect(stored.lastNudgeResult).toContain("different native runtime");
       expect(sendText).not.toHaveBeenCalled();
       expect(sendKeys).not.toHaveBeenCalled();
     }

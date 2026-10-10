@@ -13,7 +13,7 @@ You're running inside OpenRig. OpenRig ships a set of **skills** — small docum
 
 ## How OpenRig context works (30 seconds)
 
-Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file is the index over the whole shipped set. (For bounded procedures, open `agent-operated-workflows`; for ongoing agent-backed applications, open `agent-operated-software`.)
+Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file recommends skills from the shipped set. (For bounded procedures, open `agent-operated-workflows`; for ongoing agent-backed applications, open `agent-operated-software`.)
 
 Every row below names **how to reach the skill** — already-hot, or an exact load path. No row is a dead end.
 
@@ -43,7 +43,7 @@ shows an operator — `get` is the agent-facing pull.)
 
 ## The index
 
-> Membership rule (`layout.skills[*].edges.length > 0`): every public skill with at least one product edge in the generated edge layout appears exactly once in this index; no other skill appears.
+> Membership rule (`layout.skills[*].edges.length > 0`): this index recommends skills from the public product edges. Optional procedures remain available through `rig context list` without a recommendation here.
 
 ### Always loaded — the universal spine (open its body when its moment hits)
 These are auto-delivered to every rig; their name+description are already in your context. Open the body when the "when" matches.
@@ -57,7 +57,7 @@ These are auto-delivered to every rig; their name+description are already in you
 - **loading-addressable-markdown** — a task names Markdown as `path#h2-slug` or `path#h2-slug/h3-slug` outside the context-pack library.
 - **session-compaction-and-restore** — preparing for, or recovering from, compaction (any runtime). The write- and read-side protocol.
 - **queue-handoff** — you're passing durable work to another seat or ending your turn. The queue is the work ledger, not chat.
-- **refocusing** — a long-running seat may have lost the product outcome, crossed a major boundary, or compacted and needs a fresh path-based trace.
+- **refocusing** — invoke as `refocusing` when a long-running seat may have lost the product outcome, crossed a major boundary, or compacted and needs a fresh path-based trace.
 - **seat-continuity-and-handover** — handing your seat's work across a restart or to another owner.
 - **orienting-to-an-inherited-seat** — you just inherited an existing seat through a planned handover and need to verify its identity, state, and testimony.
 - **retiring-and-inheriting-a-seat** — you're planning a seat transition and need to retire the current occupant into a fresh successor without losing continuity.
@@ -72,7 +72,7 @@ These are auto-delivered to every rig; their name+description are already in you
 These ship in the OpenRig repo and reach a seat when its profile selects them. To use one, select it in your profile's `uses.skills`, or open it directly at `packages/daemon/specs/agents/shared/skills/core/<skill>/SKILL.md`.
 
 - **openrig-software-factory** — a user wants continuing reviewed work: manual/team, queue-only orchestration or an explicit Workflow; add one or two seats to the running starter when useful, with context, ownership, concurrency, spend and permission limits. Load `rig context get skills/core/openrig-software-factory/SKILL.md`.
-- **openrig-architect** — authoring a rig or topology (NOT for changing OpenRig itself — that's `openrig-builder`).
+- **openrig-architect** — authoring a rig or topology (NOT for changing OpenRig itself — that's `developing-openrig`).
 - **openrig-cmux** — driving the `cmux` terminal provider.
 - **openrig-herdr** — opening/managing seat terminals via the default proof-gated provider.
 - **agent-startup-and-context-ingestion** — a seat is booting and ingesting its startup context.
@@ -106,7 +106,6 @@ Product-management craft (load when shaping/reviewing work):
 ### Vendored craft — load when you're coding (ships with upstream provenance)
 General engineering skills OpenRig ships as vendored copies. Open when the task matches; they carry "modified by OpenRig" provenance.
 
-- **test-driven-development** — implementing a feature or bugfix: write the failing test first.
 - **verification-before-completion** — about to claim done / passing / fixed: run the check and read the output first.
 - **systematic-debugging** — debugging: find the root cause before the fix.
 - **agent-browser** — driving a browser (screenshot / screencast) from an agent.

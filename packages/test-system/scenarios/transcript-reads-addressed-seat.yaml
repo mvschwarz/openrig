@@ -1,0 +1,33 @@
+# Real stub output reaches the addressed seat's shipped `rig transcript` read.
+# Host mode only: the existing pipeline stages per-seat scripts. No model runs.
+# This checks each seat's own output, not ordering, uniqueness, sibling-token
+# absence, tail limits, restart persistence or whether a seat consumed input.
+#
+# Negative control: temporarily omit `content` from the daemon's successful
+# tail JSON response while retaining the requested session and ingest health.
+# `up` still succeeds; the dev-impl content assertion must fail (step 2, 0-based).
+scenario: transcript-reads-addressed-seat
+topology: ./dev-pair-stub.yaml
+env:
+  stub_scripts:
+    dev-impl: ./scripts/transcript-impl.json
+    dev-qa: ./scripts/transcript-qa.json
+steps:
+  - up: {}
+  - expect:
+      surface: ps
+      match:
+        - name: dev-pair-stub
+          status: running
+          runningCount: 2
+  - expect:
+      surface: transcript
+      seat: dev-impl@dev-pair-stub
+      within: 30s
+      contains: "s06-transcript-impl-87b2"
+  - expect:
+      surface: transcript
+      seat: dev-qa@dev-pair-stub
+      within: 30s
+      contains: "s06-transcript-qa-5ca9"
+  - down: {}

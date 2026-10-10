@@ -10,7 +10,11 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import { reconcileSkillLoadout } from "../src/domain/skill-catalog.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
+import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
+import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
@@ -296,6 +300,122 @@ profiles:
       db?.close();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it.each(["claude-code", "codex"] as const)("reports bundle precedence after real %s reconciliation", async (runtime) => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-bundle-precedence-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const catalog = nodePath.join(root, "catalog");
+      const project = nodePath.join(root, "project");
+      const skill = (body: string) => `---\nname: shared\ndescription: Skill fixture\n---\n${body}\n`;
+      for (const dir of ["installed/agents/impl", "installed/agents/impl/skills/shared", "catalog/shared", "project"]) fs.mkdirSync(nodePath.join(root, dir), { recursive: true });
+      fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      fs.writeFileSync(nodePath.join(catalog, "shared/SKILL.md"), skill("Catalog"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/skills/shared/SKILL.md"), skill("Bundle"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: shared\n      path: skills/shared\nprofiles:\n  default:\n    uses:\n      skills: [shared]\n');
+      execFileSync("git", ["init", "-q", catalog]);
+      execFileSync("git", ["-C", catalog, "add", "."]);
+      execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => catalog, skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime, cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler).toHaveBeenCalledOnce();
+      expect(reconciler.mock.results[0]?.value.ok).toBe(true);
+      const owner = reconciler.mock.calls[0]![0].topologyOwner;
+      expect(JSON.stringify(result)).toContain(`${owner}: skill_bundle_precedence`);
+      expect(JSON.stringify(result)).toContain("the managed catalog was not changed");
+      const selected = reconciler.mock.calls[0]![0].loadout.entries.find(e => e.id === "shared")!;
+      expect(selected.sourceDir).toBe(nodePath.join(installed, "agents/impl/skills/shared"));
+      expect(fs.readFileSync(nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills/shared/SKILL.md"), "utf8")).toBe(skill("Bundle"));
+      const adapter = runtime === "codex" ? fixture.codexAdapter : fixture.adapter;
+      const plan = vi.mocked(adapter.project).mock.calls[0]![0];
+      expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain("installed/agents/impl/skills/shared");
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["claude-code", "codex"] as const)("projects a selected plugin's skills for %s and keeps a same-name skill it does not own", async (runtime) => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const plugin = nodePath.join(installed, "agents/impl/plugins/core");
+      const project = nodePath.join(root, "project");
+      const skills = nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills");
+      const skill = (id: string, body: string) => `---\nname: ${id}\ndescription: Skill fixture\n---\n${body}\n`;
+      for (const manifest of [".claude-plugin", ".codex-plugin"]) {
+        fs.mkdirSync(nodePath.join(plugin, manifest), { recursive: true });
+        fs.writeFileSync(nodePath.join(plugin, manifest, "plugin.json"), '{"name":"core","version":"0.1.4"}');
+      }
+      for (const id of ["delegating-work", "openrig-skills", "queue-handoff"]) {
+        fs.mkdirSync(nodePath.join(plugin, "skills", id), { recursive: true });
+        fs.writeFileSync(nodePath.join(plugin, "skills", id, "SKILL.md"), skill(id, "Plugin"));
+      }
+      fs.mkdirSync(nodePath.join(skills, "delegating-work"), { recursive: true });
+      fs.writeFileSync(nodePath.join(skills, "delegating-work/SKILL.md"), skill("delegating-work", "The project's own"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: core\n      source:\n        kind: local\n        path: plugins/core\nprofiles:\n  default:\n    uses:\n      plugins: [core]\n');
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => nodePath.join(root, "no-catalog"), skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime, cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler.mock.results[0]?.value.ok).toBe(true);
+      for (const id of ["openrig-skills", "queue-handoff"]) {
+        expect(fs.readFileSync(nodePath.join(skills, id, "SKILL.md"), "utf8")).toBe(skill(id, "Plugin"));
+      }
+      expect(fs.readFileSync(nodePath.join(skills, "delegating-work/SKILL.md"), "utf8")).toBe(skill("delegating-work", "The project's own"));
+      const owner = reconciler.mock.calls[0]![0].topologyOwner;
+      expect(JSON.stringify(result)).toContain(`${owner}: plugin_skill_kept: delegating-work`);
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("starts the seat without plugin skills when they cannot be projected, and says why", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-plugin-skills-refused-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const plugin = nodePath.join(installed, "agents/impl/plugins/core");
+      const project = nodePath.join(root, "project");
+      fs.mkdirSync(nodePath.join(plugin, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, ".claude-plugin/plugin.json"), '{"name":"core","version":"0.1.4"}');
+      fs.mkdirSync(nodePath.join(plugin, "skills/queue-handoff"), { recursive: true });
+      fs.writeFileSync(nodePath.join(plugin, "skills/queue-handoff/SKILL.md"), "---\nname: queue-handoff\ndescription: Skill fixture\n---\nPlugin\n");
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  plugins:\n    - id: core\n      source:\n        kind: local\n        path: plugins/core\nprofiles:\n  default:\n    uses:\n      plugins: [core]\n');
+      // The project keeps its own ignore file where OpenRig would add its exclusions.
+      fs.mkdirSync(nodePath.join(project, ".claude/skills"), { recursive: true });
+      fs.writeFileSync(nodePath.join(project, ".claude/skills/.gitignore"), "*.tmp\n");
+      execFileSync("git", ["init", "-q", project]);
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => nodePath.join(root, "no-catalog"), skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler.mock.results.map((call) => call.value.ok)).toEqual([false, true]);
+      expect(JSON.stringify(result)).toContain("plugin_skills_not_projected: git_exclusion_failed");
+      expect(fs.existsSync(nodePath.join(project, ".claude/skills/queue-handoff"))).toBe(false);
+      expect(fs.readFileSync(nodePath.join(project, ".claude/skills/.gitignore"), "utf8")).toBe("*.tmp\n");
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it("dedupes role guidance when the same file is referenced by resources.guidance and startup.files", async () => {
@@ -1004,20 +1124,76 @@ profiles:
   // failure). Unlike cycle_error, the rig record + pods have been created
   // by the time the hook runs (the hook needs rigId), so the fix wraps
   // the failure return with rigRepo.deleteRig(rigId).
-  it("service_boot_failed: rolls back the created rig record (Bug 2 prelaunch-hook rollback)", async () => {
+  it.each(["service_boot_failed", "compose_project_conflict"])("%s: propagates hook refusal and rolls back the created rig record", async (code) => {
     const { db, rigRepo, inst } = setup();
     const specName = "orphan-prelaunch-test-rig";
     const yaml = RigSpecCodec.serialize(makeRigSpec({ name: specName }));
     const result = await inst.instantiate(yaml, RIG_ROOT, {
-      prelaunchHook: async () => ({ ok: false, code: "service_boot_failed", message: "test: service boot refused" }),
+      prelaunchHook: async () => ({ ok: false, code, message: "test: service boot refused" }),
     });
     expect(result.ok).toBe(false);
     if (!result.ok && "code" in result) {
-      expect(result.code).toBe("service_boot_failed");
+      expect(result.code).toBe(code);
     }
     const orphans = rigRepo.findRigsByName(specName);
     expect(orphans, `expected no orphan rig records after service_boot_failed, found ${JSON.stringify(orphans)}`).toHaveLength(0);
     db.close();
+  });
+
+  it.each(["boot-failure", "node-failure", "boot-cleanup-failure", "node-cleanup-failure", "inherited", "inherited-boot-failure"].flatMap(scenario =>
+    (["leave_running", "down_and_volumes"] as const).map(policy => ({ scenario, policy })),
+  ))("retains or cleans up the actual service project on failed instantiation ($scenario, $policy)", async ({ scenario, policy }) => {
+    const { db, rigRepo, inst, adapter, tmux } = setup();
+    try {
+      tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+      adapter.project = vi.fn(async () => ({ projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }] }));
+      const commands: string[] = [];
+      let currentId: string | undefined;
+      const composeAdapter = new ComposeServicesAdapter(async cmd => {
+        commands.push(cmd);
+        if (cmd.includes("down")) {
+          expect(rigRepo.getServicesRecord(currentId!)).not.toBeNull();
+          if (scenario.includes("cleanup-failure")) throw new Error("Docker unavailable during cleanup");
+        }
+        if (cmd.includes("ps --format json") && (scenario.startsWith("boot-") || scenario === "inherited-boot-failure")) throw new Error("status failed after Compose up succeeded");
+        return "";
+      });
+      const serviceOrchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter });
+      const dbHandle = { db };
+      const bootstrap = new BootstrapOrchestrator({ db, rigRepo, serviceOrchestrator, bootstrapRepo: dbHandle,
+        runtimeVerifier: dbHandle, installExecutor: dbHandle, packageInstallService: dbHandle,
+      } as ConstructorParameters<typeof BootstrapOrchestrator>[0]);
+      const predecessor = scenario.startsWith("inherited") ? rigRepo.createRig("test-rig") : undefined;
+      if (predecessor) rigRepo.setServicesRecord(predecessor.id, {
+        kind: "compose", specJson: "{}", rigRoot: RIG_ROOT, composeFile: "compose.yaml", projectName: "legacy-project",
+      });
+      const yaml = RigSpecCodec.serialize(makeRigSpec({ services: {
+        kind: "compose", composeFile: "compose.yaml", downPolicy: policy,
+      } }));
+      type HookResult = { ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean };
+      const hook = await (bootstrap as unknown as { buildServicePrelaunchHook(yaml: string, root: string, stages: unknown[], errors: string[]): Promise<((id: string, replaced: readonly string[]) => Promise<HookResult>) | undefined> })
+        .buildServicePrelaunchHook(yaml, RIG_ROOT, [], []);
+      expect(hook).toBeDefined();
+      const result = await inst.instantiate(yaml, RIG_ROOT, { force: true, prelaunchHook: async (id, replaced) => {
+        currentId = id;
+        return hook!(id, replaced);
+      } });
+      expect(result.ok).toBe(false);
+      const down = commands.filter(cmd => cmd.includes("down"));
+      expect(down).toHaveLength(predecessor ? 0 : 1);
+      expect(down.every(cmd => !cmd.includes("--volumes"))).toBe(true);
+      if (scenario.includes("cleanup-failure")) {
+        expect(rigRepo.getServicesRecord(currentId!)).not.toBeNull();
+        if (!result.ok) expect(result.message).toContain("retained for recovery");
+      } else {
+        expect(rigRepo.getRig(currentId!)).toBeNull();
+      }
+      if (predecessor) {
+        expect(rigRepo.findUnarchivedRigsByName("test-rig").map(rig => rig.id)).toContain(predecessor.id);
+        expect(commands.some(cmd => cmd.includes("-p 'legacy-project'") && cmd.includes("up -d"))).toBe(true);
+        if (scenario === "inherited-boot-failure" && !result.ok) expect(result.message).toContain("Compose up may have changed its runtime");
+      }
+    } finally { db.close(); }
   });
 
   // NS-T05: orphan tmux sessions killed on total failure
@@ -1058,6 +1234,73 @@ profiles:
     const killSession = tmux.killSession as ReturnType<typeof vi.fn>;
     expect(killSession).toHaveBeenCalled();
 
+    db.close();
+  });
+
+  it("removes a failed rig when its launched tmux session is already absent", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    tmux.killSession = vi.fn(async () => ({ ok: false, code: "guard_target_unknown", message: "ambiguous target" }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(adapter.project).toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig").map((rig) => rig.id)).toEqual([prior.id]);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig").map((rig) => rig.id)).toEqual([prior.id]);
+    db.close();
+  });
+
+  it("retains a failed rig when the tmux server cannot be reached", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({
+      state: "transport_unavailable", cause: "no server running on /tmp/tmux-501/default",
+    }));
+    tmux.killSession = vi.fn(async () => ({ ok: true }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(adapter.project).toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig")).toHaveLength(2);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")).toHaveLength(1);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")[0]?.id).not.toBe(prior.id);
+    db.close();
+  });
+
+  it("retains a failed rig if the tmux server vanishes between probe and kill", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({ state: "present" }));
+    tmux.killSession = vi.fn(async () => ({
+      ok: false, code: "session_not_found", message: "no server running on /tmp/tmux-501/default",
+    }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(tmux.killSession).toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig")).toHaveLength(2);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")[0]?.id).not.toBe(prior.id);
     db.close();
   });
 

@@ -1,197 +1,110 @@
 ---
 kind: as-built
-title: OpenRig Codemap — Navigation Index / Map of Territory
+title: OpenRig Codemap — Modules and Source Entry Points
 status: active
 topics: [knowledge-and-context, observability]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  You know what you need to learn about the shipped OpenRig system but not
-  which as-built module holds it. Use the module map, the use-case lookup,
-  or the source-root table to route to the right doc — or jump straight to
-  the source root the codemap points at.
-siblings: [README.md, cli-reference.md]
+  You know the behavior you need to inspect but not its owning source files.
+  Follow the module and source entry points below, then read the implementation.
+siblings: [README.md, arteries.md, test-layers.md, cli-reference.md]
 prerequisite-reads: [README.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
-# OpenRig Codemap — Navigation Index
+# OpenRig codemap
 
-This is a **map of territory**, not a content dump. It tells you which
-as-built module answers a question and which `packages/*/src` root that
-module is grounded in. The deep content lives in the modules; the code lives
-in the source roots; this file points at both.
+The paths and named entry points below were checked at main
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`. This is a navigation map, not a replacement for
+reading the implementation. Linked documents retain their individual verification stamps.
+[README.md](README.md) lists the complete document tree and commands to derive its inventory.
 
-> The old codemap was a 425-line file-by-file `Exports:`/`Related:` flat dump
-> that drifted fastest (its own header carried a stale v0.2.0 footprint and an
-> internally-contradictory command-group count) and never fit a context
-> window. That anti-pattern is retired (slice-08 Q5, founder-ratified). The
-> genuinely-useful part — the source-root index — is preserved below as the
-> source-root pointer table; the per-file transcription is not.
+## Package entry points
 
-## (a) Product frame
+Paths in backticks are relative to the repository root.
 
-OpenRig is a local control plane for multi-agent coding topologies — a
-multi-agent harness that manages your Claude Code and Codex sessions as a
-single system. The daemon (`@openrig/daemon`) is the framework-free
-SQLite-backed core; the CLI (`@openrig/cli`), UI (`@openrig/ui`), and MCP
-server all sit on top of it.
-
-> Source-verified at HEAD `7eaf524c` (`v0.3.1-6-g7eaf524c`); package version
-> **0.3.1**, 6 unreleased 0.3.2 commits on HEAD, no `v0.3.2` tag. Frame
-> sentence triangulated against `architecture/daemon-core.md` §1 +
-> `openrig-internal/product/positioning.md` ("a multi-agent harness, a local
-> control plane that manages your Claude Code and Codex sessions as a single
-> system").
-
-## (b) Module map
-
-One row per module. "Reach for this when…" mirrors each module's actual
-`applies-when` frontmatter.
-
-### architecture/
-
-| Module | One-sentence summary | Reach for this when… |
-|---|---|---|
-| `daemon-core.md` | The framework-free SQLite-backed core the CLI/UI/MCP all sit on. | You need to know how the daemon boots, how `createDaemon` wires the dependency graph, the SQLite schema/migration set, or the route-mount surface. |
-| `adapters-and-runtimes.md` | The five-method runtime-adapter contract + the resume-honesty layer. | You need the runtime-adapter contract, how OpenRig launches/resumes a Claude Code, Codex, or terminal harness inside tmux, or how the daemon honestly assesses whether a harness actually resumed vs fresh-launched. |
-| `coordination-primitive.md` | PL-004 Phase A: the SQLite-canonical durable-work layer (`/api/stream`, `/api/queue`). | You need the stream/queue/inbox/outbox tables, the hot-potato closure contract, the transactional handoff guarantee, or where queue closure is enforced. |
-| `workflow-runtime.md` | PL-004 Phase D: turns an intended sequence of work into durable SQLite state. | You need workflow specs cache, instance state, step trails, the transactional-scribe projection contract, or the watchdog policy set including workflow-keepalive. |
-| `mission-control.md` | PL-005: the daemon-backed queue-observability surface inside the existing shell. | You need the seven views, the seven write verbs, the action audit table, the bearer-token middleware, or how queue observability maps to PL-004 sources. |
-| `agent-spec-and-startup.md` | How authored YAML specs become a resolved, launched, identity-addressable topology. | You need the AgentSpec/RigSpec/pod-aware reboot types, profile resolution + additive startup layering, the StartupOrchestrator delivery split, or how whoami/materialize/bind/adopt resolve identity. |
-| `lifecycle-snapshot-restore.md` | The durable-state half of `down → up → handoff`. | You need how OpenRig captures a snapshot, restores a rig (resume vs rebuild vs fresh), enforces restore honesty, consults live continuity, or how restore-check / restore-packet readiness probes work. |
-| `transport-and-transcripts.md` | The communication-and-history layer; tmux is transport, not truth. | You need how rig send/capture/broadcast works, pipe-pane transcript capture + search, durable SQLite chat, what `rig ask` gathers, or the MCP-tool-name vs tmux-metadata-key distinction. |
-| `workspace-primitive.md` | PL-007: the typed declaration of where a rig's work lives. | You need how a rig declares a typed workspace (root/repos/defaultRepo/knowledgeRoot), how it persists/resolves into whoami / node-inventory, how per-item `target_repo` scope is validated, or how the file-backed missions/slices tree is indexed and projected into Project. |
-| `content-surfaces.md` | The operator-allowlisted, filesystem-canonical read/write layer Project/Steering sits on. | You need how the file browser enforces path safety, how atomic conflict-checked writes + the JSONL edit audit work, how the PROGRESS.md tree is indexed, or how the one-screen Steering surface is composed. |
-| `plugin-agent-image-context-pack.md` | Four filesystem-canonical content primitives the daemon discovers and serves. | You need how OpenRig discovers plugins, captures/forks agent images, assembles/sends context packs, or how the Claude auto-compaction enforcer decides to send `/compact`. |
-| `packaging-bootstrap-bundles.md` | How a topology is packaged into a shareable bundle and reconstituted elsewhere. | You need how rig/pod bundles are assembled (schema-v2 vs legacy v1), how bundle create/inspect/install + `/api/up` route across source kinds, the staged BootstrapOrchestrator flow, or which legacy install-engine seams still ship. |
-| `architecture-rules-and-event-system.md` | The cross-cutting invariants that belong to no single subsystem. | You need the 25 architecture rules + startup/import constraints, the shape of the RigEvent union and its SSE delivery, or the intentional compatibility limits that still describe the shipped system. |
-| `living-notes-review.md` | **v0.4.4** — the one intent→plan→delivered review projection over on-disk SDLC markdown. | You need the `ComposedSliceReview` contract, the `/api/review/*` routes, staged-approval locks (`--scope spec|delivery`), the `## Proof contract` ↔ proof-artifact join and C1-bound `verified`, the freeze export, or ranged media serving for review evidence. |
-
-### ui/
-
-| Module | One-sentence summary | Reach for this when… |
-|---|---|---|
-| `shell-and-routing.md` | The shell-first, route-first, primitive-driven operator surface. | You need how the UI shell (rail / Explorer / center workspace / drawer / preview stack) is assembled, the actual route tree the shipped UI mounts, or how the shared detail drawer and event consumption work. |
-| `topology.md` | The operator's live picture of host → rig → pod → seat. | You need how the topology surface is built — the host hybrid graph, the table/terminal views, the activity-ring / hot-potato visual language, terminal-preview popovers, and the navigation/overlay contracts. |
-| `project-and-for-you.md` | The three operator-facing destination surfaces (For You / Project / Dashboard). | You need how the For-You attention feed (5-card classifier + verb actions), the Project workspace/mission/slice scope pages, and the Dashboard landing on the vellum brand system are built. |
-| `library-specs-and-design-system.md` | The Library (`/specs`) destination + the design-system pointer. | You need how the Library UI is assembled — the spec/skills/plugins surfaces, the spec-review + spec-library + live-identity flows that feed it — or where the canonical visual/design-system spec lives. |
-
-### root
-
-| Doc | One-sentence summary | Reach for this when… |
-|---|---|---|
-| `cli-reference.md` | The full `rig` CLI surface, kept as one doc. | You need the exact rig CLI surface — command groups, subcommands, flags, JSON output, cross-host, coordination primitives. |
-| `frontmatter-schema.md` | The frontmatter convention these docs follow + the as-built-unique field. | You are authoring or updating a doc under `docs/as-built/`. |
-| `../DESIGN.md` | The canonical visual / brand / design-system spec (repo `docs/` root). | You need the visual system, brand identity, or design-system tokens. (Stays at root by design; pointer only.) |
-
-## (c) Structural relationship diagram
-
-Built from each module's `siblings` / `prerequisite-reads` frontmatter.
-`daemon-core.md` is the spine (prerequisite for almost every architecture
-module); `shell-and-routing.md` is the UI spine.
-
-```
-                         README.md  (entry — prerequisite for all)
-                              │
-              ┌───────────────┴───────────────┐
-              ▼                                ▼
-        architecture/                         ui/
-              │                                │
-   daemon-core.md ◀── (prerequisite spine for the column below)
-      │   │   │  │
-      │   │   │  └──▶ adapters-and-runtimes.md
-      │   │   │         (five-method contract + resume honesty;
-      │   │   │          consumed by agent-spec startup orchestration)
-      │   │   └────────────────────────────┐
-      │   └──────────────┐                  │
-      ▼                  ▼                  ▼
- coordination-      agent-spec-and-    transport-and-
- primitive.md        startup.md         transcripts.md
-   │     │              │  │
-   ▼     ▼              │  ▼
- workflow-  mission-    │  lifecycle-snapshot-restore.md
- runtime.md control.md  │     ▲ (consumes persisted replay context)
-   │          │         │
-   └────┬─────┘         ├──▶ packaging-bootstrap-bundles.md
-        ▼               │        ▲
- architecture-rules-    │        │ (0.3.x reusable starter-state cluster)
- and-event-system.md    │        ▼
- (consumes all          └──▶ plugin-agent-image-context-pack.md
-  PL-004/005 events)
-
- workspace-primitive.md ──▶ content-surfaces.md
-   (PL-007 declaration)      (filesystem read/write layer on top)
-        │                          │
-        └──────────┬───────────────┘
-                   ▼  (UI counterpart)
-            ui/project-and-for-you.md
-
- shell-and-routing.md ──▶ topology.md
-        │             └──▶ project-and-for-you.md ◀──▶ architecture/mission-control.md
-        └──────────────▶ library-specs-and-design-system.md ──▶ ../DESIGN.md (pointer)
-```
-
-Reading-order rule: open a module's `prerequisite-reads` first
-(`README.md`, then `daemon-core.md` for most architecture modules;
-`README.md` then `shell-and-routing.md` for most ui modules).
-
-## (d) Fast lookup by use-case
-
-| I need to know… | → see |
+| Surface | Start here |
 |---|---|
-| How the daemon boots / `createDaemon` wiring / migration set / route mounts | `architecture/daemon-core.md` |
-| The runtime-adapter contract / how a harness is launched or resumed in tmux | `architecture/adapters-and-runtimes.md` |
-| Where Claude resume honesty lives / resumed-vs-fresh assessment | `architecture/adapters-and-runtimes.md` |
-| Where queue closure is enforced / hot-potato contract / durable handoff | `architecture/coordination-primitive.md` |
-| How workflow specs project on closure / transactional-scribe / watchdog policies | `architecture/workflow-runtime.md` |
-| The Mission Control views/verbs / queue-observability / action audit | `architecture/mission-control.md` |
-| AgentSpec/RigSpec types, profile resolution, startup layering, whoami/bind/adopt | `architecture/agent-spec-and-startup.md` |
-| Snapshot/restore, restore honesty, restore-check / restore-packet probes | `architecture/lifecycle-snapshot-restore.md` |
-| rig send/capture/broadcast, transcripts, durable chat, `rig ask`, MCP-name vs tmux-key | `architecture/transport-and-transcripts.md` |
-| The workspace primitive (root/repos), `target_repo` scope gating, missions/slices indexing | `architecture/workspace-primitive.md` |
-| The file browser path safety, atomic writes + edit audit, PROGRESS tree, Steering composer | `architecture/content-surfaces.md` |
-| The composed slice/mission review (`/api/review/*`), staged-approval locks, proof artifacts + `verified`, freeze export, ranged media | `architecture/living-notes-review.md` |
-| Plugin discovery / agent images / context packs / Claude auto-compaction enforcer | `architecture/plugin-agent-image-context-pack.md` |
-| Bundle assembly, bundle install / `/api/up`, BootstrapOrchestrator, legacy install seams | `architecture/packaging-bootstrap-bundles.md` |
-| The 25 architecture rules / RigEvent union / SSE delivery / compatibility limits | `architecture/architecture-rules-and-event-system.md` |
-| The UI shell, the real route tree, the shared detail drawer | `ui/shell-and-routing.md` |
-| The topology graph/table/terminal views, activity-ring / hot-potato visuals | `ui/topology.md` |
-| The For-You attention feed, Project scope pages, the Dashboard landing | `ui/project-and-for-you.md` |
-| The vellum brand system on the destination surfaces (0.3.1 brand identity) | `ui/project-and-for-you.md` (vellum brand = **0.3.1** per slice-00 0.3.0-GT seam (b); slice-00 §2 row 1 = vellum-primitives → brand-identity, row 2 = destination-model → polished-destinations) |
-| The Library `/specs` UI + spec-review/spec-library/live-identity flows | `ui/library-specs-and-design-system.md` |
-| The full `rig` CLI surface | `cli-reference.md` |
-| The visual / brand / design-system spec | `../DESIGN.md` (repo `docs/` root) |
-| Which frontmatter these docs use + the as-built-unique field | `frontmatter-schema.md` |
+| Daemon process | `packages/daemon/src/index.ts`; `createDaemon()` in `packages/daemon/src/startup.ts`. |
+| HTTP application | `createApp()` in `packages/daemon/src/server.ts`; route modules under `packages/daemon/src/routes/`. |
+| State and migrations | `packages/daemon/src/db/connection.ts`, `packages/daemon/src/db/migrate.ts`, `packages/daemon/src/db/all-migrations.ts`. |
+| CLI | `createProgram()` in `packages/cli/src/index.ts`; commands under `packages/cli/src/commands/`, HTTP in `packages/cli/src/client.ts`. |
+| MCP | `createMcpServer()` in `packages/cli/src/mcp-server.ts`; stdio command in `packages/cli/src/commands/mcp.ts`. |
+| Terminal UI | `packages/tui/src/main.ts`, `packages/tui/src/state.ts`, `packages/tui/src/render.ts`; HTTP in `packages/tui/src/daemon-client.ts`. |
+| Web UI | `packages/ui/src/main.tsx`, `packages/ui/src/routes.tsx`. |
+| npm assembly | `scripts/build-package.sh`, `scripts/rewrite-daemon-imports.mjs`, `packages/cli/package.json`. |
 
-## (e) Source-root pointer table
+The daemon's route handlers obtain domain services from request context. `startup.ts` constructs
+those services, repositories and runtime adapters; `server.ts` wires them into the application.
+CLI and TUI clients use the daemon's HTTP projections. Package boundaries and the development
+versus bundled paths are described in [ARCHITECTURE.md](../../ARCHITECTURE.md).
 
-Module → primary `packages/*/src/...` roots. This replaces the old per-file
-`Exports:`/`Related:` dump: it points at the code, it does not transcribe it.
-Source-grounding for each claim lives inside the module with file:line cites.
+## Runtime and state modules
 
-| Module | Primary source roots |
+Each row names an existing module and a small set of source starting points. Directories group
+related code; they are not an exhaustive dependency list.
+
+| Question | Module | Source entry points |
+|---|---|---|
+| How are the daemon, database and routes assembled? | [Daemon core](architecture/daemon-core.md) | `packages/daemon/src/startup.ts`, `packages/daemon/src/server.ts`, `packages/daemon/src/db/`. |
+| How do runtime launch, projection and resume work? | [Adapters and runtimes](architecture/adapters-and-runtimes.md) | `packages/daemon/src/domain/runtime-adapter.ts`, `packages/daemon/src/adapters/`, `packages/daemon/src/domain/native-resume-probe.ts`. |
+| How do authored specs become launched agents with identity? | [Agent spec and startup](architecture/agent-spec-and-startup.md) | `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/startup-orchestrator.ts`, `packages/daemon/src/domain/whoami-service.ts`. |
+| Where are durable work, delivery and handoff handled? | [Coordination](architecture/coordination-primitive.md) | `packages/daemon/src/domain/queue-repository.ts`, `packages/daemon/src/domain/stream-store.ts`, `packages/daemon/src/domain/inbox-handler.ts`, `packages/daemon/src/domain/outbox-handler.ts`. |
+| How does a workflow retain progress and resume? | [Workflow runtime](architecture/workflow-runtime.md) | `packages/daemon/src/domain/workflow-runtime.ts`, `packages/daemon/src/domain/workflow-projector.ts`, `packages/daemon/src/domain/policies/`, `packages/daemon/src/routes/workflow.ts`. |
+| How are queue observations and actions exposed? | [Mission control](architecture/mission-control.md) | `packages/daemon/src/domain/mission-control/`, `packages/daemon/src/routes/mission-control.ts`. |
+| What is captured and checked during restore? | [Lifecycle, snapshot and restore](architecture/lifecycle-snapshot-restore.md) | `packages/daemon/src/domain/snapshot-capture.ts`, `packages/daemon/src/domain/restore-orchestrator.ts`, `packages/daemon/src/routes/restore-check.ts`. |
+| How do messages and transcript reads reach sessions? | [Transport and transcripts](architecture/transport-and-transcripts.md) | `packages/daemon/src/domain/session-transport.ts`, `packages/daemon/src/domain/transcript-store.ts`, `packages/daemon/src/routes/transport.ts`. |
+| Where do workspaces, projects and repository scope resolve? | [Workspace](architecture/workspace-primitive.md) | `packages/daemon/src/domain/workspace/`, `packages/daemon/src/domain/current-work.ts`, `packages/daemon/src/routes/projects.ts`. |
+| How are files, progress and steering read or written? | [Content surfaces](architecture/content-surfaces.md) | `packages/daemon/src/domain/files/`, `packages/daemon/src/domain/progress/`, `packages/daemon/src/domain/steering/`. |
+| How are review inputs, proof and approvals composed? | [Living notes and review](architecture/living-notes-review.md) | `packages/daemon/src/domain/review/`, `packages/daemon/src/domain/scope/`, `packages/daemon/src/routes/review.ts`. |
+| Where are plugins, agent images and context packs discovered? | [Plugins, images and context packs](architecture/plugin-agent-image-context-pack.md) | `packages/daemon/src/domain/plugin-discovery-service.ts`, `packages/daemon/src/domain/agent-images/`, `packages/daemon/src/domain/context-packs/`. |
+| How are reusable bundles assembled and installed? | [Packaging, bootstrap and bundles](architecture/packaging-bootstrap-bundles.md) | `packages/daemon/src/domain/pod-bundle-assembler.ts`, `packages/daemon/src/domain/bootstrap-orchestrator.ts`, `packages/daemon/src/routes/bundles.ts`, `packages/daemon/src/routes/up.ts`. |
+| Where are event types, publication and SSE handled? | [Architecture rules and events](architecture/architecture-rules-and-event-system.md) | `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/event-bus.ts`, `packages/daemon/src/routes/events.ts`. |
+
+For an execution projection, also read `packages/daemon/src/domain/execution-view.ts` and
+`packages/daemon/src/domain/view-projector.ts`. The terminal-side consumer starts in
+`packages/tui/src/execution/`. These sit alongside the queue and workflow sources above.
+
+### Newer entry points
+
+These features were added after the module pages above were last verified. Each module's own
+stamp says whether it already covers them; until then, start from the source named here.
+
+| Question | Source entry points | Nearest module |
+|---|---|---|
+| How does a GitHub folder link become a bundle source? | `isGitHubBundleLink()` and the bundle source in `packages/cli/src/lib/bundle-source.ts`, used by `packages/cli/src/commands/up.ts` and `packages/cli/src/commands/bundle.ts`. | [Packaging and bundles](architecture/packaging-bootstrap-bundles.md) |
+| What does `rig bundle check` read? | `checkBundleFolder()` in `packages/cli/src/lib/bundle-check.ts`: advisory file reads against `openrig.bundle-standard/v1`, with no daemon, launch or provider call. | [Packaging and bundles](architecture/packaging-bootstrap-bundles.md) |
+| How does a member's `permission_policy` become a launch posture, including `builtin:auto`? | `builtinLaunchPosture()` and `resolvePermissionPolicyAttachment()` in `packages/daemon/src/domain/permission-policy/policy-ref.ts` (`builtin:yolo` is full bypass, `builtin:auto` is auto, the other built-ins are the floor), bound per seat in `packages/daemon/src/domain/rigspec-instantiator.ts`. `packages/daemon/src/domain/bundle-behaviour.ts` is the read-only preview of the same mapping for an unopened bundle. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| What does a non-interruptive launch add? | `nonInterruptiveArgs()` in `packages/daemon/src/adapters/non-interruptive.ts` (per-launch arguments only; it never changes permissions or native settings files). The separate instance-wide YOLO setting, off by default, is in `packages/daemon/src/adapters/yolo-mode.ts`. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| What launch arguments does a kernel seat get? | `operationalLaunchArgs()` and `KERNEL_CLAUDE_ALLOW` in `packages/daemon/src/adapters/kernel-authority.ts`; `NativePermissionStore.launchOverride()` in `packages/daemon/src/domain/native-permission-store.ts` decides it per launch (only the rig named `kernel`, with no explicit seat choice, permission policy or Codex profile). | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| What launch default does a seat in any other rig get? | Under the same conditions `launchOverride()` sets `teamPermissionDefault`: a Claude seat at the floor posture gets `TEAM_CLAUDE_ALLOW` and `TEAM_CLAUDE_ASK` from `operationalLaunchArgs()` in `packages/daemon/src/adapters/kernel-authority.ts`, whose `claudeCommandSettings()` hands the kernel or team lists to the session-only Bash hook `packages/daemon/assets/claude-team-permissions.cjs`, which returns the allow or ask decision; a workspace-write Codex seat gets `--add-dir` roots from `prepareCodexTeamWorkspace()` in `packages/daemon/src/domain/codex-team-workspace.ts`. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| How does `rig seat continue` finish a fresh startup that stopped before its context was delivered? | `continueFreshStartup()` in `packages/daemon/src/domain/seat-lifecycle-service.ts`, `canContinueFresh()` in `packages/daemon/src/domain/startup-orchestrator.ts`, the route in `packages/daemon/src/routes/seat.ts`, and the command in `packages/cli/src/commands/seat.ts`. | [Agent spec and startup](architecture/agent-spec-and-startup.md) |
+| How does `rig context work-install` choose a project and position? | `resolveWorkPosition()` in `packages/cli/src/lib/work-install.ts`, `packages/cli/src/commands/context.ts`, and `packages/daemon/src/domain/workspace/project-catalog.ts`. | [Workspace](architecture/workspace-primitive.md) |
+| Where do rosters come from? | `packages/cli/src/commands/roster.ts`: `rig roster list`, `show` and `find` read JSON roster files from `<workspace.root>/rosters` (or `--folder`) and are read-only. | [Agent spec and startup](architecture/agent-spec-and-startup.md), "Specialist rosters" |
+| What telemetry can be read? | `packages/daemon/src/domain/finite-telemetry.ts` (the `events`, `queue-transitions` and `tenures` streams), `/api/telemetry` in `packages/daemon/src/routes/telemetry.ts`, and `packages/cli/src/commands/telemetry.ts`. | [Architecture rules and events](architecture/architecture-rules-and-event-system.md), "Telemetry read surface" |
+
+## Change and verification guides
+
+| Need | Read |
 |---|---|
-| `architecture/daemon-core.md` | `packages/daemon/src/{startup.ts,server.ts,index.ts}`, `packages/daemon/src/db/migrations/`, `packages/cli/src/index.ts` |
-| `architecture/adapters-and-runtimes.md` | `packages/daemon/src/domain/runtime-adapter.ts`, `packages/daemon/src/adapters/{claude-code-adapter,codex-runtime-adapter,terminal-adapter}.ts`, `packages/daemon/src/domain/{native-resume-probe,resume-metadata-refresher,codex-thread-id}.ts` |
-| `architecture/coordination-primitive.md` | `packages/daemon/src/domain/{stream-store,queue-repository,queue-transition-log,hot-potato-enforcer,inbox-handler,outbox-handler}.ts`, `packages/daemon/src/routes/{stream,queue}.ts` |
-| `architecture/workflow-runtime.md` | `packages/daemon/src/domain/{workflow-projector,workflow-runtime,workflow-instance-store,workflow-spec-cache,workflow-step-trail-log,workflow-validator}.ts`, `packages/daemon/src/domain/policies/workflow-keepalive.ts`, `packages/daemon/src/routes/workflow.ts` |
-| `architecture/mission-control.md` | `packages/daemon/src/domain/mission-control/`, `packages/daemon/src/middleware/auth-bearer-token.ts`, `packages/daemon/src/routes/mission-control.ts`, `packages/daemon/src/db/migrations/037_mission_control_actions.ts` |
-| `architecture/agent-spec-and-startup.md` | `packages/daemon/src/domain/{agent-manifest,rigspec-schema,profile-resolver,startup-orchestrator,whoami-service,claim-service}.ts`, `packages/daemon/src/routes/{rigspec,whoami}.ts` |
-| `architecture/lifecycle-snapshot-restore.md` | `packages/daemon/src/domain/{restore-orchestrator,snapshot-capture,snapshot-repository,checkpoint-store}.ts`, `packages/daemon/src/routes/restore-check.ts`, `packages/cli/src/commands/restore-packet.ts` |
-| `architecture/transport-and-transcripts.md` | `packages/daemon/src/domain/{session-transport,transcript-store,history-query,ask-service,chat-repository}.ts`, `packages/daemon/src/routes/{transport,transcripts,ask,chat}.ts`, `packages/cli/src/mcp-server.ts` |
-| `architecture/workspace-primitive.md` | `packages/daemon/src/domain/workspace/`, `packages/cli/src/commands/config-init-workspace.ts`, `packages/daemon/src/db/migrations/{038,039}*`, `packages/ui/src/routes.tsx` |
-| `architecture/content-surfaces.md` | `packages/daemon/src/domain/{files,progress,steering}*`, `packages/daemon/src/routes/{files,progress,steering}.ts`, `packages/ui/src/routes.tsx` |
-| `architecture/living-notes-review.md` | `packages/daemon/src/domain/review/{types,compose,gather,freeze,brief-spine}.ts`, `packages/daemon/src/routes/{review,files,slices}.ts`, `packages/cli/src/commands/{scope,proof}.ts`, `packages/ui/src/components/review/` |
-| `architecture/plugin-agent-image-context-pack.md` | `packages/daemon/src/domain/plugin-discovery-service.ts`, `packages/daemon/src/domain/{agent-images,context-packs}/`, `packages/daemon/src/domain/claude-compaction-enforcer.ts` |
-| `architecture/packaging-bootstrap-bundles.md` | `packages/daemon/src/domain/{pod-bundle-assembler,bootstrap-orchestrator,bundle-*,package-*,install-*}.ts`, `packages/daemon/src/routes/{bundles,up}.ts` |
-| `architecture/architecture-rules-and-event-system.md` | `packages/daemon/src/domain/types.ts` (RigEvent union), `packages/daemon/src/routes/{stream,queue}.ts` (SSE watch), `packages/daemon/src/server.ts` (`/api/events`) |
-| `ui/shell-and-routing.md` | `packages/ui/src/routes.tsx`, `packages/ui/src/components/AppShell.tsx` |
-| `ui/topology.md` | `packages/ui/src/components/topology/`, `packages/ui/src/lib/{graph,hybrid,multi-rig}-layout.ts` |
-| `ui/project-and-for-you.md` | `packages/ui/src/routes.tsx`, `packages/ui/src/components/dashboard/vellum/` |
-| `ui/library-specs-and-design-system.md` | `packages/ui/src/components/specs/`, `packages/daemon/src/domain/{spec-review-service,spec-library-service}.ts`, `../DESIGN.md` (pointer) |
-| `cli-reference.md` | `packages/cli/src/index.ts`, `packages/cli/src/commands/*` |
+| Contributor setup and a small change recipe | [CONTRIBUTING.md](../../CONTRIBUTING.md), [ARCHITECTURE.md](../../ARCHITECTURE.md). |
+| What depends on a sensitive source path | [arteries.md](arteries.md). |
+| Unit, route, scenario, package and CI coverage | [test-layers.md](test-layers.md), `packages/test-system/README.md`, `.github/workflows/tests.yml`. |
+| Exact CLI syntax | [cli-reference.md](cli-reference.md), then `packages/cli/src/index.ts`, its command module and current command help. |
+| As-built metadata | [frontmatter-schema.md](frontmatter-schema.md). |
+| An older architecture link | [architecture.md](architecture.md), which redirects into this module tree. |
+| Visual specification | [DESIGN.md](../DESIGN.md). |
 
-> No per-file flat dump. File-level detail belongs in the code; this codemap
-> points at the source root and the module that explains it. The per-file
-> index anti-pattern (old codemap) is retired, not relocated.
+## Existing web UI references
+
+These historical documents are still indexed; this pass checks their locations, not their
+current implementation claims. Consult each page's stamp.
+
+| Reference | Source area |
+|---|---|
+| [UI compatibility pointer](ui.md) | `packages/ui/src/`. |
+| [Shell and routing](ui/shell-and-routing.md) | `packages/ui/src/routes.tsx`, `packages/ui/src/components/AppShell.tsx`. |
+| [Topology](ui/topology.md) | `packages/ui/src/components/topology/`. |
+| [Project and For You](ui/project-and-for-you.md) | `packages/ui/src/routes.tsx`. |
+| [Library/specs and design system](ui/library-specs-and-design-system.md) | `packages/ui/src/components/specs/`. |

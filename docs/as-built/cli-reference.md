@@ -1,1957 +1,926 @@
 ---
 kind: as-built
-title: OpenRig CLI Reference — Full rig Command Surface
+title: CLI Reference — Registered Commands and Options
 status: active
-topics: [runtime-control, agent-runtime]
-domains: [operating-advisor, engineering-advisor, orchestrator]
+topics: [orchestration, coordination, observability, knowledge-and-context]
+domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  Need the exact rig CLI surface — command groups, subcommands, flags,
-  JSON output, cross-host, coordination primitives.
-siblings: [README.md, architecture/daemon-core.md]
-prerequisite-reads: [README.md]
-last-verified-against-source: b13a8e4c7
-last-updated: 2026-06-20
+  Looking up the complete registered rig command/option surface or locating
+  the source that implements a command. Use command help for invocation details.
+siblings: [README.md, codemap.md]
+prerequisite-reads: [../reference/help.md]
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
-# OpenRig CLI Reference
+# CLI Reference — Registered Commands and Options
 
-Verified against the shipped CLI on 2026-06-15 (v0.3.4) using:
-- `packages/cli/src/index.ts`
-- `packages/cli/src/commands/*.ts`
-- `packages/cli/src/mcp-server.ts`
-- live help from `node packages/cli/dist/index.js ... --help`
+Verified against source commit `e8f0ab340db773392ec8be75b072d1c0f3068a50`.
+The inventory below comes from the actual Commander tree returned by
+[`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
+strings or an installed CLI from a different commit.
 
-This document reflects the current `rig` surface as shipped. Where live help text is narrower than the implementation, notes call that out explicitly.
+There are **87 top-level registrations**, **356 registered command objects**
+below `rig` (including groups and the hidden `restore apply` command), and
+**1,082 explicitly registered option objects**, including the root version
+option. Aliases do not add command objects; short/long spellings of one
+option do not add option objects. Commander-generated help is additional.
+These are source counts, not a claim about a deployed release.
 
-## Terminal dashboard entry
+## Reading this reference
 
-The TUI's **Connections** section (`connections` or `:connections`) shows
-running daemon and launching CLI identity, selected instance settings with
-source, observed rigs and authored Specs, Slack configuration and running wire
-state, and registered humans with primary/secondary bindings. `back` restores
-the work view that opened Connections. The view supplies supported CLI guidance;
-it does not enable a connector, change settings, or send a test message.
+Each table row lists one registered command, its positional arguments,
+command aliases, and its **own declared options**. `<value>` denotes a
+required positional/option value; `[value]` is optional; `...` is variadic.
+An option marked **required** was registered with Commander's mandatory
+option setting. An option marked (repeatable) collects every value when it is
+given more than once. Conditional requirements enforced by an action are not
+encoded by this inventory.
 
-Connections reads the passive `GET /api/gateway/connections` projection. It
-selects safe fields from settings, config, the human registry and gateway status;
-secret values/references and raw errors are omitted. Current config is compared
-with the wire's activation digest when available. Last Slack verification comes
-from at most 64 KiB of the existing channel-operation audit tail, matched to the
-current configuration and labeled with its time/actor. It is historical scope
-and channel-membership evidence, not current reachability, credential identity,
-delivery or readership. Missing, failed, incomplete and changed observations
-remain distinct; an older daemon without the projection reads as unavailable.
-Use the displayed guidance on that instance; `rig slack verify --json` explicitly
-contacts Slack. Ordinary navigation/refresh does not.
+Use `rig <command> --help` for descriptions, choices, defaults, and examples.
+Defaults may depend on the current directory, configuration, or action code;
+they are not fixed by the flags table. Parent command options are listed on
+the parent row, not repeated on every child. The root declares `-V, --version`;
+Commander also provides `-h, --help` and applicable `help [command]` handling.
+The only explicit command alias at this pin is `rig host ls` for `host list`.
 
-`rig tui` opens an independent TUI through the same front door as bare `rig`.
-`rig tui --shared` requires interactive input/output and a loopback daemon
-connection. It resolves the kernel's bound `operator.human` terminal and
-attaches a local tmux client without starting a seat or another TUI. Ctrl-b,
-then d detaches; reattaching preserves navigation. A missing or ambiguous
-binding fails with inspection guidance instead of creating another kernel.
+An option named `--json` selects the command's JSON mode; it does not imply
+that every verb shares one response schema. The handler and its daemon
+route remain the source for result/error shape and side effects.
 
-Fresh kernel terminals start `rig tui` automatically. Older terminals, or a
-terminal where the TUI was quit, retain their shell: run `rig tui` there once.
-The kernel view uses TUI instance `kernel`; standalone uses its ordinary
-instance. `rig tui commands --json` exposes the command registry for agent
-control. In the ordinary shell, Tab completes command names/aliases, section
-jumps and arguments from the current snapshot. Ambiguous prefixes show candidates;
-keep typing and press Tab again. No match preserves the text. Enter executes;
-Escape clears. Free-text filters are not completed. Bracketed paste is text, never
-an implicit command submission.
+## Entry points and practical routes
 
-Recent shows ordered, wrapped queue changes. Enter on an event opens the original
-record (including its raw timestamp); Escape returns to the previous view/scroll.
-Recorded changes remain attributed claims, including attempts and failures.
+Bare `rig` opens the TUI, the status dashboard rather than an agent conversation, when both
+stdin and stdout are terminals. Arguments,
+pipes, and redirected streams follow normal CLI parsing.
+[`runFrontDoor` and `openMissionControl`](../../packages/cli/src/front-door.ts)
+own the entry behavior; [`tuiCommand`](../../packages/cli/src/commands/tui.ts)
+owns explicit TUI options; `rig terminal open saved:kernel --window` opens a terminal view
+of the OpenRig TUI, the operator and the advisor (in a new tab or window, or the current
+Herdr session), and `rig tui --shared` is the dashboard-only fallback when that view cannot open. A daemon-down transport result can still open the
+recovery cockpit; it is not automatically a reason to exit before rendering.
 
-Absolute TUI times use `ui.timezone`, default `America/Los_Angeles`, with native
-daylight-saving rules. Run `timezone` in the TUI for the current value and settings
-guidance. `rig config set ui.timezone Europe/London` persists an alternative;
-`rig config reset ui.timezone` restores the default. Reopen the TUI after changing
-it. `OPENRIG_UI_TIMEZONE` overrides the file setting. Invalid settings produce a
-visible fallback notice. Relative ages and stored source timestamps are unchanged.
+| Need | Start here |
+|---|---|
+| Install, upgrade, or make a first project | [Getting started](../reference/getting-started.md), then `rig setup --help` and `rig doctor --help`. |
+| Inspect live state and diagnose failures | `rig ps`, `rig health`, `rig doctor`; [health diagnosis](../reference/health-diagnosis.md). |
+| Define/start rigs and seats | `rig spec`, `rig agent`, `rig up`, `rig create`, `rig grow`, `rig seat continue`; [RigSpec](../reference/rig-spec.md) and [AgentSpec](../reference/agent-spec.md). |
+| Snapshot, restore, or hand over | `rig snapshot`, `rig restore`, `rig restore-check`, `rig restore-packet`, `rig handover`; [lifecycle source map](architecture/lifecycle-snapshot-restore.md). |
+| Find owned work or communicate | `rig queue`, `rig send`, `rig stream`, `rig chatroom`, `rig walk`; [coordination source map](architecture/coordination-primitive.md). |
+| Work with projects, missions, slices, and proof | `rig scope`, `rig proof`, `rig workflow`; [project workspace](../reference/project-workspace.md) and [SDLC conventions](../reference/sdlc-conventions.md). |
+| Read/project context and skills | `rig context`, `rig skill`, `rig package`; [context source map](architecture/plugin-agent-image-context-pack.md). |
+| Connect another host or human channel | `rig host`, `rig gateway`, `rig slack`; [Slack setup](../reference/slack-app-setup.md). |
+| Check, share, or start a rig bundle | `rig bundle check`, `rig bundle`, `rig up <GitHub folder link>`; [packaging source map](architecture/packaging-bootstrap-bundles.md). |
+| Find a specialist seat across rigs and hosts | `rig roster` (read-only). |
+| Read event, queue-transition, and tenure telemetry | `rig telemetry`. |
 
-See [the first-use journey](../reference/getting-started.md).
+Do not confuse `rig project`'s coordination/classification surface with
+`rig scope`'s project and work-tree commands. Likewise, `rig spec` manages
+rig specifications, `rig specs` browses the spec library, and
+`rig workflow specs` lists workflow specifications. The tree below preserves
+those distinct registrations.
 
-## Daemon shutdown
+A successful read, queue admission, terminal delivery, proof judgment, and
+publication are different operations. Consult the relevant command handler
+and [workflow runtime](architecture/workflow-runtime.md) when deciding what a
+result establishes. This reference does not turn an inventory entry into
+permission to perform that operation.
 
-`rig daemon stop` sends at most one SIGTERM to a live daemon identified by its
-local state.
-An explicit `OPENRIG_URL` that disagrees with that target refuses before signaling.
-The daemon has one referenced **10-second** budget covering asynchronous service
-shutdown, connections and recorder drain; repeated SIGINT/SIGTERM joins that stop.
-The CLI allows **12 seconds** for process exit, then verifies the original PID and
-listener even if `daemon.json` was removed. A refused listener, a responding
-listener and an unavailable probe are different outcomes.
+## Reproducing the registration inventory
 
-`$OPENRIG_HOME/daemon-shutdown.json` records the PID, shutdown start/completion,
-phase, failures and `clean|failed|timed-out` outcome. Only successful drains mark
-the lifecycle record clean. A failed/timed-out drain returns nonzero, including
-after the process exits. For a recorded target, missing or stale receipt evidence
-is unverified and also returns nonzero. Failed/unverified stops retain target
-state for retries; status reads only clean it after a matching clean receipt.
-An already-exited target uses the same receipt judgment without another signal.
-With no recorded target and a refused listener, the CLI reports a distinct
-no-target no-op, not a clean-drain verdict. Unbound incomplete or unreadable
-local shutdown evidence remains nonzero/unverified rather than being attributed
-to an unrelated listener.
-
-Older daemons without the receipt can therefore be proven stopped without their
-graceful drain being certified. Inspect the receipt and `daemon.log`;
-do not infer that pending external work completed or was rolled back, or retry it
-blindly. The bound covers asynchronous waits, not a synchronous event-loop wedge.
-
-## Human delivery
-
-`rig gateway human list --json` discovers registered `<entityId>@external`
-addresses. `rig gateway human show <entityId> --json` includes primary-connector
-readiness, reason and next inspection. Project policy decides when to contact a
-human; `messaging-the-human` supplies the transport mechanics.
-
-Create a human request with `rig queue create --destination <address> --summary
-"<decision>" --body-file <file> --evidence-ref <ref> --verify --json`. It persists
-one row before checking the delivery receipt. `posted` proves connector
-acceptance, never readership; `transport-failed`, `never-posted`, `still-pending`
-and `indeterminate` preserve the request and name the next inspection. Do not
-blindly repeat the create. `rig send` is for agent seats.
-
-`rig slack manifest [--url|--json]` (experimental in 0.6.0) prints the Slack app manifest a user creates
-their own private Socket Mode app from, offline (no daemon, tokens or network).
-`--url` is Slack's create-app link with the manifest prefilled; `--json` adds the
-scope and event lists and why each scope is requested. The same object is served
-read-only at `GET /api/gateway/slack/manifest` for the TUI Connections page. Setup
-steps: `docs/reference/slack-app-setup.md`.
-
-`rig slack enable [--reason <reason>]` seeds existing backlog only on a disabled
-to enabled transition. Repeating enable does not reseed or restart. `rig slack
-disable --reason <reason>` requires a shutdown reason. Both return attributed
-lifecycle receipts; direct requests can name `actor` when no managed-session
-header exists. Header-derived and claimed identities remain distinct.
-Configuration, verification and human-binding edits also record actor, reason,
-prior/result state and effect in
-`$OPENRIG_HOME/state/human-channel-operations.jsonl`. Each operation has a start
-and a completion receipt with one ID; a missing completion is indeterminate.
-Snapshots retain state/digests rather than credentials or message bodies. Local
-CLI configuration/verification/binding receipts are explicitly `claimed:v1`.
-
-`rig host pair <url> [--human <address>]` selects the sole registered target
-human, or requires an explicit selection when several exist. A missing registry
-or ambiguous recipient refuses before creating an approval. An unset
-`workspace.operator_seat_name` no longer invents a username-derived kernel
-seat: Mission Control discovers a single registered human or shows identity
-uncertainty. Explicit existing seat selections remain supported. Legacy aliases
-resolve only when their entity is registered; old failed rows are preserved,
-not implicitly delivered or replayed by registration.
-
-## Overview
-
-System Health diagnosis, policy, checkpoints, and dispositions are documented in
-[Agent-operated System Health diagnosis](../reference/health-diagnosis.md).
-Diagnosis `show`/`list --json` are summaries; use `--full --json` for the previous
-complete evidence payload. Their defaults identify omitted fields and the exact
-expansion command. Workflow human views remain summaries; workflow `--json`
-continues to return the complete API payload.
-
-For raw JSON evidence files, CLI read defaults cannot intercept `cat` or a Node
-print. Inspect size and keys before selecting needed fields; retain full evidence
-on disk. For example:
+In a development checkout at the stamped commit, after installing its locked
+dependencies and building the daemon and CLI, this import walks the registered
+tree without parsing arguments or invoking command actions:
 
 ```sh
-wc -c < receipt.json
-jq 'keys' receipt.json
-jq '{gate, judge, cutSha, surfaceCount, overallPackageVerdict}' receipt.json
+node --input-type=module <<'JS'
+import { createProgram } from './packages/cli/dist/index.js';
+const root = createProgram();
+const rows = [];
+function walk(command, prefix = '') {
+  const path = prefix ? `${prefix} ${command.name()}` : command.name();
+  rows.push({
+    path,
+    aliases: command.aliases(),
+    arguments: command.registeredArguments.map(a => ({
+      name: a.name(), required: a.required, variadic: a.variadic,
+    })),
+    options: command.options.map(o => ({
+      flags: o.flags, required: Boolean(o.mandatory),
+    })),
+  });
+  for (const child of command.commands) walk(child, path);
+}
+walk(root);
+console.log(JSON.stringify({
+  topLevel: root.commands.length,
+  registeredCommands: rows.length - 1,
+  declaredOptions: rows.reduce((n, row) => n + row.options.length, 0),
+  rows,
+}, null, 2));
+JS
 ```
 
-Select the actual fields present in that file. Redirect intentional full CLI
-output to a file before inspecting selected fields; use `set -o pipefail` when
-piping a command so a formatter cannot hide its failing exit.
-
-
-- Binary: `rig`
-- Top-level command groups: `64`
-- Output mode: human-readable by default; many commands also support `--json`
-- Daemon-backed commands fail when the daemon is stopped or unhealthy; `daemon`, `config`, `preflight`, and `doctor` also have local responsibilities
-- Managed apps are launched through the normal spec/library surfaces; the canonical shipped example is `rig up secrets-manager`
-- Legacy surface still shipped: `package`
-
-## Top-Level Commands
-
-| Command | Description |
-| --- | --- |
-| `daemon` | Manage the OpenRig daemon |
-| `start` | Recovery entrypoint — daemon + kernel + per-rig restore (interactive or headless) |
-| `status` | Show rig status |
-| `snapshot` | Manage rig snapshots |
-| `restore` | Restore a rig from a snapshot |
-| `export` | Export a rig spec as YAML |
-| `import` | Import a rig spec from YAML |
-| `ui` | UI commands |
-| `package` | Manage agent packages (legacy) |
-| `bootstrap` | Bootstrap a rig from a spec file |
-| `requirements` | Check requirements for a rig spec |
-| `discover` | Scan for unmanaged tmux sessions |
-| `attach` | Attach the current shell or agent into a rig node |
-| `bind` | Bind a discovered session to a rig node |
-| `adopt` | Materialize topology and bind discovered live sessions |
-| `reconcile-session` | No-launch, no-input adopt of a hand-resumed session |
-| `bundle` | Manage rig bundles |
-| `up` | Bootstrap a rig from a spec or bundle |
-| `down` | Tear down a rig |
-| `archive` | Archive a rig (soft + reversible: hides it from the default view, retains all data) |
-| `unarchive` | Unarchive a rig (reverse of `rig archive`): returns it to the default view |
-| `add` | Add a member to an existing pod in a running rig (`add_member` converge op) |
-| `env` | Inspect and control rig environment services |
-| `file` | Cross-host file movement over ssh/rsync (v0.4.4; one explicit verb: `copy`) |
-| `ps` | List rigs and their status |
-| `mcp` | MCP server for agent integration |
-| `agent` | Manage agent specs |
-| `spec` | Manage rig specs |
-| `transcript` | Read agent transcript output |
-| `send` | Send a message to an agent's terminal |
-| `capture` | Capture terminal output from agent sessions |
-| `broadcast` | Send a message to multiple agent sessions |
-| `ask` | Query rig evidence from transcript/chat history |
-| `chatroom` | Chat room for rig communication |
-| `specs` | Browse, preview, and manage the spec library |
-| `whoami` | Show current managed identity in an OpenRig topology |
-| `auth` | Manage agent auth profiles per runtime (CLI-local; tokens never printed) |
-| `config` | Inspect and change OpenRig configuration |
-| `preflight` | Check system readiness for OpenRig |
-| `doctor` | Verify OpenRig install health |
-| `destroy` | Destroy OpenRig local state for recovery |
-| `expand` | Add a pod to a running rig |
-| `unclaim` | Release an adopted session without killing tmux |
-| `release` | Release claimed sessions from a rig |
-| `launch` | Launch or relaunch a node in a running rig |
-| `remove` | Remove a node from a running rig |
-| `shrink` | Remove an entire pod from a running rig |
-| `setup` | Prepare the machine for OpenRig |
-| `stream` | Coordination L1 — append-only intake stream |
-| `queue` | Coordination L3 — owned-work queue + inbox/outbox |
-| `project` | Coordination L2 — agent-backed classifier with daemon-enforced lease + idempotency + reclaim |
-| `view` | Coordination L5 — daemon-backed views over coordination state |
-| `watchdog` | Coordination Watchdog — daemon-native scheduler |
-| `workflow` | Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection |
-| `restore-packet` | Generate, read, and validate cross-runtime restore packets |
-| `restore-check` | Check restore readiness across running rigs |
-| `context` | Browse, preview, compose, and manage operator-authored context packs (never delivers) |
-| `walk` | Walk a seat through a paced sequence of context pieces |
-| `compact-plan` | Plan Claude compact-in-place candidates without compacting anything |
-| `heartbeat` | Show workflow execution proof state from queue files |
-| `seat` | Inspect OpenRig seat observability state |
-| `agent-image` | Browse, snapshot, and manage agent images |
-| `workspace` | Workspace primitive — typed-kind tooling (frontmatter validation) |
-| `plugin` | Inspect plugins (read-only) — list, show, used-by, validate |
-| `scope` | Scope tree primitive — missions, slices, sub-slices |
-| `policy` | Operator context-mode bindings (sleep/desk/mobile/away/focus/debug) |
-
-## Core Daemon and System Commands
-
-### `rig daemon`
-
-Usage: `rig daemon <subcommand>`
-
-Subcommands:
-- `start [--port <port>] [--host <host>] [--db <path>]`
-- `stop`
-- `status`
-- `logs [--follow]`
-
-Notes:
-- `start` additively reconciles the canonical instance layout before launching
-  the daemon process, then accepts runtime overrides for port, host, and DB
-  path. Direct daemon first start uses the same initializer. Existing files are
-  preserved and wrong-type managed paths are refused before any write. See
-  `docs/reference/instance-layout.md`.
-- Startup uses a local `daemon-start.lock` reservation before instance initialization,
-  shared by `daemon start`, `start`, and `up`. A concurrent supported launch fails
-  without spawning another daemon or running its pre-bind database initialization.
-  Success requires the spawned child's numeric PID from `/healthz` at every required
-  listener and a live child through atomic `daemon.json` publication. Missing or
-  mismatched process identity, an invalid listener plan, child exit, and unresolved
-  probes cannot publish success. Use a matching CLI/daemon pair; a legacy endpoint
-  without PID evidence is insufficient. This local reservation does not serialize
-  old binaries or direct execution of the daemon entrypoint.
-- Startup checks physical liveness after the synchronous state writer as well as
-  before it; queued child events alone cannot prove that boundary. If publication
-  fails verification, startup rejects and withdraws only state matching this
-  launch's PID, start time, listener and DB. It never removes a replacement owner.
-- Failed process inspection is uncertainty, not proof that a child exited. Cleanup
-  waits for the owned child's exit evidence; an error event is insufficient.
-- Failed startup signals only its own child and waits boundedly for its exit. If
-  cleanup cannot be confirmed, the reservation remains and the error names the PID.
-  An interrupted launcher can also leave `daemon-start.lock`. Inspect its recorded
-  launcher/child PIDs, `daemon.json`, and `daemon.log`; only after proving both
-  processes absent, archive that reservation before retrying. There is no timed
-  takeover: a dead launcher may have left a live, unbound child.
-- `logs` reads daemon log output and can follow it.
-- **Deploy identity (v0.4.4, OPR.0.4.4.11 FR-6/7)**: a PACKAGED build (built via `scripts/build-package.sh`) is stamped with `{semver, commit, dirty, builtAt}`; the daemon's `/healthz` payload carries the four stamp fields additively and `rig --version` renders `<semver> (<commit8>[, dirty])`. A source/dev run has no build stamp (never an invented SHA); `/healthz` still reports its runtime PID and `--version` prints the plain semver. This is the 30-second stale-deploy diagnostic: an unstamped or old-commit `/healthz` on a long-running host means you are looking at an older deployed build, not the source tree. Source: `packages/{daemon,cli}/src/build-info.ts` (`stampFields`), `packages/daemon/src/server.ts` (`/healthz`), `packages/cli/src/version.ts`.
-
-### `rig status`
-
-Usage: `rig status`
-
-Notes:
-- Human-oriented summary command.
-- Prints daemon state, rig summary, and cmux availability.
-- Does not support `--json`.
-
-### `rig ui`
-
-Usage: `rig ui open`
-
-The OpenRig UI is experimental and in maintenance mode. It is not under active development; support is best-effort. The CLI is the primary supported interface. Contributions welcome.
-
-Subcommands:
-- `open`
-
-### `rig config`
-
-Usage:
-- `rig config [--json] [--with-source]`
-- `rig config get <key> [--show-source]`
-- `rig config set <key> <value>`
-- `rig config reset [<key>]`
-- `rig config init-workspace [--root <path>] [--force] [--dry-run] [--json]`
-
-Supported keys:
-- `daemon.port`
-- `daemon.host`
-- `db.path`
-- `transcripts.enabled`
-- `transcripts.path`
-- `workspace.root` (and other workspace-rooted paths used by `init-workspace`)
-- `context.root` (default `$OPENRIG_HOME/context`; env
-  `OPENRIG_CONTEXT_ROOT`) — the single writable addressable context library.
-  The removed `context.packs_root`, config field `context.packsRoot`, and env
-  `OPENRIG_CONTEXT_PACKS_ROOT` are refused with replacement guidance.
-- `context.system_world` (default `default`; env
-  `OPENRIG_CONTEXT_SYSTEM_WORLD`) — selects
-  `$OPENRIG_HOME/context/system/system-world.yaml`, an explicit replacement
-  manifest path, or the explicit `disabled` state. `rig context work-install`
-  reports the resolved state and provenance.
-- `skills.root` (default `$OPENRIG_HOME/skills`; env `OPENRIG_SKILLS_ROOT`) — the
-  one authoritative Git-versioned managed skill catalog. An override replaces
-  the default; it does not add an overlay root.
-- `snapshots.periodic.enabled` (default `true`) — daemon-side periodic snapshot scheduler on/off (v0.3.4)
-- `snapshots.periodic.interval_seconds` (default `300`) — interval between periodic snapshots
-- `snapshots.periodic.retention_keep` (default `10`) — number of periodic snapshots to retain per rig
-- `feed.subscriptions.{action_required|approvals|shipped|progress|audit_log}` (booleans) — the For-You feed's five flat lens toggles (`OPENRIG_FEED_SUBSCRIPTIONS_*` env mapping)
-- `feed.subscriptions.<hostId>.enabled` (boolean; **v0.4.4, OPR.0.4.4.15**) — ONE registered dynamic key CLASS (not a general dynamic-key mechanism): per-host feed subscription toggles for the aggregated multi-host For-You feed. `hostId` segment charset `[A-Za-z0-9_-]+` (dotted host ids are inexpressible in dotted keys and reject as unknown); the flat toggle tails + `enabled` are RESERVED segments in both spellings, so a host id can never shadow a flat key. No env-var mapping for the dynamic class in v1 — file/API only. The CLI config store carries the same class (parity-pinned against the daemon store).
-
-Precedence:
-- CLI flag
-- environment variable
-- config file
-- default
-
-Notes:
-- `--with-source` (top-level) and `--show-source` (`get`) report per-key source/default for honest provenance.
-- `init-workspace` additively scaffolds `missions/`, `exhaust/`, `SPEC.md`, `project.yaml`, `workspace.yaml`, and `.gitignore` at `~/.openrig/workspace/` (or the `--root` override). `--dry-run` previews without writing. `--force` is deprecated compatibility and preserves existing files. New in v0.3.0.
-- `snapshots.periodic.*` (v0.3.4): the daemon-side scheduler takes periodic snapshots per rig at `interval_seconds` and retains the newest `retention_keep`. At restore time, newest-wins between `auto-periodic` and `auto-pre-down` snapshots.
-
-Legacy env compatibility: the original runtime keys still accept deprecated
-`RIGGED_*` aliases. New typed config keys use `OPENRIG_*` only.
-
-### `rig auth`
-
-Manage agent auth profiles. The command is **CLI-local** — it never touches the daemon, so a token
-value never enters the daemon queue, stream, database, or logs. The runtime is an orthogonal axis via
-`--runtime` (MVP: `codex`, also the default), modeled on `gh auth switch/status` and `aws --profile` /
-`kubectl config use-context`. It is deliberately NOT `rig codex-auth` and NOT a `rig codex` vendor-noun
-family — the harness is a flag, not a command noun (see `conventions/cli-read-command-grammar`).
-
-Usage:
-- `rig auth status [--runtime codex]` — auth-file presence, file mode, saved-profile count, and login
-  state. **No secrets**: login state is derived from the runtime CLI's exit code only, never its output.
-- `rig auth list [--runtime codex]` — saved profile names.
-- `rig auth save <profile> [--runtime codex]` — snapshot the active auth file into a named profile (a
-  mode-guarded byte copy; contents are never read into or echoed by the command).
-- `rig auth switch <profile> [--runtime codex]` — activate a saved profile (copy it onto the active
-  auth file at `0600`).
-- `rig auth validate <profile> [--runtime codex]` — check a profile's file mode + JSON parseability.
-  This is **not** a live-auth check; a parse failure reports a fixed reason, never the file content.
-- `rig auth seats list|show <seat>|set …|report [--runtime codex]` — a per-operator seat → profile
-  **metadata** registry.
-
-Profile storage:
-- `CODEX_HOME` (default `$HOME/.codex`, env-overridable) holds the active `auth.json`, the
-  `auth-profiles/` directory (profiles `0600`, directory `0700`), and `auth-seat-registry.tsv`.
-- Ships **empty**: no example or bundled profiles/registry. Profile names use a strict whitelist
-  (alnum-led `[A-Za-z0-9._-]`, ≤64 chars); symlinked or out-of-tree profile paths are refused.
-
-Secret + honesty invariants:
-- **No token value is ever printed, logged, queued, streamed, or committed.** `status`/`validate`
-  report presence/mode/parseability/login-state only.
-- **Seat-registry labels are metadata, not proof of a live account.** A seat labeled with profile "X"
-  does not prove a running session is actually using that account; the command output states this. The
-  registry stores no token/resume secret — its columns are `seat / rig / runtime / cwd / auth_profile /
-  updated_ts`.
-
-Note: live runtime sessions do not switch accounts in place — restart the affected seats to pick up a
-newly switched profile.
-
-### `rig preflight`
-
-Usage: `rig preflight [--json]`
-
-Notes:
-- Runs system readiness checks from local configuration.
-- On failure, prints what failed, why it matters, and how to fix it.
-
-### `rig doctor`
-
-Usage: `rig doctor [--json]`
-
-Notes:
-- Verifies install health for packaged/local CLI usage.
-- Checks daemon dist, UI dist, Node version, `tmux`, optional `cmux` control health, writable state paths, and daemon port availability.
-- On macOS, also warns when tmux mouse mode appears disabled, gives the current-server fix (`tmux set -g mouse on`), and points to the persistent fix in `~/.tmux.conf`.
-- `cmux` issues are warnings, not hard failures. OpenRig still works without `cmux`; only `Open CMUX` workflows are unavailable.
-- `--json` is suitable for agent use and only exits non-zero on real failures, not warnings.
-
-### `rig destroy`
-
-Usage:
-- `rig destroy --state [--backup] --yes --confirm destroy-openrig-state`
-- `rig destroy --all [--backup] --yes --confirm destroy-openrig-state`
-
-Notes:
-- This is the destructive recovery surface for polluted local OpenRig state.
-- `--state` stops the daemon, clears the active OpenRig listener on the configured port if needed, rotates or deletes the effective state root, and recreates an empty state root.
-- `--all` includes `--state` plus managed tmux session cleanup for sessions that are discoverable from the current OpenRig database.
-- `--backup` moves the state root aside to a collision-safe timestamped path such as `~/.openrig.backup-YYYYMMDD-HHMMSS`.
-- Managed tmux cleanup is intentionally conservative. It only removes sessions that are present in current DB state; unrelated tmux sessions are left alone.
-- Human output prints a compact destroy plan followed by the destroy result.
-
-### `rig start`
-
-Usage:
-- `rig start` (interactive: daemon + kernel + pick-and-restore)
-- `rig start --last [--json]` (headless: restore rigs that were last running)
-- `rig start --all [--json]` (headless: restore all rigs with restore-usable snapshots)
-- `rig start --rigs <name> [<name>...] [--json]` (headless: restore only the named rigs)
-
-Notes:
-- Recovery entrypoint introduced in v0.3.4 (slice 01). Sequencing-only: composes daemon start + kernel auto-boot wait + per-rig restore primitives; re-codes nothing.
-- NOT the getting-started boot hero — that remains `rig up <starter>`. `rig start` is for post-reboot/crash recovery.
-- TTY interactive flow lists last-running candidates with a readiness summary (`[ready to resume]`, `[will ask before fresh]`, `[fresh start]`, `[mixed]`), then offers restore-all or a spacebar multi-select picker.
-- Headless modes (`--last`, `--all`, `--rigs`) take zero prompts; if a node returns `awaiting-decision`, the CLI reports it honestly and prints the `rig up --existing <rig> --fresh <logicalId>` command to take action.
-- Surface source-verified against `packages/cli/src/commands/start.ts` at `03a5f915` (v0.3.4).
-
-### `rig mcp`
-
-Usage: `rig mcp serve [--port <port>]`
-
-Subcommands:
-- `serve`
-
-Shipped MCP tools:
-- `rig_up`
-- `rig_down`
-- `rig_ps`
-- `rig_status`
-- `rig_snapshot_create`
-- `rig_snapshot_list`
-- `rig_restore`
-- `rig_discover`
-- `rig_bind`
-- `rig_bundle_inspect`
-- `rig_agent_validate`
-- `rig_rig_validate`
-- `rig_rig_nodes`
-- `rig_send`
-- `rig_capture`
-- `rig_chatroom_send`
-- `rig_chatroom_watch`
-
-## Rig Lifecycle and Specs
-
-### `rig bootstrap`
-
-Usage: `rig bootstrap <spec> [--plan] [--yes] [--json]`
-
-Arguments:
-- `spec`: path to a rig spec YAML file or a library name
-
-Notes:
-- Bare names resolve through the spec library before falling back to the raw source value.
-
-### `rig requirements`
-
-Usage: `rig requirements <spec> [--json]`
-
-Arguments:
-- `spec`: path to a rig spec YAML file
-
-Notes:
-- `rig requirements` is the spec/app-specific dependency surface.
-- Use `rig doctor` for host-level install health, then `rig requirements <spec>` for rig-specific requirements.
-
-### `rig up`
-
-Usage: `rig up <source> [--plan] [--yes] [--cwd <path>] [--target <root>] [--existing] [--fresh <seats...>] [--json]`
-
-Arguments:
-- `source`: path to `.yaml` or `.rigbundle`, or a bare name
-
-Actual source resolution:
-- Absolute/relative YAML path: boot from that spec
-- `.rigbundle` path: install/bootstrap from that bundle
-- Bare name without slash/extension:
-  - first checks the spec library
-  - if no library match, treats it as an existing rig restore/power-on target
-  - if both a library spec and existing rig share the same name, exits with an ambiguity error
-
-Current behavior notes:
-- `--cwd <path>` overrides launch working directory for all members for this run only. For path-form `rig up <install-internal-spec>` invocations the CLI defaults `cwd` to the caller's directory (slice-22 Bug 3) so library specs match path-form behavior.
-- `--target <root>` is only for bundle/package installation. It does not override agent working directories.
-- `--existing` skips the library-spec name resolution and treats `<source>` as an existing rig name directly (disambiguates when a library spec and a stopped rig share the same name).
-- `--plan` previews the restore without executing (read-only). The preview honors an honest async timeout and reports per-node intended action.
-- `--fresh <seats...>` deliberately fresh-primes the named seats (logical ids) instead of resuming their original sessions (operation B); reported in the per-node status vocabulary as `fresh-primed`. Repeatable: `--fresh seat-a --fresh seat-b` or `--fresh seat-a seat-b`.
-- `local:` `agent_ref` values resolve relative to the rig spec directory, not the caller shell cwd.
-- If you copy a built-in spec to a new directory, keep its `agents/` tree beside it or rewrite those refs to `path:/absolute/path`.
-- Managed apps are first-class `up` targets. `rig up secrets-manager` launches the shipped Vault example from the library.
-- **`rig up factory-rsi` (OPR.0.4.6.FAC2)** launches the single-rig recursive-self-improvement factory MVP starter — seven seats (`plan`/`build`/`check`/`review`/`dogfood`/`release`/`orch`) that run the `factory-rsi` builtin workflow (inner loop plan→build→check→review→release); the dogfood seat runs out-of-band against the shipped product and feeds its findings back into the next plan. Workspace-agnostic: `rig up factory-rsi --cwd <repo>` points the loop at the repo to improve.
-- v0.3.2 paper-cut fix-round (slice-22): pre-launch failures now return structured HTTP 4xx (`cycle_error` / `preflight_failed` / `validation_failed` / `service_boot_failed`) instead of bare 500; failed boots no longer leave orphan rig records on disk.
-- **v0.4.4 (OPR.0.4.4.11) — whole-topology sources**: a `.rigtopology` manifest (or a YAML file whose body declares the topology form) boots MULTIPLE rigs in one staged spin-up. v0 manifest entries are **spec paths only** (a closed-key manifest: `.rigbundle` and bare library-name entries are rejected at parse time with per-entry what/why/fix naming the v0 boundary). Per-entry `host: <id>` is the ONLY placement mechanism for topology entries — `rig up --host <id> <topology>` is REJECTED pre-dispatch (two placement mechanisms must not coexist). The launcher acquires per-rig launch locks route-side and reports a CLOSED per-entry aggregate `{ok | failed | skipped}` (skipped is explicit — a lock conflict or upstream failure never reads as silent success). Source: `packages/cli/src/commands/up.ts` (`.rigtopology` sniff + `--host` rejection), `packages/daemon/src/domain/topology/{topology-manifest,multi-rig-launcher,remote-up-leaf}.ts`, `packages/daemon/src/routes/up.ts`.
-- v0.3.4: `rig up` is resume-original-by-default for existing rigs. Per-seat opt-in to deliberate fresh-prime is via `--fresh <seats...>`. The five-term restore status vocabulary surfaced per-node is `resumed` / `fresh-primed` / `awaiting-decision` / `attention_required` / `failed`. On TTY, `awaiting-decision` nodes trigger an interactive [y/N] ASK; in headless mode they are reported honestly with the exact `rig up --existing <rig> --fresh <logicalId>` follow-up command.
-
-Success modes:
-- fresh boot
-- restored existing rig
-- partial boot (non-zero exit)
-
-### `rig down`
-
-Usage: `rig down <rig> [--delete] [--force] [--snapshot] [--json]`
-
-`<rig>` accepts a rig **name or id**, symmetric with `rig up`. A name is
-resolved to its id via the active (non-archived) rig summary before teardown.
-
-Flags:
-- `--delete`: delete the rig record after teardown
-- `--force`: kill sessions immediately
-- `--snapshot`: take a snapshot before teardown
-
-Notes:
-- When `--snapshot` succeeds, human output includes the restore command.
-- If the rig name is uniquely reusable, the handoff prefers `rig up <rigName>`.
-- Destructive-op safety: if a name matches more than one rig, `rig down`
-  refuses to tear down any of them and lists the matching ids - re-run with
-  `rig down <id>`. An id always resolves directly (ids are never ambiguous).
-
-### `rig archive`
-
-Usage: `rig archive <rigId> [--force] [--json]`
-
-Flags:
-- `--force`: archive even if the rig is running or degraded
-- `--json`: JSON output for agents
-
-Notes:
-- Soft, reversible archive: hides the rig from the default explorer and `rig ps`, while retaining the rig record, topology, and snapshots.
-- Different from `rig down --delete` (delete is destructive; archive is recoverable).
-- Archived rigs are hidden from default `rig ps`; use `rig ps --include-archived` to see them.
-- Archiving a running or degraded rig requires `--force`; without it the call returns HTTP `409` with a three-part honest error and exits `2`.
-- Reverse with `rig unarchive <rigId>`.
-- Emits `rig.archived` SSE event.
-- Surface source-verified against `packages/cli/src/commands/archive.ts` at `53794fbe` (v0.3.3).
-
-### `rig unarchive`
-
-Usage: `rig unarchive <rigId> [--json]`
-
-Notes:
-- Reverse of `rig archive`: clears the `archived_at` flag so the rig returns to the default explorer and `rig ps` view.
-- Always non-destructive (the row and snapshots were retained while archived); no `--force` and no running-rig guard.
-- Emits `rig.unarchived` SSE event.
-- Surface source-verified against `packages/cli/src/commands/unarchive.ts` at `53794fbe` (v0.3.3).
-
-### `rig env`
-
-Usage:
-- `rig env status <rig> [--json]`
-- `rig env logs <rig> [service] [--tail <n>]`
-- `rig env down <rig> [--volumes]`
-
-Notes:
-- This surface is only meaningful for service-backed rigs and managed apps.
-- `status` resolves rig names or IDs and returns the env receipt with an honest freshness probe. The response includes `probeStatus` (fresh/stale/no_orchestrator) so operators can distinguish current truth from cached state.
-- `logs` proxies compose-backed service logs; `[service]` is optional.
-- `down` tears down the rig environment. `--volumes` overrides the stored down policy to force volume removal via `docker compose down --volumes`.
-- Note: `rig ps` does not yet surface env health. Runtime env truth is available through `rig env status` and the rig drawer `Env` tab.
-
-### `rig ps`
-
-Usage:
-- `rig ps [--json] [--full] [--rig <name>] [-A | --all-rigs] [--session <sess>] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--host <id>]`
-- `rig ps --nodes [--json] [--full] [--rig <name>] [-A | --all-rigs] [--session <sess>] [--limit <n>] [--fields <list>] [--summary] [--filter <key=value>] [--active] [--host <id>]`
-
-Notes:
-- **v0.4.4 — consolidated all-rigs default + disclosure ladder (OPR.0.4.4.21)**: the default is **every ACTIVE rig, one compact row each** — O(rigs), never a fleet node fan-out — plus three load-bearing display elements: the host rollup line ("N rigs · M seats · K need attention"), the archived/stopped count line (history folds to ONE line), and the affordance footer teaching the drill ladder. The v0.4.0 current-rig default is RETIRED (it hid running rigs from the operator's field of view); the session-rig default now applies ONLY to `--nodes`, and only locally — **implicit scope defaults don't cross host boundaries** (remote `--nodes` requires explicit `--rig` or `-A`). `-A`/`--all-rigs` keeps exactly ONE meaning: the `--nodes` fleet widener; bare `-A` is a structured teaching error naming `--include-archived` for history. STATED contract: default `--json` is a bare array of ALL non-archived rigs INCLUDING stopped ones (existing keys preserved; additive `attentionCount`); only the human table folds stopped rigs. Fan-out (`--all-hosts`/`--hosts`) emits the intra-P4 shared `AggregatedPayload` (hostId-stamped `items` + closed-enum per-host `hosts[]` statuses) and is rollup-only by default; the full explicit ladder (`--all-hosts --nodes -A`, `--full` for complete records) fans out per-node with hostId-stamped projected rows. Migration from the old firehose: `rig ps --nodes -A --full`. The default `--json` output is a compact TL;DR projection per node: `session`, `rig` (to disambiguate under `-A`), `activity` (state + reason), `assigned` / `pending` counts, resume summary as `resumeType` + `resumeTokenPresent` (boolean — NOT the token value, per the slice-34 security correction). `--full` returns the complete per-node record (raw byte-equivalent passthrough — preserves the prior shape including `tmuxAttachCommand`, `resumeCommand`, `contextUsage`, `agentActivity` full, `restoreOutcome`, etc.; `resumeToken` value is still part of `--full` for downstream consumers that need it). All-states stays the default (per the orch-lead-grounded ruling: ps surfaces topology/readiness, where stopped/recoverable/attention IS the actionable signal — unlike queue-list which defaults to active items only). `--active` / `--running` is the opt-in active-filter (already existed). Closes a ~77,000-token status-glance incident at root + a fleet-scale unbounded-default-output bomb.
-- **Daemon node-list payload trimmed at source (slice 26)**: `recoveryGuidance` is no longer serialized as near-identical templated prose on every node — relocated to a guidance-by-reference map at the top level so the 4 current consumers still resolve it. `contextUsage` is a compact summary in the list payload (full telemetry remains retrievable per-node via `rig whoami` / detail queries). Even `--full` and the UI consumers stop paying for the redundant per-node blobs.
-- `rig ps` lists rig summaries. Default human columns (v0.4.4): `RIG`, `NODES`, `RUNNING`, `ACTIVE`, `WORK`, `ATTN`, `STATUS`, `LIFECYCLE`, `UPTIME`, `SNAPSHOT`. The `LIFECYCLE` column shows the rig-level fold of per-node lifecycle states with codes `run`/`rec`/`stp`/`deg`/`att`; `ATTN` is the additive attention count.
-- `rig ps --nodes` expands into the current (or `--rig`-named) rig's node inventory — `--nodes -A` for the cross-rig inventory (v0.4.4 scoping). Default human columns include `STATUS`, `STARTUP`, `LIFECYCLE`, `ACTIVITY`, `RESTORE`, `ERROR` so startup-time and live runtime state can be compared side-by-side without composing a separate diagnostic command.
-- JSON output for both rig and node tiers includes a `rigName` alias (equal to `name`) for forward compatibility; agent code should prefer `rigName`. Default `--json` is a bare array (back-compat); the envelope shape `{entries, totalRigs|totalNodes, truncated, hint?}` is only used when `--limit`, `--fields`, `--summary`, or `--filter` is set.
-- Default human output is bounded for context-window safety: rigs truncate at 50 with a footer naming the total + `--full` opt-out, nodes truncate at 100 with the same shape. `--full` disables truncation. `--limit <n>` sets an explicit bound.
-- `--summary` emits aggregate counts only (`byStatus`, `byLifecycle` for rigs; `bySessionStatus`, `byLifecycle` for nodes); useful for quick fleet checks without per-entry detail. Cross-facet disagreement (e.g. a `running` rig with `attention_required` nodes) is not directly visible in summary mode — narrow with `--filter lifecycleState=attention_required` instead.
-- `--fields <list>` projects JSON output to a comma-separated allow-list of top-level fields. Unknown keys are rejected before any HTTP call with an error naming the unknown key(s) and the sorted supported list. Exit code on rejection is `1`. Accepted (rig-level): `rigId`, `name`, `rigName`, `nodeCount`, `runningCount`, `activeCount`, `hasWorkCount`, `attentionCount`, `status`, `lifecycleState`, `uptime`, `latestSnapshot`. Accepted (node-level, with `--nodes`): `rigId`, `rigName`, `logicalId`, `podId`, `podNamespace`, `canonicalSessionName`, `nodeKind`, `runtime`, `sessionStatus`, `startupStatus`, `restoreOutcome`, `oriented`, `lifecycleState`, `tmuxAttachCommand`, `resumeCommand`, `latestError`, `terminalActive`, `hasAssignedWork`, `pendingWorkCount`, `agentActivity`, `contextUsage`, `heldReason`. `name` is rig-level only; for node entries use `rigName` (the rejection error includes a hint). Nested fields (e.g. `agentActivity.state`) are not drilled; pass the whole object name (e.g. `agentActivity`) and read the nested value downstream.
-- `--filter <key=value>` accepts `status`, `lifecycleState`, `name-prefix`, `name`, and `agentActivity.state` (PL-019; node-level — use with `--nodes`). Unknown keys are rejected before any HTTP call with a clear error naming the supported list. For `agentActivity.state`, allowed values are `running`, `needs_input`, `idle`, `unknown`; invalid values fail fast with a three-part error (what failed / what's allowed / what to do).
-- `--active` (PL-019; node-level) is sugar for `--filter agentActivity.state=running`. Combining `--active` with `--filter` is rejected — pick one explicit form. Output is identical to the explicit-filter form on the same fixture.
-- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). Forwards every shaping flag (`--nodes`, `--full`, `--limit`, `--fields`, `--summary`, `--filter`, `--json`) to the remote `rig ps`. The remote rig's output is verbatim passthrough on success; failure is distinguished into `ssh-unreachable` / `permission-gate` / `remote-daemon-unreachable` / `remote-command-failed` per the closed cross-host execution contract.
-- Exit codes:
-  - `0` success
-  - `1` daemon not running, or invalid `--filter` / `--limit` / `--fields`
-  - `2` daemon fetch failure
-
-### `rig snapshot`
-
-Usage:
-- `rig snapshot <rigId> [--intended-seats <ids>]`
-- `rig snapshot list <rigId>`
-
-Subcommands:
-- `list <rigId>`
-
-### `rig restore`
-
-Usage:
-- `rig restore <snapshotId> --rig <rigId>`
-- `rig restore status <attemptId> --rig <rigId> [--json]`
-
-Important:
-- `--rig <rigId>` is required by the source code, even though the help text does not visually mark it as required.
-
-Notes:
-- Human output prints each restored node and any failed node error.
-- Non-zero exit if any restored node fails.
-- A started asynchronous restore prints its attempt id. `status` derives the
-  original and current intended-set verdict, snapshot selection, historical
-  exclusions, and unresolved intended seats from that durable attempt.
-
-### `rig restore-check`
-
-Usage: `rig restore-check [--rig <name>] [--as <session>] [--full] [--no-queue] [--no-hooks] [--json]`
-
-Notes:
-- Checks restore readiness across running rigs (or one rig with `--rig` / one seat with `--as`).
-- **v0.4.0 — summary + not-ready default (slice 29)**: default output is a summary block (total seats / ready / not-ready / error-degraded counts) PLUS only the **not-ready** seats listed compactly (seat + readiness reason). `--full` (or `--json --full`) returns today's complete per-seat readiness across the fleet. The daemon skips per-seat detail assembly for ready seats when compact (computes verdict, omits detail). Closes the largest measured token bomb on the read-command surface (~79,000 tokens → low thousands).
-- The summary default correctly identifies EVERY not-ready seat (no false-ready omission) — the actionable signal is lossless even though detail is dropped for ready seats.
-- `--no-queue` skips queue file checks; `--no-hooks` skips hook checks.
-- Exit codes: `0` restorable (or restorable with caveats), `1` not restorable (red blockers found), `2` unknown / probe error.
-
-### `rig restore-packet`
-
-Usage: `rig restore-packet <subcommand>`
-
-Subcommands:
-- `write [options]` — generate a restore packet from a source session or JSONL file.
-- `read <packet-dir> [--json]` — render a restore packet's contents (human or JSON).
-- `validate <packet-dir> [--json]` — validate a restore packet against the v0 schema.
-
-Notes:
-- Packet shape is the cross-runtime v0 standard (Claude Code and Codex transcripts both supported via runtime parsers + redaction).
-- `write` emits a packet directory with the canonical schema files plus `omitted-records` accounting.
-- `read` and `validate` operate on existing packet directories and do not mutate them.
-
-### `rig export`
-
-Usage: `rig export <rigId> [-o|--output <path>]`
-
-Default output path:
-- `rig.yaml`
-
-### `rig import`
-
-Usage:
-- `rig import <path> [--instantiate] [--materialize-only] [--preflight] [--target-rig <rigId>] [--rig-root <root>]`
-
-Notes:
-- Accepts YAML rig specs.
-- `--target-rig` is additive materialization into an existing rig.
-- `--rig-root` is used for pod-aware resolution.
-
-### `rig bundle`
-
-Usage: `rig bundle <subcommand>`
-
-Subcommands:
-- `create <spec> -o <path> [--name <name>] [--bundle-version <ver>] [--include-packages <refs...>] [--rig-root <root>] [--notes <text>] [--min-daemon-version <ver>] [--min-cli-version <ver>] [--json]` — pack a rig spec + its declared content into a `.rigbundle`. v0.3.2 slice-05 ships first-class cross-primitive bundling: skills + plugins (hybrid) + workflow_specs + context_packs + agent_images vendor end-to-end with both-sides path containment, symlink escape protection, and integrity hashing.
-- `inspect <path> [--json]` — inspect a `.rigbundle` manifest. v0.3.2 surfaces the cross-primitive content fields as first-class.
-- `install <path> [--plan] [--yes] [--target <root>] [--skip-version-check] [--force] [--json]` — install a `.rigbundle`. Routes each declared content kind to its canonical library under `$OPENRIG_HOME`. `--skip-version-check` is an operator-explicit override of the install-time daemon/CLI compatibility gate (NOT recommended). `--force` is an operator-explicit override of the install-time conflict check (NOT recommended; conflicts may produce partial install state).
-- `history [--rig <name>] [--since <iso>] [--json]` — list bundle install audit records from `~/.openrig/bundle-audit.jsonl`. Filters by target rig name and earliest `installedAt`.
-
-Important:
-- `bundle create` requires `-o, --output <path>` by source definition.
-- v0.3.2 install timeout bumped (was 5s — too short for tmux-session-bootstrapping installs).
-- Deferred to 0.3.3 (per release packet): agent/port/managed-app collision detection (Item 4.3), broader install-into-existing-rig pathway acceptance (Item 4.4), and the `--target-name` CLI flag (slice-05 Item-3 sub-scopes; design-contingent on CLI surface decision).
-
-### `rig package` (legacy)
-
-Usage: `rig package <subcommand>`
-
-Subcommands:
-- `validate <path>`
-- `plan <path> [--target <dir>] [--runtime <runtime>] [--role <name>]`
-- `install <path> [--target <dir>] [--runtime <runtime>] [--role <name>] [--allow-merge]`
-- `rollback <installId>`
-- `list`
-
-Notes:
-- The package surface is explicitly marked legacy in the shipped CLI.
-
-### `rig spec`
-
-Usage: `rig spec <subcommand>`
-
-Subcommands:
-- `validate <path> [--json]`
-- `preflight <path> [--rig-root <root>] [--json]`
-
-### `rig agent`
-
-Usage: `rig agent validate <path> [--json]`
-
-Subcommands:
-- `validate <path>`
-
-### `rig specs`
-
-Usage: `rig specs <subcommand>`
-
-Subcommands:
-- `ls [--kind <kind>] [--json]`
-- `show <name-or-id> [--json]`
-- `preview <name-or-id> [--json]`
-- `add <path> [--json]`
-- `sync [--json]`
-- `remove <name-or-id> [--json]`
-- `rename <name-or-id> <new-name> [--json]`
-
-Notes:
-- `specs` is the library surface for rigs, agents, and managed apps.
-- `preview` returns structured review data from the daemon.
-- `add` accepts either a YAML spec file or a full spec directory containing `rig.yaml` or `agent.yaml`.
-- Directory adds copy the whole tree into the user library so adjacent agents, guidance, skills, and docs remain available.
-- `preview secrets-manager` is the canonical managed-app review example.
-
-## Discovery and Topology Mutation
-
-### `rig discover`
-
-Usage: `rig discover [--json] [--draft]`
-
-Notes:
-- Scans unmanaged tmux sessions.
-- `--draft` generates a candidate rig spec from the discovery set.
-
-### `rig attach`
-
-Usage:
-- `rig attach --self --rig <rigId> --node <logicalId> [--cwd <path>] [--display-name <name>] [--print-env] [--json]`
-- `rig attach --self --rig <rigId> --pod <namespace> --member <name> --runtime <runtime> [--cwd <path>] [--display-name <name>] [--print-env] [--json]`
-
-Notes:
-- `--self` is currently required.
-- Node attach and pod-create attach are exclusive modes.
-- In tmux-backed shells, the command records tmux attachment metadata; otherwise it records an `external_cli` attachment.
-- `--print-env` prints shell exports for `OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`.
-
-### `rig bind`
-
-Usage: `rig bind <discoveredId> --rig <rigId> (--node <logicalId> | --pod <namespace> --member <name>)`
-
-Important:
-- `--rig <rigId>` is required.
-- Binding mode is exclusive:
-  - existing node: `--node <logicalId>`
-  - create new node: `--pod <namespace> --member <name>`
-
-### `rig adopt`
-
-Usage:
-- `rig adopt <path> --bind <logicalId=tmuxSessionOrDiscoveryId> [--bind ...] [--target-rig <rigId>] [--rig-root <root>] [--json]`
-
-Important:
-- `--bind` is required and repeatable.
-- The input file must be a pod-aware RigSpec with `pods`.
-
-Notes:
-- Materializes the topology first, then resolves/binds discovered sessions.
-- In JSON mode, emits the materialized nodes plus binding results.
-
-### `rig reconcile-session`
-
-Usage:
-- `rig reconcile-session <session> [--rig <rigId>] [--node <logicalId>] [--no-launch] [--json]`
-
-Arguments:
-- `session`: canonical session name (e.g. `dev-impl@my-rig`) of the LIVE session to adopt.
-
-Flags:
-- `--rig` and `--node` are paired disambiguators (both required together) when the session resolves ambiguously.
-- `--no-launch` is the only mode this command has; accepted for explicitness.
-
-Notes:
-- No-launch, no-input adopt of a hand-resumed canonical session (slice 03 / v0.3.4). The operator already resumed the session externally (e.g. `claude --resume`, `codex resume`) inside its canonical tmux session; the daemon still shows the seat down.
-- Binds the live process to its OWN persisted node (same node id, no re-key) and updates the projection so `rig ps` / topology / send / capture / queue routing work again.
-- NEVER launches, relaunches, kills, replays startup, presses resume menus, compacts, or types into the pane.
-- Anything that could not be proven is reported as projection drift; conversation continuity is never claimed.
-- Surface source-verified against `packages/cli/src/commands/reconcile-session.ts` at `03a5f915` (v0.3.4).
-
-### `rig expand`
-
-Usage: `rig expand <rig-id> <pod-fragment-path> [--json] [--rig-root <path>]`
-
-Notes:
-- Adds a pod fragment to a running rig.
-- `--rig-root` controls agent resolution.
-- Member YAML may carry `session_source` (see "Session source declaration" below) to start the new seat from a prior native conversation (`mode: fork`) or from operator-declared artifacts (`mode: rebuild`).
-
-### `rig add`
-
-Usage: `rig add <rig-id> <pod-namespace> <member-fragment-path> [--json] [--rig-root <path>]`
-
-Arguments:
-- `<rig-id>`: id of the target rig
-- `<pod-namespace>`: namespace of the existing pod to add the member to
-- `<member-fragment-path>`: path to a YAML/JSON member-fragment file (spec snake_case fields)
-
-Notes:
-- The `add_member` converge op verb: adds a member to an existing pod in a running rig from a YAML/JSON member-fragment file.
-- Member fragment accepts both the bare form (top-level member fields) and the wrapper form (`{ member: {...}, edges?: [...] }`). A top-level `edges:` field in the bare form is lifted as pod-local edges and is NOT silently dropped.
-- **OPR.0.4.6.FAC1**: the fragment accepts an optional `role: <name>` (charset `A-Za-z0-9_.-`; rejected on `runtime: terminal`). A role-declared seat becomes eligible for workflow role→seat capability resolution on this rig — scale-out = add a member under the role (this verb IS the growth path). Role is opt-in per seat: a role-less member stays reachable only via explicit `preferred_targets`; a PROVIDED role is validated, never silently dropped.
-- A present-but-non-array `edges` field is rejected with an honest error (no silent drop).
-- `--rig-root <path>` controls agent resolution.
-- HTTP outcomes: `201` on success (with the new node + persisted edges + optional warnings); `409 member_conflict`; `400 validation_failed` / `preflight_failed`; `404 pod_not_found` (lists existing pods).
-- Exit code is non-zero if the HTTP call failed OR the new node did not fully launch (`status !== "launched"`).
-- Surface source-verified against `packages/cli/src/commands/add.ts` at `53794fbe` (v0.3.3).
-
-### Session source declaration (`session_source`)
-
-Member YAML in a rig spec or `rig expand` payload may declare a launch-time `session_source` to control how the new managed seat derives its starting context. Two modes are supported in v1:
-
-```yaml
-# Fork from a prior native runtime conversation. Captures and persists a NEW
-# post-fork token; the parent token is NEVER persisted onto the new seat.
-members:
-  - id: reviewer-2
-    runtime: claude-code        # or "codex"; not valid on terminal
-    session_source:
-      mode: fork
-      ref:
-        kind: native_id         # v1 fork mode supports "native_id" only
-        value: "0b0165d7-cb4d-4650-90de-15c0a1ede9e6"
-```
-
-```yaml
-# Rebuild from operator-declared artifacts (CULTURE, role doc, handover packet,
-# queue files, session logs). Fresh-launches the harness and seeds the running
-# TUI with the artifacts in the operator-declared trust-precedence order.
-# The seat's continuityOutcome is `rebuilt` (NEVER `fresh`/`resumed`/`forked`)
-# and NO `resumeToken` is persisted.
-members:
-  - id: writer-2
-    runtime: claude-code        # or "codex"; not valid on terminal
-    session_source:
-      mode: rebuild
-      ref:
-        kind: artifact_set      # v1 rebuild mode supports "artifact_set" only
-        value:                  # ordered list, highest-trust first
-          - <substrate-shared-docs>/rigs/<rig>/CULTURE.md
-          - <substrate-shared-docs>/specs/agents/<role>.md
-          - /path/to/handover-packet.md
-          - /path/to/state/<pod>/<member>.queue.md
-          - /path/to/state/<pod>/shared.session.log
-          - /path/to/state/<pod>/<member>.session.log
-```
-
-Notes:
-- `terminal` runtime rejects `session_source` (no native fork primitive; no agent context to rebuild).
-- `mode: fork` requires `ref.kind: native_id` and a non-empty `ref.value` string. Other ref kinds (`artifact_path`, `name`, `last`) are reserved shapes for follow-up slices and are refused in v1 fork mode.
-- `mode: rebuild` requires `ref.kind: artifact_set` and a non-empty `ref.value` array of paths. Missing paths are recorded as gaps and the launch proceeds with what resolved; if NO declared paths resolve, the launch fails with a clear error.
-- The two modes are mutually exclusive on a given member; mixing is a schema error.
-
-### `rig unclaim`
-
-Usage: `rig unclaim <sessionRef> [--json]`
-
-Notes:
-- Releases an adopted session without killing its tmux session.
-
-### `rig release`
-
-Usage: `rig release <rigId> [--delete] [--json]`
-
-Notes:
-- Releases all claimed/adopted sessions from a rig without killing their tmux sessions.
-- `--delete` removes the rig record after a clean release.
-- OpenRig-launched nodes still require `rig down`.
-
-### `rig launch`
-
-Usage: `rig launch <rigId> [nodeRef] [--seats <ids>] [--hold-reason <reason>] [--snapshot-id <id>] [--plan] [--json]`
-
-Notes:
-- Launches or relaunches a node in a running rig.
-- `nodeRef` (optional) can be a logical ID or node ID for the single-target form.
-- `--seats <ids>` (v0.3.4, slice 11) takes a comma-separated list of logical IDs for node-granular managed partial restore — launch a named subset of seats while holding the rest. Retires the prior `pod_aware_launch_unsupported` dead-end.
-- `--hold-reason <reason>` records the reason non-target seats are being held; surfaced via observability so the held state is auditable.
-- `--snapshot-id <id>` selects one exact restore-usable snapshot instead of
-  applying the automatic choice. `--plan` previews a multi-seat subset and its
-  non-target effects without mutation.
-- `rig launch <rigId> <nodeRef> --retry-startup-from <member-file> --rig-root <absolute-source-root>`
-  explicitly retries an added agent whose first start failed during resource
-  projection, before a native conversation began and before startup context was
-  saved. First correct the projection failure, exit the failed shell normally,
-  and use `rig seat clean <seat> --reason <reason>` after it is stopped. Supply
-  the original bare or `{member: ...}` YAML/JSON fragment, without edges or
-  member startup/continuity overrides. The agent source hash and retained
-  identity, model, cwd and policy must agree. The retry uses normal validation,
-  projection and required startup delivery on the same node; it preserves other
-  seats and prior failures. It refuses bound, live, indeterminate or previously
-  native sessions. This is not snapshot restore or a substitute for deliberate
-  fresh launch, and cannot combine with snapshot, subset or plan options.
-  The operator is responsible for supplying the complete original fragment:
-  retained state cannot reconstruct missing member, pod or rig instructions.
-  Never strip unsupported overrides to make a retry pass.
-
-### `rig remove`
-
-Usage: `rig remove <rigId> <nodeRef> [--json]`
-
-Notes:
-- Removes a single node from a running rig.
-
-### `rig shrink`
-
-Usage: `rig shrink <rigId> <podRef> [--json]`
-
-Notes:
-- Removes an entire pod from a running rig.
-- `podRef` can be a pod namespace or pod ID.
-
-## Identity, Communication, and Context
-
-### `rig startup-proof submit`
-
-Usage: `rig startup-proof submit --challenge-id <id> --answer <answer> [--json]`
-
-Submits the selected startup exercise through the authenticated activity hook,
-using the current seat's identity and the challenge supplied in its startup
-prompt. A correct current answer returns `oriented: verified`; a bare
-acknowledgement, wrong answer, or stale challenge fails. Startup readiness alone
-does not verify orientation.
-
-An extra exercise is opt-in through a `startup_proof` startup action with
-`value: authenticated` and `idempotent: true`. Omission adds no exercise, and a
-later applicable `value: none` selects lean startup. See
-[startup proof selection](../reference/rig-spec.md#startup-proof-selection)
-for the full authoring and restore rules. Terminal nodes receive no challenge.
-
-### `rig whoami`
-
-Usage: `rig whoami [--node-id <id>] [--session <name>] [--host <id>] [--full | --verbose] [--json]`
-
-Identity resolution order:
-1. `--node-id`
-2. `--session`
-3. `OPENRIG_NODE_ID` / `RIGGED_NODE_ID`
-4. `OPENRIG_SESSION_NAME` / `RIGGED_SESSION_NAME`
-5. tmux pane metadata `@rigged_node_id`
-6. tmux pane metadata `@rigged_session_name`
-7. raw tmux session name
-
-Notes:
-- **v0.4.0 — compact-by-default (slice 27)**: `rig whoami` and `rig whoami --json` default to identity-recovery essentials only — `identity` (rig / pod / member / sessionName / runtime / cwd / logicalId / ids), `peers` (names only: logicalId + sessionName per peer), `edges` (directional `kind` + `to.sessionName`), `transcriptPath`. Daemon skips the `contextUsageStore` lookup and `runtimeContext` build when compact is requested (also saves daemon work). The first command every agent runs on boot + every compaction-restore now costs ~192 tokens instead of ~909.
-- **`--full` (alias `--verbose`)** returns today's complete payload including `contextUsage`, `commands`, `peersNote`, `runtimeContext` — byte / shape parity with the v0.3.4 default (back-compat for any consumer that reads those fields).
-- The compact-default is an ALLOWLIST projection (not a denylist) — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
-- If the daemon is unreachable but an identity source can still be resolved, `--json` returns a partial result instead of crashing.
-- Human-readable output (compact default) shows identity + peers + edges + transcript path. `--full` adds context usage block, commands list, peersNote prose, runtimeContext.
-- `peers[]` is this rig's roster excluding self (no edge filter); use `edges{}` for directional relationships and `rig ps --nodes` for node inventory including self + live state.
-- In Claude Code projects, unattended `rig whoami` on boot may require the local permissions allow list to include `Bash(rig:*)`.
-- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh (CLI-side shell-out; daemon untouched). Identity resolution happens on the REMOTE rig (each host has its own daemon + tmux + identity context); local `--node-id`/`--session`/`--full` flags are forwarded to the remote `rig whoami` invocation. The remote rig's output is verbatim passthrough on success; failure is distinguished into the same `ssh-unreachable` / `permission-gate` / `remote-daemon-unreachable` / `remote-command-failed` enum as `rig ps --host` and `rig send --host`.
-
-### `rig transcript`
-
-Usage: `rig transcript <session> [--tail <lines>] [--grep <pattern>] [--host <id>] [--json]`
-
-Defaults:
-- `--tail 50`
-
-Notes:
-- Reads transcript files, not pane scrollback.
-- `--grep` treats the pattern as regex.
-- **v0.4.6 (OPR.0.4.6.MH4)** — `--host <id>` / the `agent@rig@host` session form reads the
-  transcript from a remote host, CLI-direct against that daemon's shipped
-  `GET /api/transcripts/:session/tail|grep` routes (http-registered hosts only — an
-  ssh-declared host is a structured transport-requirement error; there is no ssh path for this
-  verb). Output shape is the origin's, verbatim, under the `[via host=…]` banner. Precedence:
-  explicit `--host` > target sugar > the persisted host selection. See "Cross-host execution".
-
-### `rig send`
-
-Usage: `rig send <session> [<text>] [--context <ref>] [--verify] [--force] [--raw] [--dangerously-interact --reason <text>] [--wait-for-idle <s>] [--from <session>] [--host <id>] [--json]`
-
-Notes:
-- Uses the two-step send pattern automatically: paste text, wait, submit Enter.
-- `--verify` requests delivery verification.
-- The default path refuses to send ONLY on positive evidence that the target is at an interactive prompt / permission block. This closes the footgun where a peer message blindly submits another agent's open prompt. When the target's activity cannot be determined (unknown, missing, or stale telemetry), the send PROCEEDS with an advisory note — telemetry is advisory, not authority over whether agents can communicate. Use `--wait-for-idle` to send only after explicit idle evidence.
-- A mid-task/busy target sends-with-advisory by default (busy is not a block). `--force` is a back-compat no-op and never bypasses the interactive-prompt/permission guard.
-- `--raw` sends exact text/keystrokes without the From/To messaging envelope; still guarded against interactive prompts.
-- `--context <ref>` resolves one path-like context ref and delivers its whole content on a local single-seat send. Missing members abort before delivery; oversized content emits a `rig walk` advisory. It is not supported with `--host`, cross-host target sugar, or fan-out targeting.
-- `--dangerously-interact` is the ONLY override of the prompt/permission guard — it deliberately drives an interactive prompt/permission block (e.g. selects an option). It implies `--raw`, requires `--reason <text>`, and is recorded in the audit log. Cannot be combined with `--wait-for-idle`.
-- `--reason <text>` records why the prompt is being driven (required with `--dangerously-interact`).
-- `--host <id>` sends on a remote host declared in `~/.openrig/hosts.yaml`; see "Cross-host execution" below. **v0.4.6 (OPR.0.4.6.MH4)** — the host entry's transport decides the path: ssh hosts keep the single-hop ssh shell-out byte-verbatim (SSH success is NOT verify success — the remote rig's `Verified: yes/no` is what counts and is surfaced verbatim); http hosts (e.g. pair-registered) go CLI-direct to the remote daemon's `POST /api/transport/send` with the same body a local send posts (wrap parity by construction) — `--verify` prints the REMOTE route's `verified`/`outcome` verbatim, never a locally synthesized verdict. The `agent@rig@host` target form is sugar for `--host` when the suffix is a REGISTERED host id (explicit `--host` > sugar > persisted selection; a conflict between `--host` and the sugar is a structured error).
-
-### `rig capture`
-
-Usage:
-- `rig capture <session> [--lines <n>] [--host <id>] [--json]`
-- `rig capture --rig <name> [--lines <n>] [--host <id>] [--json]`
-- `rig capture --pod <name> --rig <name> [--lines <n>] [--host <id>] [--json]`
-
-Default:
-- `--lines 20`
-
-Notes:
-- `--host <id>` captures on a remote host declared in `~/.openrig/hosts.yaml`; see "Cross-host execution" below. **v0.4.6 (OPR.0.4.6.MH4)** — ssh hosts keep the shell-out verbatim; http hosts go CLI-direct to the remote daemon's `POST /api/transport/capture` with the local body shape (lines/rig/pod/session), rendering single/multi results exactly as a local capture under the `[via host=…]` banner. The `agent@rig@host` session form is sugar for `--host` when the suffix is a REGISTERED host id (`--rig`/`--pod` values are names, never sugar-parsed).
-
-### `rig walk`
-
-Usage: `rig walk <seat> --through <ref | files...> [--pace <duration>] [--json]`
-
-Notes:
-- `--through` accepts either one path-like context ref or an ordered list of existing local files; mixing the two forms is rejected.
-- Sends one piece at a time through the normal transport and waits `--pace` between pieces (default `10s`; duration overrides require an explicit `ms` or `s` suffix). The same explicit-unit grammar applies to `--consume-timeout`, `--consume-poll`, and `--turn-timeout`; bare numbers are refused. There is no trailing delay.
-- A missing local file or missing/unreadable ref member aborts before the first send, so a walk delivers every piece or none.
-- Where a generation record resolves, each piece must appear as a complete user message in the newly appended record and its corresponding native turn must close before the next piece. Only CRLF line endings and surrounding whitespace are normalized; internal whitespace, missing middles, shared prefixes, and tails do not qualify.
-- Claude closure follows the message's UUID ancestry through an assistant response to `turn_duration`. Codex uses a `response_item` user message within a named `task_started`/`task_complete` turn; queued input or a different turn's completion is insufficient. These receipts prove delivery and turn completion, not semantic comprehension.
-- Codex generation lookup joins the bound process's post-start log thread IDs to retained native CLI conversations. Auxiliary title threads cannot replace that identity; zero or multiple matching conversations remain unverified instead of being selected by recency.
-- Codex records resolve through the verified current pane/process and native thread table, including before token telemetry exists. The rollout header must identify that thread. Missing or ambiguous identity is reported as unverified. A generation/file replacement or unreadable record during a verified walk aborts it; it never silently continues into a replacement occupant.
-- `--json` reports `consumptionVerified`. If the initial generation-record probe is unavailable, legacy delivery remains possible with an explicit unverified advisory and `consumptionVerified: false`.
-
-### Cross-host execution (`--host <id>`)
-
-Cross-host commands route to a remote host declared by id. SSH-transport
-commands use single-hop SSH CLI-side shell-out; HTTP-transport commands talk to
-the remote daemon API. The local daemon is not involved in SSH routing. The
-remote host is expected to have its own managed `rig` available on `$PATH`.
-
-HTTP sender attribution uses the originating instance's persisted self-host
-identity, read without creating or changing its database. Explicit DB config
-wins; otherwise the last daemon launch's DB selection is retained. This works
-while the local daemon is stopped. The destination's identity and the configured
-display name are never used as the origin.
-
-Ordinary local requests retain bare seat names. For an explicit `OPENRIG_URL`
-(or legacy `RIGGED_URL`), a bounded health probe preserves bare addressing only
-when the target's self-host identity matches the local one. A different,
-unavailable, or ambiguous target—including a loopback forwarding endpoint—gets
-the known origin suffix. Already-qualified senders remain unchanged. If the
-local origin cannot be read, delivery proceeds with `origin-unknown:v1`
-provenance and a diagnostic after a successful response; queue forwarding
-preserves that uncertainty rather than attributing the sender to the relay.
-
-Hosts are declared by the operator in `~/.openrig/hosts.yaml`:
-
-```yaml
-hosts:
-  - id: vm-claude-test
-    transport: ssh
-    target: vm-claude-test.local
-    user: your-username  # optional
-    notes: "test VM"     # optional
-  - id: factory-http
-    transport: http
-    url: http://100.64.1.2:7433
-    bearer_env: FACTORY_HTTP_TOKEN
-```
-
-Validation rules:
-
-- `hosts` is required and must be a non-null array.
-- Each entry: `id` required (non-empty, unique), `transport` required (`ssh` or `http`).
-- SSH entries require `target` (non-empty — DNS name, SSH config alias, or IP); `user` and `notes` are optional.
-- HTTP entries require `url`; a bearer pointer (`bearer_env` or `bearer_file`) is OPTIONAL — omit both for an anonymous/tokenless daemon (no `Authorization` header is sent; host+VM are one founder-owned trust domain and the mesh is the auth boundary). At most one bearer pointer may be set, never both. Pointers are config names/paths, never resolved token values; a configured-but-unresolvable pointer is a permission failure before any request.
-- `rig host add/list/doctor` covers the standard path; hand-editing remains the path for exotica.
-- A missing or invalid file returns a clear error pointing at the canonical path.
-
-The CLI distinguishes four structured failure modes (operators get an
-actionable error per mode; JSON output preserves the `failedStep` enum):
-
-- `ssh-unreachable` — SSH itself failed (connection refused, host key mismatch, etc.). Verify SSH access and the registry entry.
-- `permission-gate` — SSH hit an auth/permission gate (Permission denied, Keychain). The error includes a hint to the keychain-over-SSH field note.
-- `remote-daemon-unreachable` — SSH succeeded but the remote `rig` reported the remote daemon was not reachable. Start it with `ssh <target> rig daemon start`.
-- `remote-command-failed` — SSH succeeded but the remote `rig` exited non-zero for some other reason; the remote stderr is surfaced.
-
-**The transport posture (OPR.0.4.4.13 FR-4 — DECIDED, pm-ruled: document, no parity).** The
-partition is the intended posture, not an accident of history: **ssh carries interactive pane
-ops, http carries daemon REST ops, `ps`/`whoami` follow the host's DECLARED transport.**
-There is NO cross-transport fallback, and NO http parity for `send`/`capture` ships in 0.4.4
-(parity would be new attack surface with no scope-locked need). **v0.4.6 UPDATE (OPR.0.4.6.MH4,
-pm-RULED IN as fulfilling-confirmed-intent):** `send`/`capture` gain the http branch — the
-founder's `pair` front door registers HTTP hosts, and without the branch a pair-registered demo
-host could not receive send/capture at all. The mechanism is CLI-DIRECT via the shipped
-`runRemoteHttpOp` to the remote daemon's EXISTING transport routes (zero daemon-side changes;
-the ssh path is kept byte-verbatim for ssh hosts — coverage, not a rewrite, and still no
-cross-transport fallback: the host entry's declared transport dictates the path). `transcript`
-and `broadcast` gain their first cross-host affordance the same way (http-only — there is no
-ssh path for them). Per-command:
-
-| Command | ssh transport | http transport | Fan-out (`--all-hosts`/`--hosts`) |
-| --- | --- | --- | --- |
-| `rig send` | ✓ (shell-out, byte-verbatim) | ✓ (v0.4.6 MH-4 — CLI-direct `POST /api/transport/send`) | ✗ |
-| `rig capture` | ✓ (shell-out, byte-verbatim) | ✓ (v0.4.6 MH-4 — CLI-direct `POST /api/transport/capture`) | ✗ |
-| `rig transcript --host` (v0.4.6, OPR.0.4.6.MH4) | ✗ (structured transport error) | ✓ (CLI-direct `GET /api/transcripts/:session/tail\|grep`) | ✗ |
-| `rig broadcast --host` (v0.4.6, OPR.0.4.6.MH4) | ✗ (structured transport error) | ✓ (CLI-direct `POST /api/transport/broadcast`; remote fan-out, per-target passthrough) | ✗ |
-| `rig up` / `rig down` / `rig launch` | ✗ | ✓ (http-ONLY) | ✗ |
-| `rig file copy` (v0.4.4) | ✓ (ssh-ONLY, rsync-over-ssh) | ✗ | ✗ |
-| `rig ps --host` | ✓ (declared) | ✓ (declared) | http-only; non-http hosts appear as STRUCTURED `unsupported-transport` statuses in `hosts[]` |
-| `rig whoami --host` | ✓ (declared) | ✓ (declared) | http-only; non-http hosts are currently SILENTLY FILTERED from the fan-out (a shipped gap, routed for 0.4.5 triage — differs from ps's structured status) |
-| `rig host doctor` | ✓ | ✓ | n/a (single host) |
-| `rig queue create/handoff/handoff-and-complete --host` (v0.4.6, OPR.0.4.6.MH3) | ✗ | ✓ (http-ONLY, daemon→daemon forward — an ssh-declared host is a structured `unsupported-transport` error) | ✗ |
-
-Out of scope in 0.4.4: cross-transport fallback; http parity for `send`/`capture` *(shipped in
-0.4.6 — OPR.0.4.6.MH4, pm-ruled fulfilling-confirmed-intent; see the v0.4.6 update above)*;
-connection pooling; multi-hop SSH; cross-host queue routing *(shipped in 0.4.6 — OPR.0.4.6.MH3;
-see `rig queue` § Cross-host queue routing)*; cross-host seat handover.
-
-**The http branch's failure taxonomy (v0.4.6 — OPR.0.4.6.MH4).** The http branch names its OWN
-steps (never the ssh enum, never a generic "failed"): registry-load-failed / unknown-host (the
-same class across all four verbs) / `permission-gate` (bearer resolution failed locally, or the
-remote returned 401/403 — including the terminal-bearer posture below) / `remote-daemon-unreachable`
-(network/timeout) / `remote-command-failed` (remote 4xx/5xx, with the remote route's own error
-text surfaced beside the step). **Terminal-bearer posture (named, v0 — applies to
-`/api/transport/*` ONLY, i.e. send/capture/broadcast):** the remote's transport routes gate on
-ITS terminal bearer class, while the CLI presents the host's REGISTRY bearer when one is
-configured; for a URL-only anonymous host the `Authorization` header is omitted. Default (no
-terminal bearer) + tailnet binds = pass-through by design (the mesh is the auth boundary); a
-remote enforcing a DIFFERENT terminal bearer surfaces as the structured `permission-gate` step —
-remedy: set the remote's terminal bearer equal to the paired registry bearer, or rely on the
-tailnet boundary. **`rig transcript --host` is NOT in this class (arch n2):** the remote's
-`/api/transcripts/*` routes are the shipped UNGATED transcript-read posture (open route,
-daemon-local trust boundary, route-level credential redaction as the protective primitive) — a
-wrong terminal bearer that permission-gates a cross-host send does NOT gate a cross-host
-transcript read; transcript keeps succeeding. A coherent transcript-read auth policy across
-tail/grep/full is a named future slice per the route's own comment
-(`routes/transcripts.ts`, orch decision approved-option-a), out of scope here. No new auth
-machinery ships with this slice.
-
-**Destination parse rules — the two-family contract (OPR.0.4.6.MH3, arch-ruled).** The
-`agent@rig@host` three-part form is INPUT SUGAR at the CLI edge, never grammar: session strings
-stay `member@rig` everywhere (BR-1), and the host always travels out-of-band. TWO parse rules
-ship, per verb family, BY DESIGN — one canonical rule would either break adopted targets or
-degrade queue error honesty:
-
-| Verb family | 3-part trailing segment | Why |
-| --- | --- | --- |
-| Queue coordination writes (`rig queue create/handoff/handoff-and-complete`) | **Always stripped** into the out-of-band `hostId` envelope (after the human-seat classifier) | Queue destinations are canonical-only by construction (the daemon's `validateRig` rejects any non-canonical parse), so the unconditional strip loses nothing — and a mistyped host dies loud as an unknown-HOST error instead of a misleading rig-shaped `unknown_destination_rig`. |
-| Session-target interactive/observe verbs (`rig send/capture/transcript`) | **Stripped only if the segment matches a REGISTERED host id** | Interactive verbs legitimately target raw/adopted tmux session names that may contain `@`; strip-iff-registered preserves them, with the unregistered-suffix host hint keeping mistypes loud. |
-| `rig broadcast` | **No sugar** — the positional is MESSAGE TEXT, never parsed as a target | Sugar-parsing a message body would corrupt text containing `@`; cross-host broadcast routes on `--host` or the persisted selection only (v0.4.6 — OPR.0.4.6.MH4). |
-
-Both families converge on the same outcome: a mistyped host dies loud with the host named. The
-`RESERVED_HOST_IDS` set (`kernel`, `host`, `local` — rejected at `rig host add`) guarantees no
-registered host can ever shadow the human-seat `@kernel`/`@host` classification family.
-
-### `rig file` (v0.4.4 — OPR.0.4.4.18)
-
-Usage: `rig file copy <src> <dst> [--dry-run] [--json]`
-
-Cross-host file movement over ssh/rsync — v0 ships ONE explicit verb, `copy`,
-for a single file.
-
-Operand grammar (parsed, never guessed):
-- `<hostId>:<absolute-path>` = remote (the `<hostId>` must resolve in the ssh
-  hosts registry; remote paths must be absolute).
-- Bare path = local. A LOCAL file whose name contains a colon needs the `./`
-  prefix (`./weird:name.txt`) — the grammar refuses the ambiguous form with a
-  structured error instead of guessing.
-- Valid shapes: local→remote, remote→local, local→local. remote→remote is not
-  a v0 shape.
-
-Semantics + safety wall (source: `packages/cli/src/lib/file-transfer.ts`):
-- An existing destination is **OVERWRITTEN** (v0 copy semantics, stated) —
-  preview with `--dry-run`, which prints the exact planned transfer (src, dst,
-  host, files/bytes) and moves nothing.
-- **Default-deny wall over live agent/credential state**: paths resolving into
-  the closed deny set `~/.openrig`, `~/.ssh`, `~/.codex`, `~/.claude` — plus
-  the ACTIVE `OPENRIG_HOME` and the active hosts registry file — are refused
-  with a named what/why error (extension of the deny set requires a ruling,
-  never a silent widening).
-- Traversal is rejected on the RAW operand: a `..` path segment refuses
-  BEFORE any normalization (normalization collapses `..`, so a post-normalize
-  check would be dead code); remote paths are additionally restricted to a
-  shell-inert charset (`A-Za-z0-9._/-` — restriction over escaping, because
-  both rsync implementations in the fleet differ on quoting flags), and every
-  rsync invocation pins operands behind `--` and spawns argv-style with no
-  shell.
-- Transport is ssh-only (see the transport-posture table above); the remote
-  side uses the same ssh registry entries `rig send`/`capture` use.
-
-### `rig host`
-
-Usage: `rig host <add|list|doctor>` — the multi-host registry verbs (OPR.0.4.4.13; capped at
-exactly these three — no edit/remove/tunnel/bootstrap verbs; hand-editing `hosts.yaml` remains
-the path for exotica, and the factory bootstrap ships as
-`scripts/bootstrap-product-factory-vps.sh`).
-
-- `add --id <id> --transport <ssh|http> [--target <t> --user <u> | --url <u> [--bearer-env <n>|--bearer-file <p>]] [--notes <text>] [--json]` — writes the entry validated by the registry loader's OWN rules (add-time errors are load-time errors, verbatim; duplicate ids refused; the http bearer pointer is optional — omit both for a tokenless daemon, never both). Rewrites `hosts.yaml` canonically (hand-authored comments are not preserved).
-- `list [--json]` — id/transport/target plus AUTH as a config POINTER (`env:NAME` / `file:PATH` / `ssh-key`); never a resolved secret value.
-- `doctor <id> [--posture product-factory-vps] [--public-addr <ip>] [--json]` — stepwise, honest verification: transport reachability → remote `rig` binary (+version) → remote daemon health → remote identity; each failing step is a DISTINCT actionable error, and unknown host ids surface as the registry error class. `--posture` runs the ONE built-in baseline (`product-factory-vps`): every item reports pass/fail/**unknown** individually with a fix per non-pass — UNKNOWN is never pass; the public `:7433`/`:22` probes need `--public-addr` (outside vantage) and a reachable public daemon port FAILS loudly. Exit `1` on any fail.
-
-### `rig broadcast`
-
-Usage: `rig broadcast [<text>] [--context <ref>] [--rig <name>] [--pod <name>] [--force] [--host <id>] [--json]`
-
-Notes:
-- Without `--rig` or `--pod`, broadcasts across all running sessions in all rigs.
-- `--context <ref>` resolves one path-like context ref and fans out its whole content. Missing members abort before fan-out; oversized content emits a `rig walk` advisory. It is not supported with `--host`.
-- **v0.4.6 (OPR.0.4.6.MH4)** — `--host <id>` broadcasts on a remote host, CLI-direct to that
-  daemon's shipped `POST /api/transport/broadcast` (http-registered hosts only; an ssh-declared
-  host is a structured transport-requirement error). The REMOTE daemon resolves `--rig`/`--pod`
-  on ITS topology; its per-target results print verbatim and a partial fan-out exits non-zero
-  exactly as a local one. The remote call carries its own named fan-out deadline
-  (`BROADCAST_REMOTE_TIMEOUT_MS`, 30s — a full per-target loop outlives the 5s read default).
-  The `<text>` positional is message text and is NEVER parsed as a target, so broadcast takes
-  `--host` or the persisted host selection — not the `agent@rig@host` sugar.
-
-### `rig ask`
-
-Usage: `rig ask <rig> <question> [--json]`
-
-Current implementation:
-- Queries `/api/ask`
-- Returns:
-  - the original question
-  - a rig summary (`name`, `status`, `nodeCount`, `runningCount`, `uptime`)
-  - evidence excerpts from transcripts
-  - optional chat excerpts
-  - `insufficient` flag
-  - optional guidance text
-
-Important:
-- The live help description says “Search rig transcript history with a natural language question,” but the shipped behavior is broader than plain transcript grep and narrower than a topology/lifecycle synthesis layer.
-- This command is a daemon-backed evidence query, not a second LLM invocation.
-
-### `rig chatroom`
-
-Usage: `rig chatroom <subcommand>`
-
-Subcommands:
-- `send <rig> <message> [--sender <name>]`
-- `history <rig> [--topic <name>] [--after <id>] [--since <ts>] [--sender <name>] [--limit <n>] [--json]`
-- `wait <rig> [--after <id>] [--topic <name>] [--sender <name>] [--timeout <seconds>] [--json]`
-- `clear <rig>`
-- `topic <rig> <topic-name> [--body <text>] [--sender <name>]`
-- `watch <rig> [--tmux]`
-
-Notes:
-- All chatroom subcommands take the rig name as a positional argument.
-- `history` filters are composable: `--sender`, `--since`, `--after`, `--topic` can be combined.
-- `wait` blocks until new matching messages arrive or times out (exit 1). Same filter semantics as `history`.
-- `clear` is destructive and rig-scoped. Removes all messages for that rig.
-- `watch --tmux` starts a dedicated tmux watcher session.
-
-## Coordination Primitive (PL-004 Phase A)
-
-Two top-level commands back the SQLite-canonical coordination layer. They speak only to the daemon HTTP API; they do NOT touch the POC `rigx-stream-proto` / `rigx-queue-proto` filesystem state. POC and daemon coexist at OPERATOR level only.
-
-### `rig stream`
-
-Usage: `rig stream <subcommand>` — L1 append-only intake stream.
-
-Subcommands:
-- `emit --source <session> --body <text> [--format <fmt>] [--hint-destination <session>] [--hint-type <type>] [--hint-urgency <urgency>] [--hint-tags <csv>] [--interrupt] [--id <streamItemId>] [--json]`
-- `list [--source <session>] [--hint-destination <session>] [--tag <tag>] [--since <iso>] [--until <iso>] [--limit <n>] [--after <sortKey>] [--include-archived] [--json]`
-- `watch [--json]`
-- `show <streamItemId> [--json]`
-- `archive <streamItemId> [--json]`
-
-Notes:
-- `--id` is for idempotency; same id returns the same row, body of subsequent calls is ignored.
-- `--tag` is exact membership in `hint_tags`, not substring matching. `--since` and `--until` are inclusive ISO timestamp bounds normalized to UTC by the daemon; list order and cursor semantics remain chronological.
-- `watch` consumes the existing `/api/stream/sse` contract: the daemon's initial replay followed by live items. Human output shows timestamp, source, and body; `--json` emits one `StreamItem` object per line. It makes one connection and does not reconnect automatically.
-- `archive` is soft — the row remains for audit and is excluded from `list` unless `--include-archived` is passed.
-
-### `rig queue`
-
-Usage: `rig queue <subcommand>` — L3 owned-work queue plus inbox/outbox.
-
-`create` generates a `qitem-<UTC YYYYMMDDHHMMSS>-<16 lowercase hex>` ID unless
-`--id` supplies the identity. In either case it prints the ID to stderr **before
-sending**. This is not proof of persistence. After an unknown outcome, reconcile with
-`rig queue show <id> --full --json` at the same endpoint, then reuse `--id <id>`
-with unchanged source, destination, body and options if retrying. A negative read
-does not rule out a pending commit; omitting the original ID starts new work.
-For a forwarded create, replace `<destination-daemon-url>` with the registered
-destination host's daemon URL and use
-`OPENRIG_URL='<destination-daemon-url>' rig queue show <id> --full --json`.
-`--json` keeps stdout as one JSON document; the pre-send receipt is on stderr.
-
-Reusing an ID with the same source and destination returns the existing row,
-without creating new work or delivering it again. If the supplied body differs,
-the response includes `createWarning.code: "qitem_body_not_saved"` and the CLI
-warns on stderr that the changed body was **not saved**. The original row is
-unchanged; HTTP success and the CLI success exit remain compatible with existing
-retry callers. With `--verify`, `persisted` and `delivery` describe that returned
-original row, not the unsaved body. This warning requires a daemon containing
-this change; an older daemon can return the original row without it. Other
-changed options are not compared by this body warning; retry with the same full
-payload. A different source or destination remains an ID-reuse conflict.
-
-Subcommands:
-- `create --source <session> --destination <session> (--body <text> | --body-file <path> | --body-context <ref>) [--mission <id>] [--slice <id>] [--priority <p>] [--tier <t>] [--tags <csv>] [--target-repo <name>] [--host <id>] [--no-nudge] [--expires-at <iso>] [--id <qitemId>] [--json]` — `--body-context <ref>` resolves a complete context pack, snapshots that content into the qitem body, and adds a `body-context:<ref>` provenance tag; it is mutually exclusive with `--body` / `--body-file`, and missing members abort before qitem creation. v0.3.2 slice-21 FR-4 adds `--body-file <path>` (use `-` for stdin) which kills the backtick-shell-corruption class for multiline bodies, and first-class `--mission <id>` / `--slice <id>` flags that translate to `mission:<id>` / `slice:<id>` tags (compose with `--tags`). v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` destination form — see § Cross-host queue routing below.
-- `claim <qitemId> --destination <session> [--json]` — pending → in-progress; computes closure_required_at from tier
-- `unclaim <qitemId> --destination <session> [--reason <text>] [--json]` — in-progress → pending
-- `update <qitemId> --actor <session> --state <state> [--closure-reason <r>] [--closure-target <t>] [--note <text>] [--json]`
-- `handoff <qitemId> --from <session> --to <session> [--body <text> | --body-file <path>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — transactional close-as-handed-off + create-new; v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` `--to` form (§ Cross-host queue routing)
-- `handoff-and-complete <qitemId> --from <session> --to <session> [--body <text> | --body-file <path>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — variant of `handoff` that closes the source as `done` (terminal) instead of `handed-off`; same atomic close+create, chain_of_record, default-nudge, and cross-host contracts
-- `fallback <qitemId> --destination <session> [--reason <text>] [--json]` — reroute to fallback seat
-- `show <qitemId> [--json]`
-- `transitions <qitemId> [--json]` — append-only transition log
-- `list [--destination <session>] [--source <session>] [--owned] [--mine] [--state <csv>] [-a | --all] [-A | --all-rigs] [--full] [-o <json|wide>] [--limit <n>] [--json]` — **v0.4.0 grammar (slices 28 + 32, docker / kubectl-aligned)**:
-  - **`rig queue list`** (no flags) → active states only (`pending` / `in-progress` / `claimed` / `blocked` / `handed-off`; NOT `done` / `canceled`), **current-rig** breadth, compact rows: `qitemId`, `state`, `source→destination` (or `current-owner`), `closure_reason` / `closure_target` (when handed-off / blocked), `mission`, `slice`, `tier` / `priority`, `age` / `updated_at`, short title, capped tags. Excludes: full body, chain_of_record, transition history, proof / artifact blobs.
-  - **`-a` / `--all`** → include closed / done history within the current breadth (docker `-a` axis: history).
-  - **`-A` / `--all-rigs`** → cross-rig breadth (kubectl `-A` axis: breadth). Composable with `-a`, `--owned`, `--mine`, `--full`.
-  - **`--full`** → add body + chain-of-record + full tags + transition history to whichever scope is selected (field-breadth axis).
-  - **`-o json|wide`** → encoding, compact-by-default. `-o json` does NOT imply full body (compact JSON is token-safe + machine-parseable); `--full -o json` returns the full JSON.
-  - **`--owned`** → obligations assigned to the caller (`destination_session` only).
-  - **`--mine`** → the caller's source-or-destination union, including rows the caller authored but does not own.
-  - Pipeline use must enable `set -o pipefail`; otherwise the shell reports only the downstream formatter's status and can mask a nonzero `rig` read such as a timeout.
-  - `--destination <s>` / `--source <s>` / `--state <csv>` keep working and compose with the new flags.
-  - The four axes (scope × history × field-breadth × encoding) are orthogonal and composable. The bare unscoped firehose that aggregated cross-rig + full-history (~64,000 tokens on the live host) is retired as a default — opt-in via `-A -a --full`.
-  - Use `rig queue show <qitemId>` for the body preview; `rig queue show <qitemId> --full --json` returns the original complete record. Preview JSON adds `readView` with completeness, omitted content, full JSON byte size and the exact expansion command.
-- `overdue [--json]` — in-progress qitems past closure_required_at
-- `inbox-drop <destinationSession> --sender <session> (--body <text> | --body-file <path>) [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <inboxId>] [--json]`
-- `inbox-absorb <inboxId> --receiver <session> [--json]` — promote a pending inbox entry to a queue_item
-- `inbox-deny <inboxId> --receiver <session> --reason <text> [--json]`
-- `inbox-pending <destinationSession> [--json]`
-- `outbox-record --sender <session> --destination <session> (--body <text> | --body-file <path>) [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <outboxId>] [--json]`
-- `outbox-list <senderSession> [--limit <n>] [--json]`
-
-Hot-potato strict-rejection (load-bearing API contract):
-- `update --state done` REQUIRES `--closure-reason` from one of: `handed_off_to`, `blocked_on`, `denied`, `canceled`, `no-follow-on`, `escalation`. Missing or invalid reason → exit 1 with structured error naming the 6 valid values.
-- `closure-reason` of `handed_off_to`, `blocked_on`, or `escalation` additionally requires `--closure-target`.
-- All hot-potato enforcement happens at the daemon domain layer; every surface (CLI, future MCP, future UI) inherits the same guarantee.
-
-Closure-reason semantics:
-- `handed_off_to` — work continues at a different seat (target = new owner). `handoff` subcommand is the preferred path; `update` accepts it for non-handoff terminal closures.
-- `blocked_on` — parked pending another qitem (target = blocker qitem_id).
-- `denied` — receiver rejected the work.
-- `canceled` — sender or receiver withdrew.
-- `no-follow-on` — terminal completion, nothing else needed.
-- `escalation` — kicked up to a higher tier (target = escalation target).
-
-### Cross-host queue routing (v0.4.6 — OPR.0.4.6.MH3)
-
-`rig queue create`, `handoff`, and `handoff-and-complete` can target a destination on ANOTHER
-registered host: `--host <id>` or the host-qualified destination form `member@rig@<host>` (both
-resolve to the same out-of-band `hostId` request envelope; naming both with DIFFERENT hosts is a
-structured ambiguity error). The mechanism generalizes the shipped mission-control
-forward-then-strip WRITE: the local daemon resolves the host registry server-side (bearers never
-reach the caller), strips the host at the edge, and forwards the WHOLE body over HTTP to the
-target daemon — see `docs/as-built/architecture/coordination-primitive.md` § Cross-host queue
-routing for the full model. Load-bearing contract points:
-
-- **Explicit-only (no selection follow).** Queue verbs route cross-host ONLY on `--host` / the
-  3-part form — they NEVER consult the persisted `rig host select` selection (a durable write and
-  a hot-potato close must not silently re-home on yesterday's sticky selection). This is a
-  deliberate asymmetry with the observe/interactive verbs, which do follow selection.
-- **Origin-owns-the-record.** The qitem lives in the TARGET host's DB; that row is THE record.
-  No local ghost row is ever written, and the target daemon's OWN nudge fires on ITS local tmux
-  (the whole body — including the `nudge` flag — is forwarded).
-- **At-least-once + idempotent, never exactly-once.** The forwarding daemon MINTS the qitem id
-  before the first forward (a retry carries the same id by construction); a cross-host handoff's
-  successor id is DERIVED deterministically from (source qitem, destination, host) — namespaced
-  `qitem-xh-…`, so a re-driven forward absorbs on the target's primary key. Retrying is safe;
-  a same-id create whose identity fields differ is a structured `qitem_id_reuse` error.
-- **Never-drop ordering.** A cross-host handoff creates the successor on the target host FIRST
-  and closes the local source SECOND. A crash between the two leaves a live duplicate that the
-  idempotent re-drive converges — never a source closed toward a successor that doesn't exist.
-  Re-drives: an already-closed source with the MATCHING `closure_target` absorbs as success; a
-  MISMATCH is a structured `cross_host_close_conflict` (409) — surfaced, never overwritten.
-  *(Named residual, inherent to at-least-once/no-2PC: a re-drive naming a DIFFERENT destination
-  is a NEW handoff decision and can leave the earlier successor live on the target host — visible
-  via the chain + provenance tags, not a dedup bug.)*
-- **Closure fields.** The cross-host source close records `closure_reason=handed_off_to` and
-  `closure_target=member@rig@<host>` — `closure_target` is OPAQUE audit/display metadata,
-  presence-checked and NEVER parsed for routing (any PR parsing it as a session string is a spec
-  violation). Session-string carriers (`destination_session`, `source_session`, `blocked_on`,
-  `handed_off_to`) stay 2-part `member@rig` (BR-1). The forwarded successor carries the continued
-  `chain_of_record`; those A-side ids are OPAQUE lineage identifiers on the target host (they do
-  not dereference in the target's DB). Provenance: the forwarded item is tagged `cross-host` +
-  `from-host:<sender's self-declared name>` (honest best-effort, not authenticated identity).
-- **Failure honesty.** Unknown host / ssh-declared host / unreachable / auth-failed each surface
-  as a distinct structured `remote_queue_write_failed` error naming the host — nothing is written
-  on either side. Transport is http-ONLY (the daemon→daemon path is what fires the remote nudge;
-  the `rig send --host` ssh shell-out is a different mechanism, untouched).
-- **Local zero-regression.** No `--host` (or `local`) = today's local path, byte-identical.
-  Claim / update / inbox verbs stay local-by-principle: after a cross-host handoff the successor
-  lives on the target host where its worker lives. Sender-side operations on an already-forwarded
-  item (cancel/update from the sending host) are a named follow-up, out of v1.
-
-## Coordination Project / Classifier and View (PL-004 Phase B)
-
-Two top-level commands extend the coordination layer with L2 (project / classifier) and L5 (views).
-
-### `rig project`
-
-Usage: `rig project <subcommand>` — L2 agent-backed classifier with daemon-enforced lease + idempotency + reclaim.
-
-Subcommands:
-- `lease-acquire [options]` — acquire the active classifier lease for the caller.
-- `lease-heartbeat [options]` — send a heartbeat for an active classifier lease (extends TTL). A lease already past its TTL refuses with `lease_expired`; acquire again instead.
-- `lease-show [options]` — show the currently-active classifier lease.
-- `reclaim-classifier [options]` — operator verb to reclaim the active classifier lease. Use `--if-dead` to refuse if holder is still alive.
-- `classify <streamItemId> [options]` — project a stream item with classification fields. Idempotent on `stream_item_id` (first write wins). Requires `--lease-id`: the result is refused (`lease_mismatch`, `lease_expired`, `lease_held`) unless that exact lease is active, unexpired and held by `--session` at write time. Optional `--area`, `--scope-ref` (with `--candidate-set-version`), `--duplicate-of`, `--needs-human true|false` (omit when unknown), `--classifier-version`, `--taxonomy-version`, `--attempt-id` with `--execution-id`. Without `--attempt-id` the result is a manual classification, not bound to the attempt ledger. Every supplied field must be a string (IDs and versions non-empty); `--needs-human` omitted means unknown.
-- `list [options]` — list project classifications with filters (`--session`, `--destination`, `--area`, `--scope-ref`, `--needs-human true|false|unknown`).
-- `show <projectId> [options]` — show one project classification.
-
-Notes:
-- Lease semantics: only one classifier holds the active lease at a time. Heartbeats extend TTL only while the lease is unexpired. Re-acquiring your own expired lease issues a new lease id, so results bound to the old id are refused; another session must use `--evaluate-deadness-first` or the reclaim verb.
-- Attempt ledger (daemon HTTP, used by a classifier occupant): `POST /api/projects/attempts/begin`, `/attempts/:id/abstain`, `/attempts/:id/fail`, `GET /api/projects/eligible`. Abstentions and errors are recorded there, never in the classification row; errors retry with bounded backoff, then end `exhausted`. Every `begin` (including a timeout or error retry) returns a new `executionId`; only the current one can abstain, fail or bind a result (`attempt_superseded` otherwise), because a renewable lease never proves an older execution stopped.
-- `classify` enforces L1→L2 foreign-key existence: the referenced `stream_items` row must exist or the call is rejected before any state mutation.
-- `reclaim-classifier` is the operator-side verb to recover from a hung classifier; `--if-dead` adds a liveness guard so a still-heartbeating classifier is not stolen from.
-
-### `rig view`
-
-Usage: `rig view <subcommand>` — L5 daemon-backed views over coordination state.
-
-Subcommands:
-- `list [options]` — list built-in + custom views.
-- `show <viewName> [options]` — run a view (built-in or custom).
-- `register [options]` — register or update a custom view.
-
-Built-in views:
-- `recently-active`, `founder`, `pod-load`, `escalations`, `held`, `activity`.
-
-Notes:
-- Views emit a `view.changed` SSE event on every state mutation that affects them. Queue update mutations bridge to `queue.updated` and then to `view.changed` for all six built-in views (Phase B R2).
-- Custom view registration writes to the `views_custom` table; the daemon hot-reloads on registration.
-
-## Coordination Watchdog (PL-004 Phase C)
-
-`rig watchdog` registers, lists, inspects, and stops daemon-native scheduler jobs. The scheduler runs inside the daemon supervision tree and persists state in SQLite (`watchdog_jobs`/`watchdog_history`); jobs survive daemon restarts. Three policies are available at v1: `periodic-reminder`, `artifact-pool-ready`, and `edge-artifact-required`. The fourth POC policy `workflow-keepalive` is rejected with `policy_deferred_to_phase_d` and ships in Phase D.
-
-### `rig watchdog`
-
-- `register --spec <path> --policy <name> --target-session <s> --interval-seconds <n> --registered-by <s>` — register a job from a YAML spec; `--active-wake-interval-seconds` and `--scan-interval-seconds` are pool-ready-specific opt-ins.
-- `list` — list all jobs (active + stopped + terminal).
-- `show <job_id>` — show one job.
-- `status <job_id>` — show job + recent evaluation history (last 20 entries).
-- `stop <job_id> [--reason <text>]` — operator stop; scheduler skips the job thereafter.
-
-History records only loud evaluations: `sent` (delivery executed) or `terminal` (policy declared the job done). Quiet skip reasons (`not_due`, `no_actionable_artifacts`, `no_missing_edge_artifacts`, `active_wake_not_due`) are NOT recorded — POC parity so agents are not woken about scheduler polls. Loud `skipped` rows are recorded only if a policy returns a non-quiet reason.
-
-Phase D extends the policy enum with `workflow-keepalive` (the policy deferred from Phase C). It reads `workflow_instances` directly via SQLite, requires `status: active|waiting`, and resolves frontier qitem owners from `queue_items`.
-
-## Workflow Runtime (PL-004 Phase D)
-
-`rig workflow` operates on the daemon-native Workflow Runtime: declarative spec validation, instance creation, step projection (transactional-scribe), trace, and idempotent continue. Workflow specs are markdown/YAML files on disk (workspace-surface); the daemon caches them in SQLite for fast lookup.
-
-### `rig workflow`
-
-- `validate <specPath>` — validate a workflow spec file; returns structured ok/error report (role resolution, step uniqueness, allowed-exits consistency, optional seat liveness). Spec-only: it takes no rig context (OPR.0.4.6.FAC1 arch ruling — rig-coverage checks happen at instantiate).
-- `compile <missionPath> [--operation-key <key>]` — read `project.yaml` →
-  `mission.yaml` → `slice.yaml` into an inspectable lifecycle graph without
-  creating a cached spec, workflow instance, or qitem.
-- `instantiate-lifecycle <missionPath> --operation-key <key> --root-objective
-  <text> --created-by <session>` — compile and start an eligible lifecycle;
-  `--entry-owner` and `--rig` retain their normal workflow meanings. The opaque
-  operation key makes exact replay idempotent and conflicting reuse refuses.
-- `instantiate <specPath> --root-objective <text> --created-by <session>` — create a new instance + entry-step qitem in the same daemon transaction; `--entry-owner <session>` overrides the default entry owner. **OPR.0.4.6.FAC1**: `--rig <name>` binds the instance to a rig (overrides the spec's `target.rig` DEFAULT; persists as `boundRig` on the instance, rendered by `show`/`trace` and carried in `--json`). On a bound instance, a role with **no `preferred_targets`** resolves to a live capable SEAT on that rig by the pure capability policy (running agents declaring the role, managed seats only, required runtime, least pending backlog, deterministic coordinate tiebreak). Unknown rig = structured `bound_rig_unknown`; a bound-rig role no seat structurally declares = `bound_rig_role_uncovered` (existence at any lifecycle state satisfies it — liveness is checked when the step projects). No `--rig` and no spec default = unbound, byte-identical pre-FAC-1 behavior.
-- `run <specPath> …` — accepts the same `--rig <name>` binding (run instantiates too).
-- `project --instance <id> --current-packet <qitem-id> --exit <handoff|waiting|done|failed> --actor-session <session>` — close the current packet AND project the next-step packet IN THE SAME daemon transaction (transactional-scribe; lost handoffs impossible by design). `--result-note <text>`, `--blocked-on <ref>`, `--next-owner <session>` modify behavior.
-- `list [--status <s>]` — list instances; optionally filter by status (`active`/`waiting`/`completed`/`failed`).
-- `show <instanceId>` — show one instance.
-- `revise <instanceId>` — inspect authored versus bound lifecycle input without
-  writing. The result names changed sources/steps, composition, compatibility,
-  and an apply command containing the inspected version, digest and operation
-  key. Fill in the actor and decision before using `--apply`.
-- `operation <key>` — recover the original lifecycle creation or revision
-  receipt and current instance after a lost response or later source edit.
-- `trace <instanceId>` — show the instance + its append-only step trail (audit-only).
-- `continue <instanceId>` — idempotent inspector; in v1 returns the current state.
-
-The owner-as-author + workflow-as-transactional-scribe contract is enforced by the daemon. The owner of a packet decides when it closes; the workflow runtime atomically records the closure AND creates/projects the next qitem per the workflow spec, in a single daemon transaction.
-
-### Project-owned release profiles
-
-`project.lifecycle.profile` selects a key in `project.lifecycle.profiles`. Each
-selected entry contains `required_steps` (a nonempty list of stable obligation
-IDs) and `workflow` (the ordinary workflow language). The reusable example at
-[`project-release-profile.yaml`](../reference/project-release-profile.yaml)
-names nine release-ceremony stages followed by one `release-boundary` judgment.
-That final judgment covers the seven areas of the canonical
-[`release-boundary.md`](../reference/release-boundary.md) checklist in one
-agent-authored record. It does not create seven automatic gates.
-
-Put the profile in `project.yaml` once; release missions need only their ordinary
-composition. Customize the example's project ID, roles, and policy for the
-project. Every profile step declares `depends_on` (including `[]` on roots);
-conditional `next_hop.on` jumps are refused so required stages cannot be bypassed.
-Missing required IDs refuse with `lifecycle_required_step_missing`.
-Prerequisite cycles make compilation ineligible with `dependency_cycle`, even
-when `loop_guards.max_hops` is set. That guard bounds routing loops; it cannot
-make mutually dependent steps ready.
-
-Precedence is explicit:
-
-- With a selected project graph and no mission workflow, the mission inherits it.
-- `mission.lifecycle: {profile: <same-profile>, mode: extend, workflow: ...}` adds
-  new steps, merges roles by name, and appends context references. An extension
-  cannot replace a step ID; its workflow accepts only `steps`, `roles`, and
-  `context_refs`.
-- `mode: override` supplies a replacement workflow. All required project step IDs
-  and the prerequisite relationships between them must remain. Additional
-  intermediate stages are allowed. An omitted or unknown mode with competing
-  workflows refuses with `lifecycle_override_ambiguous`.
-- Without `project.lifecycle.profiles`, the existing mission-authored workflow
-  takes precedence over slice execution declarations. This legacy path remains
-  supported and reports an advisory that no project graph is selected. Adding a
-  project graph to an existing copied mission workflow requires explicit mode
-  selection or removal of the copy. Project lifecycle fields such as an inert
-  `workflow` or `workflow_ref` are refused rather than silently ignored.
-
-An authored, ready successor may be a mission extension step depending on
-`release-boundary`. Without that extension, `release-boundary` exits `done` and
-finishes the current lifecycle. The runtime creates the continuation packet;
-the agent judges readiness and performs any authorized activation. It does not
-infer readiness from a folder or activate future scope automatically.
-
-Compilation exposes `graphSource` (selection mode, project/mission addresses,
-required IDs), the complete `workflowSpec`, dependencies, and source digests.
-These are bound into the compiled input digest and persisted at instantiation.
-Changing source bytes under an existing operation key refuses. Relative paths
-passed to both CLI `compile` and `instantiate-lifecycle` are resolved against the
-**caller cwd before HTTP**, so daemon cwd cannot change their meaning.
-
-`workflow guidance <instance> [--packet <qitem>] [--component <id>] [--full]`
-reads current selected SDLC teaching and original SPEC intent. `workflow show`
-and `workflow continue` expose the same guidance. Entry, handoff, route and resume
-packets carry a compact preview; existing admitted wait notices refresh it at
-send time. Healthy waiting does not read or inject the catalog on every tick.
-
-Selection follows project → mission → explicit active slice (or a legacy slice's
-exact executable identity). A narrower component list replaces ancestor components
-and edges; an omitted catalog inherits. Bound member lists alone do not select an
-active slice. Catalog addresses use the shared H2/H3 resolver: absolute or
-`$OPENRIG_HOME` paths, paths relative to the declaring manifest, `root: repository`
-from that manifest's Git tree, or a file declared by the installed context library.
-Missing/ambiguous components and unavailable sources are named unknowns; prose
-stays verbatim and has no required semantic field ontology.
-
-Compact guidance previews one component, using exact owner matches where possible;
-otherwise it labels a menu preview. Position remains unknown: neither array order,
-clock nor handoff infers method progress. `--full` expands components relevant to
-current packet custody (all selected components when none match); `--component`
-chooses one explicitly. Whole oversized prose blocks are omitted with an expansion
-notice, so a clipped caveat never masquerades as complete teaching.
-
-Guidance reports manifest hashes against the lifecycle binding and the current
-catalog hash. Referenced prose is current authored advice, not a cached executable
-snapshot. YAML selection edits use the existing revision path; catalog-only prose
-changes refresh on read without creating work or a new revision store. Reading
-advice, receiving a notice and independent acceptance remain distinct.
-
-`workflow show`, read-only `workflow revise`, and the TUI distinguish current,
-source-only, compatible, incompatible and unavailable authored comparisons.
-Catalog or membership bytes can change without changing executable steps;
-file edits do not silently adopt either kind of change. A supported `revise
---apply` preserves completed/live steps, required obligations, queue custody and
-prior receipts while adopting future-step changes on the same instance. It
-requires the inspected version/digest, a stable operation key, actor and reason.
-Changed completed/live steps, removed obligations and unsupported migrations
-refuse with a specific explanation; restore the protected contract and revise
-unstarted successors. After an ambiguous response, inspect `workflow operation
-<key>` or retry the identical apply command to recover its one committed effect.
-
-Mission-bound continuation and wait guidance carries a snapshot of authored
-planning, wave admission/review and integration rules, with a pointer to inspect
-the current source before deciding. Waves guide agents; executable dependencies
-schedule steps. Bound slice sources do not automatically create child workflows.
-The execution view also reads current arrangement guidance into `planning_guidance`
-with exact source fields. Ordinary mission/wave/slice inspection keeps admission,
-review and accepted-core/full-contract guidance distinct from executable edges,
-attributed proof and current custody; prose does not create those facts.
-
-`workflow show`/JSON and the TUI execution view show every named obligation with
-its state and receipt state. Required steps need `project --evidence-ref <ref>`
-on a successful `done`/`handoff` exit; missing references refuse before mutation
-with `lifecycle_receipt_required`. Waiting and failed exits remain available.
-The projection records who supplied the reference and when. `recorded` means an
-attributed workflow receipt exists, not that the daemon verified its substance.
-An ordinary terminal queue row never supplies that receipt. Agents inspect the
-actual evidence, including reasoned not-applicable or deferred boundary areas.
-Existing typed `acceptance` contracts remain separate and retain their checks.
-
-### Authored mission boundary (legacy)
-
-Without a project-owned graph, when a mission declares `lifecycle.workflow`, `compile` uses that explicit
-workflow instead of deriving steps from active slices. Slice membership and
-backlinks are still validated and included in provenance; slice SDLC selections
-do not add workflow steps or gates. `lifecycle.profile` must match the profile
-selected in `project.yaml`:
-
-```yaml
-# Add to mission.yaml; project.yaml already selects release-boundary-v0.
-lifecycle:
-  profile: release-boundary-v0
-  workflow:
-    context_refs: [SPEC.md, PROGRESS.md, NOTES.md]
-    entry: {role: orchestrator}
-    roles:
-      orchestrator: {preferred_targets: [orch@my-rig]}
-    steps:
-      - id: mission-boundary
-        actor_role: orchestrator
-        objective: Inspect current evidence and decide the next authored exit.
-        allowed_exits: [waiting, done, failed]
-        re_present_after_seconds: 300
-        re_present_max_seconds: 3600
-```
-
-The nested `workflow` uses the ordinary workflow language; its ID defaults to
-`lifecycle-<project>-<mission>`, and its compiled version is derived from source
-digests. Boundary steps explicitly allowing `waiting` default to a five-minute
-initial reminder and a one-hour cap; both fields in the example override those
-defaults. Missing operation identity leaves compilation ineligible. Instantiation
-with one opaque `--operation-key` persists the compiled input digest and lifecycle
-binding; exact replay returns the same instance/entry packet, and changed input
-under that key refuses. Authoring alone never starts an instance.
-
-`context_refs` carries addresses in entry, successor, route/resume, and reminder
-packets. The lifecycle compiler also includes the project/mission manifests and
-`project.install.context`. Relative project references resolve from the project
-root; profile workflow references resolve from the project root and mission workflow
-references from the mission directory. References
-are not evidence verdicts: the receiving agent opens current context, may inspect
-beyond it, and chooses the exit. The daemon neither interprets receipts nor
-activates a mission. `rigx project` remains a separate manual shadow.
-
-Outside mission-boundary compilation, an unmapped `waiting` exit with
-`re_present_after_seconds` alone remains one-shot.
-Adding `re_present_max_seconds` opts into an existing queue/watchdog timer that
-repeats with exponential backoff: the example waits 5, 10, 20, 40, then 60 minutes
-between reminders. The cap must be an integer at least as large as the initial
-delay. No new packet is created. Repeated waiting acknowledgments retain the
-schedule; changed structured `closureEvidence` or a new blocker resets it.
-`rig workflow project --evidence-ref <ref>` records an attributed reference as
-closure evidence, without interpreting it or substituting for typed acceptance. Omitted
-evidence preserves the prior evidence, and object key order is immaterial.
-
-A transition on the exact qitem blocker makes the reminder due on the next
-scheduler tick (normally within one second), resetting the initial delay.
-Wake delivery receipts do not count as progress. The workflow's own waiting
-acknowledgments are on its frontier packet, not its upstream blocker; a repeating
-wait cannot name itself as its blocker. Blocker completion retains native
-queue unpark/wake behavior. Terminal or rerouted packets retire their timer.
-Restart reconciles blocker transition identity and resumes the persisted delay;
-replaying the same transition does not create another wake. A live repeating
-timer can have an unconsumed wake: these are separate facts in park status.
-Hard human gates are authored using the existing `gate` field; a reminder does
-not manufacture a gate or satisfy one.
-
-## Operational Inspection
-
-Read-only inspection commands for compaction planning, workflow heartbeat, and seat handover observability. Default mode is read-only across this section.
-
-### `rig compact-plan`
-
-Usage: `rig compact-plan [--rig <name>] [--refresh] [--threshold-tokens <n>] [--threshold-percent <0-100>] [--json]`
-
-Notes:
-- Plans Claude compact-in-place candidates without compacting anything (read-only triage).
-- `--threshold-tokens <n>` is the estimated used-token threshold; `--threshold-percent <0-100>` is the used-percent threshold when the context window size is missing.
-- Output identifies seats that are candidates for compaction by current heuristics; the operator decides what (if anything) to compact.
-
-### `rig heartbeat`
-
-Usage: `rig heartbeat [--rig <name>] [--nudge] [--include-done] [--json]`
-
-Notes:
-- Shows workflow execution proof state from queue files.
-- Default mode is read-only. `--nudge` sends informational proof instructions to stalled or unproven owners; it does not modify queue files or reroute work.
-- `--include-done` includes done/handed-off queue items in the output (excluded by default).
-
-### `rig seat`
-
-Usage: `rig seat <subcommand>`
-
-Subcommands:
-- `status <seat> [options]` — show read-only seat handover observability status.
-- `handover <seat> [options]` — plan a safe two-phase seat handover.
-- `launch <seat> --fresh --reason <text> [--stop] [--operator <address>] [--json]`
-  — create a deliberate blank occupant for exactly one existing seat. No
-  continuity source is used; a live managed occupant requires `--stop`, while
-  adopted or unmanaged ambiguity refuses.
-- `clear-attention <session> [--reason <text>] [--json]` — evidence-gated, operator-attested, audited reconcile of a stuck `attention_required` seat.
-
-Notes:
-- `status` reads the seat-handover observability tables (migration `021`); it does not mutate anything.
-- `handover` plans the two-phase sequence; actual execution happens through the existing seat-launch surfaces under operator gating.
-- `clear-attention` (v0.3.4) clears a stuck `attention_required` startup status using captured evidence; `--reason <text>` is an operator attestation override that skips the evidence gate (audited). Replaces SQLite hand-edit workarounds.
-
-## Mission Control / Queue Observability (PL-005 Phase A)
-
-Mission Control is an integrated product UI inside the existing shell, NOT a new `rig` command. PL-005 originally named the read-only node surface as `rig ps --nodes --json`; under the v0.4.4 disclosure ladder, the fleet-wide projected node source is `rig ps --nodes -A --json`.
-
-Mission Control is reached via the product UI at the `/mission-control` route. The HTTP API surface (`/api/mission-control/*`) is documented in `docs/as-built/architecture/mission-control.md`. The 7 verbs (`approve`, `deny`, `route`, `annotate`, `hold`, `drop`, `handoff`) execute via `POST /api/mission-control/action`; the 7 views are read via `GET /api/mission-control/views/:view-name`.
-
-Mission Control consumes `rig ps --nodes -A --json` for fleet roll-up where the canonical CLI source is preferred. Cross-CLI-version drift is handled per the 4 sub-clauses of PRD § Runtime/Source Drift Acceptance: missing fields surface as honest "field unavailable on this rig's daemon version" placeholders; once-per-session-per-rig logging avoids spam; the fleet view shows a top-level "rigs running stale CLI" indicator.
-
-## Agent Images, Context Packs, and Workspace (v0.3.0)
-
-Three top-level commands shipped in v0.3.0 for operator-authored library content (agent images and context packs) and the workspace primitive.
-
-### `rig agent-image`
-
-Usage: `rig agent-image <subcommand>` — browse, snapshot, and manage agent images (PL-016).
-
-Subcommands:
-- `list [options]` — list all agent images in the library.
-- `show <name-or-id> [options]` — show image manifest + statistics.
-- `preview <name-or-id> [options]` — show manifest + sized supplementary file metadata + starter snippet.
-- `create <source-session> [options]` — capture a productive seat's resumable state into a new agent image.
-- `delete <name-or-id> [options]` — delete an agent image (subject to evidence-preservation guard).
-- `pin <name-or-id> [options]` — pin an image so prune cannot delete it.
-- `unpin <name-or-id> [options]` — unpin an image.
-- `prune [options]` — delete evictable images (protected by evidence-preservation guard).
-- `sync [options]` — re-walk discovery roots and refresh the library index.
-
-Notes:
-- Images are an operator-authored library form; deletion is gated by an evidence-preservation guard so productive seat snapshots are not lost accidentally.
-- `pin` / `unpin` are the operator levers for explicit retention; `prune` honours them.
-
-### `rig context`
-
-Usage: `rig context <subcommand>` — browse, preview, compose, and manage operator-authored context packs. This noun never delivers; delivery belongs to `send`, `broadcast`, `walk`, and `queue create`.
-
-Subcommands:
-- `work-install [--project <id>] [--mission <id>] [--slice <id>] [--deliver] [--runtime <claude-code|claude|codex>] [--cwd <agent-working-directory>] [--topology <ids>] [--apply-skills] [--json]` — resolve project/mission/slice Markdown plus `project.yaml install.skills` in one plan. With `--runtime`, composes system, topology, and project selectors and reports per-skill provenance/status; `--apply-skills` safely reconciles the owned harness projection into `--cwd` (default: the caller's current working directory), not the workspace metadata directory. Omitting `--runtime` skips skill inspection regardless of `OPENRIG_RUNTIME`; applying skills requires an explicit runtime.
-- `profile <name-or-ref> --situation <fresh|handover|post-compaction> [--runtime <claude-code|claude|codex>] [--profile <id>] [--budget <tokens>] [--rig <rig> --seat <seat>] [--mission <mission>] [--slice <slice>] [--json]` — compose the selected atom graph and explicitly granted context. Runtime defaults to `OPENRIG_RUNTIME`, otherwise Claude; an unknown nonempty environment value warns and falls back to Claude. An explicit flag overrides the environment.
-- `list [options]` — list all context packs in the library.
-- `show <name-or-ref> [options]` — show pack manifest + per-file metadata.
-- `preview <name-or-ref> [options]` — show the assembled bundle without delivering it.
-- `compose --out <ref> --from <files...>` — compose ordered files into a durable context ref without delivering it.
-- `sync [options]` — re-walk discovery roots and refresh the library index.
-- `add <source> [--git] [--checkout] [--pack <relative-path>] [--name <ref>] [--json]` — install a directory/manifest URL, or clone a Git repository with `--git`. Git discovery checks the repository-root manifest and `.openrig/context-packs`; multiple packs require an explicit `--pack`. `--checkout` selects an existing local checkout whose branch may be merged by an update.
-- `source inspect <ref> [--json]` — distinguish the selected revision/digest, current served edits, checkout branch/revision/status/conflicts, and locally known upstream divergence. It does not fetch or prove consumption.
-- `source update <ref> [--json]` — explicitly fetch and merge the selected checkout branch’s upstream, then publish its clean declared pack inputs. Dirty checkouts or edited served selections stop before update. Conflicts/unavailable upstream retain the old served selection and both Git sides.
-- `rm <ref> [options]` — remove a context pack by its path-like ref.
-
-Notes:
-- Context packs are operator-authored bundles of context (manifest + files) intended to prime a managed seat with a coherent starting context.
-- Both `profile` and `work-install` accept `claude-code`, its alias `claude`, and `codex`. Invalid explicit values fail during CLI argument parsing, before context lookup or projection. JSON metadata retains the consumer's existing keys: `profile.runtime` is `claude` or `codex`; `skillProjection.runtime` is `claude-code` or `codex`. Both Claude spellings produce the same selection and metadata within each command; manifest runtime keys remain unchanged.
-- For example, `rig context profile world-public --situation fresh --runtime claude-code` and `rig context work-install --runtime claude-code` use the same runtime spelling. Profile atoms that read seat context still require both `--rig` and `--seat`.
-- `preview` is the canonical read-only way to inspect the assembled content.
-- This command family is delivery-free; context-window inspection is not part of this noun.
-
-Git source example (use the intended instance and existing Git credentials):
-
-```bash
-rig context add <repository-path-or-URL> --git --name team-world
-rig context source inspect team-world --json
-# Edit/commit in the reported checkout with ordinary Git.
-rig context source update team-world --json
-rig context get team-world
-```
-
-Git selections copy only `manifest.yaml` and its declared files into the existing
-context library; `.openrig-git-source.json` records the retained checkout, pack,
-revision, selection time and digest. The checkout and previous selections live
-beside the configured library under `<context.root>-git-checkouts` and
-`<context.root>-git-history`. They are retained when a selected pack is removed.
-Local-only inspection compares against cached upstream refs; only explicit update
-contacts the remote. Git uses existing credentials, with terminal prompting disabled
-and a 60-second command timeout; a failure retains the checkout for native Git diagnosis.
-
-Commit local improvements in the checkout before updating. If someone edited the
-served copy directly, preserve those edits in the checkout and commit them; restore
-the served copy to its recorded selection explicitly before retrying. No automatic
-stash, reset, rebase, push or conflict strategy runs. A merge conflict remains in the
-checkout for an owning author to resolve/commit or abort with Git. Only then retry
-update. Selected bytes, successful `context get`, and a consumer demonstrably using
-them are separate facts. This command does not automatically adopt context in other
-instances or prove that an agent consumed it.
-
-### `rig workspace`
-
-Usage: `rig workspace <subcommand>` — Workspace Primitive (PL-007), v0 typed-kind tooling.
-
-Subcommands:
-- `validate [root] [--kind <kind>] [--no-recursive] [--require-frontmatter] [--max-files <n>] [--json]` — walk a workspace root, parse each `.md` file's YAML frontmatter, and emit a structured gap report. Advisory only — never modifies files. Default root: `cwd`. `--kind` validates against a specific workspace kind (`user | project | knowledge | lab | delivery`). `--max-files` (default `10000`) hard-caps the walk; v0.3.2 slice-01 GA enforces strict-int regex on this flag.
-- `doctor [--workspace <path>] [--strict] [--json]` — run an 8-check workspace-readiness diagnostic against the daemon's resolved workspace (workspace root, missions folder, file allowlist, daemon alignment, daemon reload, optional slice docs, current `NOTES.md` or readable legacy notes, and SDLC convention sections). Read-only. Default exit-code: non-zero only on `fail`; `--strict` makes warn-or-fail non-zero.
-
-Notes:
-- v0 surface was intentionally narrow (`validate` only); v0.3.2 added `doctor` as the operator-facing readiness diagnostic.
-- Future versions will add typed-kind authoring/refactor tooling on the same root walker.
-- See `rig config init-workspace` to scaffold a fresh default workspace.
-
-## Plugin Inspection (v0.3.1)
-
-One read-only top-level command added in v0.3.1 to inspect plugins
-discovered from `$OPENRIG_HOME/plugins/` (default `~/.openrig/plugins/`).
-No `install` verb at v0 — installation is explicit operator copy or
-symlink per each plugin's `OPENRIG-INSTALL.md`.
-
-### `rig plugin`
-
-Usage: `rig plugin <subcommand>` — read-only plugin inspection.
-
-Subcommands:
-- `list [options]` — list discoverable plugins (aggregated across vendored + runtime caches).
-- `show <id> [options]` — show plugin manifest + skills + hooks + mcp servers.
-- `used-by <id> [options]` — list agents referencing this plugin in their `profile.uses.plugins[]`.
-- `validate <path> [options]` — validate plugin manifest + skill frontmatter against the agentskills.io spec.
-
-Notes:
-- `used-by` includes bare `<id>` and `shared:<id>` profile references from user and shipped agents, even if the plugin is not installed. Resource definitions without a consuming profile are listed separately; JSON rows distinguish `kind: consumer` from `kind: definition`.
-- Plugin discovery aggregates `$OPENRIG_HOME/plugins/` (vendored at runtime by the operator) with the daemon's bundled plugin cache.
-- `openrig-core` ships bundled with the daemon (11 skills). Additional plugins (`gstack` — 45 skills; `obra-superpowers` — 14 skills) ship as substrate references for plugin authors to copy-install per the `OPENRIG-INSTALL.md` workflow inside each plugin's source tree.
-- A first-class `rig plugin install <substrate-path>` verb is deferred to 0.3.2.
-
-## Scope Tree Primitive (v0.3.2)
-
-One top-level command first shipped in v0.3.2 (`scopeCommand`,
-`packages/cli/src/index.ts:20,187`; defined in
-`packages/cli/src/commands/scope.ts`; release-0.3.2 slice 12). Operates
-the scope tree (missions, slices, sub-slices) per
-`conventions/scope-and-versioning`.
-
-### `rig scope`
-
-Usage: `rig scope <subcommand>` — scope tree primitive: missions, slices, sub-slices.
-
-Top-level option:
-- `--workspace <path>` — override workspace root (otherwise use the typed `workspace.slices_root` setting; `$OPENRIG_WORK_ROOT` remains a legacy override).
-
-Two subcommand groups: `slice` and `mission`.
-
-`rig scope slice <subcommand>` — slice-tier commands:
-- `ls [--mission <name>] [--state <state>] [--json]` — list slices in a mission (or across all missions). `--state` filter: `active | closed | shipped | all` (default `active`).
-- `show <slice-path> [--mission <name>] [--json]` — inspect a single slice (frontmatter + README + children). `slice-path` is absolute, relative-to-substrate, or `NN-slug`; `--mission` hints the mission when path is just `NN-slug`.
-- `create <mission> <slug> [--template <kind>] [--title <text>] [--intent <text>] [--depends-on <dot-id...>] [--json]` — create a mode-neutral slice scaffold: one intent-bearing `SPEC.md` with the three convention sections, `PROGRESS.md`, `PROOF.md`, and `proof/`. `depends_on` accepts same-mission sibling slice dot-IDs and is advisory build-order data. Every template kind emits the same file set; mode richness composes through the template seam.
-- `progress <slice-path> [--mission <name>] [--status <state>] [--milestone <text>] [--owner <session>] [--note <text>] [--json]` — **v0.4.0 (slice 33)** new verb: append / set / update progress entries deterministically. Writes the canonical structure the OpenRig PROGRESS UI page reads. Replaces hand-editing `PROGRESS.md` with markdown.
-- `stage <slice-path> <new-stage> [--mission <name>] [--successor <id>] [--json]` — **v0.4.0 (slice 35)** new verb: set the slice's `stage` frontmatter (wip / provisional / established / canonical / superseded / retired) deterministically. `superseded` REQUIRES `--successor <id>` (rejected otherwise + records the successor); `retired` warns "do not use"; invalid stages rejected with the valid set named.
-- `verified <slice-path> --against "<source>" [--mission <name>] [--json]` — **v0.4.0 (slice 35)** new verb: stamp the slice's `verified` line with `verified: <today> against <source>`. `--against` is MANDATORY (bare timestamps rejected — the anti-stale keystone per `conventions/scope-and-versioning` §2). Overwrites the prior verified line.
-- `reconcile <slice-path> [--mission <name>] [--json]` — **v0.4.0 (slice 35)** new verb: idempotent repair. Backfills missing `PROGRESS.md`, conforms mandatory frontmatter (`id` / `stage` / `verified`), and repairs id-registration ghosts (`id:null` / doubled-prefix). Safe to re-run.
-- `ship <slice-path> <release-mission> [--mission <name>] [--json]` — ship a slice to a release mission (preserves git history).
-- `close <slice-path> [--note <text>] [--mission <name>] [--json]` — close a slice (move to `<mission>/closed/`, update status). `--note` is an optional closure note.
-- `move <slice-path> <dest-mission> [--mission <name>] [--json]` — move a slice between missions (re-numbers in destination).
-
-`rig scope mission <subcommand>` — mission-tier commands:
-- `ls [--json]` — list missions (top-level folders with `README.md`).
-- `show <mission> [--json]` — inspect a single mission.
-- `create <name> [--template <kind>] [--id <dot-id>] [--title <text>] [--intent <text>] [--depends-on <dot-id...>] [--no-notes] [--json]` — create a mission with an intent-bearing `SPEC.md`, `NOTES.md`, `PROGRESS.md`, and `slices/`. `depends_on` accepts same-project sibling mission dot-IDs and is advisory build-order data. `--no-mission-notes` remains a deprecated alias for `--no-notes`; the old notes-template environment variable remains readable with an advisory.
-- `graph <mission> [--json]` — show slice dependency nodes, the current ready/waiting sets, and advisories for malformed, cross-parent, or absent dependencies. Stale edges never block or crash the reader.
-- `progress <mission> [--status <state>] [--milestone <text>] [--owner <session>] [--note <text>] [--json]` — **v0.4.0 (slice 33)** new verb: append / set / update progress entries on a mission's `PROGRESS.md` deterministically. UI-valid by construction.
-- `stage <mission> <new-stage> [--successor <id>] [--json]` — **v0.4.0 (slice 35)** new verb: set the mission's `stage` frontmatter deterministically. Same enum + `--successor`-required-for-superseded rules as the slice variant.
-- `verified <mission> --against "<source>" [--json]` — **v0.4.0 (slice 35)** new verb: stamp the mission's `verified` line. `--against` MANDATORY.
-- `reconcile <mission> [--json]` — **v0.4.0 (slice 35)** new verb: idempotent mission-tier repair (backfills `PROGRESS.md`, conforms frontmatter, repairs ghosts).
-
-Convention compliance: `rig scope` together with slice 33 (`PROGRESS.md` + scaffolding) and slice 35 (`stage` / `verified` / `reconcile`) makes `rig scope` the **deterministic enforcer** of `conventions/scope-and-versioning` (§1 dot-IDs, §2 maturity vocabulary). Agents update the convention through commands rather than hand-editing markdown.
-
-### SDLC control plane verbs (v0.4.4)
-
-The conventions these verbs operate live in ONE shipped document: `docs/reference/sdlc-conventions.md` (copied into the assembled CLI package); the operating procedure is the packaged `mission-slice-sop` skill.
-
-- `rig scope slice|mission approve <target> [--scope spec|delivery] [--actor <session>] [--on-behalf-of <human>] [--json]` — the two staged-approval locks, one daemon-side write path. `--scope spec` plan-locks the node's `SPEC.md`; `--scope delivery` (default) is terminal sign-off. Approval is freeze/sign-off, never proven-green.
-- `rig proof add <slice-path> --artifact-type <guard|qa|rev1-r1|rev1-r2|adjudication> --verdict <CLEAR|BLOCKING|CONCERNING|PASS|NOT-CLEAR> --candidate-sha <sha> --money-evidence "<line>" [--file <path>|--body <text>] [--evidences <refs>] [--media <refs>] [--self-check <text>] [--json]` — **v0.4.4 (slice 19 FR-8; `--media` via the corrective §3.4)** drop a proof artifact into `<slice>/proof/` with the machine-readable C1 header, validated at drop time (closed sets above). `--evidences` (item text or 1-based index) joins the drop to the slice's `## Proof contract` items — the pairing the Living Notes DELIVERED section renders; `--media` (proof/-relative refs, containment-checked, never absolute) names the curated media the drop stands behind, projected into the DELIVERED items' proof set. Contract/self-check outputs are advisories (exit 0), never gates.
-- `rig scope audit <mission> [--json]` — checks C1 headers and the one-SPEC convention (frontmatter `intent:` or a readable legacy Intent section, Mini-requirements, Proof contract, and current NOTES). It never requires a second PRD. All convention findings are advisory/fail-open.
-
-Notes:
-- Surface source-verified against `packages/cli/src/commands/scope.ts` at `51554eee` (v0.4.0 post-slice-35); SDLC control-plane verbs source-verified against `scope.ts` / `proof.ts` / `scope-audit.ts` in OPR.0.4.4.23.
-
-## Skill Cascade Audit (v0.4.0)
-
-One top-level command first shipped in v0.4.0 (slice 10 — skill / knowledge lifecycle curation, Hermes-informed). Defined in `packages/cli/src/commands/skill.ts`. Pairs with the daemon-side audit surface at `packages/daemon/src/routes/skills/audit.ts` + `mirror-drift` detection.
-
-### `rig skill`
-
-Usage: `rig skill <subcommand>`
-
-Subcommands:
-- `loadout --runtime <claude-code|codex> [--cwd <path>] [--project-root <path>] [--topology <ids>] [--apply] [--json]` — inspect the deterministic managed loadout selected by `catalog.yaml` system selectors, topology/profile selectors, and `project.yaml install.skills`. Reports selector reasons, catalog Git revision/content digest, target, and current/missing/shadowed/conflicting status. `--apply` writes exact bytes plus an ownership manifest, is idempotent, and refuses to overwrite or remove locally modified/unowned content.
-- `audit [--json] [--include-cache] [--severity <level>] [--rig <name>]` — read-only audit of the skill cascade. Detects provenance + freshness issues across the canonical → product mirror → hub cwd → installed plugin chain.
-
-Audit categories surfaced:
-- **`missing`** — a skill location in the cascade lacks a SKILL.md file but a sibling location has one (declares the cascade-relative gap).
-- **`stale`** — a SKILL.md file exists but is older than the canonical or has a content-hash mismatch.
-- **`self-referential`** — a SKILL.md provenance pointer references its own location instead of an upstream source.
-- **`invalid-date`** — frontmatter `last-verified` / `last-updated` is malformed or in the future.
-- **`mirror-drift`** — a downstream mirror copy diverges from canonical with no documented intentional fork.
-
-Notes:
-- **Read-only**: the audit does NOT mutate any skill file. Findings are routed back to the lifecycle (curation-steward) for shaped propagation runs.
-- **False-green prevention**: when mirror-drift evidence is unavailable for any reason (daemon offline, filesystem inaccessible), the CLI emits a clear `unable-to-audit` outcome with exit code `2` rather than reporting `clean`. This closes the failure mode the v0.3.4 wrap-gate AC-3 almost shipped ("Mirror sync verified via `npm run mirror-skills` clean" — that sync did not touch substrate canonical or hub cwd).
-- `--include-cache` includes packaged-installer cache copies in the audit (default skips because those are immutable post-ship).
-- `--severity <level>` filters output: `info` (default; everything), `warn` (stale + mirror-drift only), `error` (invalid-date + self-referential only).
-- `--rig <name>` narrows the audit to a single rig's embedded skill copies.
-- `--json` emits structured findings: `{cascade: [...locations...], findings: [{category, path, evidence, suggested-action}]}`.
-- Exit codes: `0` clean, `1` findings present, `2` unable to audit.
-
-Composes with the existing `scripts/mirror-skills.mjs` guardrails — the audit detects what `mirror-skills` would also catch, plus the canonical / hub cwd layers that script doesn't touch.
-
-## Operator Context-Mode Bindings (v0.3.2)
-
-One top-level command first shipped in v0.3.2 as `rig policy`
-(release-0.3.2 slice 09), renamed to `rig mode` in 0.5.2 per the PM
-ruling RULING-rig-mode-rig-policy-naming (clean rename, no alias —
-zero adoption confirmed; `rig policy` is being reintroduced as the
-permission-policy verb). Defined in `rigModeCommand`
-(`packages/cli/src/commands/rig-mode.ts`). Pairs with the daemon's
-typed-primitive store at
-`packages/daemon/src/db/migrations/041_rig_policy.ts` (DB artifact
-names keep their shipped forms). Operates the operator context-mode
-binding surface (sleep / desk / mobile / away / focus / debug) used by
-mode-aware agent posture.
-
-### `rig mode`
-
-Usage: `rig mode <subcommand>`
-
-Subcommands:
-- `set <mode> [--scope <scope>] [--qualifier <id>] [--<field> ...] [--evidence <citation>] [--confirm] [--bearer <token>] [--json]` — propose a binding. Without `--confirm` the CLI echoes the proposed binding and exits with `exit 2` so scripts cannot accidentally apply; `--confirm` is the explicit operator action. `<scope>` is one of `global_host | rig | workstream | qitem` (defaults to the per-mode recommendation). `--qualifier <id>` is required for `rig | workstream | qitem` scopes and rejected for `global_host`. Per-field tuning flags: `--autonomy-scope`, `--heartbeat-cadence`, `--inspection-depth`, `--update-detail`, `--escalation-threshold`, `--concurrency-limit`, `--permission-prompt-posture` (one of `normal | batch_for_human | do_not_prompt_unless_blocked`; `auto_accept` is FORBIDDEN by convention), `--expiry-or-stale-rule`. `--evidence` carries a free-text operator citation (message id, file pointer, chatroom topic, etc.).
-- `show [--json]` — list all operator-context-mode bindings.
-- `effective [--rig <id>] [--workstream <id>] [--qitem <id>] [--json]` — resolve the effective mode for a (rig, workstream, qitem) read context. Surfaces `unknown_posture` when no binding matches.
-- `cite [--rig <id>] [--workstream <id>] [--qitem <id>]` — emit the short-prose citation line for the effective mode at the read context (per convention §Citation Rules).
-- `unset <scope> [qualifier] [--bearer <token>] [--json]` — delete one binding (operator-only).
-- `defaults [--json]` — print the recommended per-mode 6×7 field defaults + default-scope mapping + stale rule.
-
-Notes:
-- The 6 modes are `sleep | desk | mobile | away | focus | debug`. Bare-word invocation is accepted (`set desk`); `mode:<word>` is the disambiguated prefix form.
-- Restate-and-confirm posture (HG-4): `set` is restate-only until `--confirm` is passed. This prevents accidental script application.
-- `--qualifier` strict reject for `global_host` (HG-7 guard finding): operators who type `--scope global_host --qualifier <id>` get an error and the daemon is never contacted. The CLI does NOT silently drop the qualifier.
-- Operator-edit mutations (`set --confirm`, `unset`) require an operator bearer token (`--bearer` or `OPENRIG_AUTH_BEARER_TOKEN` env).
-- Surface source-verified against `packages/cli/src/commands/rig-mode.ts` at `b13a8e4c7` (0.5.2 rename).
-
-### `rig policy`
-
-Usage: `rig policy <subcommand>` — the top-level PERMISSION-POLICY verb, introduced in 0.5.2 after
-the context-mode verb moved to `rig mode` (RULING-rig-mode-rig-policy-naming). OpenRig bakes NO
-allow/ask/deny permission policy — the harness-native permissions are the control surface. This verb
-TEACHES and RECORDS into RigSpec (`permission_policy: builtin:<name> | none`); it never enforces at
-runtime.
-
-Subcommands:
-- `list [--json]` — the built-in templates (`locked | standard | open | yolo`) plus the reserved
-  deliberate-`none` choice, each with its ref form.
-- `show <name> [--json]` — one choice: its ref form and what recording it means.
-- `current --spec <path> [--json]` — the `permission_policy` value recorded in a rig spec and how it
-  classifies (absent = the floor; `none` = deliberate; `builtin:<name>`; custom relative path).
-- `apply <name> --spec <path> [--json]` — record the choice into an EXISTING spec via the same
-  comment-preserving flow as `rig setup --policy` (which stays as the setup-step composition, not an
-  alias). A new install has no spec; nothing is written and the floor holds by absence.
-
-## Commands Not Present
-
-These are not current top-level `rig` commands:
-- `rig claim`
-- `rig blame`
-- `rig replay`
-
-If older docs or habits mention them, treat those references as stale.
+This inspects registration, not action semantics or availability of a running
+daemon. [`index.ts`](../../packages/cli/src/index.ts) imports the command
+factories; their implementations live in
+[`packages/cli/src/commands/`](../../packages/cli/src/commands/).
+The tables below retain registration order. Only the command/argument/alias/
+option cells are mechanically transcribed; the explanations above are authored.
+
+## Registered command tree
+
+Root: `rig`; declared option: `-V, --version`.
+
+### start
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig start` | — | `--last`<br>`--all`<br>`--rigs <names...>`<br>`--json` |
+
+### daemon
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig daemon` | — | — |
+| `rig daemon start` | — | `--port <port>`<br>`--host <host>`<br>`--db <path>`<br>`--no-kernel`<br>`--wait-for-kernel`<br>`--wait-for-kernel-ms <ms>` |
+| `rig daemon stop` | — | — |
+| `rig daemon status` | — | — |
+| `rig daemon logs` | — | `--follow` |
+
+### status
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig status` | — | — |
+
+### snapshot
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig snapshot <rigId>` | — | `--intended-seats <ids>` |
+| `rig snapshot list <rigId>` | — | — |
+
+### restore
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig restore` | — | — |
+| `rig restore apply <snapshotId>` (hidden) | — | `--rig <rigId>` **required** |
+| `rig restore status <attemptId>` | — | `--rig <rigId>` **required**<br>`--json` |
+
+### crash-cart
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig crash-cart` | — | `--json` |
+
+### gateway
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig gateway` | — | — |
+| `rig gateway human` | — | — |
+| `rig gateway human add <entityId>` | — | `--display-name <name>` **required**<br>`--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>` **required** (repeatable)<br>`--delivery-class <A\|B\|C\|D>` **required**<br>`--away`<br>`--replace`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig gateway human list` | — | `--json` |
+| `rig gateway human show <entityId>` | — | `--json` |
+| `rig gateway human set <entityId> <field> <value>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig gateway human remove <entityId>` | — | `--force` |
+
+### parked
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig parked [seat]` | — | `--rig <rig>`<br>`--json` |
+
+### export
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig export <rigId>` | — | `-o, --output <path>` |
+
+### import
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig import <path>` | — | `--instantiate`<br>`--materialize-only`<br>`--workspace-only`<br>`--preflight`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--cwd <path>` |
+
+### ui
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig ui` | — | — |
+| `rig ui open` | — | — |
+
+### tui
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig tui` | — | `--shared` |
+| `rig tui commands` | — | `--json` |
+
+### package
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig package` | — | — |
+| `rig package validate <path>` | — | — |
+| `rig package plan <path>` | — | `--target <dir>`<br>`--runtime <runtime>`<br>`--role <name>` |
+| `rig package install <path>` | — | `--target <dir>`<br>`--runtime <runtime>`<br>`--role <name>`<br>`--allow-merge` |
+| `rig package rollback <installId>` | — | — |
+| `rig package list` | — | — |
+
+### bootstrap
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig bootstrap <spec>` | — | `--plan`<br>`--yes`<br>`--cwd <path>`<br>`--target <path>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
+
+### requirements
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig requirements <spec>` | — | `--json` |
+
+### discover
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig discover` | — | `--json`<br>`--draft` |
+
+### attach
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig attach` | — | `--self` **required**<br>`--rig <rigId>` **required**<br>`--node <logicalId>`<br>`--pod <namespace>`<br>`--member <name>`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--display-name <name>`<br>`--print-env`<br>`--json` |
+
+### bind
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig bind <discoveredId>` | — | `--rig <rigId>` **required**<br>`--node <logicalId>`<br>`--pod <namespace>`<br>`--member <name>` |
+
+### adopt
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig adopt <path>` | — | `--bind <logicalId=tmuxSessionOrDiscoveryId>` (repeatable)<br>`--bindings-file <path>`<br>`--target-rig <rigId>`<br>`--rig-root <root>`<br>`--json` |
+
+### bundle
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig bundle` | — | — |
+| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--context-pack <dir>` (repeatable)<br>`--project-dir <dir>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
+| `rig bundle configurations <spec>` | — | `--json` |
+| `rig bundle inspect <path>` | — | `--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--json` |
+| `rig bundle install <path>` | — | `--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--target <root>`<br>`--cwd <path>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
+| `rig bundle check <folder>` | — | `--json` |
+| `rig bundle history` | — | `--rig <name>`<br>`--since <iso>`<br>`--json` |
+
+### up
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
+
+### down
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig down <rig>` | — | `--delete`<br>`--force`<br>`--snapshot`<br>`--json`<br>`--host <id>` |
+
+### archive
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig archive <rigId>` | — | `--force`<br>`--json` |
+
+### unarchive
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig unarchive <rigId>` | — | `--json` |
+
+### host
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig host` | — | — |
+| `rig host add` | — | `--id <id>` **required**<br>`--transport <transport>` **required**<br>`--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--bearer-env <name>`<br>`--bearer-file <path>`<br>`--notes <text>`<br>`--json` |
+| `rig host select <id>` | — | `--json` |
+| `rig host rename <name>` | — | `--json` |
+| `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
+| `rig host list` | `ls` | `--json` |
+| `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
+
+### ps
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig ps` | — | `--json`<br>`--no-cleanup`<br>`--resources`<br>`--nodes`<br>`--full`<br>`--verbose`<br>`--limit <n>`<br>`--fields <list>`<br>`--summary`<br>`--filter <key=value>`<br>`--active`<br>`--running`<br>`-A, --all-rigs`<br>`--rig <name>`<br>`--session <name>`<br>`--include-archived`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>` |
+
+### roster
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig roster` | — | — |
+| `rig roster list` | — | `--folder <path>`<br>`--json` |
+| `rig roster show <id>` | — | `--folder <path>`<br>`--json` |
+| `rig roster find <query>` | — | `--folder <path>`<br>`--json` |
+
+### mcp
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig mcp` | — | — |
+| `rig mcp serve` | — | `--port <port>` |
+
+### agent
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig agent` | — | — |
+| `rig agent validate <path>` | — | `--json` |
+
+### spec
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig spec` | — | — |
+| `rig spec show <rig-id>` | — | `--json`<br>`--as-template` |
+| `rig spec audit <path>` | — | `--json` |
+| `rig spec validate <path>` | — | `--json` |
+| `rig spec preflight <path>` | — | `--rig-root <root>`<br>`--json` |
+
+### transcript
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig transcript <session>` | — | `--tail <lines>`<br>`--grep <pattern>`<br>`--host <id>`<br>`--json` |
+
+### send
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--reason <text>`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
+
+### stream
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig stream` | — | — |
+| `rig stream emit` | — | `--source <session>` **required**<br>`--body <text>` **required**<br>`--hint-destination <session>`<br>`--hint-type <type>`<br>`--hint-urgency <urgency>`<br>`--hint-tags <tags>`<br>`--format <fmt>`<br>`--interrupt`<br>`--id <streamItemId>`<br>`--json` |
+| `rig stream list` | — | `--source <session>`<br>`--hint-destination <session>`<br>`--tag <tag>`<br>`--since <iso>`<br>`--until <iso>`<br>`--limit <n>`<br>`--after <sortKey>`<br>`--include-archived`<br>`--json` |
+| `rig stream watch` | — | `--json` |
+| `rig stream show <streamItemId>` | — | `--json` |
+| `rig stream archive <streamItemId>` | — | `--json` |
+
+### queue
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig queue` | — | — |
+| `rig queue create` | — | `--source <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--body-context <ref>`<br>`--mission <id>`<br>`--slice <id>`<br>`--gate <role>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--expires-at <iso>`<br>`--id <qitemId>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--human-intent <intent>`<br>`--human-detail-file <path>`<br>`--reply-to <qitemId>`<br>`--human-questions-file <path>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--verify`<br>`--json` |
+| `rig queue claim <qitemId>` | — | `--destination <session>`<br>`--json` |
+| `rig queue unclaim <qitemId>` | — | `--destination <session>`<br>`--reason <text>`<br>`--json` |
+| `rig queue update <qitemId>` | — | `--actor <session>`<br>`--state <state>`<br>`--reopen`<br>`--closure-reason <reason>`<br>`--closure-target <target>`<br>`--blocked-on <blocker>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--json` |
+| `rig queue block <qitemId>` | — | `--on <blocker>` **required**<br>`--actor <session>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--note <text>`<br>`--continuation <text>`<br>`--wake-watchdog <jobId>`<br>`--wake-after <duration>`<br>`--json` |
+| `rig queue resolve <qitemId>` | — | `--decision <text>` **required**<br>`--actor <session>`<br>`--bearer <token>`<br>`--no-notify`<br>`--json` |
+| `rig queue handoff <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--json` |
+| `rig queue handoff-and-complete <qitemId>` | — | `--from <session>`<br>`--to <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--note <text>`<br>`--priority <priority>`<br>`--tier <tier>`<br>`--tags <tags>`<br>`--gate <role>`<br>`--target-repo <name>`<br>`--summary <text>`<br>`--evidence-ref <path>`<br>`--host <id>`<br>`--no-nudge`<br>`--json` |
+| `rig queue whoami` | — | `--session <session>`<br>`--recent-limit <n>`<br>`--json` |
+| `rig queue fallback <qitemId>` | — | `--destination <session>` **required**<br>`--reason <text>`<br>`--json` |
+| `rig queue show <qitemId>` | — | `--full`<br>`--json` |
+| `rig queue transitions <qitemId>` | — | `--json` |
+| `rig queue list` | — | `-a, --all`<br>`-A, --all-rigs`<br>`--full`<br>`--owned`<br>`--mine`<br>`-o <format>`<br>`--destination <session>`<br>`--source <session>`<br>`--state <state>`<br>`--target-repo <name>`<br>`--limit <n>`<br>`--json` |
+| `rig queue overdue` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
+| `rig queue undelivered` | — | `--rig <name>`<br>`-A, --all-rigs`<br>`--full`<br>`--limit <n>`<br>`--json` |
+| `rig queue inbox-drop <destinationSession>` | — | `--sender <session>`<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <inboxId>`<br>`--json` |
+| `rig queue inbox-absorb <inboxId>` | — | `--receiver <session>` **required**<br>`--json` |
+| `rig queue inbox-deny <inboxId>` | — | `--receiver <session>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig queue inbox-pending <destinationSession>` | — | `--json` |
+| `rig queue outbox-record` | — | `--sender <session>`<br>`--destination <session>` **required**<br>`--body <text>`<br>`--body-file <path>`<br>`--tags <tags>`<br>`--urgency <urgency>`<br>`--audit <pointer>`<br>`--id <outboxId>`<br>`--json` |
+| `rig queue outbox-list <senderSession>` | — | `--limit <n>`<br>`--json` |
+
+### slack
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig slack` | — | — |
+| `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack status` | — | `--json` |
+| `rig slack manifest` | — | `--url`<br>`--json` |
+| `rig slack verify` | — | `--json`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack channel-map` | — | — |
+| `rig slack channel-map list` | — | `--json` |
+| `rig slack channel-map set <match> <channel>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig slack channel-map remove <match>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig slack enable` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig slack disable` | — | `--reason <reason>` **required**<br>`--actor <actor>` |
+| `rig slack outbound` | — | `--json` |
+| `rig slack inbound` | — | — |
+
+### project
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig project` | — | — |
+| `rig project experimental` | — | — |
+| `rig project experimental enable` | — | `--config <file>` **required**<br>`--max-requests <n>`<br>`--timeout-ms <n>`<br>`--json` |
+| `rig project experimental disable` | — | `--config <file>` **required**<br>`--max-requests <n>`<br>`--timeout-ms <n>`<br>`--json` |
+| `rig project experimental status` | — | `--config <file>` **required**<br>`--max-requests <n>`<br>`--timeout-ms <n>`<br>`--json` |
+| `rig project experimental capture` | — | `--config <file>` **required**<br>`--input <file>` **required**<br>`--output <file>` **required**<br>`--json` |
+| `rig project candidates` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
+| `rig project wake` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
+| `rig project shadow-status` | — | — |
+| `rig project shadow-drain` | — | `--actor <name>` |
+| `rig project shadow-stop` | — | `--actor <name>` |
+| `rig project lease-acquire` | — | `--session <session>` **required**<br>`--evaluate-deadness-first`<br>`--json` |
+| `rig project lease-heartbeat` | — | `--lease-id <id>` **required**<br>`--session <session>` **required**<br>`--json` |
+| `rig project lease-show` | — | `--json` |
+| `rig project reclaim-classifier` | — | `--session <session>` **required**<br>`--if-dead`<br>`--reason <text>`<br>`--json` |
+| `rig project classify <streamItemId>` | — | `--session <session>` **required**<br>`--lease-id <id>` **required**<br>`--attempt-id <id>`<br>`--execution-id <id>`<br>`--type <type>`<br>`--urgency <urgency>`<br>`--maturity <maturity>`<br>`--confidence <confidence>`<br>`--destination <destination>`<br>`--action <action>`<br>`--area <area>`<br>`--scope-ref <id>`<br>`--duplicate-of <streamItemId>`<br>`--needs-human <value>`<br>`--classifier-version <v>`<br>`--taxonomy-version <v>`<br>`--candidate-set-version <v>`<br>`--json` |
+| `rig project list` | — | `--session <session>`<br>`--destination <destination>`<br>`--area <area>`<br>`--scope-ref <id>`<br>`--needs-human <value>`<br>`--limit <n>`<br>`--json` |
+| `rig project show <projectId>` | — | `--json` |
+
+### view
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig view` | — | — |
+| `rig view list` | — | `--json` |
+| `rig view show <viewName>` | — | `--rig <rig>`<br>`--limit <n>`<br>`--mission <id>`<br>`--project <name>`<br>`--json` |
+| `rig view register` | — | `--name <name>` **required**<br>`--definition <sql>` **required**<br>`--session <session>` **required**<br>`--json` |
+
+### terminal
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig terminal` | — | — |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal views` | — | `--json` |
+| `rig terminal status` | — | `--provider <name>`<br>`--json` |
+
+### watchdog
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig watchdog` | — | — |
+| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
+| `rig watchdog list` | — | `-a, --all`<br>`--full`<br>`--limit <n>`<br>`--json` |
+| `rig watchdog show <jobId>` | — | `--json` |
+| `rig watchdog status <jobId>` | — | `--json` |
+| `rig watchdog stop <jobId>` | — | `--reason <text>`<br>`--json` |
+
+### workflow
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig workflow` | — | — |
+| `rig workflow validate <specPath>` | — | `--json` |
+| `rig workflow compile <missionPath>` | — | `--operation-key <key>`<br>`--json` |
+| `rig workflow revise <instanceId>` | — | `--apply`<br>`--expected-version <number>`<br>`--expected-digest <sha256>`<br>`--operation-key <key>`<br>`--actor-session <session>`<br>`--reason <text>`<br>`--json` |
+| `rig workflow operation <key>` | — | `--json` |
+| `rig workflow instantiate-lifecycle <missionPath>` | — | `--operation-key <key>` **required**<br>`--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--json` |
+| `rig workflow instantiate <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--json` |
+| `rig workflow project` | — | `--instance <id>` **required**<br>`--current-packet <qitem-id>` **required**<br>`--exit <kind>` **required**<br>`--actor-session <session>` **required**<br>`--result-note <text>`<br>`--evidence-ref <ref>`<br>`--wait-for-proof <scope>`<br>`--blocked-on <ref>`<br>`--next-owner <session>`<br>`--acceptance-candidate <identity>`<br>`--acceptance-verdict <verdict>`<br>`--acceptance-evidence-ref <path>`<br>`--json` |
+| `rig workflow list` | — | `--status <s>`<br>`--json` |
+| `rig workflow specs` | — | `--json` |
+| `rig workflow guidance <instanceId>` | — | `--packet <id>`<br>`--component <id>`<br>`--full`<br>`--json` |
+| `rig workflow show <instanceId>` | — | `--json` |
+| `rig workflow trace <instanceId>` | — | `--json` |
+| `rig workflow continue <instanceId>` | — | `--json` |
+| `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--json` |
+| `rig workflow watch <instanceId>` | — | `--json` |
+| `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` **required**<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
+| `rig workflow resume <instanceId>` | — | `--actor-session <session>` **required**<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--json` |
+| `rig workflow abort <instanceId>` | — | `--reason <text>` **required**<br>`--actor-session <session>` **required**<br>`--json` |
+| `rig workflow status` | — | `--json` |
+
+### capture
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--host <id>`<br>`--json` |
+
+### broadcast
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig broadcast [text]` | — | `--rig <name>`<br>`--pod <name>`<br>`--force`<br>`--host <id>`<br>`--context <ref>`<br>`--json` |
+
+### walk
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig walk <seat>` | — | `--through <items...>`<br>`--through-profile <ref>`<br>`--situation <situation>`<br>`--runtime <runtime>`<br>`--profile <profile>`<br>`--rig <rig>`<br>`--seat-grant <seat>`<br>`--mission <mission>`<br>`--slice <slice>`<br>`--budget <tokens>`<br>`--pace <duration>`<br>`--consume-timeout <duration>`<br>`--consume-poll <duration>`<br>`--turn-timeout <duration>`<br>`--json` |
+
+### ask
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig ask <rig> <question>` | — | `--json`<br>`--seat <session-name>`<br>`--session <token>`<br>`--wake <seat[@gen]\|token>`<br>`--runtime <runtime>`<br>`--wake-timeout <seconds>` |
+
+### chatroom
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig chatroom` | — | — |
+| `rig chatroom send <rig> <message>` | — | `--sender <name>` |
+| `rig chatroom history <rig>` | — | `--topic <name>`<br>`--after <id>`<br>`--since <timestamp>`<br>`--sender <name>`<br>`--limit <n>`<br>`--json` |
+| `rig chatroom watch <rig>` | — | `--tmux` |
+| `rig chatroom topic <rig> <topic-name>` | — | `--body <text>`<br>`--sender <name>` |
+| `rig chatroom wait <rig>` | — | `--after <id>`<br>`--topic <name>`<br>`--sender <name>`<br>`--timeout <seconds>`<br>`--json` |
+| `rig chatroom clear <rig>` | — | — |
+
+### specs
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig specs` | — | — |
+| `rig specs ls` | — | `--kind <kind>`<br>`--json` |
+| `rig specs show <name-or-id>` | — | `--kind <kind>`<br>`--json` |
+| `rig specs preview <name-or-id>` | — | `--kind <kind>`<br>`--json` |
+| `rig specs add <path>` | — | `--json` |
+| `rig specs sync` | — | `--json` |
+| `rig specs remove <name-or-id>` | — | `--json` |
+| `rig specs rename <name-or-id> <new-name>` | — | `--json` |
+
+### context
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig context` | — | — |
+| `rig context work-install` | — | `--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--deliver`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--topology <ids>`<br>`--apply-skills`<br>`--json` |
+| `rig context trace` | — | `--rig <rig>` **required**<br>`--pod <pod>`<br>`--seat <seat>`<br>`--name <file>` **required**<br>`--json` |
+| `rig context compose` | — | `--out <ref>` **required**<br>`--from <files...>` **required** |
+| `rig context list` | — | `--json` |
+| `rig context show <name-or-ref>` | — | `--json` |
+| `rig context preview <name-or-ref>` | — | `--json` |
+| `rig context get <name-or-ref>` | — | `--json` |
+| `rig context profile <name-or-ref>` | — | `--situation <situation>` **required**<br>`--runtime <runtime>`<br>`--profile <profile>`<br>`--budget <tokens>`<br>`--rig <rig>`<br>`--seat <seat>`<br>`--mission <mission>`<br>`--slice <slice>`<br>`--json` |
+| `rig context recap-write` | — | `--rig <rig>` **required**<br>`--seat <seat>` **required**<br>`--file <path>` **required** |
+| `rig context sync` | — | `--json` |
+| `rig context add <source>` | — | `--name <name>`<br>`--git`<br>`--checkout`<br>`--pack <path>`<br>`--json` |
+| `rig context source` | — | — |
+| `rig context source inspect <ref>` | — | `--json` |
+| `rig context source update <ref>` | — | `--json` |
+| `rig context rm <ref>` | — | `--json` |
+
+### plugin
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig plugin` | — | — |
+| `rig plugin list` | — | `--runtime <runtime>`<br>`--source <source>`<br>`--json` |
+| `rig plugin show <id>` | — | `--json` |
+| `rig plugin used-by <id>` | — | `--json` |
+| `rig plugin validate <path>` | — | `--json` |
+
+### skill
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig skill` | — | — |
+| `rig skill loadout` | — | `--runtime <runtime>` **required**<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
+| `rig skill audit` | — | `--json` |
+
+### agent-image
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig agent-image` | — | — |
+| `rig agent-image list` | — | `--runtime <runtime>`<br>`--json` |
+| `rig agent-image show <name-or-id>` | — | `--json` |
+| `rig agent-image preview <name-or-id>` | — | `--json` |
+| `rig agent-image create <source-session>` | — | `--name <name>` **required**<br>`--image-version <version>`<br>`--notes <text>`<br>`--estimated-tokens <n>`<br>`--lineage <names...>`<br>`--json` |
+| `rig agent-image delete <name-or-id>` | — | `--force`<br>`--json` |
+| `rig agent-image pin <name-or-id>` | — | `--json` |
+| `rig agent-image unpin <name-or-id>` | — | `--json` |
+| `rig agent-image prune` | — | `--dry-run`<br>`--force`<br>`--json` |
+| `rig agent-image sync` | — | `--json` |
+
+### fork
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig fork <source-session>` | — | `--rig <rig-id>` **required**<br>`--pod <pod-namespace>` **required**<br>`--member <member-id>` **required**<br>`--keep-image`<br>`--image-name <name>`<br>`--image-version <version>`<br>`--rig-root <path>`<br>`--json` |
+
+### workspace
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig workspace` | — | — |
+| `rig workspace validate [root]` | — | `--kind <kind>`<br>`--no-recursive`<br>`--require-frontmatter`<br>`--max-files <n>`<br>`--json` |
+| `rig workspace doctor` | — | `--workspace <path>`<br>`--json`<br>`--strict` |
+
+### mode
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig mode` | — | — |
+| `rig mode set <mode>` | — | `--scope <scope>`<br>`--qualifier <id>`<br>`--autonomy-scope <v>`<br>`--heartbeat-cadence <v>`<br>`--inspection-depth <v>`<br>`--update-detail <v>`<br>`--escalation-threshold <v>`<br>`--concurrency-limit <v>`<br>`--permission-prompt-posture <v>`<br>`--expiry-or-stale-rule <v>`<br>`--evidence <citation>`<br>`--confirm`<br>`--bearer <token>`<br>`--json` |
+| `rig mode show` | — | `--json` |
+| `rig mode effective` | — | `--rig <id>`<br>`--project <id>`<br>`--mission <id>`<br>`--workstream <id>`<br>`--qitem <id>`<br>`--json` |
+| `rig mode cite` | — | `--rig <id>`<br>`--project <id>`<br>`--mission <id>`<br>`--workstream <id>`<br>`--qitem <id>` |
+| `rig mode unset <scope> [qualifier]` | — | `--bearer <token>`<br>`--json` |
+| `rig mode defaults` | — | `--json` |
+
+### policy
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig policy` | — | — |
+| `rig policy permissions` | — | — |
+| `rig policy permissions list` | — | `--spec <path>`<br>`--json` |
+| `rig policy permissions show <nameOrRef>` | — | `--spec <path>`<br>`--json` |
+| `rig policy permissions current` | — | `--spec <path>` **required**<br>`--json` |
+| `rig policy permissions apply <name>` | — | `--spec <path>` **required**<br>`--json` |
+| `rig policy list` | — | `--spec <path>`<br>`--json` |
+| `rig policy show <nameOrRef>` | — | `--spec <path>`<br>`--json` |
+| `rig policy current` | — | `--spec <path>` **required**<br>`--json` |
+| `rig policy apply <name>` | — | `--spec <path>` **required**<br>`--json` |
+
+### whoami
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig whoami` | — | `--node-id <id>`<br>`--session <name>`<br>`--host <id>`<br>`--all-hosts`<br>`--hosts <ids>`<br>`--json`<br>`--full`<br>`--verbose` |
+
+### config
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig config` | — | `--json`<br>`--with-source` |
+| `rig config get <key>` | — | `--json`<br>`--show-source` |
+| `rig config set <key> <value>` | — | — |
+| `rig config reset [key]` | — | — |
+| `rig config init-workspace` | — | `--root <path>`<br>`--force`<br>`--dry-run`<br>`--json` |
+
+- `init-workspace` — `rig config init-workspace` creates missing `missions/`, `exhaust/`, `SPEC.md`, `project.yaml`, `workspace.yaml`, and `.gitignore` entries at the configured workspace root (or `--root <path>`). Initialization is additive and preserves existing files; a complete six-entry scaffold is a no-op. `--force` is deprecated compatibility and still preserves existing files. `--dry-run` reports planned additions without writing; incompatible path types are reported before any writes.
+
+### file
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig file` | — | — |
+| `rig file copy <src> <dst>` | — | `--dry-run`<br>`--json` |
+
+### preflight
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig preflight` | — | `--json` |
+
+### auth
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig auth` | — | — |
+| `rig auth status` | — | `--runtime <runtime>` |
+| `rig auth list` | — | `--runtime <runtime>` |
+| `rig auth save <profile>` | — | `--runtime <runtime>` |
+| `rig auth switch <profile>` | — | `--runtime <runtime>` |
+| `rig auth validate <profile>` | — | `--runtime <runtime>` |
+| `rig auth seats` | — | — |
+| `rig auth seats list` | — | `--runtime <runtime>` |
+| `rig auth seats show <seat>` | — | `--runtime <runtime>` |
+| `rig auth seats set` | — | `--runtime <runtime>`<br>`--seat <seat>` **required**<br>`--rig <rig>` **required**<br>`--cwd <cwd>`<br>`--profile <profile>` |
+| `rig auth seats report` | — | `--runtime <runtime>` |
+
+### provider
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig provider` | — | — |
+| `rig provider status` | — | `--json` |
+| `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
+| `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
+| `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
+| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
+| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+
+### usage
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig usage` | — | — |
+| `rig usage top` | — | `--window <duration>`<br>`--top <n>`<br>`--json` |
+| `rig usage series` | — | `--seat <session>`<br>`--lane <lane>`<br>`--since <iso>`<br>`--until <iso>`<br>`--limit <n>`<br>`--json` |
+
+### telemetry
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig telemetry` | — | — |
+| `rig telemetry events` | — | `--cursor <token>`<br>`--limit <n>`<br>`--json`<br>`--start <mode>`<br>`--node <id>`<br>`--rig <id>` |
+| `rig telemetry transitions` | — | `--cursor <token>`<br>`--limit <n>`<br>`--json`<br>`--start <mode>`<br>`--qitem <id>` |
+| `rig telemetry tenures <node-id>` | — | `--cursor <token>`<br>`--limit <n>`<br>`--json` |
+
+### health
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig health` | — | `--self`<br>`--seat <node-id>`<br>`--rig <rig-id>`<br>`--instance [instance-id]`<br>`--severity <severity>`<br>`--status <status>`<br>`--limit <count>`<br>`--json`<br>`--actor <name>` |
+| `rig health explain <finding-id>` | — | `--json` |
+| `rig health policy` | — | `--file <path>`<br>`--json` |
+| `rig health checkpoint` | — | `--file <path>`<br>`--json` |
+| `rig health diagnose` | — | `--apply`<br>`--json` |
+| `rig health diagnosis` | — | — |
+| `rig health diagnosis list` | — | `--json`<br>`--full` |
+| `rig health diagnosis show <qitem-id>` | — | `--json`<br>`--full` |
+| `rig health diagnosis record <qitem-id>` | — | `--file <path>` **required**<br>`--json` |
+| `rig health diagnosis notify <qitem-id>` | — | `--json` |
+
+### doctor
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig doctor` | — | `--json`<br>`--spec <path>` |
+
+### expand
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig expand <rig-id> <pod-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
+
+### add
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig add <rig-id> <pod-namespace> <member-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
+
+### create
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig create <name>` | — | `--runtime <runtime>`<br>`--cwd <path>`<br>`--json` |
+
+### grow
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig grow <rig-id> <members...>` | — | `--pod <pod>`<br>`--new-pod <pod>`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--json` |
+
+### reconcile-session
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig reconcile-session <session>` | — | `--rig <rigId>`<br>`--node <logicalId>`<br>`--no-launch`<br>`--json` |
+
+### env
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig env` | — | — |
+| `rig env status <rig>` | — | `--json` |
+| `rig env logs <rig> [service]` | — | `--tail <n>` |
+| `rig env down <rig>` | — | `--volumes` |
+
+### unclaim
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig unclaim <sessionRef>` | — | `--json` |
+
+### release
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig release <rigId>` | — | `--delete`<br>`--json` |
+
+### launch
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig launch <rigId> [nodeRef]` | — | `--seats <ids>`<br>`--hold-reason <reason>`<br>`--snapshot-id <id>`<br>`--retry-startup-from <member-file>`<br>`--rig-root <path>`<br>`--plan`<br>`--json`<br>`--host <id>` |
+
+### remove
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig remove <rigId> <nodeRef>` | — | `--fallback <live-seat>`<br>`--json` |
+
+### shrink
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig shrink <rigId> <podRef>` | — | `--fallback <live-seat>`<br>`--json` |
+
+### destroy
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig destroy` | — | `--state`<br>`--all`<br>`--backup`<br>`--yes`<br>`--confirm <token>` |
+
+### setup
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--policy <name>`<br>`--spec <path>` |
+
+### restore-check
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig restore-check` | — | `--json`<br>`--full`<br>`--ready`<br>`--rig <name>`<br>`--no-queue`<br>`--no-hooks` |
+
+### restore-packet
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig restore-packet` | — | — |
+| `rig restore-packet write` | — | `--source-session <session>`<br>`--source-jsonl <path>`<br>`--source-runtime <runtime>`<br>`--target <dir>` **required**<br>`--target-rig <rig>`<br>`--target-runtime <runtime>`<br>`--target-workspace-root <path>`<br>`--default-target-repo <path>`<br>`--role-pointer <path>`<br>`--current-work-summary <text>`<br>`--next-owner <name>`<br>`--caveat <text>` (repeatable)<br>`--authority-boundaries <text>`<br>`--source-trust-ranking <csv>`<br>`--generator-version <version>`<br>`--source-session-id-override <id>`<br>`--source-rig-override <rig>` |
+| `rig restore-packet read <packet-dir>` | — | `--json` |
+| `rig restore-packet validate <packet-dir>` | — | `--json` |
+
+### compact-plan
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig compact-plan` | — | `--json`<br>`--rig <name>`<br>`--refresh`<br>`--threshold-tokens <n>`<br>`--threshold-percent <0-100>` |
+
+### compact
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig compact <session>` | — | `--json`<br>`--skip-map`<br>`--cancel`<br>`--state` |
+
+### heartbeat
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig heartbeat` | — | `--rig <name>`<br>`--json`<br>`--nudge`<br>`--include-done` |
+
+### seat
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig seat` | — | — |
+| `rig seat set-typing-guard <seat>` | — | `--enabled <boolean>` **required**<br>`--reason <text>` **required**<br>`--json` |
+| `rig seat held-messages <seat>` | — | `--limit <n>`<br>`--offset <n>`<br>`--id <id>`<br>`--json` |
+| `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |
+| `rig seat status <seat>` | — | `--json` |
+| `rig seat handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+| `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
+| `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
+| `rig seat set-permissions <seat>` | — | `--mode <mode>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>` **required**<br>`--stop`<br>`--operator <address>`<br>`--json` |
+| `rig seat continue <seat>` | — | `--json` |
+| `rig seat stop <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-resume-token <session>` | — | `--token-stdin`<br>`--reason <text>` **required**<br>`--json` |
+
+### handover
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig handover <seat>` | — | `--source <source>`<br>`--reason <reason>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
+
+### startup-proof
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig startup-proof` | — | — |
+| `rig startup-proof submit` | — | `--challenge-id <id>` **required**<br>`--answer <answer>` **required**<br>`--json` |
+
+### scope
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig scope` | — | `--workspace <path>` |
+| `rig scope slice` | — | — |
+| `rig scope slice ls` | — | `--mission <name>`<br>`--state <state>`<br>`--json` |
+| `rig scope slice show <slice-path>` | — | `--mission <name>`<br>`--json` |
+| `rig scope slice create <mission> <slug>` | — | `--template <kind>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--readme-only`<br>`--json` |
+| `rig scope slice ship <slice-path> <release-mission>` | — | `--mission <name>`<br>`--json` |
+| `rig scope slice close <slice-path>` | — | `--reason <reason>` **required**<br>`--note <text>`<br>`--mission <name>`<br>`--json` |
+| `rig scope slice move <slice-path> <dest-mission>` | — | `--mission <name>`<br>`--json` |
+| `rig scope slice progress <slice-path>` | — | `--mission <name>`<br>`--add <text>`<br>`--set <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
+| `rig scope slice repair <slice-path>` | — | `--mission <name>`<br>`--json` |
+| `rig scope slice stage <slice-path> <new-stage>` | — | `--successor <id>`<br>`--mission <name>`<br>`--json` |
+| `rig scope slice verified <slice-path>` | — | `--against <source>`<br>`--mission <name>`<br>`--json` |
+| `rig scope slice approve <slice-path>` | — | `--mission <name>`<br>`--scope <scope>`<br>`--actor <session>`<br>`--on-behalf-of <human>`<br>`--re-approve`<br>`--reason <why>`<br>`--locked-artifacts <paths>`<br>`--json` |
+| `rig scope mission` | — | — |
+| `rig scope mission ls` | — | `--json` |
+| `rig scope mission show <mission>` | — | `--json` |
+| `rig scope mission create <name>` | — | `--template <kind>`<br>`--id <dot-id>`<br>`--title <text>`<br>`--intent <text>`<br>`--depends-on <dot-id...>`<br>`--no-notes`<br>`--no-mission-notes`<br>`--json` |
+| `rig scope mission graph <mission>` | — | `--json` |
+| `rig scope mission progress <mission>` | — | `--add <text>`<br>`--set <text>`<br>`--section <heading>`<br>`--status <status>`<br>`--json` |
+| `rig scope mission repair <mission>` | — | `--json` |
+| `rig scope mission stage <mission> <new-stage>` | — | `--successor <id>`<br>`--json` |
+| `rig scope mission verified <mission>` | — | `--against <source>`<br>`--json` |
+| `rig scope mission approve <mission>` | — | `--mission <name>`<br>`--scope <scope>`<br>`--actor <session>`<br>`--on-behalf-of <human>`<br>`--re-approve`<br>`--reason <why>`<br>`--locked-artifacts <paths>`<br>`--json` |
+| `rig scope resolve-notes <absolute-work-node-dir>` | — | `--json` |
+| `rig scope audit` | — | `--mission <name>` **required**<br>`--json` |
+
+### proof
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig proof` | — | `--workspace <path>` |
+| `rig proof show [scope]` | — | `--json` |
+| `rig proof judge <scope-item>` | — | `--verdict <verdict>` **required**<br>`--reason <text>` **required**<br>`--evidence <ref>` (repeatable)<br>`--subject <kind:ref>`<br>`--comparison <ref>`<br>`--revision <revision>`<br>`--operation-id <id>`<br>`--replace`<br>`--json` |
+| `rig proof add <slice-path>` | — | `--mission <name>`<br>`--artifact-type <type>` **required**<br>`--verdict <verdict>` **required**<br>`--candidate-sha <sha>` **required**<br>`--money-evidence <line>` **required**<br>`--slice-id <dot-id>`<br>`--file <path>`<br>`--body <text>`<br>`--name <filename>`<br>`--replace`<br>`--evidences <refs>`<br>`--self-check <text>`<br>`--media <refs>`<br>`--json` |

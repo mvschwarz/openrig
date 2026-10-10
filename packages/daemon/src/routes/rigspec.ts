@@ -13,6 +13,7 @@ import { rigPreflight } from "../domain/rigspec-preflight.js";
 import { RigNotFoundError } from "../domain/errors.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
+import { RigSpecParseError, validateRigSpecImport } from "../domain/spec-validation-service.js";
 
 export const rigspecImportRoutes = new Hono();
 
@@ -96,8 +97,10 @@ rigspecImportRoutes.post("/", async (c) => {
         : outcome.code === "rig_name_running" ? 409
         // #141: an import refused because a same-name rig could not be confirmed stopped.
         : outcome.code === "generation_unconfirmed" ? 409
+        // A Compose project conflict is an actionable request conflict, not a server failure.
+        : outcome.code === "compose_project_conflict" ? 409
         : 500;
-      const body = outcome.code === "rig_name_running" || outcome.code === "generation_unconfirmed"
+      const body = outcome.code === "rig_name_running" || outcome.code === "generation_unconfirmed" || outcome.code === "compose_project_conflict"
         ? { ...outcome, error: outcome.message }
         : outcome;
       return c.json(body, status);
@@ -211,20 +214,12 @@ rigspecImportRoutes.post("/materialize", async (c) => {
 // POST /api/rigs/import/validate -> validate only (auto-detects format)
 rigspecImportRoutes.post("/validate", async (c) => {
   const body = await c.req.text();
-
-  let raw: unknown;
   try {
-    raw = RigSpecCodec.parse(body);
+    return c.json(validateRigSpecImport(body));
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return c.json({ valid: false, errors: [message] }, 400);
+    if (!(err instanceof RigSpecParseError)) throw err;
+    return c.json({ valid: false, errors: [err.message] }, 400);
   }
-
-  const isPodAware = raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).pods);
-  if (isPodAware) {
-    return c.json(RigSpecSchema.validate(raw));
-  }
-  return c.json(LegacyRigSpecSchema.validate(raw));
 });
 
 // POST /api/rigs/import/preflight -> validate + preflight (auto-detects format)

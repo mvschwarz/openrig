@@ -5,10 +5,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gatewayRoutes } from "../src/routes/gateway.js";
 import { loadConfig, saveConfig, DEFAULT_CONFIG } from "../src/domain/gateway/slack/config.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { addHumanFragment, writeProjection } from "../src/domain/gateway/human-registry.js";
 
 const homes: string[] = [];
-afterEach(() => homes.splice(0).forEach((home) => rmSync(home, { recursive: true, force: true })));
+const databases: ReturnType<typeof createDb>[] = [];
+afterEach(() => {
+  vi.restoreAllMocks();
+  databases.splice(0).forEach((db) => db.close());
+  homes.splice(0).forEach((home) => rmSync(home, { recursive: true, force: true }));
+});
 
 function fixture(opts: { registerHuman?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), "channel-lifecycle-"));
@@ -18,10 +29,23 @@ function fixture(opts: { registerHuman?: boolean } = {}) {
     prefs: { deliveryClass: "B" } }, home);
   saveConfig({ ...DEFAULT_CONFIG, secretsEnvFile: "private-pointer", channel: "C-private" }, home);
   const restart = vi.fn();
-  const list = vi.fn(() => []);
+  const db = createDb();
+  databases.push(db);
+  migrate(db, ALL_MIGRATIONS);
+  const queueRepo = new QueueRepository(db, new EventBus(db));
+  const prepare = vi.spyOn(db, "prepare");
+  const selectionCount = () => prepare.mock.calls.filter(([sql]) => /SELECT qitem_id FROM queue_items/.test(sql)).length;
+  const alert = (id: string) => {
+    db.prepare(`INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body)
+      VALUES (?, '2026-01-01', '2026-01-01', 'author@rig', 'alex@external', 'pending', 'fixture backlog')`).run(id);
+    const result = db.prepare(`INSERT INTO queue_transitions(qitem_id,ts,state,actor_session,owner_notification_level,owner_notification_kind)
+      VALUES (?, '2026-01-01', 'pending', 'author@rig', 'ALERT', 'human-required')`).run(id);
+    return `${id}:${result.lastInsertRowid}`;
+  };
+  const seen = () => [...new SeenStore(join(home, "state", "slack-outbound-seen.jsonl")).load()];
   const app = new Hono();
   app.use("*", async (c, next) => {
-    c.set("queueRepo" as never, { list } as never);
+    c.set("queueRepo" as never, queueRepo as never);
     c.set("gatewaySubsystem" as never, { restart, status: () => ({ state: loadConfig(home).enabled ? "active" : "disabled" }) } as never);
     await next();
   });
@@ -30,7 +54,7 @@ function fixture(opts: { registerHuman?: boolean } = {}) {
     method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "operator@rig" }, body: JSON.stringify(body),
   });
   const receipts = () => readFileSync(join(home, "state", "human-channel-operations.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  return { home, app, restart, list, post, receipts };
+  return { home, app, restart, selectionCount, alert, seen, post, receipts };
 }
 
 describe("human channel lifecycle at the daemon door", () => {
@@ -56,7 +80,7 @@ describe("human channel lifecycle at the daemon door", () => {
     });
     expect(readFileSync(join(f.home, "slack-connector.json"), "utf8")).toBe(before);
     expect(f.restart).not.toHaveBeenCalled();
-    expect(f.list).not.toHaveBeenCalled();
+    expect(f.selectionCount()).toBe(0);
     expect(existsSync(join(f.home, "state", "slack-outbound-seen.jsonl"))).toBe(false);
     expect(f.receipts().map(row => row.effect)).toEqual(["started", "failed"]);
     expect(f.receipts().at(-1)).toMatchObject({ before: { enabled: false }, after: null });
@@ -64,13 +88,27 @@ describe("human channel lifecycle at the daemon door", () => {
 
   it("allows a valid empty registry to seed the backlog", async () => {
     const f = fixture({ registerHuman: false });
+    f.alert("unregistered-backlog");
     expect(writeProjection(f.home).ok).toBe(true);
     const response = await f.post("enable");
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, seeded: 0 });
+    expect(f.seen()).toEqual([]);
     expect(loadConfig(f.home).enabled).toBe(true);
     expect(f.restart).toHaveBeenCalledTimes(1);
-    expect(f.list).toHaveBeenCalledTimes(1);
+    expect(f.selectionCount()).toBe(1);
+  });
+
+  it("seeds the existing human backlog as history before enabling delivery", async () => {
+    const f = fixture();
+    const key = f.alert("existing-backlog");
+    const response = await f.post("enable");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, seeded: 1 });
+    expect(f.seen()).toEqual([key]);
+    expect(f.selectionCount()).toBe(1);
+    expect(f.restart).toHaveBeenCalledTimes(1);
+    expect(loadConfig(f.home).enabled).toBe(true);
   });
 
   it("keeps enable no-op and disable available when the human registry is missing", async () => {
@@ -82,24 +120,33 @@ describe("human channel lifecycle at the daemon door", () => {
     expect((await f.post("disable", { reason: "offline maintenance" })).status).toBe(200);
     expect(loadConfig(f.home).enabled).toBe(false);
     expect(f.restart).toHaveBeenCalledTimes(1);
-    expect(f.list).not.toHaveBeenCalled();
+    expect(f.selectionCount()).toBe(0);
   });
 
   it("serializes concurrent enables so a repeat cannot reseed newly pending work", async () => {
     const f = fixture();
+    const before = f.alert("before-enable");
+    let after: string | undefined;
+    f.restart.mockImplementation(() => { after = f.alert("after-enable"); });
     const responses = await Promise.all([f.post("enable"), f.post("enable")]);
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(await Promise.all(responses.map((response) => response.json()))).toMatchObject([{ seeded: 1 }, { seeded: 0 }]);
+    expect(after).toBeDefined();
+    expect(f.seen()).toEqual([before]);
+    expect(f.seen()).not.toContain(after);
     expect(f.restart).toHaveBeenCalledTimes(1);
-    expect(f.list).toHaveBeenCalledTimes(1);
+    expect(f.selectionCount()).toBe(1);
     expect(f.receipts().filter((row) => row.effect !== "started").map((row) => row.effect)).toEqual(["applied", "no-op"]);
   });
   it("attributes changes, distinguishes repeats, and requires a shutdown reason before changing state", async () => {
     const f = fixture();
+    const key = f.alert("attributed-backlog");
     expect((await f.post("enable", { actor: "other@rig", reason: "resume delivery" })).status).toBe(200);
+    expect(f.seen()).toEqual([key]);
     expect(loadConfig(f.home).enabled).toBe(true);
     expect((await f.post("enable", { reason: "replay" })).status).toBe(200);
     expect(f.restart).toHaveBeenCalledTimes(1);
-    expect(f.list).toHaveBeenCalledTimes(1);
+    expect(f.selectionCount()).toBe(1);
     expect((await f.post("disable")).status).toBe(400);
     expect(loadConfig(f.home).enabled).toBe(true);
     expect((await f.post("disable", { reason: "bounded maintenance" })).status).toBe(200);

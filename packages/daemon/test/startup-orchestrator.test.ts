@@ -10,10 +10,12 @@ import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { StartupAction } from "../src/domain/types.js";
-import { deriveOriented, issueStartupChallenge, verifyStartupProof } from "../src/domain/startup-proof.js";
+import { deriveOriented, issueStartupChallenge, verifyStartupProof, STARTUP_PROOF_INSTRUCTION_LINE } from "../src/domain/startup-proof.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
+import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 
 // -- Mocks --
 
@@ -27,6 +29,7 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
     ...overrides,
   } as unknown as TmuxAdapter;
 }
@@ -38,7 +41,9 @@ function mockAdapter(overrides?: Partial<RuntimeAdapter>): RuntimeAdapter {
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
     checkReady: vi.fn(async () => ({ ready: true })),
-    launchHarness: vi.fn(async () => ({ ok: true })),
+    // A successful managed Claude resume returns the identity it resumed.
+    launchHarness: vi.fn(async (_binding, opts) => ({ ok: true,
+      ...(opts.resumeToken ? { resumeToken: opts.resumeToken, resumeType: "claude_id" } : {}) })),
     ...overrides,
   };
 }
@@ -93,7 +98,7 @@ describe("StartupOrchestrator", () => {
   afterEach(() => { db.close(); });
 
   function createOrchestrator(
-    opts?: TmuxAdapter | { tmux?: TmuxAdapter; readFile?: (path: string) => string },
+    opts?: TmuxAdapter | { tmux?: TmuxAdapter; readFile?: (path: string) => string; readinessSettings?: Pick<SettingsStore, "resolveOne"> },
   ): StartupOrchestrator {
     const normalized = opts && "sendText" in opts
       ? { tmux: opts as TmuxAdapter }
@@ -104,6 +109,9 @@ describe("StartupOrchestrator", () => {
       eventBus,
       tmuxAdapter: normalized.tmux ?? tmux,
       readFile: normalized.readFile,
+      readinessSettings: normalized.readinessSettings ?? ({
+        resolveOne: () => ({ value: 30, source: "default", defaultValue: 30 }),
+      } as unknown as Pick<SettingsStore, "resolveOne">),
       sleep: async () => {},
     });
   }
@@ -131,6 +139,28 @@ describe("StartupOrchestrator", () => {
     };
   }
 
+  it.each([false, true])("returns projection and delivery warnings on launch outcomes (fails=%s)", async fails => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      project: vi.fn(async () => ({ projected: ["core"], skipped: [], failed: [], warnings: ["AGENTS.md is untracked"] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [], warnings: ["plugin exclude skipped"] })),
+      launchHarness: vi.fn(async () => fails ? { ok: false, error: "controlled launch failure" } : { ok: true }),
+    });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter }));
+    expect(result.ok).toBe(!fails);
+    expect(result.warnings).toEqual(["AGENTS.md is untracked", "plugin exclude skipped"]);
+  });
+
+  it("keeps a challenge-only transport failure best-effort", async () => {
+    const seed = seedSession();
+    const tmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "fixture transport failure" })) });
+    const result = await createOrchestrator(tmux).startNode(makeInput(seed, {
+      startupActions: [makeAction({ type: "startup_proof", value: "authenticated" })],
+    }));
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
   it("deliberate fresh replacement appends the named durable obligation read without an extra message", async () => {
     const seed = seedSession();
     await createOrchestrator().startNode(makeInput(seed, { startupActions: [makeIdentityAction()], includeDurableObligations: true }));
@@ -152,6 +182,22 @@ describe("StartupOrchestrator", () => {
     expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
   });
 
+  it("records a role binding before launch succeeds and preserves it on exact resume", async () => {
+    const seed = seedSession();
+    const orch = createOrchestrator();
+    const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture", orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+    const read = () => db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { resolved_files_json: string; created_at: string };
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => {
+      expect(JSON.parse(read().resolved_files_json)).toEqual([role]);
+      return { ok: false, recovery: "attention_required", error: "Native gate" };
+    }) });
+    expect((await orch.startNode(makeInput(seed, { adapter, resolvedStartupFiles: [role] }))).ok).toBe(false);
+    const before = read();
+    expect(before.created_at).toBeTruthy();
+    await orch.startNode(makeInput(seed, { isRestore: true, resumeToken: "original", preserveStartupContext: true }));
+    expect(read()).toEqual(before);
+  });
+
   it("exact resume retains configured fresh context while sending no replay", async () => {
     const seed = seedSession(); const orch = createOrchestrator();
     const action = makeAction({ type: "send_text", value: "configured context" });
@@ -162,6 +208,71 @@ describe("StartupOrchestrator", () => {
     expect(result.ok).toBe(true);
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId)).toEqual(before);
     expect(adapter.deliverStartup).toHaveBeenCalledWith([], expect.anything());
+  });
+
+  it.each([
+    { preserve: true, populated: false, calls: 0 },
+    { preserve: true, populated: true, calls: 1 },
+    { preserve: false, populated: false, calls: 1 },
+  ])("projects resources only outside an empty preserved Claude plan: %j", async ({ preserve, populated, calls }) => {
+    const adapter = mockAdapter();
+    const plan = emptyPlan();
+    if (populated) plan.entries.push({
+      category: "runtime_resource", resourceType: "claude_activity_hooks", effectiveId: "activity",
+      sourceSpec: "saved", sourcePath: "/fixture", resourcePath: "activity", absolutePath: "/fixture/activity",
+      classification: "safe_projection",
+    });
+    const result = await createOrchestrator().startNode(makeInput(seedSession(), {
+      adapter, plan, preserveStartupContext: preserve, isRestore: true, resumeToken: "native-original",
+    }));
+    expect(result.ok).toBe(true);
+    expect(adapter.project).toHaveBeenCalledTimes(calls);
+    if (calls) expect(adapter.project).toHaveBeenCalledWith(plan, expect.anything());
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "claude_id", "claude_name", "codex_id"])("managed Claude resume agrees with the requested type: %s", async (resumeType) => {
+    const seed = seedSession();
+    const adapter = mockAdapter();
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, {
+      adapter, isRestore: true, resumeToken: "requested-native", resumeType,
+    }));
+    const compatible = resumeType !== "codex_id";
+    expect(result).toMatchObject(compatible
+      ? { ok: true, startupStatus: "ready", continuityOutcome: "resumed" }
+      : { ok: false, startupStatus: "attention_required" });
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
+      .toEqual({ status: "running", startup_status: compatible ? "ready" : "attention_required",
+        resume_type: "claude_id", resume_token: "requested-native", resume_provenance: "scrape" });
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    if (!compatible) expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+  });
+
+  it.each(["missing", "late-hook"])("managed Claude resume checks final row agreement: %s", async (mode) => {
+    const seed = seedSession();
+    const token = "requested-native";
+    const adapter = mockAdapter(mode === "missing"
+      ? { launchHarness: vi.fn(async () => ({ ok: true })) } : {});
+    const t = mockTmux({ sendText: vi.fn(async () => {
+      sessionRegistry.updateResumeToken(seed.sessionId, "claude_id", "other-native", "hook");
+      return { ok: true as const };
+    }) });
+    const orch = createOrchestrator({ tmux: t });
+    const result = await orch.startNode(makeInput(seed, {
+      adapter, resumeToken: token, isRestore: true,
+      startupActions: mode === "late-hook" ? [makeAction()] : [],
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(db.prepare("SELECT status, startup_status, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
+      .toEqual({ status: "running", startup_status: "attention_required",
+        resume_token: mode === "late-hook" ? "other-native" : null, resume_provenance: mode === "late-hook" ? "hook" : null });
+    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(t.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
   });
 
   it.each(["launch", "readiness"])("pod-aware exact resume cannot continue fresh context after a %s gate", async (gate) => {
@@ -230,6 +341,52 @@ describe("StartupOrchestrator", () => {
     expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
     expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId)).toEqual({ startup_status: "attention_required" });
     expect(db.prepare("SELECT COUNT(*) AS n FROM node_startup_context WHERE node_id = ?").get(seed.nodeId)).toEqual({ n: 1 });
+  });
+
+  it.each(["initial_identity", "restore_preload", "after_ready"])("reports a trust dialog after %s instead of startup ready", async (source) => {
+    const seed = seedSession();
+    let delivered = false;
+    // Claude 2.1.220's observed trust panel, with the project path replaced.
+    const trust = "Accessing workspace:\n/fixture/project\nQuick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder\n  2. No, exit\nEnter to confirm · Esc to cancel";
+    const t = mockTmux({ sendText: vi.fn(async () => { delivered = true; return { ok: true as const }; }),
+      capturePaneContent: vi.fn(async () => trust) });
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => {
+      const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: delivered ? trust : "Claude Code v2.1.220\n❯ \n? for shortcuts" });
+      return { ready: probe.status === "resumed", code: probe.code, reason: probe.detail };
+    }) });
+    const result = await createOrchestrator({ tmux: t, readFile: () => "Read the project instructions." }).startNode(makeInput(seed, {
+      adapter, isRestore: source === "restore_preload",
+      ...(source === "restore_preload" ? { resumeToken: "native-original", resumeType: "claude_id" } : {}),
+      resolvedStartupFiles: source === "after_ready" ? [] : [{ path: "role.md", absolutePath: "/fixture/role.md",
+        ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"] }],
+      startupActions: [source === "initial_identity" ? makeIdentityAction() : makeAction({ type: "send_text", value: "Read the project instructions." })],
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required",
+      errors: [expect.stringContaining("workspace trust approval")] });
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
+    expect(t.sendText).toHaveBeenCalledTimes(1);
+    expect(t.sendKeys).toHaveBeenCalledTimes(1); // no extra Enter into the trust menu
+    expect(t.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId)).toEqual({ startup_status: "attention_required" });
+    expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
+  });
+
+  it.each(["bundled", "file"])("keeps an unavailable post-%s observation unverified without failing startup", async (delivery) => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn().mockResolvedValueOnce({ ready: true })
+      .mockRejectedValueOnce(new Error("fixture capture unavailable")) });
+    const result = await createOrchestrator({ readFile: () => "Read the project instructions." }).startNode(makeInput(seed, {
+      adapter, resolvedStartupFiles: [{ path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture",
+        deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
+      startupActions: delivery === "bundled" ? [makeIdentityAction()] : [],
+    }));
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified",
+      reasons: ["Post-delivery runtime state is unverified: fixture capture unavailable"] } });
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
+    const event = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_ready'").get(seed.nodeId) as { payload: string };
+    expect(JSON.parse(event.payload).submission).toMatchObject({ status: "unverified" });
+    expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
   it("records the exact adapter-returned launch effect only after successful managed launch", async () => {
@@ -449,7 +606,7 @@ describe("StartupOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", "/rename impl");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // T8: operator debug append executes after resolved startup
@@ -706,6 +863,49 @@ describe("StartupOrchestrator", () => {
     expect(sendText.mock.calls[0]?.[1]).toContain("startup orientation challenge");
   });
 
+  // Claude shows the long startup paste as pasted content and won't act on an instruction found only
+  // there; one short line in the person's turn asks it to run the challenge's own command.
+  describe("the Claude startup-proof line", () => {
+    const challengeAndIdentity = () => [makeAction({ type: "startup_proof", value: "authenticated" }), makeIdentityAction()];
+
+    it("follows a Claude seat's challenged prompt with the short line, as its own submission", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sendText.mock.calls.map((c) => c[1])).toHaveLength(2);
+      expect(sendText.mock.calls[0]![1]).toContain("startup orientation challenge");
+      expect(sendText.mock.calls[1]![1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
+      expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+    });
+
+    it("sends no line to a Codex seat, which already acts on the pasted challenge", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, {
+        adapter: mockAdapter({ runtime: "codex" }), startupActions: challengeAndIdentity(),
+      }));
+      expect(sendText.mock.calls.map((c) => c[1])).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("sends no line when no challenge was issued", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: [makeIdentityAction()] }));
+      expect(sendText.mock.calls.map((c) => c[1])).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("a line that fails to send is a submission warning; the seat is still ready", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, text: string) => text === STARTUP_PROOF_INSTRUCTION_LINE
+        ? { ok: false as const, message: "fixture send failure" }
+        : { ok: true as const });
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText } as unknown as Partial<TmuxAdapter>) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.ok && result.submission?.reasons).toContain("Startup proof instruction was not delivered: fixture send failure");
+    });
+  });
+
   // OPR.0.4.3.06 — a resumed restore is NOT re-challenged (oriented stays n-a).
   it("runs a terminal startup command without sending agent-orientation prose to its shell", async () => {
     const seed = seedSession();
@@ -743,7 +943,7 @@ describe("StartupOrchestrator", () => {
     }));
     expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
     expect(adapter.project).toHaveBeenCalledOnce();
-    expect(adapter.checkReady).toHaveBeenCalledOnce();
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
     expect(tmux.sendText).toHaveBeenCalledExactlyOnceWith("r01-impl", makeIdentityAction().value);
     expect(deriveOriented(db, seed.nodeId)).toBe("n-a");
     const row = db.prepare("SELECT payload FROM events WHERE type='node.startup_pending'").get() as { payload: string };
@@ -1125,6 +1325,104 @@ describe("StartupOrchestrator", () => {
   });
 
   // NS-T05: readiness retry loop
+  describe("readiness deadline", () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("uses the configured launch window when the caller has no override", async () => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: Date.now() - started >= 40_000 })) });
+      const readinessSettings = {
+        resolveOne: () => ({ value: 45, source: "file", defaultValue: 30 }),
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+      const pending = createOrchestrator({ readinessSettings }).startNode(makeInput(seed, { adapter }));
+
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready" });
+    });
+
+    it("falls back to the 30-second window with a warning when the settings read throws", async () => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: Date.now() - started >= 20_000 })) });
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const readinessSettings = {
+        resolveOne: () => { throw new Error("config.json is not valid JSON"); },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+
+      try {
+        const pending = createOrchestrator({ readinessSettings }).startNode(makeInput(seed, { adapter }));
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(await pending).toMatchObject({ ok: true, startupStatus: "ready" });
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining("falling back to 30s default"));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it.each([20_000, 30_000])("accepts readiness at %i ms within the 30-second budget", async (readyAfterMs) => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => ({ ready: Date.now() - started >= readyAfterMs })),
+      });
+      let settled = false;
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter }))
+        .then((result) => { settled = true; return result; });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sessionRegistry.getSessionsForRig(seed.rigId).find((s) => s.id === seed.sessionId)?.startupStatus).toBe("ready");
+    });
+
+    it.each([500, 30_000])("does not time out before the %i ms budget expires", async (timeoutMs) => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => ({ ready: false, reason: `not ready at ${Date.now() - started}ms` })),
+      });
+      let settled = false;
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter, readinessTimeoutMs: timeoutMs }))
+        .then((result) => { settled = true; return result; });
+
+      await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toMatchObject({
+        ok: false,
+        startupStatus: "failed",
+        errors: [expect.stringContaining(`not ready at ${timeoutMs}ms`)],
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("preserves an attention blocker observed at the deadline", async () => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => Date.now() - started >= 30_000
+          ? { ready: false, code: "trust_gate", reason: "workspace trust required" }
+          : { ready: false, reason: "starting" }),
+      });
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter }));
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(await pending).toMatchObject({
+        ok: false,
+        startupStatus: "attention_required",
+        errors: ["Startup requires attention: workspace trust required", expect.stringContaining("rig seat continue")],
+      });
+    });
+  });
+
   it("readiness retries until ready", async () => {
     const seed = seedSession();
     let callCount = 0;
@@ -1151,6 +1449,7 @@ describe("StartupOrchestrator", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => e.includes("timeout") || e.includes("Readiness timeout"))).toBe(true);
+      expect(result.errors).toEqual([expect.stringContaining("after 0.1s")]);
     }
   });
 

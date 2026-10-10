@@ -129,6 +129,39 @@ function executionKeys(lines: ReturnType<typeof executionContentLines>): string[
 }
 
 describe("mission execution story — readable rows over the shipped projections", () => {
+  it("keeps project daemon N/A out of lineage gaps and the SCOPES progress strip", () => {
+    const fixture = executionFixture(1);
+    fixture.q1_lanes = [];
+    fixture.q4_ladder[0] = {
+      slice_id: "OPR.0.5.8.1", dir: "01-slice",
+      locked: { value: true }, built: { candidate_sha: "abcdef123" },
+      reviewed: { value: true }, folded: { value: true },
+      adopted: { value: "NOT_APPLICABLE", basis: "selected project has no daemon-source binding" },
+    };
+    for (const width of [58, 120]) {
+      const detail = text(executionContentLines(fixture, executionScopes(1), [], "slice:OPR.0.5.8.1", width));
+      expect(detail).toContain("N/A");
+      expect(detail).toContain("daemon");
+      const gap = text(executionContentLines(fixture, executionScopes(1), [], "evidence", width));
+      expect(gap).not.toContain("live unconfirmed");
+      const strip = text(executionSliceStripLines(fixture, "OPR.0.5.8.1", "01-slice", width));
+      expect(strip).toContain("merged");
+      expect(strip).not.toContain("live");
+      expect(strip).not.toContain("unconfirmed");
+      const project = { id: "demo", root: "/projects/demo", name: "Demo", sourcePath: null, missionsRoot: "/projects/demo/missions" };
+      const snap: FleetSnapshot = { ...demoSnapshot(), execution: fixture, scopes: executionScopes(1),
+        projects: { catalogPath: "/projects/workspace.yaml", projects: [project] }, projectRead: project };
+      const view = createViewState({ instanceId: "projects", getSnapshot: () => snap });
+      view.dispatch(parseCommand("projects"));
+      view.dispatch({ type: "project-select", id: project.id });
+      view.dispatch({ type: "scopes-mission-open", mission: fixture.mission! });
+      view.dispatch({ type: "scopes-open", mission: fixture.mission!, slice: "01-slice" });
+      const screen = renderScreen(view.get(), snap, { cols: width + 32, rows: 220 }).lines.join("\n");
+      expect(screen).toContain("N/A");
+      expect(screen).not.toMatch(/live.*undetermined/);
+    }
+  });
+
   it("shows authored admission and partial acceptance with provenance on mission, wave and slice pages at narrow widths", () => {
     const fixture = executionFixture();
     fixture.planning_guidance = [

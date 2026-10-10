@@ -67,14 +67,18 @@ describe.each(SITES)("B12-T real async list_processes — %s", (_site, listProce
 // own env on this platform (measured: 21-byte output, no env), so asserting on process.pid is
 // environment-hostage; a child we spawn with an explicit env is deterministic.
 describe("F1 real async resolve_home — codex-thread-id", () => {
-  async function withChild<T>(fn: (pid: number) => Promise<T>): Promise<T> {
+  async function withChild<T>(fn: (pid: number) => Promise<T>, home = "/tmp/f1-probe-home"): Promise<T> {
     const { spawn } = await import("node:child_process");
-    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], {
-      env: { HOME: "/tmp/f1-probe-home", PATH: process.env.PATH ?? "" },
-      stdio: "ignore",
+    const child = spawn(process.execPath, ["-e", "console.log('ready'); setTimeout(() => {}, 15000)"], {
+      env: { HOME: home, PATH: process.env.PATH ?? "", OPENRIG_TEST_END: "marker" },
+      stdio: ["ignore", "pipe", "ignore"],
     });
     try {
-      await new Promise((r) => setTimeout(r, 100)); // let it exec
+      await new Promise<void>((resolve, reject) => {
+        child.stdout!.once("data", () => resolve());
+        child.once("error", reject);
+        child.once("exit", () => reject(new Error("probe child exited before readiness")));
+      });
       return await fn(child.pid!);
     } finally {
       child.kill("SIGKILL");
@@ -85,6 +89,12 @@ describe("F1 real async resolve_home — codex-thread-id", () => {
     const { defaultResolveHomeDirByPid } = await import("../src/domain/codex-thread-id.js");
     const home = await withChild((pid) => defaultResolveHomeDirByPid(pid));
     expect(home).toBe("/tmp/f1-probe-home");
+  });
+
+  it("preserves spaces in the real child process HOME environment value", async () => {
+    const { defaultResolveHomeDirByPid } = await import("../src/domain/codex-thread-id.js");
+    const home = "/tmp/openrig profile home with spaces";
+    expect(await withChild((pid) => defaultResolveHomeDirByPid(pid), home)).toBe(home);
   });
 
   it("hands control back to the event loop instead of blocking for the spawn (RED on the pre-F1 sync implementation)", async () => {

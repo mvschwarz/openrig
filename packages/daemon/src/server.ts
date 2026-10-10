@@ -80,7 +80,7 @@ import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discov
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
-import { apiOriginProtection } from "./middleware/origin-guard.js";
+import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
@@ -207,6 +207,7 @@ export interface AppDeps {
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
   slowOpRecorder?: SlowOperationInstrumentation;
+  requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
    *  absent = legacy body). Set by the index.ts scheduler when the loop starts. */
@@ -493,6 +494,10 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   const app = new Hono();
+  if (deps.requestPhaseObserver) app.use("*", deps.requestPhaseObserver.middleware());
+  // A malformed request body is a 400, not the default 500.
+  app.use("*", trackJsonBodyParseErrors);
+  app.onError(jsonBodyErrorHandler);
   const permissionDriftObserver = deps.permissionDriftObserver
     ?? new PermissionDriftObserver({ db: deps.rigRepo.db });
 
@@ -638,9 +643,7 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   // Browser boundary: target name and browser Origin, checked once per /api request
-  // (WebSocket upgrades included), before the Origin guard below, the remote
-  // read-through and every route. It runs first so its refusal codes and remedies
-  // are what callers see.
+  // (WebSocket upgrades included), before the remote read-through and every route.
   app.use("/api/*", browserBoundary({
     webUiEnabled: deps.webUiEnabled === true,
     bearerTokens: [deps.terminalBearerToken, deps.missionControlBearerToken],
@@ -649,10 +652,6 @@ export function createApp(deps: AppDeps): Hono {
     discoverSelfNames: deps.selfNameDiscovery,
     onDecision: deps.browserBoundaryObserver,
   }));
-
-  // Cross-site request forgery and drive-by daemon API protection.
-  // Rejects requests with unauthorized browser Origin headers on all /api/* routes.
-  app.use("/api/*", apiOriginProtection());
 
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`
@@ -820,7 +819,8 @@ export function createApp(deps: AppDeps): Hono {
   // SCOPES VIEW (d64d2f5c): the store-direct TUI read.
   app.route("/api/scopes", scopesRoutes());
   // 51-08 A3 — usage series + top-N burn over usage_samples (one projection, CLI+HTTP).
-  app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db }));
+  app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db,
+    source: { hostId: getSelfHostId(), bootEpoch: deps.daemonBootEpoch ?? null } }));
   // OPR.0.4.4.19 FR-9 — scope approve: frontmatter stamp + audit row.
   app.route("/api/scope/approve", scopeApproveRoutes());
   app.route("/api/proof", proofRoutes());

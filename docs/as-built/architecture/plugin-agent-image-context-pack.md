@@ -5,353 +5,320 @@ status: active
 topics: [extension-and-user-workspace, continuity, skill-management]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  Need to know how OpenRig discovers plugins, captures/forks agent images,
-  assembles/sends context packs, or how the Claude auto-compaction enforcer
-  decides to send /compact. Author-mode module — no prior architecture.md
-  prose; every claim is sourced to file:line at HEAD.
+  Locate plugin discovery and vendoring, context-pack addressing/composition,
+  agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
-# Content Layer — Plugins, Agent Images, Context Packs, Compaction Policy
+# Content libraries and compaction
 
-Four filesystem-canonical content primitives the daemon discovers and
-serves: **plugins**, **agent images**, **context packs**, and the **Claude
-auto-compaction policy enforcer**. None adds SQLite state — all are
-filesystem-canonical with in-memory daemon caches.
+This module describes source at main commit
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`. Source paths below are repository-relative.
+Context packs, plugins and agent images have filesystem-backed content and daemon-side
+discovery. Their consumers can read database identity, mutate files, deliver messages or
+launch sessions; the whole layer is not a read-only catalog.
 
-> **AUTHOR-FROM-SOURCE module.** No prior `architecture.md` prose exists
-> for this. Every load-bearing claim carries `> Source: <file:line>
-> @HEAD`; ambiguity is declared as an OPEN item, never smoothed. Paths are
-> relative to `packages/daemon/src/` unless prefixed `docs/`.
->
-> Verified at HEAD `7eaf524c` (`git describe` → `v0.3.1-6-g7eaf524c`).
-> Package version **0.3.1**; HEAD carries 6 unreleased release-0.3.2
-> commits; no `v0.3.2` tag (daemon-core.md; slice-00 §1.1).
+## Context packs
 
-## 0. Release attribution (forensic seam — read first)
+`packages/daemon/src/domain/context-packs/context-pack-library-service.ts` implements
+`ContextPackLibraryService`. A pack contains `manifest.yaml` and declared members.
+Its path-like ref is the lookup identity, independently of the manifest name/version;
+the entry ID is `context-pack:<ref>`.
 
-Re-verified at HEAD via `git cat-file -e <tag>:<path>`:
+### Discovery and mutation
 
-| Subsystem | Release | Forensic proof @HEAD |
-|---|---|---|
-| Context packs | **0.3.0** | `v0.3.0:domain/context-packs/context-pack-library-service.ts` → present (slice-00 0.3.0-GT §1.9) |
-| Agent images | **0.3.0** | `v0.3.0:domain/agent-images/agent-image-library-service.ts` → present (slice-00 0.3.0-GT §1.9) |
-| Plugins | **0.3.1, NOT 0.3.0** | `v0.3.0:domain/plugin-discovery-service.ts` → **ABSENT**; `v0.3.1:` → present (slice-00 0.3.0-GT seam (a); map row 5) |
-| Claude auto-compaction | **0.3.1 headline, no 0.3.0 antecedent** | `v0.3.0:domain/claude-compaction-enforcer.ts` → **ABSENT**; `v0.3.1:` → present (slice-00 0.3.0-GT map row 7) |
+Startup in `packages/daemon/src/startup.ts` configures the shipped context-pack root (when
+it exists), the resolved `context.root` and its `system` root, followed by the
+workspace-local `.openrig/context-packs` root. The workspace root is registered even before
+it exists, so a folder created later is found by the next sync; it is left out only when it
+is the same path as one of the other two. The library scans recursively, stops descending
+when it finds a pack manifest, skips `.tmp-add-*` staging folders, and does not follow
+directory symlinks.
 
-> Source: re-run at HEAD `7eaf524c` —
-> `git cat-file -e v0.3.0:packages/daemon/src/domain/plugin-discovery-service.ts`
-> and `...claude-compaction-enforcer.ts` both fail ("exists on disk, but
-> not in 'v0.3.0'"); the two 0.3.0 library services resolve at `v0.3.0`.
-> Code present on disk at HEAD does NOT make plugins/compaction a 0.3.0
-> feature — ancestry is truth; the same-calendar-day commit date is the
-> forensic trap slice-00 0.3.0-GT seam (a) warns about.
+The first configured root to encounter a physical pack owns that directory. For distinct
+physical packs with the same ref, the later root wins. This distinction prevents overlapping
+roots from giving the same physical pack a second address. Scan replaces the in-memory ref
+index and reports malformed packs instead of indexing them.
 
-**Do not back-attribute plugins or compaction to 0.3.0.** The CLI
-reference already encodes this ("## Plugin Inspection (v0.3.1)").
+`composeFromFiles()` creates a durable pack after validating its ref, destination and
+sources. `removeByRef()` removes the selected pack directory and rescans, but refuses
+shipped builtin packs. Library mutation and lookup share ref validation.
 
-> Source: `docs/as-built/cli-reference.md:943` @HEAD.
+`packages/daemon/src/domain/context-packs/manifest-parser.ts` parses manifests.
+Its supported file suffixes include Markdown/YAML/text and `.sh`, `.ts`, `.mjs`,
+`.py` helper assets. Those assets are served as text; pack assembly does not execute them.
+The parser also validates atom metadata and named profiles.
 
-## 1. Context packs (PL-014) — 0.3.0
+### Assembly, addresses and profiles
 
-A **context pack** is a directory of `manifest.yaml` + included markdown /
-yaml / txt files: operator-authored, library-discoverable, reviewable, and
-composable. The `rig context` noun is delivery-free. No SQLite tables;
-in-memory cache at daemon scope.
+These are separate projections:
 
-> Source: `domain/context-packs/context-pack-types.ts:1-11` @HEAD.
+| Operation | Source and behavior |
+|---|---|
+| Framed pack preview | `packages/daemon/src/domain/context-packs/bundle-assembler.ts`, `assembleBundle()`: pack/file headers, file metadata, token estimates and `missingFiles`. Missing members are reported and skipped; a failed read of a present member raises an error. |
+| Plain file composition | The same file's `assemblePlainFiles()`: present files in declared order, separated by two newlines, without framing or trimming their bytes. |
+| Addressed read | `packages/daemon/src/routes/context-packs.ts`, `/library/resolve-address`: longest matching pack-ref prefix, a declared file, then optional H2/H3 heading selection through `packages/daemon/src/domain/markdown-address.ts`. |
+| Situation profile | `packages/daemon/src/domain/context-packs/profile-composer.ts`, `composeProfile()`: select atoms, close dependencies, order and resolve each piece. |
+| Named profile | The same file's `composeNamedProfile()`: declared phases select atoms or supplied work/seat context, preserving phase IDs in the result. |
 
-`ContextPackLibraryService.scan()` walks roots, parses each
-`manifest.yaml`, replaces the in-memory index; collisions are
-**last-wins** in discovery order (workspace > user_file > builtin).
-Startup wires the builtin root (`../context-packs`, first), the configured
-user-file root (`context.root`, default `$OPENRIG_HOME/context`), its
-`system/` child as the canonical System World root, and the workspace-local
-`<workspaceRoot>/.openrig/context-packs` root when present + distinct. A pack is
-addressed by its path-like **ref** (e.g. `packs/compaction-restore`), which is
-its unique identity; the opaque entry id is `context-pack:<ref>` (a UI routing
-key). Colon-id `context-pack:<name>:<version>` addressing and the `/library/:id`
-routes were removed in Slice-03 Atom 5. Resolution is by ref only through
-`getByRef` and the read/delete/preview/pieces route family. Startup accepts
-ordinary files only and rejects context-pack expansion; compose a durable ref
-first, then use a dedicated delivery verb when delivery is intended.
+Situation composition selects fresh atoms for `fresh`, fresh plus handover atoms for
+`handover`, and post-compaction plus handover atoms for `post-compaction`. Runtime
+selection is Claude or Codex, with `any` atoms applicable to either. Required atoms join
+the selection; missing dependencies or runtime-incompatible dependencies fail composition.
+The output is ordered by atom order, then ID. Profile-only atoms are excluded from ordinary
+situation selection, but the dependency closure doesn't check that flag, so one can still join
+as a dependency of a selected atom. Post-compaction composition skips an absent
+`seat:RECAP.md` and reports it as skipped instead of failing.
 
-> Source: `domain/context-packs/context-pack-library-service.ts:59-94`
-> (scan; last-wins L79-81), `:31-33` (id); `startup.ts`
-> (`contextPackLibrary` construction) @HEAD.
+The profile route resolves configured tree sources through
+`packages/daemon/src/domain/context-packs/profile-source-resolver.ts`.
+Seat context requires explicit rig and seat selectors. Mission/slice selectors and named
+profile context requirements are validated before reading those trees. The default
+project/mission/slice walk is bounded to the conventional single-project workspace layout
+and fresh situation; it is not an arbitrary project-catalog resolver.
 
-The parser is pure (no fs; caller passes raw YAML). It rejects malformed
-YAML, missing `name`/`version`, non-array `files`, per-file path traversal
-(`..`/leading `/`), and unsupported suffixes (`.md .markdown .yaml .yml
-.txt`); `version` coerced to string. Per-file token estimate is
-`ceil(bytes/4)`.
+Each resolved piece names its address/source and reports estimated tokens. A token budget
+reports overage and drop candidates without silently truncating the profile. Atom
+`regions` are metadata; the profile endpoint has no region-subset selector.
 
-> Source: `domain/context-packs/manifest-parser.ts:11` (suffixes),
-> `:13-121` (rejects; traversal `:83-89`); token estimate
-> `context-pack-library-service.ts:46-48` @HEAD.
+### HTTP and CLI boundaries
 
-`assembleBundle` concatenates files into one paste-ready string framed
-`# OpenRig Context Pack: <name> v<version>` + optional purpose + `## File:
-<path> (role: <role>)` headers. Missing files are **skipped and surfaced
-in `missingFiles`** (operator repair), not a hard fail; a present-but-
-unreadable file throws `file_read_failed`.
+`packages/daemon/src/server.ts` mounts `contextPacksRoutes()` at
+`/api/context-packs`. Its library handlers cover list, sync, compose, read/delete by ref,
+preview, pieces, addressed reads and profile composition.
 
-> Source: `domain/context-packs/bundle-assembler.ts:38-39` (prefixes),
-> `:73-100` (missing skip L74-76; read-fail throw L81-87) @HEAD.
+`packages/cli/src/commands/context.ts` implements `rig context`, including `list`, `show`,
+`preview`, `get`, `profile`, `compose`, `add`, `rm` and `sync`, plus `work-install`, `trace`,
+`source inspect|update` and `recap-write`. The library read/compose routes do not themselves
+send a pack to a running seat. Several verbs write: `add` installs into `context.root` (from
+a folder, a URL, or Git with `--git`), `source update` fetches and merges a Git-installed pack
+and resyncs, `work-install --apply-skills` reconciles skill projections, and `recap-write`
+writes a seat recap. Inspect the selected CLI verb before treating a context command as
+read-only. `rig context work-install` resolves a project position and its declared context
+without the daemon; [workspace-primitive.md](workspace-primitive.md) covers project
+resolution.
 
-`contextPacksRoutes()` exposes a ref-primary, delivery-free library surface:
-`GET /library`, `POST /library/sync`, `POST /library/compose`,
-`GET/DELETE /library/by-ref`, `GET /library/by-ref/preview`, and
-`GET /library/by-ref/pieces`. Preview returns the assembled review shape;
-pieces returns ordered member contents plus the whole plain text and byte size.
-There is no pack-owned delivery route. CLI library verbs are
-`rig context compose|list|show|preview|sync|add|rm`; delivery belongs to
-`rig send --context`, `rig broadcast --context`, `rig walk --through`, and
-`rig queue create --body-context`.
+On a profile read, the route adds each piece's `sha256` and provenance, with a warning when a
+piece's bytes come from outside the granted folder. Rig and seat selectors grant the seat's
+folder as a source root and supply a default `seat:LEARNED.md` atom to named profiles whose
+phases request seat context. An ordinary situation profile includes that file only when the
+pack authors a seat atom; the selectors alone don't add it.
 
-> Source: `routes/context-packs.ts` (complete route table);
-> `domain/startup-validation.ts` (file-only startup contract);
-> `packages/cli/src/commands/context.ts`, `send.ts`, `broadcast.ts`,
-> `walk.ts`, and `queue.ts` @HEAD.
+### System World, seat recaps and skill loadouts
 
-## 2. Agent images (PL-016) — 0.3.0
+`packages/daemon/src/domain/system-world.ts` reads the System World manifest (schema
+`openrig.system-world/v0alpha1`): an id, a version, the context packs every seat starts from,
+and system skills. The `context.system_world` setting selects the default manifest at
+`system/system-world.yaml` under `context.root`, disables it, or names another manifest file.
+The default (`openrig-default`) names the `onboarding-width` and `world-public` packs and no
+skills; it is seeded when missing.
 
-An **agent image** is a snapshot bundle of a productive seat's resumable
-state: runtime-specific resume token (Claude `resume_token` / Codex
-`thread_id`), source-seat lineage, optional cwd-deltas + notes. Consumable
-by AgentSpec `session_source: mode: agent_image`. Filesystem-canonical at
-`~/.openrig/agent-images/<name>/` + workspace-local; **no SQLite tables**.
+`rig context recap-write --rig <rig> --seat <seat> --file <file>` writes the seat's
+`RECAP.md` through `packages/daemon/src/domain/context-packs/seat-recap-store.ts`. The previous
+recap is kept byte-for-byte under `recap-superseded/`. A recap that isn't addressable Markdown
+is refused; the other content checks are advisory.
 
-> Source: `domain/agent-images/agent-image-types.ts:1-13` @HEAD.
+`packages/daemon/src/domain/skill-catalog.ts` resolves a seat's skill loadout from the
+catalog at `skills.root` (`catalog.yaml`, schema `openrig.skill-catalog/v1`) and the system,
+topology and project selections. It projects skills into `<cwd>/.claude/skills` or
+`<cwd>/.agents/skills` and tracks what it owns in
+`<cwd>/.openrig/skill-loadouts/<runtime>.json`. Each projection reports `current`, `missing`,
+`shadowed`, `stale` or `conflicting`. `rig skill loadout --runtime <runtime>` inspects the
+composed projection and reconciles it only with `--apply`; `rig skill audit` is a separate
+read-only provenance and freshness audit. Launch applies the selected loadout per seat.
 
-`AgentImageLibraryService` mirrors `ContextPackLibraryService` (scan / list
-/ get / last-wins) with three source-stated differences: `sourceResumeToken`
-passes through to consumers (instantiator consumes; operator surfaces
-redact); `stats.json` is a separate mutable file updated atomically on
-fork-count increment; a `.pinned` sentinel pins from prune. Id
-`agent-image:<name>:<version>`.
+For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to
+that loadout (`packages/daemon/src/domain/profile-resolver.ts:309–330`, with
+`resolvePluginSkills()` at `skill-catalog.ts:460`). Neither runtime reads skills from the plugin
+folder projected into the working directory. The skills are projected under their plain names,
+and a skill the profile already selects keeps its source. A kept plugin copy (an edited or
+user-owned one, or OpenRig's own copy whose plugin source changed or moved after the loadout
+was resolved, `skill-catalog.ts:1060–1068`) gives a `plugin_skill_kept` warning, and an unreadable one gives
+`plugin_skill_skipped`. If plugin skills can't be projected at all, the seat starts without them
+and gets a `plugin_skills_not_projected` warning (`rigspec-instantiator.ts:2045`).
 
-> Source: `domain/agent-images/agent-image-library-service.ts:5-14`
-> (3-difference comment), `:38-41` (id) @HEAD.
+## Agent images and forks
 
-`discoverResumeToken(db, sourceSession)` queries `sessions` then `nodes`
-and returns a typed failure (`session_not_found`/`runtime_unsupported`)
-rather than fabricating a token; only `claude-code`/`codex` have a native
-fork primitive. Claude prefers `context_usage.session_id` over persisted
-`sessions.resume_token`; Codex uses `resume_token`, falling back to a
-binding's `external_session_name` for `external_cli` seats; returns
-`nativeId: null` honestly when none.
+`packages/daemon/src/domain/agent-images/agent-image-library-service.ts` implements
+`AgentImageLibraryService`. Startup registers the OpenRig `agent-images` root and,
+when present, the workspace-local `.openrig/agent-images` root. Entries are keyed by
+`agent-image:<name>:<version>`, with later discovery roots replacing identical IDs.
+Content is a manifest plus optional files; `stats.json` holds usage data and `.pinned`
+marks protection from ordinary deletion/pruning.
 
-> Source: `domain/agent-images/resume-token-discovery.ts:37-85` (honest
-> null L84; Claude pref L64-69; external_cli L78-83); honesty comment
-> `:9-10` @HEAD.
+Capture and consumption depend on live identity as well as library files:
 
-`SnapshotCapturer.capture()` routes through `discoverResumeToken`, throws
-`AgentImageError` on failure or missing native id (no fabricated token, no
-auto-fallback to fresh), writes manifest + empty `stats.json` via
-`install()`, re-scans. Captured `nodeCwd` → manifest `source_cwd` so the
-Use-as-starter snippet emits `cwd:` (fork starts in the parent's directory
-where Claude's project-dir-scoped jsonl lives); the daemon does NOT
-override cwd at fork dispatch.
+- `packages/daemon/src/domain/agent-images/resume-token-discovery.ts`:
+  `discoverResumeToken()` reads session/node/binding state. It supports Claude Code and
+  Codex. Claude prefers matching context-usage identity; Codex prefers the persisted resume
+  token, then an external-CLI binding. Absent native identity remains absent.
+- `packages/daemon/src/domain/agent-images/snapshot-capturer.ts`:
+  `SnapshotCapturer.capture()` refuses unsupported or missing native identity, writes
+  an image manifest/files and rescans. It records the source working directory when known.
+- `packages/daemon/src/routes/agent-images.ts`:
+  `POST /fork` composes native identity discovery with an add-member operation. The
+  default path makes no image. The keep-image path captures and pins one before launch,
+  and reports that retained image even if launch fails.
 
-> Source: `domain/agent-images/snapshot-capturer.ts:60-104` (throw
-> L65-79; source_cwd L88-93; install+scan L101-102);
-> `routes/agent-images.ts:256-265` (no-cwd-override contract) @HEAD.
+Library/snapshot responses redact `sourceResumeToken`; the fork composer builds its
+native-ID session source inside the daemon rather than returning that field to the caller.
+This describes these response projections, not secrecy of every field in an image manifest.
 
-**Evidence guard (CATASTROPHIC-bounce; fails closed).**
-`evaluateProtection()` protects an image from deletion if ANY: pinned;
-referenced by an active `agent.yaml`; referenced by a rig spec; or a
-lineage descendant of a protected image (transitive, fixed-point
-iteration). Spec-root scanning parses YAML structure (not string-grep)
-and is deliberately conservative — false positives (over-protection)
-acceptable; false negatives = catastrophic data loss. `--force` /
-`?force=true` overrides.
+`recordConsumption()` accepts a separate fork-count flag: consumption intent can update
+last-use time without incrementing successful forks. Inspect the instantiation caller as
+well as library statistics when assessing whether a launch succeeded.
 
-> Source: `domain/agent-images/evidence-guard.ts:1-16` (bounce +
-> fail-closed), `:53-115` (direct + transitive; fixed point L92-112),
-> `:117-122` (conservative) @HEAD.
+`packages/daemon/src/domain/agent-images/evidence-guard.ts` implements
+`evaluateProtection()`: pins, parsed spec references and descendants of protected images
+contribute protection reasons. The route applies the guard to deletion/pruning unless
+`force` is explicit. Prune defaults to dry-run. Its protection view depends on the supplied
+spec roots; it is not an inventory of every reference anywhere on the host.
 
-**Resume-token redaction at route boundary (LOAD-BEARING).**
-`/api/agent-images` redacts `sourceResumeToken` → `"(redacted)"` on every
-operator-facing path; tokens are **never returned over the wire**; only
-the in-process rigspec-instantiator consumes the real token.
+The guard keys its result by image name, not version: every version of one name gets the
+status computed for the last-listed version, carrying that version's image ID. The delete
+route looks up by image ID, so on delete only that last-listed version of a name is matched,
+and its other versions are deleted without `force` even when pinned. `rig agent-image prune`
+sends a dry run unless `--force` is given, and `--force` also overrides the guard, so a
+guarded real prune is reachable only through the HTTP route.
 
-> Source: `routes/agent-images.ts:15-17` + `:44-46` (`redactResumeToken`),
-> applied `:60`,`:67`,`:94`,`:161`; slice-00 0.3.0-GT §1.9 flags this
-> LOAD-BEARING @HEAD.
+The routes mount at `/api/agent-images` and expose list/sync, snapshot/fork,
+entry/preview, pin/unpin, delete and prune.
+`packages/cli/src/commands/agent-image.ts` owns the image library commands. The top-level
+`rig fork` verb (`packages/cli/src/commands/fork.ts`) drives `POST /fork`; `--keep-image`
+also captures a pinned image.
 
-`agentImagesRoutes()` (mounted `server.ts:483-485`): `GET /library`,
-`POST /library/sync`, `GET /library/:id`, `GET /library/:id/preview`,
-`POST /library/:id/pin`, `POST /library/:id/unpin`,
-`DELETE /library/:id` (evidence-guarded unless `force=true`),
-`POST /snapshot`, `POST /prune` (**dry-run by default**,
-`dryRun !== false`); guard `specRoots` injected via
-`deps.agentImageSpecRoots`. CLI: `rig agent-image
-list|show|preview|create|delete|pin|unpin|prune|sync`.
+## Plugins
 
-> Source: `routes/agent-images.ts:54-250` (table; prune default L112;
-> delete-guard L224-239); `server.ts:483-485`;
-> `docs/as-built/cli-reference.md:895-912` @HEAD.
+### Discovery and inspection
 
-## 3. Plugins (plugin-primitive Phase 3a) — **0.3.1, NOT 0.3.0**
+`packages/daemon/src/domain/plugin-discovery-service.ts` discovers plugins from:
 
-> **Forensic trap (slice-00 0.3.0-GT seam (a)):** the plugin-discovery
-> file's first-creating commit is dated the same day as the 0.3.0 release
-> commit but is NOT an ancestor of `v0.3.0`. Plugins are **0.3.1**.
-> Re-confirmed at HEAD by the §0 tag-presence test.
+| Source kind | Directory shape |
+|---|---|
+| `vendored` | OpenRig plugins root, one plugin directory per entry. |
+| `claude-cache` | Claude cache, grouped by marketplace/plugin/version. |
+| `codex-cache` | Codex cache, grouped by marketplace/plugin/version. |
+| `rig-cwd` | `.claude/plugins` and `.codex/plugins` beneath supplied working-directory roots. |
 
-`PluginDiscoveryService` is a read-only filesystem aggregator — no SQLite,
-no mutation routes (SC-29 EXCEPTION #8, declared verbatim in the source
-header). It scans four source kinds, unioned with provenance labels:
-vendored (`~/.openrig/plugins/<id>/`), Claude cache
-(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`), Codex cache
-(same under `~/.codex`), and rig-cwd (`<cwd>/.claude/plugins/*` +
-`<cwd>/.codex/plugins/*`). Detection = presence of
-`.claude-plugin/plugin.json` and/or `.codex-plugin/plugin.json` (declares
-`runtimes`). Slice 28 added `skillCount` (readdir of `<plugin>/skills/`)
-to the list response so the index page avoids an N+1 detail fetch
-(SC-29 EXCEPTION #11, verbatim).
+Detection uses the Claude/Codex plugin manifests. `listPlugins()` returns runtime/source
+metadata; `getPlugin()` adds manifests, skills, hooks and MCP detail.
+`findUsedBy()` scans agent YAML in configured spec-library roots for plugin declarations
+and profile references. These references describe authored specs, not proof of a running
+harness loading a plugin.
 
-> Source: `domain/plugin-discovery-service.ts:1-29` (SC-29 #8 + scan
-> desc), `:39` (4-kind `PluginSourceKind`), `listPlugins` `:205-276`
-> (4 scan blocks), `scanCwdBundledPlugins` `:283-307`, `detectPlugin`
-> `:393-453` (marker rule L399-404; `skillCount` L433-451 + #11
-> L75-80) @HEAD.
+The service constructor is not read-only: it retires obsolete refocus hook registrations
+from the older bundled plugin and rejects duplicate vendored hook registrations across
+providers. Cached plugin versions are excluded from that duplicate-provider check. Startup
+constructs the service while building the daemon's dependencies and doesn't catch that
+rejection, so a duplicate vendored hook stops daemon creation.
 
-`getPlugin(id)` returns detail (manifests + skills + hooks + MCP servers);
-`rig-cwd:` ids are self-resolvable (parses the cwd out of the id prefix
-and re-scans so `/api/plugins/:id` does not 404 on an id `?cwd=`
-returned). `findUsedBy(id)` walks `agent.yaml` files parsing YAML
-structure (not string-grep — comments don't false-positive) to collect
-`resources.plugins[].id` + referencing profiles.
+`packages/daemon/src/routes/plugins.ts` exposes GET-only inspection at `/api/plugins`:
+list, detail, used-by and file list/read. The file routes use the discovered plugin root as
+their path allowlist. `?cwd=` supplies rig-cwd discovery roots.
+At this pin, the route's source filter accepts vendored, Claude-cache and Codex-cache only;
+`source=rig-cwd` is not applied as a filter, even though the service supports that kind.
 
-> Source: `domain/plugin-discovery-service.ts:309-369` (getPlugin;
-> rig-cwd self-resolve L310-321), `extractCwdFromRigCwdId` `:466-479`,
-> `findUsedBy` `:371-389`, `readResourcesPlugins` `:599-615`,
-> `readProfilesUsingPlugin` `:617-633` (structure-not-grep `:20-23`)
-> @HEAD.
+### Vendoring and projection
 
-`PluginVendorService.ensureLatest()` runs `ensureVendored` (hash-skip
-idempotent copy from `packages/daemon/assets/plugins/<name>/` to
-`~/.openrig/plugins/<name>/`) then `attemptAutoFetch`
-(`github.com/mvschwarz/openrig-plugins`, 5s timeout,
-**404/network/timeout tolerated silently** — vendored is ALWAYS the
-fallback; upstream repo intentionally empty at v0 so 404 is normal-state;
-NO tarball extraction at v0). Wired at startup for `openrig-core`.
+`packages/daemon/src/domain/plugin-vendor-service.ts` owns `PluginVendorService`.
+`ensureVendored()` seeds absent plugins or advances an older numeric manifest version.
+Equal/newer installed versions preserve installed bytes; equal versions can reconcile file
+modes on byte-identical files. Missing target version authority is preserved rather than
+overwritten; invalid or conflicting manifest versions are errors. Advancing a version writes
+changed files but never deletes files the new version dropped.
 
-> Source: `domain/plugin-vendor-service.ts:1-24`, `ensureVendored`
-> `:80-103` (hash-skip L97-99), `attemptAutoFetch` `:111-131`
-> (404-tolerant L116-117; no-extract L123-125), `ensureLatest`
-> `:138-141`; `startup.ts:434-472` @HEAD.
+`ensureSkillGlobally()` projects a named plugin skill using a vendor-version marker.
+An existing unversioned global skill remains externally owned. Startup wires this service
+and its filesystem implementation; inspect that wiring when changing projection roots. At
+startup only `openrig-core` is vendored, and its `openrig-skills` and `refocusing` skills are
+projected globally into `~/.claude/skills` and `~/.agents/skills`
+(`packages/daemon/src/startup.ts:877–886`). The packaged `rigs` skill
+(`packages/daemon/assets/skills/rigs`) is not a plugin skill: `ensureSkillDirGlobally()`
+projects it into the same roots under the daemon version, so each upgrade refreshes it
+(`startup.ts:891–899`). A failed global projection is logged and does not stop startup.
 
-`pluginsRoutes()` (mounted `server.ts:478`, read-only): `GET /` (filters
-`?runtime=`, `?source=`, `?cwd=`), `GET /:id/used-by`,
-`GET /:id/files/list?path=`, `GET /:id/files/read?path=` (slice 28
-docs-browser), `GET /:id`. Literal sub-paths are mounted **before** the
-bare `/:id` catchall (route-order discipline). The files endpoints reuse
-the path-safety machinery with the discovered plugin's absolute path as a
-synthetic single-root allowlist (operator need not declare plugin paths
-in `OPENRIG_FILES_ALLOWLIST`; plugin folders read-only at v0 so the
-content hash is informational). CLI: `rig plugin
-list|show|used-by|validate`; no `install` verb at v0 (deferred to 0.3.2).
+`ensureLatest()` performs local vendoring before `attemptAutoFetch()`. The latter
+requests a release asset with a bounded timeout and logs failures; even its successful
+response path does not extract/install the fetched archive at this pin. This does not
+establish whether an upstream release asset currently exists.
 
-> Source: `routes/plugins.ts:29-39` + `:107-231` (table; before-catchall
-> L128-130/L141-142; `pluginRootAllowlist` :74-92; read-only-hash
-> L182-184); `server.ts:478`;
-> `docs/as-built/cli-reference.md:943-963` @HEAD.
+`packages/cli/src/commands/plugin.ts` implements `rig plugin
+list|show|used-by|validate`. Discovery, vendoring and a runtime's projected plugin tree
+are distinct steps; see [agent-spec-and-startup.md](agent-spec-and-startup.md) for launch.
 
-> **OPEN-A** — `parseSourceFilter` (`routes/plugins.ts:69-72`) accepts
-> only `vendored|claude-cache|codex-cache`; it does NOT accept `rig-cwd`
-> though `PluginSourceKind` (`domain/plugin-discovery-service.ts:39`) and
-> `ListPluginsOpts.sourceFilter` include it. `?source=rig-cwd` is
-> silently dropped at the route while `?cwd=` still surfaces rig-cwd
-> entries unfiltered. Stated as-is; intent (rig-cwd reachable only via
-> `?cwd=`) vs filter-gap is not resolvable from source alone.
+## Claude guided compaction
 
-## 4. Claude auto-compaction enforcer (slice 27) — **0.3.1 headline**
+`packages/daemon/src/domain/claude-compaction-enforcer.ts` implements
+`ClaudeCompactionEnforcer`. Startup shares one instance between `ContextMonitor`
+and the manual-compaction route consumers.
+`packages/daemon/src/domain/user-settings/settings-store.ts` resolves the
+`policies.claude_compaction.*` settings; automatic compaction defaults to disabled.
 
-> **No 0.3.0 antecedent (slice-00 0.3.0-GT map row 7).** The enforcer
-> file is absent at `v0.3.0`, present at `v0.3.1` (§0).
+`maybeAutoCompact()` applies the delivery guard when one exists and the runtime is Claude
+Code. Its implementation requires Claude Code, observed usage and a valid integer threshold
+(default 80). Above-threshold automatic work additionally checks enablement, the
+post-restore cooldown (10 minutes), the deduplication window (60 seconds) and the
+already-triggered latch; an active manual attempt also blocks it.
 
-`ClaudeCompactionEnforcer.maybeAutoCompact()` decides per seat whether
-`ContextMonitor` should send `/compact`, driven by operator
-`policies.claude_compaction.*` settings. Decoupled from `ContextMonitor`
-scheduling; `ContextMonitor` is constructed with the enforcer at startup.
+`/compact` is held behind a preparation attempt:
 
-> Source: `domain/claude-compaction-enforcer.ts:7-12`, `maybeAutoCompact`
-> `:205-331`; `startup.ts:1191-1199` (enforcer →
-> `new ContextMonitor(db, contextUsageStore, claudeAdapter,
-> compactionEnforcer)`) @HEAD.
+1. The first above-threshold tick starts an attempt with its own ID, the seat's occupant
+   generation, a restore-map path and a completion marker, then sends only the prep prompt.
+   An unknown occupant generation stops the attempt at once.
+2. The agent writes `RESTORE-MAP.md.tmp` with its file-edit tool, completion marker last.
+   Later ticks return `preparation_pending` until that exact map is complete. The map path is under the seat's working directory
+   (`.openrig/compaction/preparation/<session>/<attempt>/`, with a `.gitignore` of `*`) when
+   that is writable, otherwise under `compaction/preparation/` in the OpenRig home.
+3. The daemon atomically renames the completed temp file to `RESTORE-MAP.md` in its existing
+   final send checks, after rechecking the attempt and occupant. An already-complete final map
+   remains compatible. Only then is `/compact` sent, with the final map path appended to the
+   compact instruction. Publication failure cannot authorize `/compact`.
+4. The continuation then runs below the threshold: turn boundary, restore prompt, then a
+   read-depth audit prompt (each item marked `FULL`, `PARTIAL` or `NOT_READ`), one stage per
+   poll tick. A seat refreshes its usage sample only when it takes a turn, so when the sample is
+   stale, unknown or has no percentage and a stage is pending, the monitor drains that stage
+   without one (`context-monitor.ts:175`, `claude-compaction-enforcer.ts:436`). Only a fresh,
+   known sample can start a compaction. The sample-less drain reads readiness from the pane alone
+   and counts a timer-less live status row, such as `✻ Compacting conversation…`, as work
+   (`session-transport.ts:153-161`); a recent hook showing work or a waiting person still
+   refuses. It records no width receipt, because the only figure would be the pre-compact one.
 
-**Defensive contract** (source classifies compaction lifecycle as
-load-bearing per the banked permission-layer foot-gun rule):
+An automatic attempt has a 25-minute ceiling that starts once the prep is delivered. A stale
+occupant generation, the policy becoming disabled, or the deadline passing stops it. A prep
+that clearly wasn't sent is retried at most three times; an uncertain prep or `/compact` is
+never replayed.
 
-- **Opt-in, default-off:** `enabled=false` → never triggers.
-- **Runtime filter:** triggers only when `runtime === "claude-code"`.
-- **Invalid-policy = disabled:** a hand-edited non-integer / out-of-
-  `[1,100]` `thresholdPercent` is treated as disabled (safer-failure).
-- **Re-arm via threshold crossing:** session must drop below threshold
-  before another auto-compact fires; window state NOT persisted (restart
-  resets — safer-failure direction).
-- **Send-failure graceful-degrade:** returns `{ triggered: false,
-  reason: "send_failed" }`, never throws; dedup timestamp set only on
-  successful send so a transient failure retries next tick.
+The restore prompt names a restore-pending marker at
+`compaction/restore-pending/<session>.json` in the OpenRig home, which the `openrig-core`
+PreCompact hook writes. A per-seat `compaction/post-compact-extra/<session>.md` is preferred
+over the global extra file, and an extra file that declares a different seat is refused.
 
-> Source: `domain/claude-compaction-enforcer.ts:14-44` (risk-class +
-> contract), runtime `:206-208`, invalid-policy `:224-232`,
-> dedup/threshold `:285-300`, send-fail `:312-314`/`:323-325` @HEAD.
+`rig compact <session>` (`packages/cli/src/commands/compact.ts`) runs the same sequence
+manually through `/api/compaction/trigger`, `cancel` and `state`, which use the terminal
+bearer-token middleware; it passes every request through when no token is configured.
+`--skip-map` skips the map requirement once, `--cancel` ends the preparation, and `--state`
+shows the attempt, its expected map and its deadline. A manual attempt has 120 seconds for
+preparation and the idle wait.
 
-**Active handshake state machine** (Claude hooks can supply context but
-do not create a new assistant turn): (1) **pre-compact prep** — first
-eligible above-threshold tick sends a normal user-channel prep prompt;
-state → `prep_prompt_sent`. (2) **/compact** — next eligible tick sends
-`/compact <instruction> + trust-channel bridge note`; sets dedup
-timestamp + `triggeredAboveThreshold`; queues post stage
-`turn_boundary`. (3) **post-compact, below threshold** — staged sends
-`turn_boundary` (ack-only) → `restore_prompt` (points at the pending
-marker `<openrigHome>/compaction/restore-pending/<key>.json`, transcript
-/ session-id fallbacks) → `compliance_prompt` (read-depth audit); final
-stage sets post-restore cooldown + clears the above-threshold latch.
+The below-threshold continuation checks policy enablement too, except for an explicitly
+operator-initiated manual sequence. A known occupant-generation mismatch invalidates the
+queued stages; an unknown generation does not prove a match. Failed or retained sends
+do not advance the stage. The manual trigger shares this continuation while having its
+own initiation checks.
 
-> Source: `domain/claude-compaction-enforcer.ts:71-77` (compact+bridge),
-> `:79-98` (prep), `:108-145` (restore + marker path), `:147-163`
-> (compliance), `:165-171` (turn boundary), state machine `:233-330`
-> (below-threshold L233-283; above-threshold L302-330) @HEAD.
+Stage, deduplication, cooldown and preparation-attempt maps are in memory; the restore maps
+are files. Startup supplies live generation
+resolution and a post-restore callback that records a managed-width receipt, so the wider
+operation also has persistent effects. Do not infer durable lifecycle completion from
+a library read or one successfully queued message.
 
-Policy fields via `SettingsStore.resolveClaudeCompactionPolicy()`:
-`enabled`, `thresholdPercent`, `preCompactInstruction`,
-`compactInstruction`, `messageInline`, `messageFilePath`,
-`postRestoreAuditInstruction` — each backed by a
-`policies.claude_compaction.*` key + `OPENRIG_POLICIES_CLAUDE_COMPACTION_*`
-env override. Defaults: dedup `60_000` ms; post-compact restore cooldown
-`10 * 60_000` ms.
+## Related maps
 
-> Source: `domain/user-settings/settings-store.ts:553-565` (resolver),
-> keys `:97-103`, env `:145-151`;
-> `domain/claude-compaction-enforcer.ts:45-46` (default windows) @HEAD.
-
-## 5. Cross-cutting properties
-
-- **Filesystem-canonical, no new SQLite** across all four; daemon caches
-  in-memory; compaction window state intentionally not persisted
-  (context-pack-types.ts:8-11; agent-image-types.ts:12-13;
-  routes/plugins.ts:6; claude-compaction-enforcer.ts:26-29) @HEAD.
-- **Honest failure, no fabrication** — discovery returns null; capturer
-  throws; enforcer degrades + never throws; evidence guard fails closed
-  (resume-token-discovery.ts:9-10; snapshot-capturer.ts:11-12;
-  claude-compaction-enforcer.ts:30-33; evidence-guard.ts:16) @HEAD.
-- **503-when-unprovisioned** is the uniform route pattern when the
-  backing service is absent from context (routes/context-packs.ts:31;
-  routes/agent-images.ts:59; routes/plugins.ts:113) @HEAD.
-
-## OPEN items (carried, not smoothed)
-
-- **OPEN-A** — plugin `?source=` filter omits `rig-cwd` (§3); intent vs
-  filter-gap unresolvable from source.
-- No slice-00 numeric-drift OPEN (1–5) applies — this module carries no
-  migration / route-group / PL-004-event counts. Slice-00 0.3.0-GT
-  OPEN-3 (For-You verb subset) is out of scope (UI surface, not
-  content-layer).
+- [packaging-bootstrap-bundles.md](packaging-bootstrap-bundles.md): bundle export and
+  routing into content libraries.
+- [agent-spec-and-startup.md](agent-spec-and-startup.md): context/resource projection
+  and image consumption during launch.
+- [lifecycle-snapshot-restore.md](lifecycle-snapshot-restore.md): broader continuity flows.

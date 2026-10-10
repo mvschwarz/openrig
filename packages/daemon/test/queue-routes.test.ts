@@ -1648,9 +1648,43 @@ describe("queue routes", () => {
       expect(body.asSource.total).toBe(0);
     });
 
+    // OPR.0.7.0.12 — work candidates ride only an explicit request, and the read writes nothing.
+    it("GET /api/queue/whoami adds workCandidates only with candidates=1, read-only", async () => {
+      const created = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "x", tags: ["mission:m"] }),
+      });
+      expect(created.status).toBe(201);
+      const counts = () => ({
+        items: (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n,
+        transitions: (db.prepare("SELECT COUNT(*) AS n FROM queue_transitions").get() as { n: number }).n,
+      });
+      const before = counts();
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as Record<string, unknown>;
+      expect(plain).not.toHaveProperty("workCandidates");
+      const asked = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      expect(asked.status).toBe(200);
+      const body = (await asked.json()) as { workCandidates: { next: Array<{ missions: string[] }>; candidates: unknown[]; held: unknown[] } };
+      expect(body.workCandidates.next).toEqual([expect.objectContaining({ missions: ["m"] })]);
+      expect(body.workCandidates.candidates).toEqual([]);
+      expect(counts()).toEqual(before);
+    });
+
     it("GET /api/queue/whoami returns 400 without session query param", async () => {
       const res = await app.request("/api/queue/whoami");
       expect(res.status).toBe(400);
+    });
+
+    it("GET /api/queue/whoami returns 400 for a recentLimit that is not a number", async () => {
+      const res = await app.request("/api/queue/whoami?session=bob@r&recentLimit=abc");
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "recentLimit must be a number" });
+      // Everything parseInt reads keeps working as before, clamped by whoami.
+      for (const value of ["5", "1.5", "2x", "-1"]) {
+        const ok = await app.request(`/api/queue/whoami?session=bob@r&recentLimit=${value}`);
+        expect(ok.status, value).toBe(200);
+      }
     });
   });
 

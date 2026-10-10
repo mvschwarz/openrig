@@ -23,8 +23,9 @@ rig mode unset mission my-project/release-1
 Unsetting reveals the next applicable explicit choice, or the visible human-led
 product default. A new, resolved rig with no binding reports `human-led`,
 `source: product-default`, and `binding: null`. Missing scope identity, conflicting
-linkage, unavailable storage or malformed authored context reports `unknown` with
-a reason. Calling `effective` without a scope does not select a rig implicitly.
+linkage or malformed authored context reports `unknown` with a reason. If the mode
+store itself is unavailable, the route answers HTTP 503 `rig_policy_store_unavailable`
+instead. Calling `effective` without a scope does not select a rig implicitly.
 The existing operator bearer requirement still applies. `set` requires `--confirm`;
 `unset` is an explicit deletion command and applies immediately.
 
@@ -40,12 +41,12 @@ another preference store or infer delegation from workflow existence or activity
 | --- | --- |
 | `posture` | `human-led`, `delegated`, or `unknown` |
 | `source` | `product-default`, `binding`, or `unknown` |
-| `context` | Resolved rig/project/mission/workstream/qitem IDs, source addresses, canonical authored paths and phase; null if scope resolution failed |
-| `context.phase` | `{value, source}` from an explicit workflow packet step, otherwise slice stage/status, otherwise mission release phase/status; null fields when unavailable |
+| `context` | Resolved rig/project/mission/workstream/qitem IDs, source addresses, canonical authored paths, phase and `warnings` (for example a malformed `rigs` list that project inference skipped); null if scope resolution failed |
+| `context.phase` | `{value, source}` from an explicit workflow packet step, otherwise slice stage/status, otherwise mission release phase/status. A slice with neither gives `value: null` with its `SPEC.md` as the source; a mission with neither makes the whole read unknown; both fields are null only for rig- or project-only scopes |
 | `binding` | Winning binding ID, scope, timestamp and evidence citation; null for default/unknown |
 | `reason` | Explanation of the result or the missing/conflicting fact |
 | `grantsAuthority` | Always `false` |
-| `members` | For queue-backed findings, each member's qitem, posture, source and binding ID; differing or unknown member postures yield unknown aggregate posture |
+| `members` | For queue-backed findings, each member's qitem, posture, source and binding ID; differing or unknown member postures, or members in different project/mission/workstream contexts, yield unknown aggregate posture |
 
 The existing SQLite mode-binding table remains the only preference store. Matching
 posture bindings resolve in this order: qitem, workstream, mission, project, rig,
@@ -54,16 +55,23 @@ global host. The qualifiers are respectively a qitem ID, `project/mission/slice-
 The workstream is an existing authored slice, found by its directory or SPEC ID;
 the returned identity uses its SPEC ID and project/mission qualification.
 
-Project selection reads `workspace.yaml`'s declared `projects: [{id, root}]`
-catalog, or the workspace's own `project.yaml` when no catalog exists. Multiple
-projects require an explicit project selection. A sole project may be derived.
+Project selection reads the declared `projects: [{id, root}]` catalog at
+`workspace.catalog_path` (default `workspace.yaml` in the workspace root), the
+same catalog `rig context work-install` uses, or the workspace's own
+`project.yaml` when no catalog exists. A sole project may be derived. With several
+projects and no explicit selection, posture picks one the way `rig context work-install`
+does: a project whose `projects[].rigs` lists the rig, then (for qitem reads) the deepest
+project root containing the destination seat's working folder, then the only project no rig
+claims. The method is recorded in the source as `#selected-by=rig:<name>`, `cwd:<path>` or
+`unclaimed`. If none gives a single answer, the read is unknown.
 The project manifest validates identity and supplies `missions.root` (default
 `missions`). Mission and slice identities come from those authored work nodes;
 missing, duplicate or conflicting identities remain unknown. The selected work
 must stay inside its canonical project root.
 
 Qitem reads join explicit `project:`, `mission:`, `slice:`/`workstream:` tags,
-destination rig, and the existing workflow packet binding. Workflow lifecycle
+destination rig, and the existing workflow packet binding. A qitem with a mission but no
+project gets its project from the selection above. Workflow lifecycle
 project/mission identity must agree with the tags and requested scope. The bound
 packet's exact step is the phase source; phase names are not classified by guess.
 An unlinked qitem does not silently inherit the default. Scope reads are observational.

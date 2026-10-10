@@ -122,15 +122,15 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
-    const rig = rigRepo.createRig("seat-rig");
+  function seedSeat(opts?: { rigName?: string; runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
+    const rig = rigRepo.createRig(opts?.rigName ?? "seat-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
-      const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+      const session = sessionRegistry.registerSession(node.id, `dev-impl@${rig.name}`);
       sessionRegistry.updateStatus(session.id, "running");
       sessionRegistry.updateStartupStatus(session.id, "ready", "2026-04-20T12:00:00Z");
-      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%0" });
+      sessionRegistry.updateBinding(node.id, { tmuxSession: `dev-impl@${rig.name}`, tmuxPane: "%0" });
       sessionId = session.id;
     }
     return { rig, node, sessionId };
@@ -379,6 +379,14 @@ describe("SeatHandoverService", () => {
     expect.soft(deliveries.filter((delivery) => delivery.targetSession === retiredSession)).toEqual([]);
   });
 
+  it("kernel handover recomputes operational authority from the persisted rig", async () => {
+    seedSeat({ runtime: "codex", rigName: "kernel" });
+    const result = await service.handover({ seatRef: "dev-impl@kernel", reason: "context-wall",
+      source: "fresh", operator: "operator@kernel" });
+    expect(result.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ kernelAuthority: true, launchPosture: "full_bypass" });
+  });
+
   it("keeps dry-run side-effect free", async () => {
     seedSeat();
     const discovered = seedDiscovery();
@@ -439,6 +447,7 @@ describe("SeatHandoverService", () => {
       // locked absence contract: the continuity edge binds the minimum floor explicitly —
       // ambient YOLO must not widen an attachment-less successor.
       expect(successorBinding.launchPosture).toBe("floor");
+      expect(successorBinding.teamPermissionDefault).toBe(true);
     } finally { vi.unstubAllEnvs(); }
   });
 
@@ -553,7 +562,7 @@ describe("SeatHandoverService", () => {
     expect(target).toBe("dev-impl@seat-rig");
     expect(packet).toContain("OpenRig seat handover");
     expect(packet).toContain("predecessor screen tail");
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@seat-rig", ["C-m"]);
+    expect(sendKeys).toHaveBeenCalledWith("dev-impl@seat-rig", ["Enter"]);
     expect(sendText.mock.invocationCallOrder[0]!).toBeLessThan(hasSession.mock.invocationCallOrder[0]!);
 
     // B1: the successor was launched into a LIVE agent (launchHarness +
@@ -735,7 +744,7 @@ describe("SeatHandoverService", () => {
     expect(packet).toContain("predecessor screen tail");
   });
 
-  it("B16 rework: packet delivery uses the shared paste-then-submit sequencing — a settle sleep BETWEEN send_text and C-m (r2 live: without it the packet sat staged-unsent 46s)", async () => {
+  it("B16 rework: packet delivery uses the shared paste-then-submit sequencing — a settle sleep BETWEEN send_text and Enter (r2 live: without it the packet sat staged-unsent 46s)", async () => {
     seedSeat({ runtime: "codex" });
     const sleeps: number[] = [];
     const orderedCalls: string[] = [];

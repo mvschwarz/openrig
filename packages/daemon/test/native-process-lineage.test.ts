@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { findExactNativeResumeProcess, observeClaudePaneStartedAt, verifyAgyPaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, verifyAgyPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+
+import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
 const token = "00000000-0000-7000-8000-000000000001";
 const startedAt = "Sat Jan  1 12:00:00 2000";
@@ -22,6 +24,22 @@ describe("joined native Codex identity", () => {
   });
   it("proves direct-native resume", async () => {
     expect((await check(() => [{ ...rows()[3]!, pid: 10, ppid: 1 }]))?.process.pid).toBe(10);
+  });
+  it.each([
+    `resume ${token} --add-dir /Users/me/code/Bob's app`,
+    `resume --add-dir /Users/me/code/Bob's-app ${token}`,
+    `resume ${token} What's next?`,
+    `resume ${token} --add-dir /Users/me/code/review"app`,
+  ])("preserves literal quote characters in Codex resume argv: %s", async args => {
+    const list = () => rows().map(r => r.pid === 13 ? { ...r, command: `/opt/native/codex ${args}` } : r);
+    expect((await check(list))?.process.pid).toBe(13);
+    expect(await check(list, { expectedToken: "different" })).toBeNull();
+  });
+  it("observes a fresh Codex launch into an apostrophe path", async () => {
+    const list = () => rows().map(r => r.pid === 13
+      ? { ...r, command: "/opt/native/codex -C /Users/me/code/Bob's-app" } : r);
+    expect((await check(list, { requireResume: false }))?.process.pid).toBe(13);
+    expect(await check(list)).toBeNull();
   });
   it("distinguishes fresh/non-strict runtime proof from exact resume", async () => {
     const fresh = () => rows().map(r => r.pid === 13 ? { ...r, command: "/opt/native/codex -m model" } : r);
@@ -131,5 +149,91 @@ describe("joined native agy identity", () => {
   });
   it("does not accept a codex process as agy", async () => {
     expect(await checkAgy(() => agyRows().map(r => r.pid === 32 ? { ...r, executableName: "codex", command: "/opt/native/codex" } : r))).toBeNull();
+  });
+});
+
+describe("Claude identity with inline settings in ps output", () => {
+  const settings = [
+    ["kernel", operationalLaunchArgs("claude-code", { kernelAuthority: true })[1]!],
+    ["team", operationalLaunchArgs("claude-code", { teamPermissionDefault: true })[1]!],
+    ["escaped quotes and hooks", JSON.stringify({
+      permissions: { allow: ["Bash(npm run test:*)"] },
+      hooks: { PreToolUse: [{ hooks: [{ type: "command", command: 'node "/fixture with spaces/check.cjs" --label "it\'s fine"', timeout: 5 }] }] },
+    })],
+  ];
+  function input(args: string) {
+    const list = [
+      { pid: 20, ppid: 1, pgid: 20, tpgid: 21, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 21, ppid: 20, pgid: 21, tpgid: 21, executableName: "claude",
+        command: `claude --permission-mode acceptEdits ${args} --name seat@rig`, startedAt },
+    ];
+    return { target: "%1", tmux: { getPanePid: async () => 20 }, listProcesses: async () => list, expectedToken: token };
+  }
+  for (const [name, value] of settings) {
+    for (const flag of ["--session-id", "--resume"]) {
+      it.each(["before", "after"])(`${name}: ${flag} %s settings stays exact for identity and delivery`, async order => {
+        // ps joins argv without putting shell quotes around the JSON argument.
+        const identity = `${flag} ${token}`, option = `--settings ${value}`;
+        const args = order === "before" ? `${identity} ${option}` : `${option} ${identity}`;
+        const actual = input(args);
+        expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+        expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+        expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+        expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+      });
+    }
+  }
+  it.each([
+    `--settings="/fixture/settings with spaces.json" --session-id ${token}`,
+    `--settings {"label":"two words"} --resume ${token}`,
+    `--settings={"label":"two words"} --session-id=${token}`,
+    `--settings /fixture/settings.json --session-id ${token}`,
+    `--settings /fixture/review's-settings.json --session-id ${token}`,
+    `--settings /fixture/review"settings.json --session-id ${token}`,
+  ])("accepts inline and file settings: %s", async args => {
+    expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...input(args), expectedToken: "different" })).toBeNull();
+  });
+  it.each([
+    `--remote-control orch.lead@rig --session-id ${token}`,
+    `--session-id ${token} --remote-control orch.lead@rig`,
+    `--remote-control=orch.lead@rig --resume ${token}`,
+  ])("proves the exact Claude identity with the launch-only Remote Control option: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+  });
+  it("preserves an apostrophe in the native Claude executable path", async () => {
+    const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
+    const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,
+      executableName: "2.1.1", command: r.command.replace(/^claude/, "/home/o'neil/.local/share/claude/versions/2.1.1"),
+    } : r);
+    const native = { ...actual, listProcesses: async () => list };
+    expect((await verifyClaudePaneProcess(native))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(native)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...native, expectedToken: "different" })).toBeNull();
+  });
+  it.each([
+    `--settings ${JSON.stringify({ label: `two words --session-id ${token}` })}`,
+    `--settings {"env":{"note":"text --session-id ${token} --model trailing`,
+    `--settings ${settings[0]![1]} --session-id ${token} --session-id different`,
+    `--settings ${settings[1]![1]} --session-id ${token} --unknown`,
+  ])("does not promote ambiguous argv: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
+  it.each(["before", "after"])("a literal quote %s settings never promotes settings text into identity", async order => {
+    const settings = `--settings ${JSON.stringify({ env: { REVIEW_NOTE: `text --session-id ${token} --model trailing` } })}`;
+    const name = '--name review"desk';
+    const args = order === "before" ? `${name} ${settings}` : `${settings} ${name}`;
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).toBe("unknown");
+    const actualIdentity = input(`${args} --session-id ${token}`);
+    expect((await verifyClaudePaneProcess(actualIdentity))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actualIdentity)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actualIdentity, expectedToken: "different" })).toBeNull();
   });
 });

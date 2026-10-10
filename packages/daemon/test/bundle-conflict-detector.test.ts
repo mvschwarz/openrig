@@ -47,9 +47,9 @@ describe("bundle-conflict-detector — rig name collision", () => {
       expect(c.description).toContain("alpha");
       expect(c.description).toContain("01H000000000000000000003");
       expect(c.resolutions.length).toBeGreaterThanOrEqual(2);
-      // Resolutions mention the --target and --force flags (Checkpoint 4.2 surfaces)
-      expect(c.resolutions.some((r) => r.includes("--target"))).toBe(true);
-      expect(c.resolutions.some((r) => r.includes("--force"))).toBe(true);
+      expect(c.resolutions.join("\n")).toContain("existing team");
+      expect(c.resolutions.join("\n")).toContain("rig down");
+      expect(c.resolutions.join("\n")).not.toMatch(/Checkpoint|--force|--target <newname>/);
     }
   });
 

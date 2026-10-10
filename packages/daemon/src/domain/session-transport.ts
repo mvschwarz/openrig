@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { inspectStartupStagedText, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import type { AgentActivityStore } from "./agent-activity-store.js";
+import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
@@ -60,9 +62,8 @@ const PROMPT_DRAFT_PATTERNS = [
   /^[❯›]\s+\S/,
 ];
 
-// Status-bar patterns that ONLY appear when the harness is at its idle
-// prompt. These are more reliable than the prompt char alone because they
-// are never rendered during active tool execution.
+// Footer hints, not proof of inactivity: Claude also renders its mode bar
+// during a turn. Current live-status evidence must take precedence below.
 const IDLE_STATUS_BAR_PATTERNS = [
   /gpt-\d[\d.]* .+ · Context \[/,  // Codex model/context footer
   /⏵⏵ accept edits/,              // Claude Code edit-accept bar
@@ -93,6 +94,7 @@ const PERMISSION_PROMPT_PATTERNS = [
 // after hitting this. Erring toward "prompt detected" is the SAFE direction for this guard: a false
 // refusal is overridable; a false-idle lets a message land on a prompt. (EXA: ntm e28763e; AgentDeck.)
 const PROMPT_SCAN_LINES = 12;
+const CLAUDE_QUESTION_FOOTER = "Enter to select · ↑/↓ to navigate · Esc to cancel";
 
 export interface PaneActivityClassification {
   state: "agent_active" | "agent_idle" | "attention" | "unknown";
@@ -120,6 +122,93 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+function findCurrentClaudeQuestion(paneContent: string): string | null {
+  // Claude 2.1.289 can wrap a current choice beyond the general prompt window.
+  // Anchor at its terminal footer, then follow only the adjoining choice block.
+  // Preserve columns so indented draft/quoted text does not gain new authority.
+  const lines = paneContent.split("\n").map(line => line.trimEnd()).filter(line => line.length > 0);
+  if (lines.at(-1) !== CLAUDE_QUESTION_FOOTER) return null;
+  for (let i = lines.length - 2; i >= 0; i--) {
+    const line = lines[i]!;
+    if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
+    if (!/^(?: {2}\d+\.\s+\S| {5}\S|─{3,}$)/.test(line)) break;
+  }
+  return null;
+}
+
+// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
+// Recognize the complete input block, never a warning or historical prompt alone.
+const CLAUDE_STATUS_WARNINGS = [
+  /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
+  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
+  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
+];
+// Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
+// vim-mode marker such as "-- INSERT --" (#808). A suffix such as "· 1 shell" can follow the mode.
+const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts\b)/;
+// Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
+// Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
+// While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
+const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:running [^()·]+ hook · )?(?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+// The same live row before Claude shows its timer: glyph, text, a trailing ellipsis and nothing
+// after it, as in "✻ Compacting conversation…" during a compaction's first seconds. Completed rows
+// ("✻ Crunched for 2s") have no trailing ellipsis. Only callers that must not send into a busy
+// pane opt in (ClassifyPaneOptions.timerlessStatusIsLive); ordinary send readiness is unchanged.
+const CLAUDE_TIMERLESS_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S.*(?:…|\.{3})$/;
+
+export interface ClassifyPaneOptions {
+  /** Treat a timer-less live status row above the composer as work in progress. */
+  timerlessStatusIsLive?: boolean;
+}
+
+function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
+  // Preserve columns: a multiline draft may contain indented border/prompt text.
+  // This classifier scans at most 20 physical lines; captures can be taller.
+  // Exhausting the scan without reaching the status head is unknown, not idle.
+  const lines = paneContent.split("\n").slice(-20)
+    .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
+  let bar = lines.length - 1;
+  while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
+  const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
+  const modeFooter = CLAUDE_MODE_FOOTER.test(lines[bar]?.trim() ?? "");
+  let indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
+  const framed = indent !== undefined;
+  let prompt = lines[bar - 2] ?? "";
+  let statusStart = bar - 4;
+  if (indent === undefined) {
+    // The unframed Claude prompt has the same current status/task block.
+    // Keep Codex footers and a bare prompt with no visible block on their old path.
+    if (bar < 2 || !/^(?:⏵⏵ (?:accept edits|bypass permissions) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(lines[bar]!.trim())) return null;
+    prompt = lines[bar - 1] ?? "";
+    indent = /^([ \t]*)❯\s*$/.exec(prompt)?.[1];
+    if (indent === undefined) return null;
+    statusStart = bar - 2;
+  } else {
+    const upper = lines[bar - 3] ?? "";
+    if (!upper.startsWith(indent) || !/^─{3,}(?: .+ ─+)?$/.test(upper.slice(indent.length)) ||
+        !prompt.startsWith(`${indent}❯`) || !/^❯(?:\s|$)/.test(prompt.slice(indent.length))) return null;
+  }
+
+  let liveStatus: string | null = null;
+  let headSeen = false;
+  for (let i = statusStart; i >= 0; i--) {
+    if (!lines[i]!.startsWith(indent)) break;
+    const line = lines[i]!.slice(indent.length);
+    const livePatterns = options.timerlessStatusIsLive
+      ? [CLAUDE_LIVE_STATUS_PATTERN, CLAUDE_TIMERLESS_STATUS_PATTERN, ...MID_WORK_PATTERNS]
+      : [CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS];
+    if (livePatterns.some((pattern) => pattern.test(line))) {
+      liveStatus = truncateEvidence(line);
+      headSeen = true;
+      break;
+    }
+    // Indented task rows can follow the live status. A newer unindented output
+    // or completed status ends this block; do not revive an older work row.
+    if (!/^\s/.test(line)) { headSeen = true; break; }
+  }
+  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus };
+}
+
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
   const rawLines = paneContent.split("\n").map((line) => line.trimEnd());
   let lastLineIndex = rawLines.length - 1;
@@ -143,14 +232,13 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
-export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
 
   const recentLines = lastNonBlank.slice(-8);
-  const recentWindow = recentLines.join("\n");
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
   const promptScanLines = lastNonBlank.slice(-PROMPT_SCAN_LINES);
@@ -162,7 +250,17 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const selectionPromptEvidence = findPatternEvidence(promptScanLines, [/^[❯›]\s*\d+\.\s/m]);
+  const claudeComposer = findClaudeComposer(paneContent, options);
+  const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
+  // A complete later empty composer with a recognized Claude bar makes the preceding question history.
+  // Keep draft handling and selectors without this dialog boundary unchanged.
+  const selectionLines = claudeComposer?.framed &&
+      /^(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(claudeComposer.bar) &&
+      IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
+      oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
+    ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
+  const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??
+    findPatternEvidence(selectionLines, [/^[❯›]\s*\d+\.\s/m]);
   if (selectionPromptEvidence) {
     return {
       state: "attention",
@@ -183,6 +281,24 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
+  if (claudeComposer?.hasWarnings && claudeComposer.supportedWarningFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+    return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer.text) };
+  }
+  if (claudeComposer?.liveStatus) {
+    return { state: "agent_active", reason: "mid_work_pattern", evidence: claudeComposer.liveStatus };
+  }
+  // Unframed status evidence can veto idle, but warnings require a complete input frame to prove it.
+  if (claudeComposer && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
+    return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
+  }
+  // Below warning rows, any Claude mode footer completes the frame for an EMPTY composer (#808).
+  // Drafts keep the narrower check above: attention is needs_input, a send refusal for other modes.
+  if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.modeFooter) &&
+      IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+    return { state: "agent_idle", reason: idleStatusBarLine ? "idle_status_bar" : "idle_prompt",
+      evidence: truncateEvidence(idleStatusBarLine ?? claudeComposer.text) };
+  }
+
   const promptDraftEvidence = findPromptDraftBeforeFooter(paneContent);
   if (promptDraftEvidence) {
     return {
@@ -192,7 +308,12 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  if (idleStatusBarLine) {
+  const midWorkEvidence = findPatternEvidence(recentLines, [
+    ...MID_WORK_PATTERNS,
+    CLAUDE_LIVE_STATUS_PATTERN,
+    ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
+  ]);
+  if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
       reason: "idle_status_bar",
@@ -214,7 +335,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
       evidence: placeholderMidWork,
     };
   }
-  if (idlePromptLine && !MID_WORK_PATTERNS.some((pattern) => pattern.test(recentWindow))) {
+  if (idlePromptLine && !midWorkEvidence) {
     return {
       state: "agent_idle",
       reason: "idle_prompt",
@@ -222,7 +343,6 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, MID_WORK_PATTERNS);
   if (midWorkEvidence) {
     return {
       state: "agent_active",
@@ -255,6 +375,8 @@ export async function probeSessionActivity(input: {
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
   captureObserver?: CaptureObserverSink;
   binding?: Omit<ObservedBinding, "sessionName">;
+  /** See ClassifyPaneOptions.timerlessStatusIsLive. */
+  timerlessStatusIsLive?: boolean;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -367,7 +489,7 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "");
+    const classification = classifyPaneActivity(paneContent ?? "", { timerlessStatusIsLive: input.timerlessStatusIsLive === true });
     return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
@@ -463,7 +585,113 @@ export type ResolveResult =
   | { ok: true; sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> }
   | { ok: false; code: "not_found" | "ambiguous"; error: string };
 
+/** The existing submit-only identity check, also used to inspect startup's own paste.
+ * A false result is no matching staged evidence, not proof of model consumption. */
+export function hasExpectedStagedText(pane: string | null, expected: string): boolean {
+  const norm = (s: string) => s.replace(/\s+/g, "");
+  // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
+  // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
+  // prompt owns the input, and an Enter there approves the prompt. So:
+  //   1. Only the pane's LAST input-marker line counts (the current input; everything above
+  //      is history).
+  //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
+  //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
+  //      only when X matches the expected piece's own line count (±1 for a trailing newline).
+  //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
+  //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
+  //      paste renders inline, possibly truncated).
+  const paneLines = (pane ?? "").split("\n");
+  let currentInputAt = -1;
+  for (let i = paneLines.length - 1; i >= 0; i--) {
+    if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
+  }
+  let stagedEvidence = false;
+  if (currentInputAt >= 0) {
+    const inputLine = paneLines[currentInputAt]!.trimStart();
+    // The region is the last ❯-line through the input box's closing separator (a box-drawing
+    // line) or pane end — wrapped input continues below the marker; everything ABOVE the
+    // marker is history and everything below the separator is hint-bar chrome.
+    let regionEnd = paneLines.length;
+    for (let i = currentInputAt + 1; i < paneLines.length; i++) {
+      const t = paneLines[i]!.trim();
+      if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
+    }
+    const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
+    if (!/^❯\s*\d+\./.test(inputLine)) {
+      // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
+      // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
+      // by the piece's own literal tail wrapped across pane lines — and the placeholder
+      // tokens themselves wrap. So: collapse wrapping, then
+      //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
+      //               CONTIGUOUS substring of the piece: the visible words are the piece's
+      //               words. Foreign residual (another piece, stale content) refuses.
+      //   SANITY    — the segment-count sum must not exceed the piece's own line count
+      //               (small slack), and with NO residual anchor must reach at least 60% of
+      //               it — a bare unrelated placeholder cannot masquerade as this piece.
+      const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
+      const regionFlat = region.replace(/\s+/g, " ");
+      const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
+      if (counts.length === 0) {
+        const head = norm(expected).slice(0, 24);
+        stagedEvidence = head.length > 0 && norm(region).includes(head);
+      } else {
+        // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
+        // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
+        // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
+        // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
+        // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
+        // enough content to identify the staged state, and a bare Enter is never guessed.
+        const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
+        const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
+        const pieceNorm = norm(expected);
+        const sum = counts.reduce((a, b) => a + b, 0);
+        // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
+        // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
+        // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
+        // piece's 142 source newlines). Compute the boundary from the piece bytes — the
+        // number of leading source lines whose normalized text the residual does NOT cover —
+        // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
+        // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
+        // renderer evidence). A matched suffix with a non-matching sum is a truncated or
+        // wrong prefix: refuse.
+        let boundary = -1;
+        if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
+          const srcLines = expected.split("\n");
+          let acc = 0;
+          boundary = 0;
+          for (let i = srcLines.length - 1; i >= 0; i--) {
+            acc += norm(srcLines[i]!).length;
+            if (acc >= residual.length) { boundary = i; break; }
+          }
+        }
+        stagedEvidence = boundary >= 0 && sum === boundary;
+      }
+    }
+  }
+  return stagedEvidence;
+}
+
+/** An interaction may consume its answer immediately. Only add Enter when the
+ * complete answer is still visible in a bounded current text input, never a
+ * numbered choice or a partial prefix. Unknown rendering is not consumption. */
+function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
+  if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
+  const lines = pane.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const input = lines[i]!.trimStart();
+    if (!/^[❯›]/.test(input)) continue;
+    if (/^[❯›]\s*\d+[.)]/.test(input)) return false;
+    if (runtime === "codex" ? !input.startsWith("›") : runtime !== "claude-code" || !input.startsWith("❯")) return false;
+    const end = lines.findIndex((line, index) => index > i && (runtime === "codex"
+      ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
+    return end > i && lines.slice(i, end).join("\n").trimStart().slice(1).trim() === answer.trim();
+  }
+  return false;
+}
+
 export interface SendOpts {
+  /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
+  beforeWrite?: () => void;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -472,6 +700,11 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
+   *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
+   *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
+   *  can be the Stop from before /compact. */
+  readinessFromPaneOnly?: boolean;
   // OPR.0.4.1.10 — interactive-prompt / permission guard.
   // `dangerouslyInteract` is the ONLY override of the prompt/permission guard (force does NOT bypass
   // it). It requires `reason` and writes an auditable `transport.prompt_override` record before the
@@ -490,6 +723,12 @@ export interface SendOpts {
   // caller's `text` argument must be empty in this mode.
   submitOnly?: boolean;
   expectedStagedText?: string;
+  /** Internal startup caller needs a bounded view of an expanded multiline composer. */
+  submitOnlyCaptureLines?: 50 | 200;
+  /** Internal startup only: require complete visible composer identity before Enter. */
+  requireFullStagedText?: boolean;
+  /** Internal, synchronous diagnostics sink. Exceptions never affect transport. */
+  onStartupMismatch?: (evidence: StartupSubmissionEvidence) => void;
   /** Round-2 (r2 HIGH-1): the walked piece's own line count — placeholder identity. A large paste
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
@@ -511,6 +750,9 @@ export interface SendResult {
   ok: boolean;
   sessionName: string;
   verified?: boolean;
+  /** Audited prompt answer: consumers must never automatically retry Enter.
+   * Neither value establishes model consumption. Absent for ordinary sends. */
+  promptInteraction?: "enter-sent" | "unverified";
   /**
    * OPR.99.0.6.3 — honest delivery-outcome vocabulary (additive; `verified`
    * keeps its exact semantics for existing parsers). Three distinguishable
@@ -521,6 +763,8 @@ export interface SendResult {
    *   but the post-send capture raced a TUI redraw and could not re-confirm
    *   the snippet. Landed-but-unconfirmable, NOT a failure — confirm with
    *   `rig capture` if it matters. (Was collapsed into `Verified: no`.)
+   *   For a prompt answer, `promptInteraction: "unverified"` means input was
+   *   sent without added Enter; the prompt may already have consumed it.
    * - `failed`: the transport itself failed (paste or Enter did not land) —
    *   set on the send_failed / submit_failed returns for vocabulary symmetry;
    *   their `ok:false` + HTTP mapping is unchanged.
@@ -580,6 +824,7 @@ interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
 interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
+interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
 export class SessionTransport {
   readonly db: Database.Database;
@@ -614,47 +859,36 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
   }
 
-  /**
-   * Slice-05 D5/D6 — when a live transport op (send/capture) observes that the
-   * seat's tmux session is genuinely gone (a `probeSession` result of `absent`
-   * — POSITIVE tmux evidence, never a transport failure; OPR.0.5.4.2 mini-req
-   * 5), durably record the SAME `session_missing` identity verdict the
-   * reconciler would write, so `rig ps` stops reporting the dead seat as
-   * running WITHOUT waiting for the next reconciler poll. This is the
-   * transport-side writer of the shared verdict bridge; the reconciler is the
-   * poll-side writer. Transport-absence must never reach this method: a blip
-   * against a live seat would otherwise fabricate a durable absence verdict.
-   *
-   * Only writes an APPLICABLE verdict: the join is narrowed to the node whose
-   * LATEST running session_name equals the probed session (so
-   * `verdict.sessionName === latest session_name`, the node-inventory
-   * applicability gate), and it only writes when a binding pane is registered
-   * (a null pane is the reconciler's `tmux_unavailable` case, which is
-   * non-down-ranking — never fabricate `session_missing` without a pane).
-   * Never mutates `sessions.status`.
-   */
-  private recordSessionMissingVerdict(sessionName: string): void {
-    const seat = this.db
+  /** Freeze the registration and binding before asking tmux about this name. */
+  private absenceProbeTarget(sessionName: string): AbsenceProbeTarget | undefined {
+    return this.db
       .prepare(`
-        SELECT n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
+        SELECT s.id AS session_id, n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
-        LEFT JOIN bindings b ON b.node_id = n.id
+        JOIN bindings b ON b.node_id = n.id AND b.tmux_session = s.session_name
         WHERE s.status = 'running'
           AND s.session_name = ?
         LIMIT 1
       `)
-      .get(sessionName) as { node_id: string; session_name: string; tmux_pane: string | null } | undefined;
-    if (!seat || seat.tmux_pane === null) return;
+      .get(sessionName) as AbsenceProbeTarget | undefined;
+  }
+
+  /** Positive tmux absence only; a delayed reply cannot describe a replacement. */
+  private recordSessionMissingVerdict(target: AbsenceProbeTarget | undefined, observedAt: string): void {
+    if (!target || target.tmux_pane === null) return;
+    const current = this.absenceProbeTarget(target.session_name);
+    if (!current || current.session_id !== target.session_id || current.node_id !== target.node_id
+      || current.tmux_pane !== target.tmux_pane) return;
     new SeatIdentityStore(this.db).upsert({
-      nodeId: seat.node_id,
+      nodeId: target.node_id,
       verdict: "pane_missing",
       evidenceSource: "tmux_session",
       reason: "session_missing",
-      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
-      sessionName: seat.session_name,
-      observedAt: this.now().toISOString(),
+      evidence: { registeredPane: target.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: target.session_name,
+      observedAt,
     });
   }
 
@@ -1078,9 +1312,11 @@ export class SessionTransport {
     // transport blip must never read as a dead seat, and absence is only ever
     // asserted on positive tmux evidence.
     try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
       const probe = await this.tmuxAdapter.probeSession(sessionName);
       if (probe.state === "absent") {
-        this.recordSessionMissingVerdict(sessionName);
+        this.recordSessionMissingVerdict(target, observedAt);
         return {
           ok: false,
           sessionName,
@@ -1116,91 +1352,28 @@ export class SessionTransport {
       if (expected.trim().length === 0) {
         return { ok: false, sessionName, reason: "invalid_submit_only", error: "submitOnly requires expectedStagedText — the Enter is only pressed onto the exact staged content." };
       }
-      const norm = (s: string) => s.replace(/\s+/g, "");
-      const pane = await this.runStage(
-        "session_transport.submit_only_precheck",
-        () => this.tmuxAdapter.capturePaneContent(sessionName, 50),
-      );
-      // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
-      // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
-      // prompt owns the input, and an Enter there approves the prompt. So:
-      //   1. Only the pane's LAST input-marker line counts (the current input; everything above
-      //      is history).
-      //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
-      //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
-      //      only when X matches the expected piece's own line count (±1 for a trailing newline).
-      //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
-      //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
-      //      paste renders inline, possibly truncated).
-      const paneLines = (pane ?? "").split("\n");
-      let currentInputAt = -1;
-      for (let i = paneLines.length - 1; i >= 0; i--) {
-        if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
+      const recordMismatch = (pane: string | null): void => {
+        if (!opts.requireFullStagedText || !opts.onStartupMismatch) return;
+        try {
+          const evidence = startupSubmissionEvidence(pane, expected, opts.submitOnlyCaptureLines ?? 50);
+          if (evidence) opts.onStartupMismatch(evidence);
+        } catch { /* Observation has no delivery authority. */ }
+      };
+      let pane: string | null;
+      try {
+        pane = await this.runStage(
+          "session_transport.submit_only_precheck",
+          () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
+        );
+      } catch (error) {
+        recordMismatch(null);
+        throw error; // Preserve the existing guarded/unguarded error handling.
       }
-      let stagedEvidence = false;
-      if (currentInputAt >= 0) {
-        const inputLine = paneLines[currentInputAt]!.trimStart();
-        // The region is the last ❯-line through the input box's closing separator (a box-drawing
-        // line) or pane end — wrapped input continues below the marker; everything ABOVE the
-        // marker is history and everything below the separator is hint-bar chrome.
-        let regionEnd = paneLines.length;
-        for (let i = currentInputAt + 1; i < paneLines.length; i++) {
-          const t = paneLines[i]!.trim();
-          if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
-        }
-        const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
-        if (!/^❯\s*\d+\./.test(inputLine)) {
-          // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
-          // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
-          // by the piece's own literal tail wrapped across pane lines — and the placeholder
-          // tokens themselves wrap. So: collapse wrapping, then
-          //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
-          //               CONTIGUOUS substring of the piece: the visible words are the piece's
-          //               words. Foreign residual (another piece, stale content) refuses.
-          //   SANITY    — the segment-count sum must not exceed the piece's own line count
-          //               (small slack), and with NO residual anchor must reach at least 60% of
-          //               it — a bare unrelated placeholder cannot masquerade as this piece.
-          const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
-          const regionFlat = region.replace(/\s+/g, " ");
-          const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
-          if (counts.length === 0) {
-            const head = norm(expected).slice(0, 24);
-            stagedEvidence = head.length > 0 && norm(region).includes(head);
-          } else {
-            // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
-            // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
-            // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
-            // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
-            // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
-            // enough content to identify the staged state, and a bare Enter is never guessed.
-            const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
-            const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
-            const pieceNorm = norm(expected);
-            const sum = counts.reduce((a, b) => a + b, 0);
-            // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
-            // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
-            // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
-            // piece's 142 source newlines). Compute the boundary from the piece bytes — the
-            // number of leading source lines whose normalized text the residual does NOT cover —
-            // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
-            // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
-            // renderer evidence). A matched suffix with a non-matching sum is a truncated or
-            // wrong prefix: refuse.
-            let boundary = -1;
-            if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
-              const srcLines = expected.split("\n");
-              let acc = 0;
-              boundary = 0;
-              for (let i = srcLines.length - 1; i >= 0; i--) {
-                acc += norm(srcLines[i]!).length;
-                if (acc >= residual.length) { boundary = i; break; }
-              }
-            }
-            stagedEvidence = boundary >= 0 && sum === boundary;
-          }
-        }
-      }
-      if (!stagedEvidence) {
+      const staged = opts.requireFullStagedText
+        ? inspectStartupStagedText(pane, expected) === "staged"
+        : hasExpectedStagedText(pane, expected);
+      if (!staged) {
+        recordMismatch(pane);
         return {
           ok: false,
           sessionName,
@@ -1212,7 +1385,7 @@ export class SessionTransport {
       if (targetFailure) return targetFailure;
       const submitResult = await this.runStage(
         "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
@@ -1228,6 +1401,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -1258,6 +1432,7 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
+    let promptOverride = false;
     if (waitForIdleMs === undefined) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -1298,7 +1473,8 @@ export class SessionTransport {
               error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
             };
           }
-          // audited → proceed to the send.
+          // Audited answers use unbracketed input; a choice may submit itself.
+          promptOverride = true;
         } else {
           return {
             ok: false,
@@ -1356,11 +1532,15 @@ export class SessionTransport {
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
 
-    // 3. Send text (paste)
+    // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => this.tmuxAdapter.sendText(sessionName, text),
+      () => {
+        opts?.beforeWrite?.();
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
+        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+      },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
@@ -1379,10 +1559,21 @@ export class SessionTransport {
 
     if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
 
-    // 5. Submit (C-m)
+    if (promptOverride) {
+      const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
+        () => this.tmuxAdapter.capturePaneContent(sessionName, 50)).catch(() => null);
+      if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
+      if (!promptAnswerStaged(pane, text, runtime)) {
+        return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
+          warning: "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)." });
+      }
+      sendAdvisory = "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer.";
+    }
+
+    // 5. Submit (Enter)
     const submitResult = await this.runStage(
       "session_transport.submit",
-      () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!submitResult.ok) {
@@ -1422,6 +1613,7 @@ export class SessionTransport {
         }
       }
     }
+    const interaction = promptOverride ? { promptInteraction: "enter-sent" as const } : {};
 
     // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
     // message LANDED; the capture only re-confirms the render. Not re-confirming
@@ -1440,16 +1632,16 @@ export class SessionTransport {
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
         const verified = postCount > preCount;
-        return observe({ ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+        return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {
         if (observed && observed.post.state === "not_reached") {
           observed.post = { state: "unavailable", cause: "capture_error", capturedAt: this.now().toISOString(), captureSeq };
         }
-        return observe({ ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+        return observe({ ok: true, sessionName, ...interaction, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       }
     }
 
-    return observe({ ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+    return observe({ ok: true, sessionName, ...interaction, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
   }
 
   private runStage<T>(
@@ -1462,23 +1654,77 @@ export class SessionTransport {
       : fn();
   }
 
+  /** Wait on the existing classifier without occupying the input/lifecycle lease. */
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal) {
+    const meta = this.getSessionMeta(sessionName);
+    return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
+      binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane } });
+  }
+
   private async waitForIdle(input: {
     sessionName: string;
     runtime: string | null;
     attachmentType: string | null;
     timeoutMs: number;
+    signal?: AbortSignal;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
   > {
-    const startedAt = Date.now();
+    // ONE deadline. UNKNOWN is retried like busy and never authorizes the send. No observation
+    // starts after the deadline (one starting exactly at it races a 0 ms timer), each one is raced
+    // against the time left, and one that completes after the deadline is discarded, so a late idle
+    // can never lead to input. At expiry the result names the last observation that completed in
+    // time; waitedMs is the wait itself.
+    const deadline = Date.now() + input.timeoutMs;
     let attempts = 0;
+    let last: AgentActivity | null = null;
+    const expire = () => {
+      const count = `${attempts} observation${attempts === 1 ? "" : "s"}`;
+      const activity: AgentActivity = last ?? {
+        state: "unknown", reason: "no_observation_in_time", evidenceSource: "pane_heuristic",
+        sampledAt: this.now().toISOString(), evidence: null,
+      };
+      return activity.state === "unknown"
+        ? {
+          ok: false as const,
+          reason: "target_activity_unknown",
+          error: last
+            ? `Target activity could not be determined (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`
+            : `Target activity could not be determined: no observation completed within the ${input.timeoutMs}ms wait. No text was sent.`,
+          activity, waitedMs: input.timeoutMs, attempts,
+        }
+        : {
+          ok: false as const,
+          reason: "wait_for_idle_timeout",
+          error: `Target was still busy (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`,
+          activity, waitedMs: input.timeoutMs, attempts,
+        };
+    };
+
+    const cancelled = () => ({
+      ok: false as const,
+      reason: "preparation_cancelled",
+      error: "Managed preparation ended; no compact authorized.",
+      activity: last ?? {
+        state: "unknown" as const, reason: "preparation_cancelled", evidenceSource: "pane_heuristic" as const,
+        sampledAt: this.now().toISOString(), evidence: null,
+      },
+      waitedMs: Math.max(0, Math.min(input.timeoutMs, input.timeoutMs - (deadline - Date.now()))),
+      attempts,
+    });
 
     while (true) {
+      if (input.signal?.aborted) return cancelled();
+      if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
-      const activity = await this.classifySendReadiness(input);
-      const waitedMs = Date.now() - startedAt;
+      const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      if (input.signal?.aborted) return cancelled();
+      if (activity === null || Date.now() > deadline) return expire();
+      last = activity;
+      const waitedMs = input.timeoutMs - (deadline - Date.now());
 
       if (activity.state === "idle") {
         return { ok: true, activity, waitedMs, attempts };
@@ -1495,30 +1741,28 @@ export class SessionTransport {
         };
       }
 
-      if (activity.state === "unknown") {
-        return {
-          ok: false,
-          reason: "target_activity_unknown",
-          error: `Target activity could not be determined (${activity.reason}). No text was sent.`,
-          activity,
-          waitedMs,
-          attempts,
-        };
-      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return expire();
+      await this.sleep(Math.min(this.waitForIdlePollMs, remainingMs));
+    }
+  }
 
-      if (waitedMs >= input.timeoutMs) {
-        return {
-          ok: false,
-          reason: "wait_for_idle_timeout",
-          error: `Target remained busy for ${waitedMs}ms. No text was sent.`,
-          activity,
-          waitedMs,
-          attempts,
-        };
-      }
-
-      const remainingMs = input.timeoutMs - waitedMs;
-      await this.sleep(Math.min(this.waitForIdlePollMs, Math.max(1, remainingMs)));
+  /** One readiness observation, raced against the time left before the wait's deadline. Null
+   *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
+  private async observeReadinessWithin(
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
+    remainingMs: number,
+  ): Promise<AgentActivity | null> {
+    const observation = this.classifySendReadiness(input);
+    observation.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        observation,
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, remainingMs)); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -1570,16 +1814,30 @@ export class SessionTransport {
     runtime: string | null;
     attachmentType: string | null;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<AgentActivity> {
     const now = this.now();
     const hookActivity = this.agentActivityStore?.getLatestForNode({
       sessionName: input.sessionName,
       now,
     });
+    // Pane-only readiness never lets a hook authorise a send, but a fresh hook showing work or a
+    // waiting person still refuses one, as it does for every other send.
+    if (
+      input.readinessFromPaneOnly &&
+      hookActivity &&
+      hookActivity.evidenceSource === "runtime_hook" &&
+      hookActivity.stale !== true &&
+      this.hookFreshForSend(hookActivity, now) &&
+      (hookActivity.state === "running" || hookActivity.state === "needs_input")
+    ) {
+      return hookActivity;
+    }
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
     if (
+      !input.readinessFromPaneOnly &&
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
       hookActivity.stale !== true
@@ -1626,6 +1884,8 @@ export class SessionTransport {
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
+      // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
+      timerlessStatusIsLive: input.readinessFromPaneOnly === true,
     });
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
@@ -1641,6 +1901,19 @@ export class SessionTransport {
       (hookActivity.state === "running" || hookActivity.state === "needs_input")
     ) {
       return hookActivity;
+    }
+    // A latest hook saying the seat waits on a person (approval, picker or elicitation) stays positive
+    // picker evidence past the send window, and past the store's freshness window: nothing newer was
+    // recorded, so nothing answered it. The pane alone can miss a picker it has no signature for (a
+    // Claude AskUserQuestion with option previews read unknown, and a watchdog wake's Enter chose its
+    // first option). An UNKNOWN pane keeps the hook's verdict; a pane that reads work or a recognized
+    // empty composer shows the seat has moved on.
+    if (probe.state === "unknown" && hookActivity && latestHookWaitsOnPerson(hookActivity, input.runtime)) {
+      return {
+        ...hookActivity,
+        state: "needs_input",
+        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; latest hook, pane unrecognized`,
+      };
     }
     return probe;
   }
@@ -1659,12 +1932,15 @@ export class SessionTransport {
   // `no_activity_signal`. NEVER surfaces a token value — env checks are
   // presence-only, and the store carries no token.
   private async diagnoseProducerLink(sessionName: string): Promise<string> {
-    // Link 1 — the SEAT ENV: can the relay even reach the daemon?
+    // Link 1 — the relay's prerequisites: the daemon URL, the activity token, and the runtime
+    // (without OPENRIG_RUNTIME the relay builds no payload and posts nothing). Only the tmux SESSION
+    // environment is inspected; the agent process's own environment is not read, and an env-prefixed
+    // launch carries these without the session environment showing them. So a name absent from the
+    // session environment is reported as UNPROVEN absent from the agent: UNKNOWN, never DOWN.
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
-    let inspectedEnv = false;
+    let hasRuntime: boolean | null = null;
     if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
-      inspectedEnv = true;
       const anyPresent = async (names: string[]): Promise<boolean | null> => {
         let unknown = false;
         for (const name of names) {
@@ -1680,53 +1956,73 @@ export class SessionTransport {
       };
       hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
       hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
+      hasRuntime = await anyPresent(["OPENRIG_RUNTIME", "RIGGED_RUNTIME"]);
     }
     let fileEndpoint: { baseUrl: string; token: string } | null = null;
     try {
       fileEndpoint = this.activityEndpointFile();
     } catch { /* unreadable fallback remains unavailable */ }
-    if (!fileEndpoint && (hasUrl === false || hasToken === false)) {
-      const label = (value: boolean | null) => value === true ? "present" : value === false ? "MISSING" : "UNKNOWN";
-      return `seat-env link DOWN — effective relay URL ${label(hasUrl)}, activity token ${label(hasToken)}, and no valid activity-endpoint.json fallback; the activity relay cannot reach the daemon. Relaunch the seat after confirming the effective endpoint is unavailable`;
-    }
-    if (!fileEndpoint && inspectedEnv && (hasUrl === null || hasToken === null)) {
-      return `seat-env link UNKNOWN — tmux session-environment lookup failed and no valid activity-endpoint.json fallback could be confirmed; URL/token absence is unproven`;
-    }
+    // The endpoint file covers the URL and token, never the runtime. Presence-only: no value is read out.
+    const prerequisites = [
+      { label: "relay URL", present: fileEndpoint ? true : hasUrl },
+      { label: "activity token", present: fileEndpoint ? true : hasToken },
+      { label: "OPENRIG_RUNTIME", present: hasRuntime },
+    ];
+    const absent = prerequisites.filter((p) => p.present === false).map((p) => p.label);
+    const unread = typeof this.tmuxAdapter?.hasSessionEnv === "function"
+      ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
+    const envNote = absent.length > 0 || unread.length > 0
+      ? `seat-env UNKNOWN — ${[
+        absent.length > 0 ? `${absent.join(", ")} absent from the tmux session environment` : null,
+        unread.length > 0 ? `session-environment lookup failed for ${unread.join(", ")}` : null,
+      ].filter(Boolean).join("; ")}; the agent process environment was not inspected and an env-prefixed launch can still carry them, so absence from the agent is unproven`
+      : null;
+    const withEnv = (verdict: string) => envNote ? `${verdict}. ${envNote}` : verdict;
 
-    // Link 2 — the DAEMON INGEST + store: did any hook actually land, and how stale?
+    // Link 2 — the DAEMON INGEST + store: did any hook land, and how old is it?
     const store = this.agentActivityStore;
     if (!store) {
-      return `daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`;
+      return withEnv(`daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`);
     }
     const latest = store.getLatestForNode({ sessionName, now: this.now() });
     if (!latest || latest.evidenceSource !== "runtime_hook") {
-      return `daemon-ingest link DOWN — no activity hook has ever been received for this seat; the ingest is rejecting posts (token mismatch → 401, or ingest unconfigured → 503) or Codex hook-trust is uncleared. Verify the seat was OpenRig-launched with hook-trust cleared`;
+      return withEnv(`no activity hook is stored for this seat — which link failed is not identified: the relay may never have posted (it needs OPENRIG_RUNTIME, the relay URL and the token in the agent process), Codex hook-trust may be uncleared, or ingest may have rejected posts (401 token mismatch, 503 unconfigured)`);
     }
-    // W2a-1 — a GENERATION verdict is stale:true but the hook is RECENT (age ~0); collapsing it to
-    // "beyond the store window / seat quiet" mislabels per-path missing carry / dead-tenure as a DARK
-    // seat and defeats the inert-visible differentiation. Distinguish the generation cause explicitly
-    // BEFORE the clock-stale fallback. generation_unverifiable is the per-hook no-generation signal
-    // (sound, not dark); the others name a real generation condition, not a quiet seat.
+    const ageMs = latest.eventAt ? this.now().getTime() - Date.parse(latest.eventAt) : NaN;
+    const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s ago` : "at an unknown time";
+    const recent = Number.isFinite(ageMs) && ageMs <= store.freshnessMs;
+    // W2a-1 — a GENERATION verdict is stale:true even for a RECENT hook; collapsing a recent one to
+    // "seat quiet" mislabels per-path missing carry / dead-tenure as a DARK seat. Age is checked FIRST
+    // so an old hook is never called recent; its generation verdict is still reported, separately.
     if (latest.stale === true && typeof latest.reason === "string" && latest.reason.startsWith("generation_")) {
-      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
-      const age = ageS !== null ? `${ageS}s ago` : "recently";
+      if (!recent) {
+        const verdict: Record<string, string> = {
+          generation_unverifiable: "it carried NO occupant generation",
+          generation_unresolvable: "the LIVE occupant generation could not be resolved",
+          generation_mismatch: "it belongs to a PRIOR occupant generation (a dead tenure)",
+          generation_resolver_error: "the occupant-generation resolver errored",
+        };
+        return withEnv(`producer link STALE — the last activity hook arrived ${ageText}, beyond the ${Math.round(store.freshnessMs / 1000)}s store window, and ${verdict[latest.reason] ?? `its generation verdict is ${latest.reason}`}; no recent hook from this live occupant`);
+      }
+      // A recent hook not verified as the LIVE occupant's says nothing about this occupant's own
+      // producer prerequisites, so none of these is "producer link OK" and each keeps the env note.
+      const age = ageText;
       switch (latest.reason) {
         case "generation_unverifiable":
           // Carried generation was null on THIS hook. Managed launch and fresh-handover producers carry
           // it; legacy/excluded launch paths or an occupant with no tenure at fire time may not. Sound,
           // not dark; not a quiet seat.
-          return `producer link OK — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`);
         case "generation_unresolvable":
-          return `producer link OK — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`);
         case "generation_mismatch":
-          return `producer link OK — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; the seat is NOT quiet`;
+          return withEnv(`hook received from a prior occupant — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; it is no evidence for this occupant's producer`);
         case "generation_resolver_error":
-          return `producer link OK — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`);
       }
     }
     if (latest.stale === true) {
-      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
-      return `producer link OK but STALE — the last activity hook arrived ${ageS !== null ? `${ageS}s ago` : "long ago"} (beyond the store window); the seat has gone quiet or its hooks stopped firing`;
+      return withEnv(`producer link STALE — the last activity hook arrived ${ageText} (beyond the store window); the seat has gone quiet or its hooks stopped firing`);
     }
     return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
   }
@@ -1776,9 +2072,11 @@ export class SessionTransport {
     // Classified probe (OPR.0.5.4.2) — same discipline as the send gate: a
     // transport blip is a transport answer, never a dead-seat answer.
     try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
       const probe = await this.tmuxAdapter.probeSession(sessionName);
       if (probe.state === "absent") {
-        this.recordSessionMissingVerdict(sessionName);
+        this.recordSessionMissingVerdict(target, observedAt);
         return {
           ok: false,
           sessionName,

@@ -60,6 +60,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
           cwd?: string | null;
         }>;
         attachCommand?: string;
+        warnings?: string[];
       }>(
         `/api/rigs/${encodeURIComponent(rigId)}/restore/${encodeURIComponent(snapshotId)}`,
         undefined,
@@ -89,6 +90,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         console.log(`Restore attempt id: ${res.data.attemptId}`);
         console.log(`Status: ${res.data.status ?? "started"}`);
         console.log("Daemon is restoring per-node in the background; follow progress with 'rig ps --nodes' or 'rig restore-check'.");
+        console.log(`Read the completed attempt and its startup warnings with: rig restore status ${res.data.attemptId} --rig ${rigId}`);
       } else {
         // Defensive: server responded ok=true but didn't include attemptId.
         // Fall back to the legacy summary if it's present (back-compat with
@@ -103,6 +105,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
           console.log(`  ${node.logicalId}: ${label}`);
         }
         printRecoveryGuidance(nodes);
+        for (const warning of res.data.warnings ?? []) console.warn(`Original attempt warning: ${warning}`);
         const attachCommand = (res.data as Record<string, unknown>)["attachCommand"] as string | undefined;
         if (attachCommand) {
           console.log(`Attach: ${attachCommand}`);
@@ -128,7 +131,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         error?: string;
         attemptId?: number;
         snapshotSelection?: { snapshotId: string; mode: string; kind: string; ageMs: number; rationale: string } | null;
-        originalResult?: { rigResult: string };
+        originalResult?: { rigResult: string; warnings?: string[] };
         currentIntendedSetVerdict?: string;
         intendedRoster?: unknown[];
         excludedNodes?: unknown[];
@@ -149,6 +152,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
         console.log(`Selection: ${res.data.snapshotSelection.rationale}`);
       }
       console.log(`Original verdict: ${res.data.originalResult?.rigResult ?? "unknown"}`);
+      for (const warning of res.data.originalResult?.warnings ?? []) console.warn(`Original attempt warning: ${warning}`);
       console.log(`Current intended-set verdict: ${res.data.currentIntendedSetVerdict ?? "unknown"}`);
       console.log(`Intended: ${res.data.intendedRoster?.length ?? 0}; excluded historical: ${res.data.excludedNodes?.length ?? 0}; unresolved: ${res.data.unresolvedIntendedSeats?.length ?? 0}`);
       for (const node of res.data.unresolvedIntendedSeats ?? []) console.log(`  ${node.logicalId}: ${node.status}`);

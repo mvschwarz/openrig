@@ -455,3 +455,25 @@ describe("SnapshotRepository", () => {
     });
   });
 });
+
+
+describe("snapshot pruning above SQLite's parameter limit", () => {
+  it.each(["all", "kind"] as const)("prunes %s history without one bind parameter per discarded snapshot", mode => {
+    const db = setupDb();
+    try {
+      const repo = new SnapshotRepository(db);
+      const insert = db.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, ?, ?, ?, ?)");
+      const data = JSON.stringify(sampleData());
+      db.transaction(() => {
+        for (let i = 0; i < 40000; i++) insert.run(`history-${i}`, "large-rig", "auto-periodic", data, "2026-03-23 12:00:00");
+        insert.run("manual-control", "large-rig", "manual", data, "2026-03-22 12:00:00");
+        insert.run("other-rig-control", "other-rig", "auto-periodic", data, "2026-03-22 12:00:00");
+      })();
+      const expectedDeleted = mode === "kind" ? 39990 : 39991;
+      expect(mode === "kind" ? repo.pruneSnapshotsByKind("large-rig", "auto-periodic", 10) : repo.pruneSnapshots("large-rig", 10)).toBe(expectedDeleted);
+      expect(repo.listSnapshots("large-rig", { kind: "auto-periodic" }).map(r => r.id)).toEqual(Array.from({length:10}, (_,i)=>`history-${39999-i}`));
+      expect(repo.getSnapshot("other-rig-control")).not.toBeNull();
+      expect(repo.getSnapshot("manual-control") === null).toBe(mode === "all");
+    } finally { db.close(); }
+  });
+});

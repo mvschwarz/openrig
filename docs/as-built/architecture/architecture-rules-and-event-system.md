@@ -11,8 +11,8 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 264fade9
-last-updated: 2026-10-02
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Architecture Invariants, Event System, Compatibility Notes
@@ -21,7 +21,7 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at main `264fade9`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -33,7 +33,7 @@ see `agent-spec-and-startup.md` for their flow detail; they are restated here as
 system-level invariants.
 
 1. No runtime Hono in `domain/` and `adapters/`. `adapters/` has none; `domain/`
-   has type-only Hono imports (`import type`) in **3** files
+   has type-only Hono imports (`import type`) in **4** files
    (`git grep -l 'from "hono' -- packages/daemon/src/domain packages/daemon/src/adapters | wc -l`).
 2. Routes depend on the domain; the domain does not depend on routes at
    runtime. **1** type-only import crosses back:
@@ -56,12 +56,12 @@ system-level invariants.
 10. Restore replay uses classification-free projection intent, not stale
     startup-time `no_op` / conflict classifications.
 11. Startup status is explicit session state: `pending`, `ready`,
-    `attention_required`, `failed` (`types.ts:99`).
+    `attention_required`, `failed` (`types.ts:102`).
 12. Session recency depends on monotonic ULIDs: `session-registry.ts` uses
     `monotonicFactory()`. Restore does not pick the newest session by max
     ULID; it resolves the active occupant recorded in the snapshot
     (`resolveActiveSnapshotSession`, `active-occupant.ts:74`, called at
-    `restore-orchestrator.ts:1170`).
+    `restore-orchestrator.ts:774` and `:971`).
 13. Readiness checking is a retry loop with exponential backoff and
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
@@ -73,9 +73,9 @@ system-level invariants.
     new process assembled from artifacts.
 15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
     the blank session rolled back and no session running
-    (`restore-orchestrator.ts:1229`). No automatic fresh fallback. Fresh launch
-    is explicit follow-up only (`rig up --fresh <logicalId>`,
-    `packages/cli/src/commands/up.ts:85`).
+    (`restore-orchestrator.ts:1055`). No automatic fresh fallback. Fresh launch
+    is explicit follow-up only (`rig up --fresh <seats...>`,
+    `packages/cli/src/commands/up.ts:99`).
 16. Post-command handoff required on `up`, `down`, `restore`,
     `snapshot create`: what happened + current state + next action.
 17. Session naming: `{pod}-{member}@{rig}` — human-authored,
@@ -83,13 +83,17 @@ system-level invariants.
 18. Communication: tmux is transport, not truth. `send/capture/broadcast`
     wrap tmux reliably with honest errors.
 19. Transcripts: bounded capture — a periodic `tmux capture-pane` snapshot of
-    the trailing lines (default 1000, every 2 s) overwrites the transcript
-    file, replacing pipe-pane (`transcript-rotation.ts:3`, `:27`–`28`; started
-    at `node-launcher.ts:181`). ANSI strip on read. `rig ask` transcript
-    search: `rg` preferred, `grep -E` fallback.
+    the trailing lines (default 1000, every 2 s for an active seat) replaces
+    the transcript file, replacing pipe-pane (`transcript-rotation.ts:3`,
+    `:27`–`28`; started at `node-launcher.ts:181`). An idle seat is captured
+    less often, within the 10-second freshness window (`:29`–`33`,
+    `:162`–`163`), and the file is rewritten only when the captured bytes
+    change (`:270`). `readTail` and `grep` strip ANSI; `readFull` returns the
+    content unfiltered. `rig ask` transcript search: `rg`
+    preferred, `grep -E` fallback.
 20. Config precedence: CLI flag > env var > config file
     (`~/.openrig/config.json`, or `$OPENRIG_HOME/config.json` when
-    `OPENRIG_HOME` is set; `packages/cli/src/config-store.ts:915`) > default.
+    `OPENRIG_HOME` is set; `packages/cli/src/config-store.ts:939`) > default.
 21. Semi-deterministic calibration: build what agents use constantly. Agent
     handles edge cases from error messages.
 22. `rig ask` is context engineering: gathers evidence, does NOT call an
@@ -115,15 +119,45 @@ system-level invariants.
 
 The reboot supports `local:...` and `path:/abs/...` agent refs. Remote
 `agent_ref` sources remain unsupported and fail in preflight (schema
-validation, `rigspec-schema.ts:545`; restated in compat note 1).
+validation, `rigspec-schema.ts:563`; restated in compat note 1).
+
+### Startup, delivery and launch invariants
+
+These hold across the startup, transport and adapter code and are stated in its
+comments:
+
+- **`ready` is not "submitted" and not "oriented".** A seat can reach
+  `startupStatus: ready` while its startup text is unverified or still staged;
+  `node.startup_ready` carries a `submission` block saying which
+  (`types.ts:220`). Orientation is a separate, challenge-verified proof:
+  `ready` never means oriented (`types.ts:222`–`227`). See
+  `agent-spec-and-startup.md`.
+- **Default sends never block on busy or unknown.** `--wait-for-idle` is the
+  caller's opt-in to wait, and a failed wait returns without sending. Otherwise
+  only positive evidence of an open
+  picker or approval prompt refuses a send; a busy or unknown seat gets the
+  message with an advisory warning (`session-transport.ts:1427`–`1433`). The
+  audited `--dangerously-interact` override is the only way past an open prompt.
+- **Non-interruptive mode is per-launch flags only.** It never changes
+  permissions or native settings files, applies only to full-bypass Claude Code
+  and Codex seats, and is saved per rig, off by default
+  (`adapters/non-interruptive.ts:9`–`26`; `rigs.non_interruptive`, migration
+  `095`). A rig spec can author it as `non_interruptive` (`rigspec-schema.ts:179`).
+- **Inside a notify envelope, events are delivered from the log.** Within
+  `withNotifyEnvelope` (`event-bus.ts:106`–`112`), every event persisted through
+  the event bus must be registered before the callback returns; after commit
+  the bus delivers the committed rows from the log, and an unreadable row
+  emits `event.delivery_poisoned`. Legacy callers outside an envelope persist
+  inside their own transaction and notify subscribers explicitly after commit
+  (`persistWithinTransaction`, `:70`; for example `node-launcher.ts:241`).
 
 ## 2. Event system
 
 The daemon's event surface is the single `RigEvent` discriminated union.
 
-`RigEvent` is declared at `packages/daemon/src/domain/types.ts:105`
-(`export type RigEvent =`) and runs through `types.ts:313`. It has **99 union
-members** declaring **100** `type` literals: one member (`types.ts:106`) carries
+`RigEvent` is declared at `packages/daemon/src/domain/types.ts:108`
+(`export type RigEvent =`) and runs through `types.ts:313`. It has **98 union
+members** declaring **99** `type` literals: one member (`types.ts:109`) carries
 both `proof.judged` and `proof.sources_changed`.
 
 - Members:
@@ -131,52 +165,52 @@ both `proof.judged` and `proof.sources_changed`.
 - Type literals:
   `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | sort -u | wc -l`
 
-**95** of the 100 literals appear as a `type: "<x>"` literal somewhere in
+**96** of the 99 literals appear as a `type: "<x>"` literal somewhere in
 `packages/daemon/src` outside `types.ts` (mostly in `domain/` and `routes/`;
-`seat.model_divergence` is built in `startup.ts`). **5** are declared but never
-constructed: `session.status_changed`, `continuity.sync`, `continuity.degraded`,
-`qitem.closure_overdue` and `mission_control.view_refreshed` (the last two are
-still named in SSE filters, `routes/queue.ts:967` and
-`routes/mission-control.ts:289`). List them with:
+`seat.model_divergence` is built in `startup.ts`). **3** are declared but never
+constructed: `session.status_changed`, `continuity.sync`, and `continuity.degraded`
+(per #490, `qitem.closure_overdue` is produced by `QueueRepository.recordClosureOverdue`
+when swept by `queue-stuck-sweep`, and `mission_control.view_refreshed` was retired).
+List them with:
 
 `for t in $(sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"'); do git grep -q -F "type: \"$t\"" -- packages/daemon/src ':!packages/daemon/src/domain/types.ts' || echo "$t"; done`
 
 ### Per-prefix event families
 
 Each count below is the number of `type` literals per prefix in the union body
-(`types.ts:105`–`313`):
+(`types.ts:108`–`313`):
 `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"' | cut -d. -f1 | sort | uniq -c | sort -rn`.
 
 | Prefix | Types | Sample / role |
 |---|---|---|
-| `node.*` | 15 | `node.added` (`types.ts:123`) … `node.startup_proof_rejected` (`:226`) — lifecycle/startup |
+| `node.*` | 15 | `node.added` (`types.ts:126`) … `node.startup_proof_rejected` (`:229`) — lifecycle/startup |
 | `workflow.*` | 8 | workflow runtime (detail in `workflow-runtime.md`) |
 | `session.*` | 8 | session discovery / status / detach / vanish / stop / clean / resume-token audit |
-| `rig.*` | 7 | `rig.created` / `rig.deleted` / `rig.imported` / `rig.stopped` / `rig.archived` / `rig.unarchived` / `rig.expanded` (`:238`) |
-| `watchdog.*` | 5 | `watchdog.evaluation_fired` (`:277`) … `watchdog.job_stopped` (`:281`) |
-| `seat.*` | 5 | `seat.model_divergence` (`:112`) … `seat.handover_completed` (`:197`) — model divergence, fresh launch, attention clear, handover |
-| `queue.*` | 5 | queue lifecycle (`:246`–`:249`, `:259`; detail in `coordination-primitive.md`) |
+| `rig.*` | 7 | `rig.created` / `rig.deleted` / `rig.imported` / `rig.stopped` / `rig.archived` / `rig.unarchived` / `rig.expanded` (`:241`) |
+| `watchdog.*` | 5 | `watchdog.evaluation_fired` (`:280`) … `watchdog.job_stopped` (`:284`) |
+| `seat.*` | 5 | `seat.model_divergence` (`:115`) … `seat.handover_completed` (`:200`) — model divergence, fresh launch, attention clear, handover |
+| `queue.*` | 5 | queue lifecycle (`:249`–`:252`, `:262`; detail in `coordination-primitive.md`) |
 | `package.*` | 5 | legacy package/install engine events |
-| `mission_control.*` | 5 | audit/notification (`:307`–`:313`; detail in `mission-control.md`) |
+| `mission_control.*` | 4 | audit/notification (`:308`–`:313`; detail in `mission-control.md`) |
 | `bootstrap.*` | 5 | legacy bootstrap-run events |
 | `restore.*` | 4 | restore start/complete/subset-complete/reconcile (detail in `lifecycle-snapshot-restore.md`) |
 | `classifier.*` | 4 | classifier-lease lifecycle |
-| `qitem.*` | 2 | `qitem.fallback_routed` (`:250`), `qitem.closure_overdue` (`:251`) |
-| `proof.*` | 2 | `proof.judged`, `proof.sources_changed` — one union member (`:106`) |
-| `pod.*` | 2 | `pod.created` (`:212`), `pod.deleted` (`:213`) |
-| `inbox.*` | 2 | `inbox.absorbed` (`:252`), `inbox.denied` (`:253`) |
-| `continuity.*` | 2 | `continuity.sync` (`:227`), `continuity.degraded` (`:228`) |
-| `agent.*` | 2 | `agent.activity` (`:148`), `agent.session_identity` (`:155`) |
-| singletons | 12 | one type each: `workflow_spec.*`, `view.*`, `transport.*` (`:152`), `topology.*` (`:135`), `stream.*` (`:242`), `snapshot.*`, `project.*`, `kernel.*`, `event.*` (`:107`), `chat.*` (`:236`), `bundle.*`, `binding.*` |
+| `qitem.*` | 2 | `qitem.fallback_routed` (`:253`), `qitem.closure_overdue` (`:254`) |
+| `proof.*` | 2 | `proof.judged`, `proof.sources_changed` — one union member (`:109`) |
+| `pod.*` | 2 | `pod.created` (`:215`), `pod.deleted` (`:216`) |
+| `inbox.*` | 2 | `inbox.absorbed` (`:255`), `inbox.denied` (`:256`) |
+| `continuity.*` | 2 | `continuity.sync` (`:230`), `continuity.degraded` (`:231`) |
+| `agent.*` | 2 | `agent.activity` (`:151`), `agent.session_identity` (`:158`) |
+| singletons | 12 | one type each: `workflow_spec.*`, `view.*`, `transport.*` (`:155`), `topology.*` (`:138`), `stream.*` (`:245`), `snapshot.*`, `project.*`, `kernel.*`, `event.*` (`:110`), `chat.*` (`:239`), `bundle.*`, `binding.*` |
 
-Family counts sum to 100 type literals (18 multi-type families totalling 88 +
+Family counts sum to 99 type literals (18 multi-type families totalling 87 +
 12 singletons).
 
 ### Emission and delivery
 
-Events are emitted via `eventBus.emit({ type: ... })` (`event-bus.ts:56`) or,
+Events are emitted via `eventBus.emit({ type: ... })` (`event-bus.ts:57`) or,
 inside a caller-managed transaction, `eventBus.persistWithinTransaction(...)`
-(`event-bus.ts:69`) with subscribers notified after commit — across domain
+(`event-bus.ts:70`) with subscribers notified after commit — across domain
 services (`stream-store.ts`, `workflow-runtime.ts`, `restore-orchestrator.ts`,
 `node-launcher.ts`, etc.) and route handlers. The event log is append-only and
 SQLite-backed.
@@ -186,14 +220,36 @@ SSE delivery surfaces include the following. The daemon has **11**
 (`git grep -o 'streamSSE(' -- packages/daemon/src/routes | wc -l`;
 `git grep -l 'streamSSE(' -- packages/daemon/src/routes | wc -l`).
 
-- `GET /api/events` — global stream of all events (`server.ts:731`
+- `GET /api/events` — global stream of all events (`server.ts:730`
   `app.route("/api/events", eventsRoute)`).
 - `GET /api/stream/watch` — new stream items (`routes/stream.ts:194`).
 - `GET /api/queue/watch` — queue/inbox coordination events
-  (`routes/queue.ts:985`).
+  (`routes/queue.ts:1054`, with a `/sse` alias at `:1055`).
 - The chat SSE stream `GET /api/rigs/:rigId/chat/watch` delivers
-  `chat.message` for one rig (`routes/chat.ts:68`, mounted at `server.ts:783`;
+  `chat.message` for one rig (`routes/chat.ts:82`, mounted at `server.ts:782`;
   rig-scoped; see compat note 6).
+- The other SSE routes are activity events and the watch or `sse` routes for
+  mission control, projects, views, watchdog and workflow; list them with
+  `git grep -n 'streamSSE(' -- packages/daemon/src/routes`.
+
+### Telemetry read surface
+
+`/api/telemetry` (`server.ts:822`; `routes/telemetry.ts`) is a read-only,
+paged view over the event log and queue history, built by
+`readTelemetryPage()` in `packages/daemon/src/domain/finite-telemetry.ts`. It
+serves three streams: `GET /api/telemetry/v1/events`, `/v1/queue-transitions`
+(active and archived transitions) and `/v1/nodes/:nodeId/tenures` (a node's
+occupant tenures). Each page is one read with no writes or subscription,
+bounded at 128 rows and 128 KiB (`TELEMETRY_LIMITS`), and resumed with a
+cursor. Rows carry metadata only, never event payloads, notes or bodies, and
+the response names gaps in the history it could not vouch for (for example a
+daemon restart boundary or rows before the retained floor) instead of
+presenting a partial history as complete. The page records the source host and
+the daemon's boot epoch. Bad input returns `400 telemetry_invalid_request`; a
+failed read returns `503 telemetry_read_unavailable`. The same route also
+serves the usage series behind `rig usage` (`/usage/series`, `/usage/top`).
+`rig telemetry events|transitions|tenures`
+(`packages/cli/src/commands/telemetry.ts`) prints one bounded page.
 
 ## 3. Remaining compatibility notes
 
@@ -212,7 +268,7 @@ Intentional limits that still describe the shipped system:
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
 7. `--verify` on `rig send` checks pane content for message visibility, not
    agent acknowledgement: it compares occurrences of the message's first 40
-   characters before and after the send (`session-transport.ts:1413`–`1415`).
+   characters before and after the send (`session-transport.ts:1605`–`1608`).
 8. Terminal node readiness is shell-ready only — no service health probes.
 9. Managed-app service surfaces are descriptive only — OpenRig does not
    auto-inject service URLs/tokens into agent prompts beyond authored

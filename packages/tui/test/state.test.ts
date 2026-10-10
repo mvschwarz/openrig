@@ -65,7 +65,7 @@ describe("one instance-scoped view-state (PIN 1, FR-12/13)", () => {
     const s = createViewState({ instanceId: "t", ...withSnap });
     s.dispatch({ type: "cross", kind: "spec-of", name: "dev50.driver" });
     expect(s.get().section).toBe("specs");
-    expect(s.get().drill.at(-1)).toEqual({ kind: "spec", name: "driver-agent" });
+    expect(s.get().drill.at(-1)).toEqual({ kind: "spec", name: "driver-agent", specKind: "agent" });
   });
 
   it("cross-navs running: spec → topology scoped to its seats", () => {
@@ -118,7 +118,10 @@ describe("one instance-scoped view-state (PIN 1, FR-12/13)", () => {
   it("renders honest-empty against an empty snapshot: errors name the miss, nothing is fabricated", () => {
     const s = createViewState({ instanceId: "t" }); // default emptySnapshot
     s.dispatch({ type: "drill", resource: "agent", name: "dev50.driver" });
-    expect(s.get().lastError).toMatch(/no such agent/);
+    // Nothing was read, so the address waits for Topology rather than call the agent absent.
+    expect(s.get()).toMatchObject({ section: "topology", drill: [], lastError: null, pendingDrill: { resource: "agent", name: "dev50.driver" } });
+    s.dispatch({ type: "resolve-pending" });
+    expect(s.get().lastError).toMatch(/could not confirm agent "dev50\.driver"/);
     expect(s.get().drill).toEqual([]);
   });
 

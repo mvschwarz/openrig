@@ -43,6 +43,17 @@ roles:
 `);
 
 describe("RoleResolver", () => {
+  it("a stale hook reference does not block actionable exports or another role", () => {
+    const manifest = structuredClone(FULL_MANIFEST);
+    manifest.roles![0]!.hooks = ["hooks/missing.yaml"];
+    const result = resolveExports(manifest, "reviewer");
+    expect(result.skills.map((skill) => skill.name)).toEqual(["foo"]);
+    expect(result.guidance.map((guidance) => guidance.name)).toEqual(["review-guidelines"]);
+    expect(result.agents).toHaveLength(1);
+    expect(result.deferred.some((entry) => entry.exportType === "hook")).toBe(false);
+    expect(resolveExports(manifest, "full-stack").skills).toHaveLength(2);
+  });
+
   // Test 1: Role with skills only -> referenced skills in output
   it("role with skills only -> referenced skills in output", () => {
     const result = resolveExports(FULL_MANIFEST, "full-stack");

@@ -112,7 +112,14 @@ describe("disabled-by-default production observer ports",()=>{
     expect((await app.request("/shadow/drain",{method:"POST"})).status).toBe(400);
     const r=await app.request("/shadow/drain",{method:"POST",headers:{"x-openrig-session":"fixture@rig"}});
     expect((await r.json()).sink).toMatchObject({errors:1,stopped:true,error:"private destination unavailable"});
-    const disabled=new Hono().route("/",projectsRoutes());expect((await disabled.request("/shadow")).status).toBe(200);
+    const disabled=new Hono().route("/",projectsRoutes());
+    for(const verb of ["drain","stop"]){
+      const named=await disabled.request(`/shadow/${verb}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({actor:"operator"})});
+      expect(named.status).toBe(verb==="drain"?409:200);
+      const bad=await disabled.request(`/shadow/${verb}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({actor:7})});
+      expect(bad.status).toBe(400);expect(await bad.json()).toMatchObject({error:"invalid_field",field:"actor"});
+    }
+    expect((await disabled.request("/shadow")).status).toBe(200);
     expect(await(await disabled.request("/shadow")).json()).toEqual({enabled:false,error:null});
   });
   it("private sink writes only synthetic observations and refuses existing or nonprivate destinations",async()=>{

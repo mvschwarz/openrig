@@ -122,12 +122,14 @@ export type LaunchFreshResult =
       effort?: string | null;
       startupPolicyHash: string;
       supersededSessionIds: string[];
+      warnings?: string[];
     }
   | (SeatRefusal & {
       status?: "attention_required" | "failed";
       sessionName?: string;
       sessionId?: string;
       generation?: string;
+      warnings?: string[];
     });
 
 interface LatestSessionRow {
@@ -702,12 +704,14 @@ export class SeatLifecycleService {
             code: "startup_failed",
             status: "failed",
             message: `Fresh startup failed and was rolled back to zero live session/binding: ${startupResult.errors.join("; ")}`,
+            warnings: startupResult.warnings,
           }
         : {
             ok: false,
             code: "attention_required",
             status: "attention_required",
             message: `Fresh startup failed and the new process could not be confirmed stopped; the seat requires attention: ${startupResult.errors.join("; ")}`,
+            warnings: startupResult.warnings,
             sessionName: canonicalSessionName,
             sessionId: launch.session.id,
             generation,
@@ -773,6 +777,7 @@ export class SeatLifecycleService {
         sessionName: canonicalSessionName,
         sessionId: launch.session.id,
         generation,
+        warnings: startupResult.warnings,
       };
     }
 
@@ -787,6 +792,7 @@ export class SeatLifecycleService {
       effort: node.effort ?? undefined,
       startupPolicyHash: startup.context.hash,
       supersededSessionIds,
+      warnings: startupResult.warnings,
     };
   }
 

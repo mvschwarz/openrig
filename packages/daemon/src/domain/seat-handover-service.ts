@@ -1,6 +1,5 @@
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
-import { permissionBindingOverride } from "./native-permission-selection.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -125,6 +124,7 @@ interface SeatHandoverServiceDeps {
   discoveryRepo: DiscoveryRepository;
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
+  successorLauncher?: SuccessorSessionLauncher;
   now?: () => Date;
   /** OpenRig identity/activity env stamped onto a created successor session,
    *  mirroring the launch identity env. Defaults to {} (the three core identity
@@ -245,7 +245,7 @@ export class SeatHandoverService {
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
-    this.successorLauncher = new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
+    this.successorLauncher = deps.successorLauncher ?? new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
       sessionEnv: deps.sessionEnv,
       runtimeSessionEnv: deps.runtimeSessionEnv,
       newId: deps.newSuccessorId,
@@ -442,13 +442,13 @@ export class SeatHandoverService {
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
-    let permissionOverride: ReturnType<typeof permissionBindingOverride>;
+    let permissionOverride: ReturnType<NativePermissionStore["launchOverride"]>;
     try {
-      const selection = new NativePermissionStore(this.db).read(node.id);
-      if (selection && selection.runtime !== node.runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
-      permissionOverride = permissionBindingOverride(selection);
+      permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, node.runtime ?? "");
     } catch (error) { return { ok: false, code: "successor_create_failed", message: `Permission selection: ${(error as Error).message}`,
       guidance: "No successor was created. Inspect the seat permission selection before a separately authorized retry." }; }
+    const effectivePosture = permissionOverride.launchPosture ?? successorPosture;
+    const effectivePermissionMode = permissionOverride.permissionMode ?? (effectivePosture === "auto" && node.runtime === "claude-code" ? "auto" : undefined);
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
@@ -458,7 +458,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, ...permissionOverride, model: node.model, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -640,7 +640,15 @@ export class SeatHandoverService {
         guidance: "Run discovery and list active discovered sessions before retrying.",
       });
     }
-    if (discovered.status !== "active") {
+    // #981: a composer-launched successor respawns into the seat's own pane, whose discovery row the
+    // previous handover claimed for this same node, and a rescan keeps that claim (#237). That claim is
+    // this seat's own, so commit re-claims it. A row claimed by any other node, or a discovered-source
+    // successor, still needs an active, unclaimed record.
+    const ownPaneClaim = input.reportedSource.mode !== "discovered"
+      && discovered.status === "claimed"
+      && discovered.claimedNodeId === input.node.id
+      && discovered.tmuxSession === input.latestSession.session_name;
+    if (discovered.status !== "active" && !ownPaneClaim) {
       return fail({
         ok: false,
         code: "discovered_not_active",
@@ -837,7 +845,7 @@ export class SeatHandoverService {
     }
     // Same spike-proven 200ms settle as the restore packet (staged-not-consumed class).
     await this.sleep(200);
-    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["C-m"]);
+    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
@@ -869,12 +877,12 @@ export class SeatHandoverService {
       return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
     }
     // B16 rework (r2 live door finding): the SHARED paste-then-submit sequencing — the transport's
-    // spike-proven 200ms settle between send_text and C-m (session-transport.ts, "Wait 200ms").
+    // spike-proven 200ms settle between send_text and Enter (session-transport.ts, "Wait 200ms").
     // Without it the multi-KB packet sat STAGED-UNSENT as collapsed paste blocks in the successor's
     // input box (r2 measured 46s until a manual Enter) — the handover committed complete while the
     // packet was never consumed: the staged-not-consumed class, shipped by the product itself.
     await this.sleep(200);
-    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["C-m"]);
+    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }

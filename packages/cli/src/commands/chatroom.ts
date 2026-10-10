@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, type DaemonResponse } from "../client.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -24,6 +24,16 @@ async function resolveRigId(client: DaemonClient, rigName: string): Promise<stri
   }
 
   return matches[0]!.id;
+}
+
+// A poll that failed this way says nothing about the room: the daemon was slow to answer, refused the
+// connection, or dropped it while restarting. `chatroom wait` retries it on its usual cadence until its own
+// deadline. An HTTP error status or any other failure is real and ends the wait at once.
+const TRANSIENT_CONNECTION_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "UND_ERR_SOCKET"]);
+
+function isTransientPollError(err: unknown): boolean {
+  if (err instanceof DaemonTimeoutError) return true;
+  return err instanceof DaemonConnectionError && err.causeCode !== undefined && TRANSIENT_CONNECTION_CODES.has(err.causeCode);
 }
 
 export function chatroomCommand(depsOverride?: StatusDeps): Command {
@@ -115,6 +125,13 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = 1;
+        return;
+      }
+
+      if (res.status >= 400) {
+        console.error((res.data as { error?: string })?.error ?? `Failed (HTTP ${res.status})`);
+        process.exitCode = 1;
         return;
       }
 
@@ -260,7 +277,9 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output")
     .action(async (rig: string, opts: { after?: string; topic?: string; sender?: string; timeout: string; json?: boolean }) => {
       // A NaN timeout would never expire and would poll with a ~1ms sleep.
-      const timeoutSeconds = Number(opts.timeout);
+      // Preserve numeric forms and legacy numeric prefixes (e.g. 30s) without truncating fractions.
+      const numericTimeout = Number(opts.timeout);
+      const timeoutSeconds = Number.isNaN(numericTimeout) ? Number.parseFloat(opts.timeout) : numericTimeout;
       if (opts.timeout.trim() === "" || !Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
         console.error(`--timeout must be a non-negative number of seconds; got '${opts.timeout}'`);
         process.exitCode = 1;
@@ -296,6 +315,8 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.sender) filterParams.set("sender", opts.sender);
 
       const start = Date.now();
+      // The message of the last poll, when it failed transiently; null once a poll succeeds.
+      let lastPollError: string | null = null;
       while (true) {
         // Check timeout BEFORE polling
         if (Date.now() - start >= timeoutMs) break;
@@ -303,11 +324,37 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         const params = new URLSearchParams(filterParams);
         if (cursor) params.set("after", cursor);
 
-        const res = await client.get<Array<Record<string, unknown>>>(
-          `/api/rigs/${encodeURIComponent(rigId)}/chat/history?${params}`,
-        );
+        const controller = new AbortController();
+        const remainingForRequest = timeoutMs - (Date.now() - start);
+        if (remainingForRequest <= 0) break;
+        // Keep the command's deadline through headers and body consumption.
+        // The client's own request timeout still bounds an unresponsive daemon.
+        const timer = setTimeout(() => controller.abort(), Math.min(remainingForRequest, 2_147_483_647));
+        let res: DaemonResponse<Array<Record<string, unknown>>> | null = null;
+        try {
+          res = await client.get<Array<Record<string, unknown>>>(
+            `/api/rigs/${encodeURIComponent(rigId)}/chat/history?${params}`,
+            { signal: controller.signal },
+          );
+          lastPollError = null;
+        } catch (err) {
+          if (controller.signal.aborted) break;
+          if (!isTransientPollError(err)) throw err;
+          // Announce the first failure of a run, then keep polling quietly.
+          if (lastPollError === null) console.error(`A poll failed (${(err as Error).message}); retrying until the --timeout deadline.`);
+          lastPollError = (err as Error).message;
+        } finally {
+          clearTimeout(timer);
+        }
+        if (controller.signal.aborted || Date.now() - start >= timeoutMs) break;
 
-        if (res.data && res.data.length > 0) {
+        if (res && res.status >= 400) {
+          console.error((res.data as { error?: string })?.error ?? `Failed (HTTP ${res.status})`);
+          process.exitCode = 1;
+          return;
+        }
+
+        if (res?.data && res.data.length > 0) {
           if (opts.json) {
             console.log(JSON.stringify(res.data));
           } else {
@@ -325,6 +372,9 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       }
 
       console.error(`Timed out after ${opts.timeout} seconds — no new messages matching filters.`);
+      if (lastPollError !== null) {
+        console.error(`The last poll failed (${lastPollError}), so new messages may have arrived without being seen.`);
+      }
       process.exitCode = 1;
     });
 

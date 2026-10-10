@@ -1,0 +1,74 @@
+{
+  "schema": "openrig.run-record/v1",
+  "id": "rr-20261004-004",
+  "subject": {
+    "kind": "harness_check",
+    "harness": "pi"
+  },
+  "execution": {
+    "resources": [
+      {
+        "kind": "plugin",
+        "ref": "openrig-core",
+        "version": "0.1.3"
+      }
+    ],
+    "settings": {
+      "permissionPolicy": "none declared"
+    },
+    "unknowns": [
+      "model chosen by the runtime default"
+    ]
+  },
+  "environment": {
+    "openrig": {
+      "version": "0.6.6",
+      "commit": "910bf9f1"
+    },
+    "platform": "linux",
+    "arch": "x64",
+    "harnesses": [
+      {
+        "name": "claude-code",
+        "version": "2.1.0",
+        "knownBy": "claude --version"
+      },
+      {
+        "name": "codex",
+        "version": "0.50.0",
+        "knownBy": "codex --version"
+      }
+    ]
+  },
+  "evidence": {
+    "kind": "native-workflow",
+    "receipt": {
+      "ref": "receipt.md",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "journey": {
+    "id": "harness-check",
+    "version": 1
+  },
+  "outcome": {
+    "steps": [
+      {
+        "id": "harness-check",
+        "result": "BLOCKED"
+      }
+    ],
+    "assistance": {
+      "count": 0,
+      "description": ""
+    },
+    "recordedBy": "fleet",
+    "at": "2026-10-04T12:00:00Z",
+    "publicNote": "Pi was not signed in on the test machine."
+  },
+  "relations": {
+    "supersedes": [],
+    "withdraws": [],
+    "resolves": []
+  }
+}

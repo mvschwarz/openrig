@@ -8,7 +8,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { policyCommand } from "../src/commands/policy.js";
 
-const PIN = "OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface.";
+const PIN = "The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.";
 
 function runCapture(argv: string[]): Promise<{ logs: string[]; errs: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {
@@ -43,13 +43,22 @@ describe("rig policy — the permission-policy verb", () => {
     expect(desc).toContain("rig mode");
   });
 
-  it("list --json names all five choices with their ref forms and the pin", async () => {
+  it("list --json names all six choices with their ref forms and the pin", async () => {
     const { logs } = await runCapture(["policy", "list", "--json"]);
     const out = JSON.parse(logs.join("")) as { policies: Array<{ name: string; ref: string }>; note: string };
-    expect(out.policies.map((p) => p.name)).toEqual(["locked", "standard", "open", "yolo", "none"]);
+    expect(out.policies.map((p) => p.name)).toEqual(["locked", "standard", "open", "yolo", "auto", "none"]);
     expect(out.policies.find((p) => p.name === "standard")?.ref).toBe("builtin:standard");
+    expect(out.policies.find((p) => p.name === "auto")?.ref).toBe("builtin:auto");
     expect(out.policies.find((p) => p.name === "none")?.ref).toBe("none");
     expect(out.note).toContain(PIN);
+  });
+
+  it("show auto displays auto with its real posture", async () => {
+    const { logs } = await runCapture(["policy", "show", "auto", "--json"]);
+    const out = JSON.parse(logs.join("")) as { name: string; ref: string; launchPosture: string };
+    expect(out.name).toBe("auto");
+    expect(out.ref).toBe("builtin:auto");
+    expect(out.launchPosture).toBe("auto");
   });
 
   it("show on an unknown bare name treats it as a custom ref and refuses loudly when it does not resolve", async () => {
@@ -64,13 +73,13 @@ describe("rig policy — the permission-policy verb", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("current classifies ABSENT as the floor (honest absence)", async () => {
+  it("current classifies ABSENT as the team launch default (nothing recorded)", async () => {
     const spec = path.join(dir, "rig.yaml");
     fs.writeFileSync(spec, "name: r\npods: []\n");
     const { logs } = await runCapture(["policy", "current", "--spec", spec, "--json"]);
     const out = JSON.parse(logs.join("")) as { sites: Array<{ effective: unknown; applies?: string }> };
     expect(out.sites[0]!.effective).toBeNull();
-    expect(String(out.sites[0]!.applies)).toContain("floor");
+    expect(String(out.sites[0]!.applies)).toContain("team launch default");
   });
 
   it("apply records builtin:standard into an existing spec and current reads it back classified", async () => {

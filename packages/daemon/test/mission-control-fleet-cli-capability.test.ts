@@ -11,8 +11,6 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import {
   MissionControlFleetCliCapability,
   MISSION_CONTROL_DESIRED_FIELDS,
-  LOCAL_CLI_NODE_FIELDS_AT_0_2_0,
-  LOCAL_CLI_VERSION_LABEL,
   makeLocalCliCapabilityProbe,
 } from "../src/domain/mission-control/mission-control-fleet-cli-capability.js";
 
@@ -38,23 +36,27 @@ describe("MissionControlFleetCliCapability (PL-005 Phase A; 4 sub-clauses of gra
     expect(fleet.rows).toHaveLength(2);
   });
 
-  it("SUB-CLAUSE 1+4: probe-reported missing fields surface as drift + bump staleCliCount", async () => {
+  it("confirmed missing fields surface as unavailable without implying an outdated version", async () => {
     const cli = new MissionControlFleetCliCapability({
       db,
       eventBus: bus,
       rigRepo,
       probeRig: async (name) => ({
         cliVersionLabel: name === "rig-alpha" ? "v0.1.12" : "head",
-        unsupportedFields: name === "rig-alpha" ? ["recoveryGuidance"] : [],
+        unsupportedFields: name === "rig-alpha" ? ["agentActivity"] : [],
       }),
     });
     const fleet = await cli.rollupFleet();
     const alpha = fleet.rows.find((r) => r.rigName === "rig-alpha");
     const beta = fleet.rows.find((r) => r.rigName === "rig-beta");
     expect(alpha?.cliDriftDetected).toBe(true);
+    expect(alpha?.cliCapabilityStatus).toBe("unavailable");
+    expect(alpha?.cliVersionOutdated).toBe(false);
     expect(beta?.cliDriftDetected).toBe(false);
-    expect(fleet.staleCliCount).toBe(1);
-    expect(fleet.degradedFields).toContain("recoveryGuidance");
+    expect(beta?.cliCapabilityStatus).toBe("available");
+    expect(fleet.staleCliCount).toBe(0);
+    expect(fleet.unknownCliCount).toBe(0);
+    expect(fleet.degradedFields).toEqual(["agentActivity"]);
   });
 
   it("SUB-CLAUSE 3: once-per-session-per-rig logging — drift event emitted only once per (rig, field)", async () => {
@@ -66,7 +68,7 @@ describe("MissionControlFleetCliCapability (PL-005 Phase A; 4 sub-clauses of gra
       rigRepo,
       probeRig: async () => ({
         cliVersionLabel: "v0.1.12",
-        unsupportedFields: ["recoveryGuidance"],
+        unsupportedFields: ["agentActivity"],
       }),
     });
     // 5 rollup calls = 10 (rig, field) observations, but only 2 drift events (one per rig).
@@ -86,7 +88,7 @@ describe("MissionControlFleetCliCapability (PL-005 Phase A; 4 sub-clauses of gra
       rigRepo,
       probeRig: async () => ({
         cliVersionLabel: "v0.1.12",
-        unsupportedFields: ["recoveryGuidance"],
+        unsupportedFields: ["agentActivity"],
       }),
     });
     await cli.rollupFleet();
@@ -136,49 +138,102 @@ describe("MissionControlFleetCliCapability (PL-005 Phase A; 4 sub-clauses of gra
     expect(alpha?.attentionReason).toContain("gate-x");
   });
 
-  // R1 fix per PL-005 Phase A guard review (2026-05-04). Production
-  // probe (makeLocalCliCapabilityProbe + LOCAL_CLI_NODE_FIELDS_AT_0_2_0)
-  // honestly reports drift WITHOUT a fake probeRig injection. This is
-  // the production-wired path: the same factory startup.ts uses to
-  // construct the daemon-level fleet capability service.
-  it("R1 PRODUCTION-WIRED probe (makeLocalCliCapabilityProbe): recoveryGuidance NOT in CLI allow-list → reports drift on every rig", async () => {
+  it.each(["absent", "production", "failed"])("%s observation is unknown, with no fabricated drift or degradation events", async (observation) => {
+    const events: Array<{ type: string }> = [];
+    bus.subscribe((e) => events.push(e));
     const cli = new MissionControlFleetCliCapability({
       db,
       eventBus: bus,
       rigRepo,
-      probeRig: makeLocalCliCapabilityProbe(),
+      probeRig: observation === "absent" ? undefined
+        : observation === "production" ? makeLocalCliCapabilityProbe()
+        : async () => { throw new Error("CLI observation unavailable"); },
     });
     const fleet = await cli.rollupFleet();
-    expect(fleet.staleCliCount).toBe(2);
-    expect(fleet.degradedFields).toContain("recoveryGuidance");
-    expect(fleet.degradedFields).not.toContain("agentActivity");
+    expect(fleet.staleCliCount).toBe(0);
+    expect(fleet.unknownCliCount).toBe(2);
+    expect(fleet.degradedFields).toEqual([]);
     for (const row of fleet.rows) {
-      expect(row.cliDriftDetected).toBe(true);
-      expect(row.cliVersionLabel).toBe(LOCAL_CLI_VERSION_LABEL);
+      expect(row).toMatchObject({
+        cliVersionLabel: "unknown",
+        cliCapabilityStatus: "unknown",
+        cliVersionOutdated: false,
+        cliDriftDetected: false,
+      });
     }
+    expect(events.filter((e) => e.type === "mission_control.cli_drift_detected")).toEqual([]);
   });
 
-  it("R1: agentActivity IS in LOCAL_CLI_NODE_FIELDS_AT_0_2_0 (audit row 5 ground truth)", () => {
-    expect(LOCAL_CLI_NODE_FIELDS_AT_0_2_0.has("agentActivity")).toBe(true);
-    expect(LOCAL_CLI_NODE_FIELDS_AT_0_2_0.has("recoveryGuidance")).toBe(false);
-  });
-
-  it("R1 production probe: an extended (hypothetical future) CLI allow-list with recoveryGuidance reports zero drift", async () => {
-    const futureFields = new Set([
-      ...LOCAL_CLI_NODE_FIELDS_AT_0_2_0,
-      "recoveryGuidance",
-    ]);
+  it("reports observed version and supported list fields without requiring detail-only recoveryGuidance", async () => {
     const cli = new MissionControlFleetCliCapability({
       db,
       eventBus: bus,
       rigRepo,
       probeRig: makeLocalCliCapabilityProbe({
-        versionLabel: "0.3.0",
-        knownNodeFields: futureFields,
+        versionLabel: "0.6.3 (90970a9, dirty)",
+        knownNodeFields: new Set(["agentActivity"]),
       }),
     });
     const fleet = await cli.rollupFleet();
     expect(fleet.staleCliCount).toBe(0);
+    expect(fleet.unknownCliCount).toBe(0);
     expect(fleet.degradedFields).toEqual([]);
+    expect(fleet.rows[0]).toMatchObject({
+      cliVersionLabel: "0.6.3 (90970a9, dirty)",
+      cliCapabilityStatus: "available",
+      cliVersionOutdated: false,
+      cliDriftDetected: false,
+    });
+  });
+
+  it("a version observation alone does not establish field support", async () => {
+    const probe = makeLocalCliCapabilityProbe({ versionLabel: "0.6.3" });
+    expect(await probe("rig-alpha")).toMatchObject({
+      cliVersionLabel: "0.6.3",
+      unsupportedFields: null,
+    });
+  });
+
+  it.each(["", "unknown"])("field observations do not invent a version or accept an outdated claim with version %j", async (versionLabel) => {
+    const cli = new MissionControlFleetCliCapability({
+      db,
+      eventBus: bus,
+      rigRepo,
+      probeRig: makeLocalCliCapabilityProbe({
+        versionLabel,
+        knownNodeFields: new Set(),
+        versionOutdated: true,
+      }),
+    });
+    const fleet = await cli.rollupFleet();
+    expect(fleet.staleCliCount).toBe(0);
+    expect(fleet.degradedFields).toEqual(["agentActivity"]);
+    expect(fleet.rows[0]).toMatchObject({
+      cliVersionLabel: "unknown",
+      cliCapabilityStatus: "unavailable",
+      cliVersionOutdated: false,
+    });
+  });
+
+  it("counts an independently confirmed outdated version, separately from field availability", async () => {
+    const cli = new MissionControlFleetCliCapability({
+      db,
+      eventBus: bus,
+      rigRepo,
+      probeRig: async (name) => ({
+        cliVersionLabel: name === "rig-alpha" ? "0.1.12" : "0.6.3",
+        unsupportedFields: [],
+        versionOutdated: name === "rig-alpha",
+      }),
+    });
+    const fleet = await cli.rollupFleet();
+    expect(fleet.staleCliCount).toBe(1);
+    expect(fleet.unknownCliCount).toBe(0);
+    expect(fleet.degradedFields).toEqual([]);
+    expect(fleet.rows.find((row) => row.rigName === "rig-alpha")).toMatchObject({
+      cliVersionOutdated: true,
+      cliCapabilityStatus: "available",
+      cliDriftDetected: false,
+    });
   });
 });

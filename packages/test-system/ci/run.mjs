@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { defaultHostDaemon, runScenarioFile } from '../../daemon/test/helpers/scenario-pipeline.ts';
-import { CASES, RESULT_PREFIX } from './result.mjs';
+import { CASES, PASSING_CASES, RESULT_PREFIX } from './result.mjs';
 
 assert.equal(process.platform, 'linux', 'container execution only');
 assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
@@ -16,8 +16,10 @@ assert.ok(Object.values(networkInterfaces()).flat().every(address => address.int
 const mode = process.argv[2];
 assert.ok(['healthy', 'lost-baton'].includes(mode), 'expected healthy or lost-baton');
 const caseName = process.argv[3] ?? 'fixture';
-const selected = CASES[caseName];
+const passingOnly = Object.hasOwn(PASSING_CASES, caseName);
+const selected = passingOnly ? PASSING_CASES[caseName] : CASES[caseName];
 assert.ok(selected, 'unknown scenario case');
+assert.ok(!passingOnly || mode === 'healthy', 'a passing-only case runs healthy only');
 const rigBin = realpathSync('/usr/local/bin/rig');
 const scenario = join('/opt/openrig-testbed', selected.file);
 const records = [];

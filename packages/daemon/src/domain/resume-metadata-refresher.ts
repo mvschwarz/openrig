@@ -1,4 +1,5 @@
 import os from "node:os";
+import fs from "node:fs";
 import nodePath from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -17,6 +18,8 @@ import {
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
+import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
+import { validateResumeToken } from "./resume-token-validation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +41,7 @@ interface ResumeMetadataRefresherDeps {
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
+  codexHome?: string;
   // OPR.0.4.3.20 FR-4 — the Claude status-line sidecar reader, for null-fill of a
   // Claude session's resume token from live state during snapshot refresh.
   // Optional + structurally typed (older wirings/tests omit it → Claude null-fill
@@ -47,6 +51,9 @@ interface ResumeMetadataRefresherDeps {
   };
   /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is not used. */
   claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
+  /** Provider root used by the daemon's Claude launches; no scan of other homes. */
+  claudeConfigDir?: string;
+  listClaudeProcesses?: NativeProcessLister;
 }
 
 export class ResumeMetadataRefresher {
@@ -60,6 +67,8 @@ export class ResumeMetadataRefresher {
   private homeDir: string;
   private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
+  private claudeConfigDir: string;
+  private listClaudeProcesses: NativeProcessLister | undefined;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
     this.sessionRegistry = deps.sessionRegistry;
@@ -72,6 +81,7 @@ export class ResumeMetadataRefresher {
     // readCodexThreadIdByPid (tests, adoption paths) is untouched.
     const threadIdResolver = new CodexThreadIdResolver({
       defaultHome: deps.homeDir ?? os.homedir(),
+      codexHome: deps.codexHome,
       resolveHomeDirByPid: this.resolveHomeDirByPid,
     });
     // S10 follow-on: identity is REQUIRED on resolve(); an identity-less read routes EXPLICITLY
@@ -83,6 +93,8 @@ export class ResumeMetadataRefresher {
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
+    this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
+    this.listClaudeProcesses = deps.listClaudeProcesses;
   }
 
   /**
@@ -104,10 +116,10 @@ export class ResumeMetadataRefresher {
    *      is unacceptable recurring blast radius (rev1-r1). Resumability VERIFICATION
    *      is FR-6's on-demand job, not a recurring-snapshot op.
    *
-   * Default (`fillNullOnly` falsy) preserves the legacy validate-and-probe-and-clear
-   * behavior for the non-snapshot / teardown auto-pre-down path (a one-time
-   * at-shutdown check — unchanged here; FR-6 §2.1b owns unifying the clear semantics
-   * across all callers).
+   * At shutdown (`fillNullOnly` falsy), first read Claude's live PID-keyed session
+   * file: /clear changes its sessionId without changing the launch argv, and the
+   * old conversation can still be resumable. If unavailable, retain the existing
+   * probe behavior. Never clear a token or add a shutdown refusal.
    */
   async refresh(
     sessions: ResumeRefreshSession[],
@@ -152,6 +164,16 @@ export class ResumeMetadataRefresher {
       }
 
       if (session.runtime === "claude-code") {
+        if (!fillNullOnly) {
+          const current = await this.captureClaudeSessionId(session);
+          if (current && this.sessionRegistry.resumeTokenMatches(session.sessionId, "claude_id", current)) {
+            this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
+            continue;
+          }
+          if (current && this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", current, "scrape")) {
+            continue;
+          }
+        }
         if (!session.resumeToken) {
           // OPR.0.4.3.20 FR-4 — null-fill from the Claude status-line sidecar
           // (best-effort; missing/parse-error/empty leaves null, never throws).
@@ -173,7 +195,7 @@ export class ResumeMetadataRefresher {
         // probe on the recurring snapshot path (rev1-r1), and never clear a present
         // token (rev1-r2). A present-but-not-resumable token stays in the ledger for
         // FR-6 to surface as `stale/unverified — re-verify`. Only the legacy/teardown
-        // default path probes + clears (a one-time at-shutdown check).
+        // default path probes and records freshness without clearing the token.
         if (fillNullOnly) {
           // OPR.0.4.3.20 FR-6.1 — equal-value freshness RE-STAMP on the periodic path
           // (NO probe; never spawns `claude --resume`). Re-derive via the pure-read
@@ -200,6 +222,34 @@ export class ResumeMetadataRefresher {
         this.sessionRegistry.markResumeProbeResult(session.sessionId, probe);
       }
     }
+  }
+
+  /** Shutdown-only read, bounded to the stable foreground Claude process's own
+   * file. A same-name file or launch argument cannot identify the post-/clear
+   * conversation. Missing/ambiguous observations retain the legacy fallback. */
+  private async captureClaudeSessionId(session: ResumeRefreshSession): Promise<string | undefined> {
+    try {
+      const input = { target: session.sessionName, tmux: this.tmuxAdapter, listProcesses: this.listClaudeProcesses };
+      const first = await observeClaudePaneRuntime(input);
+      if (!first) return undefined;
+      const started = Date.parse(first.process.startedAt ?? "");
+      if (!Number.isFinite(started)) return undefined;
+      const configDir = nodePath.resolve(session.cwd ?? process.cwd(), this.claudeConfigDir);
+      const file = nodePath.join(configDir, "sessions", `${first.process.pid}.json`);
+      const fd = fs.openSync(file, "r");
+      let record: { name?: unknown; sessionId?: unknown };
+      try {
+        const stat = fs.fstatSync(fd);
+        // A leftover file for a reused PID is not current-process evidence.
+        if (!stat.isFile() || stat.size > 64 * 1024 || stat.mtimeMs < started) return undefined;
+        record = JSON.parse(fs.readFileSync(fd, "utf8"));
+      } finally { fs.closeSync(fd); }
+      if (record?.name !== session.sessionName) return undefined;
+      const valid = validateResumeToken("claude-code", record.sessionId);
+      if (!valid.ok) return undefined;
+      const final = await observeClaudePaneRuntime(input);
+      return final?.fingerprint === first.fingerprint ? valid.token : undefined;
+    } catch { return undefined; }
   }
 
   /** Best-effort derive a Codex thread id from live pane state (getPanePid →

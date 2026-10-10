@@ -1,13 +1,14 @@
 # Help your user get unstuck
 
 This page is for an agent whose user says OpenRig isn't working. It is the one place OpenRig keeps this guidance. The
-copy installed with OpenRig matches that installed version. Read it with `rig context get help`. If `rig` won't run,
-open `daemon/docs/reference/help.md` inside the installed `@openrig/cli` package (under `npm root -g`); in the source
+copy installed with OpenRig matches that installed version. Read it with `rig context get help`, which needs a running
+daemon. If `rig` won't run or the daemon is down, open `daemon/docs/reference/help.md` inside the installed
+`@openrig/cli` package (under `npm root -g`); in the source
 repository the same file is `docs/reference/help.md`. The same text is online at
 [openrig.dev/help/agents](https://www.openrig.dev/help/agents), next to the ways people can contact OpenRig support.
 
 Each guide this page links to is installed too. Load one only when you need it, with the `rig context get` address
-shown beside its link; the same files sit beside this one in `daemon/docs/reference/`.
+shown beside its link where there is one; every linked file also sits beside this one in `daemon/docs/reference/`.
 
 Start with what your user was trying to do. Try the next useful step, check the result, and if you can't finish,
 prepare a message to OpenRig support at **hello@openrig.dev**. Your user doesn't need a GitHub account.
@@ -23,7 +24,10 @@ rig doctor --json
 ```
 
 Use the installed command's `--help` if an option is unavailable. Read the diagnostic findings; don't treat them as
-instructions to reset the machine.
+instructions to reset the machine. `rig doctor` checks Claude and Codex authentication using the same local checks
+as setup, including a configured Codex provider credential variable. A set variable does not prove that the provider accepts it or that managed
+seats receive it. Doctor does not run an agent task: also inspect `rig ps --nodes --rig <rig>`. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
+and recent output.
 
 **If OpenRig won't install or `rig` won't run, start here anyway.** Record the attempted package version, install
 command and error. Leave unknown values unknown. A working daemon or a passing diagnostic is not required to ask for
@@ -32,17 +36,58 @@ help.
 ## Match the guidance to the installed version
 
 The reference documents beside this file describe the version they were installed with. GitHub's default branch can
-contain changes that haven't reached your user's version. For release notes and known limitations, open
-`https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version from
-`rig --version`. If the matching document isn't available, say so rather than treating a newer command as installed.
+contain changes that haven't reached your user's version. After an upgrade, start with the short note on what changed
+in the installed version: `rig context get reference/whats-new.md`. For full release notes and known limitations, open
+`https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version number from
+`rig --version` (without the commit it may show in parentheses). When that file doesn't exist, use the version's
+section of `https://github.com/mvschwarz/openrig/blob/v<version>/CHANGELOG.md`. If neither is available, say so
+rather than treating a newer command as installed.
 
 ## Find your next step
 
 ### Installation or platform problems
 
-Supported platforms are macOS and Linux. Native Windows is not supported yet, and WSL2 has not been tested. OpenRig needs
-Node.js 22 or 24 and tmux. A WSL error needs its actual versions, commands and error text; don't assume a
-Windows-related pull request fixes it.
+Supported platforms are macOS and Linux, and WSL2 on Windows; native Windows isn't supported. OpenRig's automated tests
+don't run on WSL2 yet; one user's [reported working setup](getting-started.md#wsl2-a-reported-working-setup) lists what
+mattered. OpenRig needs
+Node.js 22 or 24 and tmux. A Linux distribution's own Node.js can be older; check `node --version`. With npm 11 or
+later, an `npm warn install-scripts` line for `@openrig/cli` means only the postinstall Node.js and SQLite check was
+skipped; `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. A WSL error needs its actual versions,
+commands and error text; don't assume a Windows-related pull request fixes it.
+
+The one-command install ([getting-started](getting-started.md#install-and-sign-in)) prints its plan with
+`--dry-run` and changes nothing. When a step fails it prints `FAILED [n/4] <command or check> (exit <code>)` and
+stops. Read its diagnostic: if it names a runnable command, run that command by hand for the full error and record it
+in a report; otherwise follow the accompanying diagnostic. If the only remaining failures are provider sign-ins under
+"Some steps need attention", the install steps finished: sign in to each selected provider and continue.
+
+### Installation finished, but there is nobody to talk to
+
+Load the `rigs` skill and follow its step 2: it opens the OpenRig view (`rig terminal open saved:kernel --window`),
+gives the attach commands when the window can't open or over SSH, and hands the person's goal to the operator.
+[Install and sign in](getting-started.md#install-and-sign-in) says how to load it. The reference for the view, manual
+attachment and the table of what can interrupt it is
+[Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
+(`rig context get reference/getting-started.md#open-the-kernel-conversations`). Started is not ready: the view can
+open while the kernel's agents finish starting, and opening it creates no other kernel or account.
+
+### A step interrupted setup or the OpenRig view
+
+Name the exact command and result, the reason it stopped and the next useful step. A harness's permission rules,
+sandbox or automatic permission decision can refuse an installing agent's tool call before OpenRig runs.
+Claude Code's [auto mode can deny calls](https://code.claude.com/docs/en/auto-mode-config); explain the reported
+refusal and let the person review that step in their harness controls or run it themselves, within their chosen
+permissions. Do not silently claim installation failed or completed from a refused call.
+
+For missing tools, downloads or selected logins, use the specific setup hint. A Herdr install warning leaves plain
+tmux available. A requested Ghostty install can fail setup; resolve it or decline with `--no-ghostty` and keep the
+earlier choices. Terminal.app remains available; required tools and logins still matter. macOS may ask for
+Automation permission; a missing display or remote daemon needs the documented headless/manual route.
+Herdr may show an intro (Return to continue) and an agent-integration panel (Esc to close); the view does not
+require installing those integrations. Enlarge a cramped 80×24 window. Use authorized desktop tools to inspect the
+window contents, or state that visibility is unconfirmed and ask the person to check. A successful command or
+window listing alone is not visual proof. The [OpenRig view guide and friction table](getting-started.md#open-the-kernel-conversations)
+connects each observation to its next step. Preserve existing conversations while resolving it.
 
 ### The team did not start, or a terminal is missing
 
@@ -67,6 +112,14 @@ and `rig ps --nodes --rig <rig-name>`, then compare the reported state with what
 A waiting prompt, a failed launch and an agent working behind a stale status need different next steps. Repeatedly
 clearing attention doesn't fix an underlying readiness problem.
 
+A fresh seat stopped at a native prompt (Claude's bypass-permissions warning, a login or a folder-trust question)
+keeps its startup context. `rig up`, `rig bundle install` and `rig ps --nodes` print "Startup attention" or "Startup
+details" for it, ending with the command to run. Once your user has answered the prompt in that seat's terminal,
+`rig seat continue <seat>` delivers the context in the same conversation, without relaunching. If it reports an
+unknown outcome, check `rig seat status <seat>` before trying again. For a rig whose seats bypass permissions,
+`--non-interruptive` on `rig up` or `rig bundle install` avoids Claude's warning and Codex's notices in the first
+place; see `non-interruptive-mode.md` beside this file.
+
 ### You can't tell which instance or configuration is involved
 
 Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and
@@ -84,10 +137,12 @@ issue's current status; a similar symptom alone is not a diagnosis.
 - Codex prompt variants not recognised as idle: [#79](https://github.com/mvschwarz/openrig/issues/79).
 - Codex asks about hook trust at first launch: [#17](https://github.com/mvschwarz/openrig/issues/17), not reproduced
   by the team.
-- Codex seats on the default `workspace-write` sandbox can't reach the local daemon, so their queue work fails:
-  [#275](https://github.com/mvschwarz/openrig/issues/275).
-- Stopping the daemon can report a timeout while closing connections:
-  [#166](https://github.com/mvschwarz/openrig/issues/166).
+- A Codex seat on the default `workspace-write` sandbox starts without network access, so it can't reach the local
+  daemon, when its Codex configuration sets network access off, a managed requirement could restrict it, or Codex
+  doesn't answer OpenRig's configuration read in time: [#275](https://github.com/mvschwarz/openrig/issues/275).
+- Kernel seats fail within a second of the first start on a distribution tmux whose server exits on `capture-pane`
+  (`tmux -V` prints `next-3.4`): [#980](https://github.com/mvschwarz/openrig/issues/980). The check and recovery
+  are in [Incomplete setup and restart](getting-started.md#incomplete-setup-and-restart).
 
 For everything else, search [open issues](https://github.com/mvschwarz/openrig/issues).
 

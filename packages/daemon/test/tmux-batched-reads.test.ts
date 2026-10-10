@@ -24,7 +24,7 @@ function fakeExec() {
     const m = cmd.match(/^tmux display-message -p -t (\S+) ["']#\{(\w+)\}["']$/);
     if (!m) throw new Error(`unexpected: ${cmd}`);
     const target = unquote(m[1]!), field = m[2]!;
-    if (field === "window_activity") { const w = WINDOWS.find(([s, a]) => s === target && a === 1); if (!w) throw new Error("no session"); return `${w[2]}\n`; }
+    if (field === "window_activity") { const w = WINDOWS.find(([s, a]) => s === target.replace(/^=/, "").replace(/:$/, "") && a === 1); if (!w) throw new Error("no session"); return `${w[2]}\n`; }
     const p = PANES.find(([id]) => id === target); if (!p) throw new Error("no pane");
     return field === "pane_pid" ? `${p[1]}\n` : `${p[2]}\n`;
   });
@@ -106,7 +106,7 @@ describe("SeatActivityService sweep with the batch", () => {
     expect(per.calls).toHaveLength(5);                                   // one display-message per seat before
     expect(bat.calls.filter((c) => c.startsWith("tmux list-windows -a"))).toHaveLength(1);
     // misses fall back: s3 (no valid timestamp) and gone@rig (no such session); s1, s2, s4 come from the batch
-    expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => c.match(/-t (\S+)/)![1]).map(unquote).sort()).toEqual(["gone@rig", "s3@rig"]);
+    expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => c.match(/-t (\S+)/)![1]).map(unquote).sort()).toEqual(["=gone@rig:", "=s3@rig:"]);
     expect(bat.out["s1@rig"]!.isActiveWithinWindow).toBe(true);
     expect(bat.out["s2@rig"]!.isActiveWithinWindow).toBe(false);
   });
@@ -130,6 +130,39 @@ describe("SeatActivityService sweep with the batch", () => {
 });
 
 describe("SeatIdentityReconciler with the batch", () => {
+  it.each([1, 25, 100])("%i direct Claude seats use one batch and no per-seat/native reads", async count => {
+    const db = createFullTestDb();
+    try {
+      const seats: Array<[string, string, string]> = Array.from({ length: count }, (_, i) => [`n${i}`, `s${i}@rig`, `%${i}`]);
+      seed(db, seats);
+      // Saved tokens do not turn a direct Claude label into a wrapper-probe need.
+      db.prepare("UPDATE sessions SET resume_token = 'saved' WHERE node_id = 'n0'").run();
+      const getPanePid = vi.fn(async () => 42), getPaneCommand = vi.fn(async () => "claude");
+      const listPanes = vi.fn(async () => [] as never), listProcesses = vi.fn(async () => []);
+      const readAllPaneProcesses = vi.fn(async () => new Map(seats.map(([, , p]) => [p, { pid: 42, command: "claude" }])));
+      await new SeatIdentityReconciler({ db, tmux: { listSessions: async () => seats.map(([, name]) => ({ name })) as never,
+        getPanePid, getPaneCommand, listPanes, readAllPaneProcesses }, listProcesses }).reconcileAll();
+      expect(readAllPaneProcesses).toHaveBeenCalledTimes(1);
+      for (const read of [getPanePid, getPaneCommand, listPanes, listProcesses]) expect(read).not.toHaveBeenCalled();
+      const store = new SeatIdentityStore(db);
+      for (const [id] of seats) expect(store.getForNode(id)?.verdict).toBe("verified");
+    } finally { db.close(); }
+  });
+
+  it.each(["missing", "unavailable"])("a %s batch falls back once per direct Claude pane", async kind => {
+    const db = createFullTestDb();
+    try {
+      seed(db, [["n", "s@rig", "%1"]]);
+      const getPanePid = vi.fn(async () => 42), getPaneCommand = vi.fn(async () => "claude"), listProcesses = vi.fn(async () => []);
+      await new SeatIdentityReconciler({ db, tmux: { listSessions: async () => [{ name: "s@rig" }] as never,
+        getPanePid, getPaneCommand, listPanes: async () => [] as never,
+        readAllPaneProcesses: async () => { if (kind === "unavailable") throw Error("unavailable"); return new Map(); } }, listProcesses }).reconcileAll();
+      expect(getPanePid).toHaveBeenCalledTimes(1); expect(getPaneCommand).toHaveBeenCalledTimes(1);
+      expect(listProcesses).not.toHaveBeenCalled();
+      expect(new SeatIdentityStore(db).getForNode("n")?.verdict).toBe("verified");
+    } finally { db.close(); }
+  });
+
   async function reconcile(batched: boolean) {
     const db = createFullTestDb(); seed(db, SEATS.slice(0, 4));
     const { exec, calls } = fakeExec(); const real = new TmuxAdapter(exec as never);

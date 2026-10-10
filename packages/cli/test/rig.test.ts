@@ -68,26 +68,6 @@ function createMockDaemon() {
       return;
     }
 
-    // POST /api/rigs/import/validate
-    if (req.method === "POST" && url.pathname === "/api/rigs/import/validate") {
-      let body = "";
-      req.on("data", (c: Buffer) => { body += c.toString(); });
-      req.on("end", () => {
-        if (body.includes("INVALID")) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ valid: false, errors: ["missing schema_version", "name is required"] }));
-        } else if (body.includes("ALIASPIN")) {
-          // OPR.0.5.3.3: valid + a fail-open alias-pin advisory naming the canonical id.
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ valid: true, errors: [], advisories: ['pods.dev.members.driver: model pin "fable" is an alias form — pin the canonical id "claude-fable-5" (5.3 requires exact/canonical pins).'] }));
-        } else {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ valid: true, errors: [] }));
-        }
-      });
-      return;
-    }
-
     // POST /api/rigs/import/preflight
     if (req.method === "POST" && url.pathname === "/api/rigs/import/preflight") {
       capturedHeaders = {
@@ -146,19 +126,19 @@ describe("rig spec", () => {
 
   // T3: rig spec validate invalid rig -> exit 1, output contains errors
   it("rig spec validate invalid: prints errors, exitCode 1", async () => {
-    const deps = rigDeps("INVALID");
+    const deps = rigDeps("{}");
     const program = new Command();
     program.addCommand(rigCommand(deps));
     const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "validate", "rig.yaml"]));
     const output = logs.join("\n");
-    expect(output).toContain("missing schema_version");
     expect(output).toContain("name is required");
+    expect(output).toContain("version is required");
     expect(exitCode).toBe(1);
   });
 
   // OPR.0.5.3.3 item 2: alias-pin advisories print (fail-open — spec still valid, exit not 1).
   it("rig spec validate prints alias-pin advisories naming the canonical id, fail-open", async () => {
-    const deps = rigDeps("ALIASPIN");
+    const deps = rigDeps('name: example\nversion: "1"\nnodes: [{ id: worker, runtime: claude-code, model: fable }]\n');
     const program = new Command();
     program.addCommand(rigCommand(deps));
     const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "validate", "rig.yaml"]));
@@ -167,6 +147,65 @@ describe("rig spec", () => {
     expect(output).toContain("claude-fable-5"); // names the canonical id
     expect(output).toContain("Rig spec valid"); // fail-open: still valid
     expect(exitCode).not.toBe(1);
+  });
+
+  it.each([
+    ['version: "0.2"\nname: local\npods: [{ id: dev, label: Dev, members: [{ id: worker, agent_ref: "local:worker", profile: default, runtime: claude-code, cwd: . }], edges: [] }]\nedges: []\n', true],
+    ['version: "1"\nname: legacy\nnodes: []\nedges: []\n', true],
+    ["pods: [", false],
+  ])("validates local YAML without lifecycle or client calls: %s", async (yaml, valid) => {
+    const lifecycleDeps = mockLifecycleDeps();
+    const clientFactory = vi.fn(() => { throw new Error("validation must not connect to a daemon"); });
+    const program = new Command().addCommand(rigCommand({
+      lifecycleDeps, clientFactory, readFile: () => yaml,
+    }));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "validate", "rig.yaml", "--json"]));
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({ valid, errors: expect.any(Array) });
+    expect(exitCode ?? 0).toBe(valid ? 0 : 1);
+    expect(clientFactory).not.toHaveBeenCalled();
+    for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'version: "1"\nname: broken\nnodes: [null]\n',
+    'version: "1"\nname: broken\nnodes: []\nedges: [null]\n',
+  ])("reports validator exceptions as internal failure, not invalid YAML: %s", async (yaml) => {
+    for (const json of [false, true]) {
+      const lifecycleDeps = mockLifecycleDeps();
+      const clientFactory = vi.fn(() => { throw new Error("must stay local"); });
+      const program = new Command().addCommand(rigCommand({ lifecycleDeps, clientFactory, readFile: () => yaml }));
+      const { logs, exitCode } = await captureLogs(() => program.parseAsync([
+        "node", "rig", "spec", "validate", "rig.yaml", ...(json ? ["--json"] : []),
+      ]));
+      expect(exitCode).toBe(1);
+      const message = "Internal validator error; validation did not complete.";
+      if (json) expect(JSON.parse(logs.join("\n"))).toEqual({ error: message });
+      else expect(logs.join("\n")).toBe(message);
+      expect(clientFactory).not.toHaveBeenCalled();
+      for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reports a null topology pod as structured invalid YAML, without contacting a daemon", async () => {
+    const yaml = 'version: "0.2"\nname: broken\npods: [null]\n';
+    for (const json of [false, true]) {
+      const lifecycleDeps = mockLifecycleDeps();
+      const clientFactory = vi.fn(() => { throw new Error("must stay local"); });
+      const program = new Command().addCommand(rigCommand({ lifecycleDeps, clientFactory, readFile: () => yaml }));
+      const { logs, exitCode } = await captureLogs(() => program.parseAsync([
+        "node", "rig", "spec", "validate", "rig.yaml", ...(json ? ["--json"] : []),
+      ]));
+      expect(exitCode).toBe(1);
+      if (json) expect(JSON.parse(logs.join("\n"))).toMatchObject({ valid: false, errors: ["pods[0]: must be an object"] });
+      else expect(logs.join("\n")).toBe("Rig spec invalid:\n  pods[0]: must be an object\nFix: update rig.yaml and re-validate.");
+      expect(clientFactory).not.toHaveBeenCalled();
+      for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("advertises local validation in command help", () => {
+    const validate = rigCommand().commands.find(command => command.name() === "validate")!;
+    expect(validate.helpInformation()).toContain("locally (no daemon required)");
   });
 
   // Slice 16 (item 2): rig spec audit flags stale seat ids in the culture.

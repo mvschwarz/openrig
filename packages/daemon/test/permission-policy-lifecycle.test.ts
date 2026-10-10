@@ -121,6 +121,7 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-123' WHERE id = ?").run(session.id);
     const intendedNodeIds = setup1.rigRepo.getRig(rigId)!.nodes.map((node) => node.id);
     const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual", { intendedNodeIds });
+    setup1.rigRepo.setRigNonInterruptive(rigId, true);
     db1.close(); // ── restart boundary ──
 
     const db2 = createDb(dbFile);
@@ -153,6 +154,7 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     const call = (claudeResume.resume as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[2] === "tok-123");
     expect(call, "organic seat resume should have been attempted").toBeDefined();
     expect(call![4]).toBe("full_bypass"); // 5th arg = resolvedPosture from RIG provenance
+    expect(call![9]).toBe(true); // saved launch choice survives the database reopen
     expect(new AppliedLaunchObservationStore(db2).readCurrent(organic.id)).toMatchObject({
       runtime: "claude-code",
       axis: "permission",
@@ -502,6 +504,14 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
       const checkpointStore2 = new CheckpointStore(db2);
       const snapshotCapture2 = new SnapshotCapture({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2 });
       const tmux = mockTmux();
+      // The old seat is gone; the newly created seat must be live for real readiness.
+      vi.mocked(tmux.hasSession).mockImplementation(async () => vi.mocked(tmux.createSession).mock.calls.length > 0);
+      // Model the resumed occupant too: the final restore join needs one pane
+      // and the saved token in its native process lineage, not just a launch command.
+      vi.mocked(tmux.listPanes).mockResolvedValue([
+        { id: "%1", index: 0, cwd: DECLARING_ROOT, width: 80, height: 24, active: true },
+      ]);
+      tmux.getPanePid = vi.fn(async () => 1234);
       const realClaude = new ClaudeCodeAdapter({ sleep: async () => {}, tmux, fsOps: (function () {
         const store: Record<string, string> = {};
         return { readFile: (p: string) => { if (p in store) return store[p]!; throw new Error("nf"); }, writeFile: (p: string, c: string) => { store[p] = c; }, exists: (p: string) => p in store, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [] } as ClaudeAdapterFsOps;
@@ -509,12 +519,19 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
       const orch = new RestoreOrchestrator({
         db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2,
         snapshotRepo: snapshotRepo2, snapshotCapture: snapshotCapture2, checkpointStore: checkpointStore2,
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, command: "claude --resume tok-pod" },
+        ],
         nodeLauncher: new NodeLauncher({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, tmuxAdapter: tmux }),
         tmuxAdapter: tmux,
         claudeResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
         codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
       });
-      await orch.restore(snap.id, { adapters: { "claude-code": realClaude } } as never);
+      const restored = await orch.restore(snap.id, { adapters: { "claude-code": realClaude } } as never);
+      expect(restored).toMatchObject({ ok: true, result: { nodes: [
+        { nodeId: implNode.id, status: "resumed" },
+      ] } });
+      expect(sessionRegistry2.getSessionsForRig(rigId).find((s) => s.nodeId === implNode.id && s.status === "running")?.startupStatus, JSON.stringify(restored)).toBe("ready");
       const cmds = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[1]));
       const launchCmd = cmds.find((c) => c.includes("claude"));
       expect(launchCmd, `expected a claude harness launch among: ${cmds.join(" | ")}`).toBeDefined();

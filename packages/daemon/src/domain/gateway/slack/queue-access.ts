@@ -54,6 +54,8 @@ export interface CreateQitemInput {
   body: string;
   priority?: string;
   tags?: string[];
+  /** #822 — the item whose OpenRig thread this reply was typed in (the route's correlation). */
+  inReplyTo?: string;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
@@ -108,13 +110,20 @@ export async function seedBacklogAsHistory(opts: {
   queue: OutboundQueuePort;
   seen: import("./state-store.js").SeenStore;
   filter: AlertFilterOpts;
+  /** The durable dispatch buffer, read only to say what the restart will replay: earlier posts that
+   *  failed or never finished. An alert whose row has since closed is dropped; the rest post. */
+  buffer?: Pick<import("../dispatch-buffer.js").DispatchBuffer, "pending">;
   log?: (msg: string) => void;
 }): Promise<{ seeded: number; onlineStatus: string }> {
   const alerts = await opts.queue.listHumanAlerts(opts.filter);
   const already = opts.seen.load();
   const toSeed = alerts.map((a) => a.notificationKey ?? a.qitemId).filter((id) => !already.has(id));
   const seeded = opts.seen.seed(toSeed, "seeded-at-enable");
-  const onlineStatus = `slack outbound ENABLED at enable-time: ${seeded} pre-existing alert(s) seeded as history (not reposted); only alerts created after this point will deliver.`;
+  const retained = (opts.buffer?.pending() ?? []).filter((d) => d.op === "post_message").length;
+  const retainedNote = retained > 0
+    ? ` ${retained} earlier undelivered post(s) wait in the replay buffer: an alert whose row has since closed is dropped; the rest post (open rows' alerts, decision-resolved notices, digests).`
+    : "";
+  const onlineStatus = `slack outbound ENABLED at enable-time: ${seeded} pre-existing alert(s) seeded as history (not reposted); only alerts created after this point will deliver.${retainedNote}`;
   opts.log?.(onlineStatus);
   return { seeded, onlineStatus };
 }
@@ -135,18 +144,28 @@ export function makeQueuePorts(
         summary: input.summary,
         priority: (input.priority ?? "routine") as never,
         tags: input.tags ?? ["founder-slack", "inbound"],
+        inboundReplyTo: input.inReplyTo ?? null,
       });
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {
       const registry = (opts.loadHumanRegistry ?? (() => loadHumanRegistry()))();
       if (!registry.ok) return [];
-      const rows = queueRepo.list({ activeOnly: true, limit: 1000000 });
-      const projected = rows.flatMap((row) => {
-        const transition = queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
+      // Avoid building waiting/recovery views for rows with no unposted owner notification.
+      // Keep list(activeOnly)'s selection, ordering and cap; this remains an O(N) ID scan.
+      const ids = queueRepo.db.prepare(
+        `SELECT qitem_id FROM queue_items
+         WHERE state IN ('pending', 'in-progress', 'blocked')
+         ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC
+         LIMIT ?`,
+      ).all(1000000) as Array<{ qitem_id: string }>;
+      const projected = ids.flatMap(({ qitem_id: qitemId }) => {
+        const transition = queueRepo.transitionLog.latestOwnerNotificationForQitem(qitemId);
         if (!transition) return [];
-        const notificationKey = `${row.qitemId}:${transition.transitionId}`;
-        if (queueRepo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, notificationKey)) return [];
+        const notificationKey = `${qitemId}:${transition.transitionId}`;
+        if (queueRepo.transitionLog.hasOwnerNotificationReceipt(qitemId, notificationKey)) return [];
+        const row = queueRepo.getById(qitemId);
+        if (!row) return [];
         const item = project(row, transition, registry.entities);
         return item ? [item] : [];
       });

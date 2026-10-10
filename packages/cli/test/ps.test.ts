@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
+import stringWidth from "string-width";
 import { psCommand } from "../src/commands/ps.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
@@ -126,6 +127,110 @@ describe("Ps CLI", () => {
     expect(exitCode).toBeUndefined(); // 0
   });
 
+  it.each(["--full", "--verbose"])("ps %s preserves complete cells and aligns columns", async (flag) => {
+    const longName = "demo-production-integration-rig";
+    const longUptime = "12345d 23h 59m";
+    psData = [
+      { rigId: "rig-1", name: longName, nodeCount: 5, runningCount: 5, status: "running", uptime: longUptime, latestSnapshot: "1m ago" },
+      { rigId: "rig-2", name: "short", nodeCount: 2, runningCount: 2, status: "running", uptime: "1m", latestSnapshot: "2m ago" },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", flag]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const longRow = logs.find((line) => line.startsWith("demo-"))!;
+    const shortRow = logs.find((line) => line.startsWith("short"))!;
+    expect(longRow).toContain(longName);
+    expect(longRow).toContain(longUptime);
+    expect(longRow).not.toContain("…");
+    expect(longRow).toMatch(new RegExp(`${longName} {2,}5`));
+    expect(longRow.indexOf("5", longName.length)).toBe(header.indexOf("NODES"));
+    expect(shortRow.indexOf("2")).toBe(header.indexOf("NODES"));
+    expect(longRow.indexOf("1m ago")).toBe(header.indexOf("SNAPSHOT"));
+    expect(shortRow.indexOf("2m ago")).toBe(header.indexOf("SNAPSHOT"));
+  });
+
+  it.each(["--full", "--verbose", ""])("ps %s aligns CJK rig names by terminal width", async (flag) => {
+    const name = "演示-生产-集成-长名称-rig";
+    psData = [
+      { rigId: "rig-1", name, nodeCount: 5, runningCount: 5, status: "running" },
+      { rigId: "rig-2", name: "short", nodeCount: 2, runningCount: 2, status: "running" },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", ...(flag ? [flag] : [])]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const cjkRow = logs.find((line) => line.startsWith("演示"))!;
+    const shortRow = logs.find((line) => line.startsWith("short"))!;
+    const nodeColumn = stringWidth(header.slice(0, header.indexOf("NODES")));
+    expect(stringWidth(cjkRow.slice(0, cjkRow.indexOf("5")))).toBe(nodeColumn);
+    expect(stringWidth(shortRow.slice(0, shortRow.indexOf("2")))).toBe(nodeColumn);
+    if (flag) expect(cjkRow).toContain(name);
+    else expect(cjkRow).toContain("…");
+  });
+
+  it("ps compact rows separate truncated names from counts", async () => {
+    psData = [{ rigId: "rig-1", name: "demo-production-integration-rig", nodeCount: 5, runningCount: 5, status: "running" }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const row = logs.find((line) => line.startsWith("demo-"))!;
+    expect(row).toMatch(/… {2,}5/);
+    expect(row.indexOf("5")).toBe(header.indexOf("NODES"));
+  });
+
+  it("ps compact table stays within its original width", async () => {
+    psData = [{
+      rigId: "rig-1", name: "short", nodeCount: 1, runningCount: 1,
+      activeCount: 0, hasWorkCount: 0, attentionCount: 0,
+      status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: "1m ago",
+    }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const row = logs.find((line) => line.startsWith("short"))!;
+    expect(stringWidth(header)).toBeLessThanOrEqual(100);
+    expect(stringWidth(row)).toBeLessThanOrEqual(98);
+  });
+
+  it.each([false, true])("ps separates the footer when hidden history is %s", async (hiddenHistory) => {
+    psData = [{ rigId: "rig-1", name: "live", nodeCount: 1, runningCount: 1, status: "running" }];
+    if (hiddenHistory) {
+      psData.push({ rigId: "rig-2", name: "stopped", nodeCount: 1, runningCount: 0, status: "stopped" });
+    }
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--full"]);
+    });
+    const rowIndex = logs.findIndex((line) => line.startsWith("live"));
+    expect(logs[rowIndex + 1]).toBe("");
+    expect(logs[rowIndex + 2]).toMatch(hiddenHistory ? /^not shown:/ : /^drill:/);
+    expect(logs.filter((line) => line === "")).toHaveLength(1);
+  });
+
+  it("ps --full preserves the archived marker and separates its legend", async () => {
+    const name = "demo-production-integration-archived";
+    psData = [{ rigId: "rig-1", name, nodeCount: 1, runningCount: 0, status: "stopped", isArchived: true }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--full", "--include-archived"]);
+    });
+    const rowIndex = logs.findIndex((line) => line.startsWith(name));
+    expect(rowIndex).toBeGreaterThan(0);
+    expect(logs[rowIndex]).toContain(`${name} *  `);
+    expect(logs[rowIndex + 1]).toBe("");
+    expect(logs[rowIndex + 2]).toMatch(/^\* = archived/);
+  });
+
+  it("ps filtered output without a footer has no extra blank line", async () => {
+    psData = [{ rigId: "rig-1", name: "live", nodeCount: 1, runningCount: 1, status: "running" }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--filter", "status=running"]);
+    });
+    expect(logs).toHaveLength(3);
+    expect(logs.at(-1)).toMatch(/^live/);
+  });
+
   // OPR.0.4.4.21 FR-1 (arch pin, STATED contract): the JSON-vs-table scope
   // split — default --json keeps ALL non-archived entries INCLUDING stopped
   // rigs (a stopped rig vanishing from default JSON would silently break
@@ -220,6 +325,24 @@ describe("Ps CLI", () => {
       if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
       else process.env["OPENRIG_HOST"] = savedHost;
     }
+  });
+
+  it.each([false, true])("ps cleanup opt-out=%s preserves ordinary housekeeping by default", async (noCleanup) => {
+    const state = { pid: 555, port, db: "test.sqlite", startedAt: "2026-01-01T00:00:00Z" };
+    const receipt = { schema: "openrig.daemon-shutdown/v1", pid: 555,
+      startedAt: "2026-01-01T00:01:00Z", completedAt: "2026-01-01T00:02:00Z",
+      phase: "complete", outcome: "clean", failures: [] };
+    const deps = mockLifecycleDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE || p.endsWith("daemon-shutdown.json")),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state)
+        : p.endsWith("daemon-shutdown.json") ? JSON.stringify(receipt) : null),
+      isProcessAlive: vi.fn(() => false),
+    });
+    const prog = new Command().exitOverride().addCommand(psCommand({ lifecycleDeps: deps,
+      clientFactory: (url) => new DaemonClient(url) }));
+    await captureLogs(() => prog.parseAsync(["node", "rig", "ps", ...(noCleanup ? ["--no-cleanup"] : [])]).then(() => {}));
+    if (noCleanup) expect(deps.removeFile).not.toHaveBeenCalled();
+    else expect(deps.removeFile).toHaveBeenCalledWith(STATE_FILE);
   });
 
   // NS-T08: ps --nodes tests

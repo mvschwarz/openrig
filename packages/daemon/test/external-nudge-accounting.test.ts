@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -54,6 +54,7 @@ describe("external-nudge accounting (gateway-owned, never tmux)", () => {
       summary: "Founder alert: plain-language decision ask",
       evidenceRef: "shared-docs/rigs/v-openrig-build/state/evidence-a.md",
     });
+    await vi.waitFor(() => expect(repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
     // (a) tmux was NOT consulted — the row itself is the gateway's input:
     expect(sends).toHaveLength(0);
     const fresh = repo.getById(item.qitemId)!;
@@ -74,6 +75,7 @@ describe("external-nudge accounting (gateway-owned, never tmux)", () => {
       summary: "Founder message: delivered on the phone",
       evidenceRef: "shared-docs/rigs/v-openrig-build/state/evidence-b.md",
     });
+    await vi.waitFor(() => expect(repo.getById(item.qitemId)!.lastNudgeResult).not.toBeNull());
     const undelivered = repo.findUndelivered({});
     expect(undelivered.map((u) => u.qitemId)).not.toContain(item.qitemId);
   });
@@ -108,6 +110,7 @@ describe("external-nudge accounting (gateway-owned, never tmux)", () => {
       destinationSession: "bob@rig",
       body: "ping",
     });
+    await vi.waitFor(() => expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified"));
     expect(sends).toHaveLength(1);
     expect(sends[0]!.session).toBe("bob@rig");
     expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified");
@@ -121,6 +124,7 @@ describe("external-nudge accounting (gateway-owned, never tmux)", () => {
       summary: "Operator ping in plain language",
       evidenceRef: "shared-docs/rigs/v-openrig-build/state/evidence-d.md",
     });
+    await vi.waitFor(() => expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified"));
     expect(sends).toHaveLength(1);
     expect(sends[0]!.session).toBe("human-operator@kernel");
     expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("verified");

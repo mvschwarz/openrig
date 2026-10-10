@@ -222,4 +222,16 @@ describe("rig project CLI (PL-004 Phase B)", () => {
     expect(call!.path).toContain("classificationDestination=planning%40rig");
     expect(call!.path).toContain("limit=50");
   });
+
+  it("shadow-drain and shadow-stop send --actor, and no body without it", async () => {
+    for (const verb of ["drain", "stop"]) {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ projectDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "project", `shadow-${verb}`, "--actor", "operator"]);
+      await program.parseAsync(["node", "rig", "project", `shadow-${verb}`]);
+      const posts = calls.filter((c) => c.path === `/api/projects/shadow/${verb}`);
+      expect(posts.map((c) => c.body)).toEqual([{ actor: "operator" }, undefined]);
+    }
+  });
 });

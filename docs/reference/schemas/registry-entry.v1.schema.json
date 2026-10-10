@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openrig.dev/schemas/registry-entry.v1.json",
+  "title": "Registry entry (openrig-registry/registry/<slug>.yaml)",
+  "type": "object",
+  "required": [
+    "schema",
+    "slug",
+    "name",
+    "source",
+    "configurations",
+    "review",
+    "status"
+  ],
+  "properties": {
+    "schema": {
+      "const": "openrig.registry-entry/v1"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string"
+    },
+    "source": {
+      "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/source"
+    },
+    "configurations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "packageDigest",
+          "assembler",
+          "behaviour"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/configurationId"
+          },
+          "alias": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "recommended": {
+            "type": "boolean"
+          },
+          "packageDigest": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/packageDigest"
+          },
+          "assembler": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/assembler"
+          },
+          "behaviour": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+\\.json$",
+            "description": "Registry-relative path of the generated behaviour view for this configuration and assembler version."
+          },
+          "evidenceReuse": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "packageDigest",
+                "reason"
+              ],
+              "properties": {
+                "packageDigest": {
+                  "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/packageDigest"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "description": "Earlier packages whose evidence still applies to this one, with the public reason (for example 'only EVIDENCE.md changed'). Labels resting on it show both digests."
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "date"
+      ],
+      "properties": {
+        "date": {
+          "type": "string",
+          "format": "date"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "listed",
+        "withdrawn"
+      ]
+    },
+    "withdrawnOn": {
+      "type": "string",
+      "format": "date",
+      "description": "When the entry was withdrawn; set with status: withdrawn."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "withdrawn"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "withdrawnOn"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "withdrawnOn"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -8,12 +8,15 @@ export interface FleetRollupRow {
   attentionReason: string | null;
   lastUpdate: string;
   cliVersionLabel: string;
+  cliCapabilityStatus: "available" | "unavailable" | "unknown";
+  cliVersionOutdated: boolean;
   cliDriftDetected: boolean;
 }
 
 export interface FleetRollup {
   rows: FleetRollupRow[];
   staleCliCount: number;
+  unknownCliCount: number;
   degradedFields: string[];
   sourceFallback: string | null;
 }

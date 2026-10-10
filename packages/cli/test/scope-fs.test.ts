@@ -1,12 +1,13 @@
 // release-0.3.2 slice 12 — scope-fs helpers + frontmatter parser tests.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import {
+  configuredMissionsRoot,
   ensureMissionId,
   findMission,
   findSlice,
@@ -93,6 +94,64 @@ describe("frontmatter parser", () => {
     expect(fm.custom).toBe("keep-me");
   });
 
+  it.each([
+    "title: Fix: the parser\nstatus: active",
+    "status: active\nstatus: shipped",
+    "- root-list",
+    "root-scalar",
+    "status: *missing",
+    "status: &state active\nrelated: *state",
+  ])("warns and retains main's line-based update for invalid YAML: %j", (block) => {
+    const dir = mktemp();
+    const file = path.join(dir, "README.md");
+    const original = `---\n${block}\n---\n\n# owned body\n`;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeFile(file, original);
+      expect(() => updateFrontmatter(file, { status: "closed" })).not.toThrow();
+      const updated = fs.readFileSync(file, "utf8");
+      expect(updated).toContain("status: closed");
+      expect(updated.endsWith("---\n\n# owned body\n")).toBe(true);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(file));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("frontmatter isn't valid YAML"));
+      if (block.includes("*state")) expect(updated).toContain("related: *state");
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves CRLF delimiters, unowned comments, and body when updating a quoted key", () => {
+    const dir = mktemp();
+    const file = path.join(dir, "README.md");
+    const original = "---\r\n\"status\": active # retained field note\r\n# keep\r\ncustom: 'retain: exactly'\r\n---\r\n\r\n# owned body\r\n";
+    try {
+      writeFile(file, original);
+      updateFrontmatter(file, { status: "closed" });
+      expect(fs.readFileSync(file, "utf8")).toBe(original.replace('"status": active', "status: closed"));
+      expect(readFrontmatter(file)).toMatchObject({ status: "closed", custom: "retain: exactly" });
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ["owned:\n  stale: value", "replacement"],
+    ["owned: old", { fresh: ["one", "two"] }],
+    ["owned:\n  - stale", { fresh: "value" }],
+    ["owned:", ["fresh"]],
+  ])("replaces the complete owned value in %j", (field, value) => {
+    const dir = mktemp();
+    const file = path.join(dir, "README.md");
+    const unowned = "# retain this comment\ncustom: 'retain: exactly'";
+    try {
+      writeFile(file, `---\n${field}\n${unowned}\n---\nbody\n`);
+      updateFrontmatter(file, { owned: value });
+      expect(readFrontmatter(file)).toEqual({ owned: value, custom: "retain: exactly" });
+      expect(fs.readFileSync(file, "utf8")).toContain(unowned);
+      expect(fs.readFileSync(file, "utf8").endsWith("---\nbody\n")).toBe(true);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("generates minimal frontmatter when absent", () => {
     const dir = mktemp();
     const p = path.join(dir, "README.md");
@@ -121,6 +180,43 @@ describe("resolveMissionsRoot", () => {
     expect(resolve).toThrow(`Configured workspace.slices_root is not a readable directory: ${missingMissions}.`);
   });
 
+  it("strictOverride refuses an explicit override with no missions tree instead of falling back", () => {
+    // #995: the silent fallback let a command operate on the configured tree
+    // while the caller had named another one.
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const namedWithoutMissions = mktemp();
+
+    expect(resolveMissionsRoot({ override: namedWithoutMissions, configPath })).toBe(configuredMissions);
+
+    const strict = () => resolveMissionsRoot({ override: namedWithoutMissions, configPath, strictOverride: true });
+    expect(strict).toThrow(ScopeCliError);
+    expect(strict).toThrow("named by --workspace has no missions tree");
+    // Dropping the flag does not clear the variable, so the flag's remedy says so.
+    expect(strict).toThrow(/OPENRIG_WORK_ROOT in the environment still applies/);
+  });
+
+  it("strictOverride names OPENRIG_WORK_ROOT, and how to clear it, when the override came from the env", () => {
+    const configuredRoot = mktemp();
+    const configuredMissions = path.join(configuredRoot, "missions");
+    fs.mkdirSync(configuredMissions);
+    const configPath = path.join(configuredRoot, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: configuredMissions } }));
+    const prior = process.env.OPENRIG_WORK_ROOT;
+    process.env.OPENRIG_WORK_ROOT = mktemp();
+    try {
+      const strict = () => resolveMissionsRoot({ configPath, strictOverride: true });
+      expect(strict).toThrow("named by OPENRIG_WORK_ROOT has no missions tree");
+      expect(strict).toThrow(/unset it to use the configured workspace/);
+    } finally {
+      if (prior === undefined) delete process.env.OPENRIG_WORK_ROOT;
+      else process.env.OPENRIG_WORK_ROOT = prior;
+    }
+  });
+
   it("uses the typed workspace.slices_root setting instead of walking cwd", () => {
     const root = mktemp();
     const missions = path.join(root, "declared-missions");
@@ -128,6 +224,34 @@ describe("resolveMissionsRoot", () => {
     const configPath = path.join(root, "config.json");
     fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
     expect(resolveMissionsRoot({ override: root, cwd: root, configPath })).toBe(missions);
+  });
+});
+
+describe("configuredMissionsRoot", () => {
+  it("returns the configured slices root when it is a readable directory", () => {
+    const root = mktemp();
+    const missions = path.join(root, "declared-missions");
+    fs.mkdirSync(missions);
+    const configPath = path.join(root, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
+    expect(configuredMissionsRoot(configPath)).toBe(missions);
+  });
+
+  it("returns null when the setting is unset or not a readable directory", () => {
+    const root = mktemp();
+    const unsetPath = path.join(root, "unset.json");
+    fs.writeFileSync(unsetPath, JSON.stringify({}));
+    expect(configuredMissionsRoot(unsetPath)).toBeNull();
+
+    const missingPath = path.join(root, "missing.json");
+    fs.writeFileSync(missingPath, JSON.stringify({ workspace: { slicesRoot: path.join(root, "nope") } }));
+    expect(configuredMissionsRoot(missingPath)).toBeNull();
+
+    const filePath = path.join(root, "a-file");
+    fs.writeFileSync(filePath, "not a directory");
+    const fileConfig = path.join(root, "file.json");
+    fs.writeFileSync(fileConfig, JSON.stringify({ workspace: { slicesRoot: filePath } }));
+    expect(configuredMissionsRoot(fileConfig)).toBeNull();
   });
 });
 
@@ -232,6 +356,84 @@ describe("findSlice + resolution variants", () => {
     expect(slice.missionName).toBe("release-0.3.2");
   });
 
+  it.each(["workspace", "missions", "declared mission"])(
+    "resolves a hinted bare slice past an unrelated %s directory",
+    (collision) => {
+      const scratch = path.join(collision === "workspace" ? root : missionsRoot, "07-target");
+      fs.mkdirSync(scratch);
+      if (collision === "declared mission") writeFile(path.join(scratch, "README.md"), "# Other mission\n");
+      const slice = findSlice(missionsRoot, "07-target", "release-0.3.2");
+      expect(slice.absPath).toBe(path.join(missionsRoot, "release-0.3.2", "slices", "07-target"));
+      expect(slice.id).toBe("OPR.0.3.2.7");
+    },
+  );
+
+  it.each(["relative", "absolute", "trailing separator"])(
+    "keeps an invalid explicit %s path refusal despite a valid mission hint",
+    (form) => {
+      const scratch = path.join(root, "07-target");
+      fs.mkdirSync(scratch);
+      const argument = form === "absolute" ? scratch : form === "relative" ? `.${path.sep}07-target` : `07-target${path.sep}`;
+      expect(() => findSlice(missionsRoot, argument, "release-0.3.2")).toThrow(
+        `resolved to ${scratch} but no parent mission was found`,
+      );
+    },
+  );
+
+  it.each(["mission relative", "workspace relative", "absolute"])(
+    "preserves a valid explicit %s path in another mission",
+    (form) => {
+      const other = path.join(missionsRoot, "other", "slices", "07-target");
+      writeFile(path.join(missionsRoot, "other", "README.md"), "---\nid: OPR.9.1\n---\nbody");
+      writeFile(path.join(other, "README.md"), "---\nid: OPR.9.1.7\nstatus: active\n---\nother body");
+      const argument = form === "absolute" ? other : path.join(
+        ...(form === "workspace relative" ? ["missions"] : []), "other", "slices", "07-target",
+      );
+      const slice = findSlice(missionsRoot, argument, "release-0.3.2");
+      expect(slice.absPath).toBe(other);
+      expect(slice.missionName).toBe("other");
+      expect(slice.id).toBe("OPR.9.1.7");
+    },
+  );
+
+  it("preserves the first context error when a hinted slice does not exist", () => {
+    const first = path.join(root, "07-target");
+    fs.mkdirSync(first);
+    fs.mkdirSync(path.join(missionsRoot, "07-target"));
+    expect(() => findSlice(missionsRoot, "07-target", "missing-mission")).toThrow(
+      `resolved to ${first} but no parent mission was found`,
+    );
+  });
+
+  it("keeps an unhinted bare collision refusal", () => {
+    const scratch = path.join(root, "07-target");
+    fs.mkdirSync(scratch);
+    expect(() => findSlice(missionsRoot, "07-target")).toThrow(
+      `resolved to ${scratch} but no parent mission was found`,
+    );
+  });
+
+  it("prefers active slices over closed slices after a bare-name collision", () => {
+    fs.mkdirSync(path.join(root, "07-target"));
+    writeFile(
+      path.join(missionsRoot, "release-0.3.2", "closed", "07-target", "README.md"),
+      "---\nid: OPR.0.3.2.7\nstatus: closed-wontfix\n---\nclosed body",
+    );
+    expect(findSlice(missionsRoot, "07-target", "release-0.3.2").absPath).toBe(
+      path.join(missionsRoot, "release-0.3.2", "slices", "07-target"),
+    );
+  });
+
+  it("resolves a closed slice after a bare-name collision when no active slice exists", () => {
+    fs.mkdirSync(path.join(root, "07-target"));
+    const mission = path.join(missionsRoot, "release-0.3.2");
+    fs.mkdirSync(path.join(mission, "closed"));
+    fs.renameSync(path.join(mission, "slices", "07-target"), path.join(mission, "closed", "07-target"));
+    expect(findSlice(missionsRoot, "07-target", "release-0.3.2").absPath).toBe(
+      path.join(mission, "closed", "07-target"),
+    );
+  });
+
   it("3-part error when slice not found (HG-10)", () => {
     expect(() => findSlice(missionsRoot, "99-missing", "release-0.3.2")).toThrow(/not found/);
   });
@@ -305,6 +507,56 @@ function initRepo(root: string): void {
   execFileSync("git", ["-C", root, "config", "user.name", "Tester"], { stdio: "ignore" });
   execFileSync("git", ["-C", root, "commit", "--allow-empty", "-m", "init", "-q"], { stdio: "ignore" });
 }
+
+describe("moveSlice — literal directory names in the dirty-tree guard", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mktemp();
+    // Exercise Git's default pathspec interpretation independently of the host.
+    for (const key of ["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"]) {
+      vi.stubEnv(key, "0");
+    }
+    initRepo(root);
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it.skipIf(process.platform === "win32").each([
+    [":(exclude)workspace", "outside", true],
+    [":!workspace", "outside", true],
+    [":(literal)workspace", "inside", false],
+    ["workspace", "outside", true],
+    ["workspace", "inside", false],
+    ["literal:workspace", "outside", true],
+    ["workspace[owned]", "outside", true],
+  ] as const)("checks the selected slice under %s with %s edits", (workspaceName, dirty, shouldMove) => {
+    const missionsRoot = path.join(root, workspaceName, "missions");
+    const src = path.join(missionsRoot, "backlog", "slices", "01-owned");
+    const dest = path.join(missionsRoot, "backlog", "closed", "01-owned");
+    const readme = path.join(src, "README.md");
+    const unrelated = path.join(root, "unrelated.txt");
+    writeFile(readme, "---\nstatus: active\n---\n# Owned slice\n");
+    writeFile(unrelated, "Owned unrelated baseline\n");
+    execFileSync("git", ["-C", root, "add", "."], { stdio: "ignore" });
+    execFileSync("git", ["-C", root, "commit", "-m", "seed", "-q"], { stdio: "ignore" });
+    fs.appendFileSync(dirty === "inside" ? readme : unrelated, "Owned uncommitted edit\n");
+    const before = fs.readFileSync(readme);
+    const unrelatedBefore = fs.readFileSync(unrelated);
+
+    if (shouldMove) {
+      expect(moveSlice(src, dest).usedGit).toBe(true);
+      expect(fs.existsSync(src)).toBe(false);
+      expect(fs.readFileSync(path.join(dest, "README.md"))).toEqual(before);
+    } else {
+      expect(() => moveSlice(src, dest)).toThrow(/uncommitted changes/);
+      expect(fs.existsSync(path.dirname(dest))).toBe(false);
+      expect(fs.readFileSync(readme)).toEqual(before);
+    }
+    expect(fs.readFileSync(unrelated)).toEqual(unrelatedBefore);
+  });
+});
 
 describe("moveSlice — git mv preserves history (HG-5) + refuses dirty tree (HG-11)", () => {
   let root: string;

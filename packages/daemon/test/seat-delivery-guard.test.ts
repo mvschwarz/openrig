@@ -222,6 +222,28 @@ function queueFixture() {
 }
 
 describe("real queue transaction and retained delivery",()=>{
+  async function createWithFullHeldQuota() {
+    const f=queueFixture();
+    try {
+      await f.guard.set("a",true,"person","draft");
+      for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+      const row=await f.repo.create({sourceSession:"sender@test",destinationSession:"worker@test",body:"keep this task"});
+      expect(f.repo.getById(row.qitemId)!.body).toBe("keep this task");
+      expect(row.lastNudgeResult).toMatch(/^failed:.*quota/i);
+      expect(f.db.prepare("SELECT count(*) n FROM queue_items").get()).toEqual({n:1});
+      expect(f.outbox.heldForNode("a").total).toBe(100);
+      expect(f.outbox.getById(`wake-intent-${row.qitemId}`)).toBeNull();
+      expect(f.writes).toEqual([]);
+      return row;
+    } finally { f.db.close(); }
+  }
+  it("ordinary create survives full held quota without bypassing retention limits",async()=>{
+    await createWithFullHeldQuota();
+  });
+  it("ordinary create full-quota receipt names the unretained wake",async()=>{
+    const row=await createWithFullHeldQuota();
+    expect(row.lastNudgeResult).toContain("wake not retained");
+  });
   it("precommit quota refusal rolls back closure, successor, transitions and events",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
@@ -239,7 +261,8 @@ describe("real queue transaction and retained delivery",()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
     const {created,closed}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});
-    expect(closed.state).toBe("handed-off");expect(created.state).toBe("pending");expect(created.lastNudgeResult).toBe("retained:typing_guard");
+    expect(closed.state).toBe("handed-off");expect(created.state).toBe("pending");
+    await vi.waitFor(()=>expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
     const held=f.outbox.heldForNode("a");expect(held.total).toBe(1);
     expect(held.items[0]).toMatchObject({outboxId:`wake-intent-${created.qitemId}`,auditPointer:created.qitemId,deliveryState:"retained",deliveredAt:null,guardBinding:{nodeId:"a",occupant:"g1",pane:"%1"}});
     expect(held.items[0]!.body).toContain(created.qitemId);
@@ -255,7 +278,8 @@ describe("real queue transaction and retained delivery",()=>{
     let activation:Promise<unknown>|undefined;
     const off=f.bus.subscribe(event=>{if(event.type==="queue.handed_off") activation=f.guard.set("a",true,"person","postcommit");});
     const {created,closed}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});
-    await activation;off();expect(closed.state).toBe("handed-off");expect(created.lastNudgeResult).toBe("retained:typing_guard");
+    await activation;off();expect(closed.state).toBe("handed-off");
+    await vi.waitFor(()=>expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
     expect(f.outbox.heldForNode("a").total).toBe(101);expect(f.outbox.getById(`wake-intent-${created.qitemId}`)!.body).toContain(created.qitemId);
     expect(f.writes).toEqual([]);f.db.close();
   });
@@ -421,7 +445,10 @@ it("automatic reminder records retained custody and no delivered fire or input",
   expect(f.writes.filter(command=>command.includes("paste-buffer"))).toHaveLength(1);
   expect(f.writes.some(command=>command.includes("send-keys"))).toBe(false);const count=f.writes.length;
   expect(await f.tmux.sendKeys("worker@test",["",""])).toMatchObject({ok:false,code:"typing_guard_enabled"});
-  const settings={resolveOne:()=>{throw Error("no compaction policy read or provider work while guarded");}} as never;
+  const settings={
+    resolveClaudeCompactionPolicy:()=>({enabled:true,thresholdPercent:80,preCompactInstruction:"prep",compactInstruction:"",messageInline:"",messageFilePath:"",postRestoreAuditInstruction:"audit"}),
+    resolveOne:()=>{throw Error("unexpected individual setting read while guarded");},
+  } as never;
   const enforcer=new ClaudeCompactionEnforcer(settings,f.transport,{openrigHome:process.env.OPENRIG_HOME});
   const input={sessionName:"worker@test",runtime:"claude-code",usedPercentage:99};
   expect(await enforcer.maybeAutoCompact(input)).toMatchObject({triggered:false,reason:"typing_guard_enabled"});

@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, readFileSync, symlinkSync, renameSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -18,7 +19,9 @@ vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
 // private real files. Config-selection cases additionally execute their fake.
 vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
-  return { ...fs, accessSync: (file: string) => { if (!(fs.statSync(file).mode & 0o111)) throw Error("not executable"); } };
+  // The private fake executable must be usable on Windows too, where chmod
+  // does not create POSIX execute bits.
+  return { ...fs, accessSync: (file: string) => { if (!fs.statSync(file).isFile()) throw Error("not executable"); } };
 });
 const open: Database.Database[] = [];
 afterEach(() => { for (const db of open.splice(0)) db.close(); vi.clearAllMocks(); vi.unstubAllEnvs(); });
@@ -40,9 +43,10 @@ function fixture() {
     CREATE TABLE events(payload TEXT);`);
   db.prepare("INSERT INTO nodes VALUES ('node','claude-code',?)").run(cwd);
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation-1',1)");
-  const env: Record<string,string> = { PATH: "./bin:" + daemonBin, HOME: path.join(root, "home"), CLAUDE_CONFIG_DIR: "./config",
+  const env: Record<string,string> = { PATH: "./bin" + path.delimiter + daemonBin, HOME: path.join(root, "home"), CLAUDE_CONFIG_DIR: "./config",
     ANTHROPIC_API_KEY: "synthetic-secret-never-in-command", OPENRIG_HOME: path.join(root, "instance") };
-  const renderer = {};
+  const renderer = { TERM: "dumb", COLORTERM: "daemon-value", LANG: "C",
+    LC_CTYPE: "C", LC_MESSAGES: "C", UNAPPROVED_RENDERER_VALUE: "must-not-forward" };
   const managed = new ClaudeManagedLaunch(db, env, renderer);
   const calls: string[] = [];
   const tmux = { sendShellCommand: vi.fn(async (_target: string, command: string, check: () => void) => { check(); calls.push(command); return { ok: true as const }; }),
@@ -58,18 +62,47 @@ function fixture() {
   vi.spyOn(service as any, "resolveSeat").mockReturnValue({ nodeId: "node", entry: { runtime: "claude-code", cwd } });
   vi.spyOn(service as any, "describe").mockReturnValue({ nodeId: "node", rigId: "rig", logicalId: "owner", rigName: "rig" });
   vi.mocked(execFile).mockImplementation(((file: string, _args: string[], options: any, done: any) => {
-    expect(file).toBe(executable); expect(options.cwd).toBe(cwd); expect(options.env.PATH).toBe(path.join(cwd,"bin") + ":" + daemonBin);
+    expect(file).toBe(executable); expect(options.cwd).toBe(cwd); expect(options.env.PATH).toBe(path.join(cwd,"bin") + path.delimiter + daemonBin);
     expect(options.env.ANTHROPIC_API_KEY).toBeUndefined(); done(null, help);
   }) as any);
-  return { root, cwd, executable, daemonBin, db, env, managed, tmux, calls, adapter, binding, service, eventBus };
+  return { root, cwd, executable, daemonBin, db, env, renderer, managed, tmux, calls, adapter, binding, service, eventBus };
 }
 const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "deliberate choice" };
 
 describe("S03 production managed capability selection", () => {
+  it.skipIf(process.platform === "win32").each([
+    { USER: "fixture-user", LOGNAME: "fixture-login" },
+    { USER: "fixture-user" }, { LOGNAME: "fixture-login" }, {},
+  ])("forwards only supplied daemon user names through the actual startup channel: %j", async names => {
+    const f = fixture();
+    // Execute the actual initializer, without starting a daemon or reading its env.
+    const source = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
+    const start = source.indexOf("const launchSessionEnv:");
+    expect(start).toBeGreaterThan(-1);
+    const expression = source.slice(source.indexOf("{", start), source.indexOf("\n  };", start) + 4);
+    const sessionEnv = runInNewContext(`(${expression})`, {
+      process: { env: { PATH: f.env.PATH, ...names, UNRELATED_VALUE: "not-forwarded" } },
+      OPENRIG_HOME: f.env.OPENRIG_HOME, openRigPort: "1", openRigHost: "127.0.0.1",
+      resolvedActivityHookUrl: "http://127.0.0.1:1", resolvedActivityHookToken: "synthetic-only",
+      providerAuthEnv: {}, daemonHome: f.env.HOME, codexHome: path.join(f.root, "codex"),
+    });
+    for (const key of Object.keys(f.env)) delete f.env[key];
+    Object.assign(f.env, sessionEnv);
+    writeFileSync(f.executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else console.log(JSON.stringify(Object.fromEntries(['USER','LOGNAME','UNRELATED_VALUE'].filter(k => process.env[k] !== undefined).map(k => [k,process.env[k]]))));\n`);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(execFile).mockImplementation(native.execFile);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const child = native.execFileSync("/bin/sh", ["-c", prepared.command(["--permission-mode", "auto"])], {
+      encoding: "utf8", timeout: 3000,
+      env: { ...sessionEnv, UNRELATED_VALUE: "not-forwarded" },
+    });
+    expect(JSON.parse(child)).toEqual(names);
+  });
   it.each([
-    ["unset", undefined], ["relative", "./config"],
-    ["absolute", "/inert/explicit-config"], ["empty", ""],
-  ])("preserves %s config selection in help and the executed launch", async (_label, selected) => {
+    ["unset", undefined, "present"], ["relative", "./config", "present"],
+    ["absolute", "/inert/explicit-config", "present"], ["empty", "", "present"],
+    ["absent terminal", undefined, "absent"], ["empty terminal", undefined, "empty"],
+  ])("preserves %s config selection in help and the executed launch", async (_label, selected, terminal) => {
     const f = fixture();
     if (selected === undefined) delete f.env.CLAUDE_CONFIG_DIR;
     else f.env.CLAUDE_CONFIG_DIR = selected;
@@ -77,7 +110,8 @@ describe("S03 production managed capability selection", () => {
     // Observe the actual child environment, using only synthetic credentials.
     writeFileSync(f.executable, `#!${process.execPath}\n
 const fs = require('node:fs');
-const keys = ['CLAUDE_CONFIG_DIR', 'HOME', 'ANTHROPIC_API_KEY', 'OPENRIG_HOME',
+    const keys = ['CLAUDE_CONFIG_DIR', 'HOME', 'TERM', 'COLORTERM', 'LANG', 'LC_CTYPE', 'LC_MESSAGES',
+      'UNAPPROVED_RENDERER_VALUE', 'ANTHROPIC_API_KEY', 'OPENRIG_HOME',
   'OPENRIG_NODE_ID', 'OPENRIG_RUNTIME', 'OPENRIG_SESSION_NAME', 'OPENRIG_OCCUPANT_GENERATION'];
 const env = Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
 if (process.argv.includes('--help')) {
@@ -93,9 +127,19 @@ if (process.argv.includes('--help')) {
     const args = ["--permission-mode", "auto", "--name", "seat's literal name"];
     const command = prepared.command(args);
     expect(command).not.toContain(f.env.ANTHROPIC_API_KEY);
+    const paneEnv: Record<string, string> = { ...f.env, UNAPPROVED_RENDERER_VALUE: "must-not-forward",
+      CLAUDE_CONFIG_DIR: "/inert/not-the-managed-selection", OPENRIG_NODE_ID: "not-the-target" };
+    if (terminal !== "absent") Object.assign(paneEnv, Object.fromEntries(Object.entries({
+      TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
+      LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8",
+    }).map(([key, value]) => [key, terminal === "empty" ? "" : value])));
+    // Some shells initialize TERM; model absent pane variables before expansion.
+    const paneCommand = terminal === "absent"
+      ? `unset TERM COLORTERM LANG LC_CTYPE LC_MESSAGES; ${command}`
+      : command;
     const stdout = await new Promise<string>((resolve, reject) => {
-      native.execFile("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 3000,
-        env: { ...f.env, CLAUDE_CONFIG_DIR: "/inert/not-the-managed-selection", OPENRIG_NODE_ID: "not-the-target" } },
+      native.execFile("/bin/sh", ["-c", paneCommand], { encoding: "utf8", timeout: 3000,
+        env: paneEnv },
       (error, out) => error ? reject(error) : resolve(out));
     });
     const launched = JSON.parse(stdout);
@@ -106,11 +150,26 @@ if (process.argv.includes('--help')) {
     }
     if (selected === undefined) expect.soft(command).not.toContain("CLAUDE_CONFIG_DIR=");
     expect(queried).not.toHaveProperty("ANTHROPIC_API_KEY");
+    if (terminal === "present") expect(launched.env).toMatchObject({ TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
+      LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8" });
+    else for (const key of ["TERM", "COLORTERM", "LANG", "LC_CTYPE", "LC_MESSAGES"]) expect(launched.env).not.toHaveProperty(key);
+    for (const key of ["TERM", "COLORTERM", "LANG", "LC_CTYPE", "LC_MESSAGES"]) expect(queried).not.toHaveProperty(key);
+    expect(launched.env).not.toHaveProperty("UNAPPROVED_RENDERER_VALUE");
     expect(launched).toMatchObject({ cwd: f.cwd, args, env: {
       HOME: f.env.HOME, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY, OPENRIG_HOME: f.env.OPENRIG_HOME,
       OPENRIG_NODE_ID: "node", OPENRIG_RUNTIME: "claude-code", OPENRIG_SESSION_NAME: "seat",
       OPENRIG_OCCUPANT_GENERATION: "generation-1",
     } });
+  });
+  it("forwards only terminal and locale variables into the isolated Claude environment", async () => {
+    const f = fixture();
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const command = prepared.command([]);
+    for (const key of ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+      "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]) {
+      expect(command).toContain(`\${${key}:+"${key}=$${key}"}`);
+    }
+    expect(command).not.toContain("UNAPPROVED_RENDERER_VALUE");
   });
   it("detects unset config becoming explicit even when the storage directory stays the same", async () => {
     const f = fixture(); delete f.env.CLAUDE_CONFIG_DIR;
@@ -236,8 +295,8 @@ describe("S03 bound launch across existing paths", () => {
   it("production startup supplies one helper to both adapters without calling startup", () => {
     const startup = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
     expect(startup).toContain("new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR },");
-    expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch })");
-    expect(startup).toContain("new ClaudeCodeAdapter({ tmux: tmuxAdapter, claudeManagedLaunch,");
+    expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment })");
+    expect(startup).toContain("new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch,");
   });
   it("does not submit after a context change following a valid paste; preserves partial-input semantics", async () => {
     const f = fixture(); const commands: string[] = [];

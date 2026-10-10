@@ -4,6 +4,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
 import { runtimeProbeFailure } from "../adapters/preflight-exec.js";
+import { piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 
@@ -102,9 +103,11 @@ export class RigSpecPreflight {
       const cmd = RUNTIME_COMMANDS[node.runtime];
       if (cmd) {
         try {
-          await this.exec(cmd);
+          const output = await this.exec(cmd);
+          if (node.runtime === "pi") warnings.push(piVersionNotice(output));
         } catch (err) {
-          errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
+          if (node.runtime === "pi") errors.push(...piAvailabilityFailure(err, warnings));
+          else errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
         }
       }
     }
@@ -400,10 +403,8 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
   if (errors.length === 0 && preflightCtx.exec) {
     const profileErrors = await verifyCodexProfiles(rigSpec, preflightCtx.exec);
     errors.push(...profileErrors);
-    // OPR.0.4.6.PI1 FR-1 — Pi binary probe: a spec with a pi member fails
-    // preflight (what/why/fix) when the binary is absent, never a
-    // launch-time surprise.
-    const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec);
+    // The daemon's PATH may differ from the pane's login-shell PATH.
+    const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec, warnings);
     errors.push(...piErrors);
     errors.push(...await verifyOmpRuntimeAvailable(rigSpec, preflightCtx.exec));
     const agyErrors = await verifyAgyRuntimeAvailable(rigSpec, preflightCtx.exec);
@@ -428,24 +429,34 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
 /**
  * OPR.0.4.6.PI1 FR-1 — async post-preflight probe: when the spec declares any
  * `runtime: "pi"` member, verify the `pi` binary answers `pi --version`.
- * Returns a single what/why/fix error naming the install surface on failure.
+ * A daemon-side not-found is advisory: the pane may resolve Pi on its own PATH.
+ * Version and probe failures are advisory, with bounded diagnostics.
  */
 export async function verifyPiRuntimeAvailable(
   rigSpec: PodRigSpec,
   exec: ExecFn,
+  warnings: string[] = [],
 ): Promise<string[]> {
   const hasPiMember = (rigSpec.pods ?? []).some((pod: RigSpecPod) =>
     (pod.members ?? []).some((member: RigSpecPodMember) => member.runtime === "pi"),
   );
   if (!hasPiMember) return [];
   try {
-    await exec(RUNTIME_COMMANDS["pi"]!);
+    warnings.push(piVersionNotice(await exec(RUNTIME_COMMANDS["pi"]!)));
     return [];
   } catch (err) {
-    return [
-      `Runtime "pi" not available ('pi --version' failed: ${runtimeProbeFailure(err)}). Availability could not be confirmed. If Pi is not installed, install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
-    ];
+    return piAvailabilityFailure(err, warnings);
   }
+}
+
+function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
+  const detail = runtimeProbeFailure(err);
+  if (detail === "ENOENT" || detail.includes("executable not found on PATH")) {
+    warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
+    return [];
+  }
+  warnings.push(`Pi version unknown ('pi --version' failed: ${detail}); launch continues. Check 'pi --version' in the pane's shell. If Pi is not installed, install @earendil-works/pi-coding-agent and ensure 'pi' is on PATH.`);
+  return [];
 }
 
 /** Probe only OMP seats. An OMP spec must never depend on the Pi binary. */

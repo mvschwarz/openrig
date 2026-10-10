@@ -466,10 +466,10 @@ function buildSliceShipCommand(): Command {
           planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
           planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
         ].filter((edit): edit is MissionCompositionEdit => edit !== null);
-        applyMissionCompositionEdits(edits);
-        let moveResult: ReturnType<typeof moveSlice> | null = null;
         const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         const originalTargetNode = target.readmePath ? fs.readFileSync(target.readmePath, "utf8") : null;
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
         try {
           moveResult = moveSlice(slice.absPath, destAbs);
           const targetId = ensureMissionIdPersisted(target, missionsRoot);
@@ -545,9 +545,9 @@ function buildSliceCloseCommand(): Command {
           sliceManifestRef(mission.absPath, slice.absPath),
         );
         const edits = compositionEdit ? [compositionEdit] : [];
+        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         applyMissionCompositionEdits(edits);
         let moveResult: ReturnType<typeof moveSlice> | null = null;
-        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         try {
           moveResult = moveSlice(slice.absPath, destAbs);
         } catch (error) {
@@ -630,10 +630,10 @@ function buildSliceMoveCommand(): Command {
           planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
           planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
         ].filter((edit): edit is MissionCompositionEdit => edit !== null);
-        applyMissionCompositionEdits(edits);
-        let moveResult: ReturnType<typeof moveSlice> | null = null;
         const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         const originalTargetNode = target.readmePath ? fs.readFileSync(target.readmePath, "utf8") : null;
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
         try {
           moveResult = moveSlice(slice.absPath, destAbs);
           const targetId = ensureMissionIdPersisted(target, missionsRoot);
@@ -1139,7 +1139,7 @@ function buildAuditCommand(): Command {
                 : null,
             });
 
-            if (!/^\d{2}-/.test(entry)) {
+            if (!/^\d{2,}-/.test(entry)) {
               sliceResult.findings.push({
                 kind: "id_convention_violation",
                 severity: "high",
@@ -1988,7 +1988,15 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         }
         // Resolve the scope target LOCALLY (rich NN-slug resolution), then
         // send the canonical missions-root-relative path to the daemon.
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        // #995 — approve is the one scope write that happens inside the DAEMON.
+        // The resolved root travels WITH the request so the daemon stamps the
+        // tree the caller named instead of its own; strictOverride stops a
+        // named workspace without a missions/ directory from falling back to
+        // the configured root, which would stamp a tree nobody named.
+        const missionsRoot = resolveMissionsRoot({
+          override: getOpts(command).workspace,
+          strictOverride: true,
+        });
         let scopeAbsPath: string;
         if (tier === "slice") {
           const slice = findSlice(missionsRoot, target, opts.mission ?? null);
@@ -2012,6 +2020,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         const res = await client.post<Record<string, unknown>>("/api/scope/approve", {
           scopeTier: tier,
           scopePath,
+          missionsRoot,
           approvalScope: opts.scope,
           // P21: no body actorSession — the daemon derives the approver from the transport header.
           onBehalfOf: opts.onBehalfOf ?? null,

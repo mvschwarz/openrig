@@ -127,3 +127,26 @@ describe("062 usage_samples — provider rate-limit windows (contract item 2)", 
     expect(cols).toContain("node_id");
   });
 });
+
+
+describe("context identity across same-name rig histories", () => {
+  it("deduplicates idle samples independently for each node sharing a seat name", () => {
+    const db = new BetterSqlite3(":memory:");
+    try {
+      db.exec(usageSamplesSchema.sql);
+      const store = new UsageSamplesStore(db);
+      const sample = {
+        seatSession: "dev.qa@reused-rig", source: "codex_token_count_jsonl",
+        sampledAt: "2026-08-07T10:00:00.000Z", totalInputTokens: 1000,
+        totalOutputTokens: 100, usedPercentage: 10,
+      };
+      expect(store.appendContextSample({ ...sample, nodeId: "archived-node" }, "2026-08-07T10:00:00.000Z")).toBe(true);
+      expect(store.appendContextSample({ ...sample, nodeId: "current-node", totalInputTokens: 100000 }, "2026-08-07T10:00:00.000Z")).toBe(true);
+      for (const capturedAt of ["2026-08-07T11:00:00.000Z", "2026-08-07T12:00:00.000Z"]) {
+        expect(store.appendContextSample({ ...sample, nodeId: "archived-node" }, capturedAt)).toBe(false);
+        expect(store.appendContextSample({ ...sample, nodeId: "current-node", totalInputTokens: 100000 }, capturedAt)).toBe(false);
+      }
+      expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples").get()).toEqual({ n: 2 });
+    } finally { db.close(); }
+  });
+});

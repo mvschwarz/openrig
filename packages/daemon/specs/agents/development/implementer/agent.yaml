@@ -1,6 +1,6 @@
 name: implementer
 version: "1.0"
-description: Implementation agent — writes code following TDD discipline
+description: Implementation agent — implements and verifies coherent changes
 
 defaults:
   runtime: claude-code
@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [development-team, test-driven-development, systematic-debugging, verification-before-completion]
+      skills: [development-team, systematic-debugging, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]

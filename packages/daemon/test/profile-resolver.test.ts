@@ -817,7 +817,7 @@ describe("managed catalog selection composition", () => {
     }
   });
 
-  it("refuses a topology source whose identity matches the catalog but whose bytes do not", () => {
+  it("keeps selected bundle provenance when its identity matches a differing catalog copy", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-profile-skill-conflict-"));
     try {
       const catalog = join(root, "skills");
@@ -845,9 +845,126 @@ describe("managed catalog selection composition", () => {
         homedir: join(root, "home"),
       }));
 
-      expect(result).toMatchObject({ ok: false, errors: [expect.stringContaining("skill_identity_conflict")] });
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) throw new Error(result.errors.join("; "));
+      expect(result.config.selectedResources.skills[0]).toMatchObject({ sourcePath: root, resource: { path: local } });
+      expect(result.config.skillLoadout?.entries[0]).toMatchObject({ sourceDir: local, sourceRoot: root, revision: "agent-spec:abc123" });
+      expect(result.config.skillWarnings).toEqual([expect.stringContaining("skill_bundle_precedence")]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("selected bundle identity boundaries", () => {
+  it.each(["imported", "qualified", "same-bytes", "malformed", "wrong-name", "outside", "ambient", "bundle-discovered", "qualified-sibling", "unselected", "ambiguous"])("preserves %s semantics", (kind) => {
+    const root = mkdtempSync(join(tmpdir(), "bundle-skill-identity-"));
+    try {
+      const catalog = join(root, "catalog");
+      const installed = join(root, "installed");
+      const local = join(installed, kind === "bundle-discovered" ? "skills/shared" : "local");
+      const home = join(root, "home");
+      const id = kind === "qualified" || kind === "qualified-sibling" ? "lib:shared" : "shared";
+      const catalogId = kind === "qualified-sibling" ? "shared" : id;
+      const text = (name: string, body: string) => `---\nname: ${name}\ndescription: Skill fixture\n---\n${body}\n`;
+      mkdirSync(join(catalog, catalogId), { recursive: true });
+      mkdirSync(local, { recursive: true });
+      writeFileSync(join(catalog, "catalog.yaml"), `schema: openrig.skill-catalog/v1\nsystem: [${catalogId}]\n`);
+      writeFileSync(join(catalog, catalogId, "SKILL.md"), text(catalogId, "Catalog"));
+      writeFileSync(join(local, "SKILL.md"), kind === "malformed" ? "Invalid skill" : text(kind === "wrong-name" ? "other" : "shared", kind === "same-bytes" ? "Catalog" : "Bundle"));
+      execFileSync("git", ["init", "-q", catalog]);
+      execFileSync("git", ["-C", catalog, "add", "."]);
+      execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+      const resources = { skills: [{ id: "shared", path: local }], guidance: [], subagents: [], plugins: [], runtimeResources: [] };
+      const imported = ["imported", "qualified", "qualified-sibling", "ambiguous"].includes(kind);
+      const spec = makeSpec({ resources: imported || ["ambient", "bundle-discovered"].includes(kind) ? { ...resources, skills: [] } : resources,
+        profiles: { default: { uses: { skills: kind === "unselected" ? [] : [id], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } } });
+      if (kind === "outside") {
+        const outside = join(root, "outside"); mkdirSync(outside);
+        writeFileSync(join(outside, "SKILL.md"), text("shared", "Outside"));
+        resources.skills[0]!.path = outside;
+      }
+      if (kind === "ambient") {
+        mkdirSync(join(home, ".claude/skills/shared"), { recursive: true });
+        writeFileSync(join(home, ".claude/skills/shared/SKILL.md"), text("shared", "Ambient"));
+      }
+      const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec, installed), specRoot: installed,
+        importedSpecs: imported ? [makeResolved(makeSpec({ name: "lib", resources }), installed),
+          ...(kind === "ambiguous" ? [makeResolved(makeSpec({ name: "other", resources }), installed)] : [])] : [],
+        skillsRoot: catalog, homedir: home, member: makeMember({ cwd: join(root, "work") }) }));
+      if (["malformed", "wrong-name", "outside", "ambient", "ambiguous"].includes(kind)) {
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("invalid selection accepted");
+        expect(result.errors.join(";")).toMatch(kind === "ambiguous" ? /ambiguous/ : /skill_identity_conflict/);
+      } else {
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) throw new Error(result.errors.join(";"));
+        expect(result.config.skillLoadout?.entries[0]?.sourceDir).toBe(["unselected", "qualified-sibling"].includes(kind) ? join(catalog, catalogId) : local);
+        expect(result.config.selectedResources.skills.map(e => e.effectiveId)).toEqual(kind === "qualified-sibling" ? [id, "shared"] : [id]);
+        expect(result.config.skillWarnings?.length ?? 0).toBe(["same-bytes", "unselected", "qualified-sibling"].includes(kind) ? 0 : 1);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("selected plugin skills", () => {
+  function writePlugin(root: string): string {
+    const plugin = join(root, "plugins", "core");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "core", version: "0.1.0" }));
+    for (const id of ["delegating-work", "queue-handoff"]) {
+      mkdirSync(join(plugin, "skills", id), { recursive: true });
+      writeFileSync(join(plugin, "skills", id, "SKILL.md"), `---\nname: ${id}\ndescription: Use when testing ${id}.\n---\n\n# plugin ${id}\n`);
+    }
+    return plugin;
+  }
+
+  function resolveWithPlugin(root: string, plugin: string, skills: Array<{ id: string; path: string }>) {
+    const spec = makeSpec({
+      resources: { skills, guidance: [], subagents: [], plugins: [{ id: "core", source: { kind: "local", path: plugin } }], runtimeResources: [] },
+      profiles: {
+        default: { uses: { skills: skills.map((skill) => skill.id), guidance: [], subagents: [], plugins: ["core"], runtimeResources: [] } },
+      },
+    });
+    return resolveNodeConfig(makeCtx({
+      baseSpec: makeResolved(spec, root),
+      member: makeMember({ cwd: join(root, "work") }),
+      skillsRoot: join(root, "no-catalog"),
+      homedir: join(root, "home"),
+    }));
+  }
+
+  it("adds a selected plugin's skills to the managed loadout, not to the plan's skill entries", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-plugin-skills-"));
+    try {
+      const plugin = writePlugin(root);
+      const result = resolveWithPlugin(root, plugin, []);
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.config.selectedResources.skills).toEqual([]);
+      expect(result.config.skillLoadout?.entries.map((entry) => [entry.id, entry.sourceDir, entry.selectedBy])).toEqual([
+        ["delegating-work", join(plugin, "skills", "delegating-work"), ["topology"]],
+        ["queue-handoff", join(plugin, "skills", "queue-handoff"), ["topology"]],
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps a selected bundle skill's source when the plugin has a skill with the same name", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-plugin-precedence-"));
+    try {
+      const plugin = writePlugin(root);
+      const bundle = join(root, "bundle", "queue-handoff");
+      mkdirSync(bundle, { recursive: true });
+      writeFileSync(join(bundle, "SKILL.md"), "---\nname: queue-handoff\ndescription: Use when testing the bundle copy.\n---\n\n# bundle\n");
+      const result = resolveWithPlugin(root, plugin, [{ id: "queue-handoff", path: bundle }]);
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(result.config.selectedResources.skills.map((skill) => [skill.effectiveId, (skill.resource as { path: string }).path]))
+        .toEqual([["queue-handoff", bundle]]);
+      expect(result.config.skillLoadout?.entries.map((entry) => entry.id)).toEqual(["delegating-work"]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

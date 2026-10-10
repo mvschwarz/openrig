@@ -46,6 +46,7 @@ describe("rig env", () => {
   let port: number;
   let probeStatus = "fresh";
   let probeError: string | undefined;
+  let kept: string | undefined;
 
   const rigSummary = [{ id: "rig-1", name: "my-rig", nodeCount: 2 }];
 
@@ -69,7 +70,7 @@ describe("rig env", () => {
 
         if (url.includes("/env/down") && req.method === "POST") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true }));
+          res.end(JSON.stringify({ ok: true, ...(kept ? { kept } : {}) }));
           return;
         }
 
@@ -198,6 +199,17 @@ describe("rig env", () => {
     });
 
     expect(logs.join("\n")).toContain("Services stopped");
+  });
+
+  it("env down explains an archived predecessor's retained project", async () => {
+    kept = "kept project shared: still used by rig successor (rig-2)";
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "env", "down", "my-rig"]);
+      });
+      expect(logs.join("\n")).toContain(kept);
+      expect(logs.join("\n")).not.toContain("Services stopped");
+    } finally { kept = undefined; }
   });
 
   it("env is wired via createProgram", async () => {

@@ -1,5 +1,5 @@
 // B15 — root-invocation hermeticity (r1-reviewed shape: test.projects, NOT the deprecated
-// workspace file). The per-package vitest configs carry the hermetic-env setup (D12: scrub
+// workspace file). The Node per-package vitest configs carry the hermetic-env setup (D12: scrub
 // connection env, fixture-scoped OPENRIG_HOME, fetch guard), but a bare
 // `npx vitest run packages/cli/test/x.test.ts` from the REPO ROOT found no config and ran
 // UNGUARDED — inside a seat that meant the suites escaped their mocks to the live daemon and

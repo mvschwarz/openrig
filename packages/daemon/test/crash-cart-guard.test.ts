@@ -67,6 +67,18 @@ describe("assertDaemonDown — fail-closed guard for the direct read", () => {
     expect(probeHealthz).toHaveBeenCalledWith("http://10.0.0.5:9999/healthz");
   });
 
+  it("brackets IPv6 host in daemon.json when probing healthz (#493)", async () => {
+    const probeHealthz = vi.fn(silentHealthz);
+    await assertDaemonDown(
+      deps({
+        readDaemonJson: () => ({ pid: 9, port: 9999, host: "::1", db: "/x/openrig.sqlite" }),
+        isProcessAlive: deadPid,
+        probeHealthz,
+      }),
+    );
+    expect(probeHealthz).toHaveBeenCalledWith("http://[::1]:9999/healthz");
+  });
+
   it("honors OPENRIG_URL: probes it and REFUSES if it answers (bypassing the state file)", async () => {
     const probeHealthz = vi.fn(async (url: string) => url.startsWith("http://foreign"));
     await expect(

@@ -1,8 +1,9 @@
 // B7 (0.5.2, RULING-rig-mode-rig-policy-naming) — `rig policy`: the top-level PERMISSION-POLICY
 // verb, introduced after the context-mode verb took its natural name (`rig mode`).
 //
-// BINDING HONESTY PIN (carried VERBATIM from setup.ts, per the ruling): OpenRig bakes NO
-// allow/ask/deny permission policy — the harness-native permissions are the control surface.
+// BINDING HONESTY PIN (carried VERBATIM from setup.ts, per the ruling; 0.6.7 states the per-launch team and
+// kernel defaults from #820/#893): those defaults pass allow/ask lists per launch and save none; a selected
+// Claude settings fragment can merge native settings, rules included; harness-native permissions are the control surface.
 // `rig policy` TEACHES and RECORDS into RigSpec (`permission_policy: builtin:<name> | none`); it
 // never enforces at runtime. OpenRig records posture into RigSpec, harness-native permissions
 // enforce — never runtime enforcement.
@@ -34,6 +35,7 @@ import {
 } from "./setup.js";
 import {
   BUILTIN_POLICY_NAMES,
+  builtinLaunchPosture,
   validatePermissionPolicyRef,
   resolvePermissionPolicyAttachment,
   type ResolvedPolicyAttachment,
@@ -41,7 +43,7 @@ import {
 import { parsePolicySpec, validatePolicySpec } from "../lib/permission-policy/policy-spec.js";
 
 const HONESTY_PIN =
-  "OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface. " +
+  "The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface. " +
   "OpenRig records posture into RigSpec; harness-native permissions enforce — never runtime enforcement.";
 
 const BUILTIN_DESCRIPTIONS: Record<string, string> = {
@@ -49,7 +51,8 @@ const BUILTIN_DESCRIPTIONS: Record<string, string> = {
   standard: "the packaged default posture for managed working seats",
   open: "a permissive packaged posture for trusted, high-autonomy seats",
   yolo: "the operator/no-guardrails posture — everything the harness allows (launch posture: full_bypass)",
-  none: "the RESERVED deliberate-none choice: recorded as permission_policy: none — posture identical to absent (the floor), but the absence is chosen and visible",
+  auto: "Claude runs with --permission-mode auto; Codex and Pi launch at the floor (launch posture: auto)",
+  none: "the RESERVED deliberate-none choice: recorded as permission_policy: none — the floor, without the team launch default an absent policy gets; the choice is visible",
 };
 
 function refFor(name: string): string {
@@ -191,7 +194,7 @@ function registerPermissionCommands(cmd: Command): void {
           origin: nameOrRef === "none" ? "deliberate_none" : "builtin",
           description: BUILTIN_DESCRIPTIONS[nameOrRef] ?? "",
           recordedAs: `permission_policy: ${refFor(nameOrRef)}`,
-          launchPosture: nameOrRef === "yolo" ? "full_bypass" : "floor",
+          launchPosture: builtinLaunchPosture(nameOrRef),
           enforcement: HONESTY_PIN,
         };
         if (opts.json) console.log(JSON.stringify(out));
@@ -283,7 +286,7 @@ function registerPermissionCommands(cmd: Command): void {
         // it must surface as ITS OWN defect, never silently disappear behind the rig ref).
         const effective = site === "rig" ? ref : (ref !== undefined ? ref : rigRef);
         if (effective === undefined) {
-          return { site, ref: null, effective: null, applies: "absent — the floor (honest absence; nothing recorded)" };
+          return { site, ref: null, effective: null, applies: "absent — nothing recorded: eligible Claude Code and Codex seats get the team launch default (the kernel's own seats the kernel default) unless an explicit seat choice or a named Codex profile takes precedence; other seats the floor" };
         }
         const invalid = validatePermissionPolicyRef(effective, `${site}.permission_policy`);
         if (invalid) {

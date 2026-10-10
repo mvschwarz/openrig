@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention } from "../src/domain/ps-projection.js";
+import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention, arbitratedNeedsInputSignal } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { AgentActivity, NodeInventoryEntry } from "../src/domain/types.js";
+import type { EvidenceRungId } from "../src/domain/activity-taxonomy.js";
 
 describe("PsProjectionService", () => {
   let db: Database.Database;
@@ -502,6 +503,29 @@ describe("PsProjectionService", () => {
       expect(seatNeedsAttention(baseEntry(), idleActivity("idle"))).toBe(false);
       expect(seatNeedsAttention(baseEntry(), idleActivity("unknown"))).toBe(false);
     });
+    it("#81: counts an ARBITRATED needs_input (pane chrome) even with no hook store", () => {
+      expect(seatNeedsAttention(baseEntry(), null, true)).toBe(true);
+    });
+    it("#81: an arbitrated clear answer SUPERSEDES a stale needs_input hook (row and total agree)", () => {
+      expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), false)).toBe(false);
+    });
+    it("#81: no arbitrated answer falls back to the hook signal (honest degrade)", () => {
+      expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), null)).toBe(true);
+    });
+
+    it("#180 review: arbitratedNeedsInputSignal is tri-state over observed needs-input evidence", () => {
+      const zero = { count: 0, reason: null };
+      const observed = (rung: EvidenceRungId) => ({ rung, observedAt: new Date().toISOString() });
+      expect(arbitratedNeedsInputSignal(null)).toBeNull();
+      expect(arbitratedNeedsInputSignal({ needsInput: { count: 1, reason: "prompt" }, needsInputEvidence: observed("lifecycle-hooks") })).toBe(true);
+      // count: 0 that no needs-input evidence supplied is "no trusted evidence", whatever rungs are declared
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: null })).toBeNull();
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("window-sampling") })).toBeNull();
+      // ...and an observed clear from a needs-input rung is a real no
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("self-report") })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("needs-input-chrome") })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("lifecycle-hooks") })).toBe(false);
+    });
 
     it("getEntries: multi-signal seat counts ONCE; healthy peers count zero", () => {
       const rigId = seedRig("attn-once");
@@ -540,6 +564,93 @@ describe("PsProjectionService", () => {
 
       emit(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()); // stale (latest row now old)
       expect(withStore.getEntries().find((e) => e.rigId === rigId)!.attentionCount).toBe(0);
+    });
+
+    it("#81: getEntries reads the ARBITRATED needs_input the per-seat row shows (pane chrome, hook-silent seat)", () => {
+      const rigId = seedRig("attn-arbitrated");
+      const n = seedNode(rigId, "dev");
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+        .run("s-arb", n, "dev@attn-arbitrated", "running", "ready");
+      // The row-facing oracle: a seat frozen at a permission prompt with no hook
+      // traffic — exactly the reported case where the row said needs-input x1
+      // and the rig total said 0.
+      const seatActivity = {
+        getSeatActivity: () => null,
+        getSeatStateBySession: (sessionName: string) => sessionName === "dev@attn-arbitrated"
+          ? {
+              seatNodeId: n, activity: "idle-at-prompt",
+              needsInput: { count: 1, reason: "selection_prompt" },
+              decidedBy: "needs-input-chrome", seq: 1,
+              changedAt: new Date().toISOString(), rungs: [], lastSwap: null,
+            }
+          : null,
+      };
+      const entries = new PsProjectionService({ db, seatActivity: seatActivity as never }).getEntries();
+      expect(entries.find((e) => e.rigId === rigId)!.attentionCount).toBe(1);
+    });
+
+    it("#81: getEntries takes the arbitrated answer over a stale needs_input hook", () => {
+      const rigId = seedRig("attn-stale-hook");
+      const n = seedNode(rigId, "dev");
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+        .run("s-stale", n, "dev@attn-stale-hook", "running", "ready");
+      const eventBus = new EventBus(db);
+      const store = new AgentActivityStore({ db, eventBus });
+      eventBus.emit({
+        type: "agent.activity", rigId, nodeId: n, sessionName: "dev@attn-stale-hook", runtime: "claude-code",
+        activity: { state: "needs_input", reason: "permission_prompt", evidenceSource: "runtime_hook",
+          sampledAt: new Date().toISOString(), eventAt: new Date().toISOString(), evidence: "permission_prompt", fallback: false, stale: false },
+      } as never);
+      // The hook store still carries needs_input, but the seat's arbitrated state
+      // (what its row renders) is already clear from AUTHORITATIVE needs-input
+      // evidence (a later hook turn boundary) — the totals must agree.
+      const seatActivity = {
+        getSeatActivity: () => null,
+        getSeatStateBySession: () => ({
+          seatNodeId: n, activity: "working",
+          needsInput: { count: 0, reason: null },
+          needsInputEvidence: { rung: "lifecycle-hooks", observedAt: new Date().toISOString() },
+          decidedBy: "lifecycle-hooks", seq: 2,
+          changedAt: new Date().toISOString(),
+          rungs: [{ rung: "lifecycle-hooks", sourceId: "claude-code:hooks", trust: "authoritative", lastEvidenceAt: new Date().toISOString() }],
+          lastSwap: null,
+        }),
+      };
+      const entries = new PsProjectionService({ db, agentActivity: store, seatActivity: seatActivity as never }).getEntries();
+      expect(entries.find((e) => e.rigId === rigId)!.attentionCount).toBe(0);
+    });
+
+    it("#180 review: a Codex seat with hooks at trial falls back to the hook store — a fresh PermissionRequest counts 1", () => {
+      const rigId = seedRig("attn-codex-trial");
+      const n = seedNode(rigId, "dev");
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+        .run("s-codex", n, "dev@attn-codex-trial", "running", "ready");
+      const eventBus = new EventBus(db);
+      const store = new AgentActivityStore({ db, eventBus });
+      eventBus.emit({
+        type: "agent.activity", rigId, nodeId: n, sessionName: "dev@attn-codex-trial", runtime: "codex",
+        activity: { state: "needs_input", reason: "permission_prompt", evidenceSource: "runtime_hook",
+          sampledAt: new Date().toISOString(), eventAt: new Date().toISOString(), evidence: "permission_prompt", fallback: false, stale: false },
+      } as never);
+      // Codex lifecycle hooks enter at `trial` (AM-2), so the oracle's count: 0 is
+      // "no trusted evidence", not a real "no" — the live PermissionRequest must
+      // still count, exactly as it did before the arbitrated signal was preferred.
+      const seatActivity = {
+        getSeatActivity: () => null,
+        getSeatStateBySession: () => ({
+          seatNodeId: n, activity: "working",
+          needsInput: { count: 0, reason: null },
+          decidedBy: "window-sampling", seq: 3,
+          changedAt: new Date().toISOString(),
+          rungs: [
+            { rung: "lifecycle-hooks", sourceId: "codex:hooks", trust: "trial", lastEvidenceAt: new Date().toISOString() },
+            { rung: "window-sampling", sourceId: "tmux:window-activity", trust: "authoritative", lastEvidenceAt: new Date().toISOString() },
+          ],
+          lastSwap: null,
+        }),
+      };
+      const entries = new PsProjectionService({ db, agentActivity: store, seatActivity: seatActivity as never }).getEntries();
+      expect(entries.find((e) => e.rigId === rigId)!.attentionCount).toBe(1);
     });
 
     it("getEntries: store absent -> needs_input contributes false (honest degrade), other signals still count", () => {

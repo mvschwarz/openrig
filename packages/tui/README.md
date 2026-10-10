@@ -1,13 +1,20 @@
 # @openrig/tui — mission-control TUI
 
 The explorer / master-detail "k9s for rigs" surface: left Explorer (Topology ·
-Specs · Scopes · Needs-You), right content pane, top command bar, ambient rig-stream
-footer. OBSERVE / NAVIGATE / DRIVE-STRUCTURE only — ACT / PRODUCE /
-REVIEW-ARTIFACT surfaces live in Studio, not here. Zero runtime dependencies;
-it reads the daemon's EXISTING projections (two renderers, one projection —
+Specs · Scopes · Terminals · Needs-You · System, Config and Connections, the
+last three grouped as System; `src/sections.ts`), right content pane, top
+command bar, ambient rig-stream footer. OBSERVE / NAVIGATE / DRIVE-STRUCTURE
+only — ACT / PRODUCE / REVIEW-ARTIFACT surfaces live in Studio, not here. One
+runtime dependency (`yaml`); it reads the daemon's EXISTING projections (two renderers, one projection —
 `src/daemon-client.ts` is the entire HTTP surface).
 
 ## Run — one herdr tile, daemon-direct
+
+From an installed CLI, `rig tui` opens mission control in the current terminal.
+For “show me my agents” or the welcome screen, use
+`rig terminal open saved:kernel --window` to open the dashboard and conversations
+together. Only if that window cannot open, `rig tui --shared` is the dashboard-only
+fallback (detach with Ctrl-b d). The package's own bin is `openrig-tui` (`dist/main.js`).
 
 The TUI runs as ONE pane/tile inside herdr's wall (any tmux pane works the
 same way — the tile IS a tmux pane; no extra multiplexer, no integration
@@ -21,19 +28,31 @@ layer):
     #   --url <daemon>    daemon base URL (default $OPENRIG_URL or http://127.0.0.1:7433)
     #   --socket <path>   control socket (default $OPENRIG_TUI_SOCKET or $OPENRIG_HOME/run/tui-<id>.sock)
     #   --demo            labeled demo fixture instead of live reads (never mixes with live)
+    #   --no-color        plain text, no color
 
-An agent can compose a view and open it for the operator via the `rig
-terminal` primitive pointing at that command.
+Inside an existing herdr or cmux workspace, `rig terminal open <view> --provider herdr`
+(or `--provider cmux`) adds terminal tiles without opening a desktop window. The view
+is a rig name, `mission:<id>`, `slice:<id>` or a saved-view id. For the first desktop
+view, use `rig terminal open saved:kernel --window` as above.
+
+In the TUI, choose **Open terminals** above a rig's grid or in an agent's detail.
+The Terminals section also offers it after a passive view preview. It uses the
+same desktop opener: herdr if installed, otherwise the composed layout in plain
+tmux. Run the TUI on the selected daemon's desktop for this action. Headless or
+remote sessions retain per-seat attach commands in the preview. A launch result
+does not confirm visibility; check the new terminal shows the intended view.
 
 ## Driving it (human or agent — same grammar, same state)
 
 Command bar / keyboard / mouse / control socket all mutate ONE view-state
-through ONE path. Safe-core grammar: `:topology` `:specs` `:scopes` `:needs` ·
-`/<filter>` · `host|rig|pod|agent|spec <name>` · `tab table|overview` ·
+through ONE path. Safe-core grammar: `:<section>` (any of the eight, e.g.
+`:topology` `:needs`) · `/<filter>` · `host|rig|pod|agent|spec <name>` ·
+`tab table|recent|overview|graph|health|topology|configuration|yaml|pulse` ·
 `spec-of <agent>` · `running <spec>`. Keys: arrows + Enter navigate the
-explorer, `f` toggles the footer, `q` quits.
+explorer, `F` toggles the footer, `q` quits.
 
-In Scopes, select a mission or use `mission <name>`. Its workflow rows open the
+In Scopes, select a mission or use `mission <name>`; with a mission selected, `M`
+collapses its mini-requirements and `N` shows its narrative. Its workflow rows open the
 current work, owner, recorded waiting reason, wake mechanism, next action and
 bound sources. `workflow <instance-id>` and `packet <qitem-id>` address those
 pages within the selected mission. Release ceremony, post-release housekeeping
@@ -45,15 +64,24 @@ Specs separates authored declarations from observed consumers. Open a consumer
 to inspect its served runtime and seat binding; missing source stays explicit.
 The selected source is re-read on refresh even if the library revision did not
 change. `back` or Escape returns to the previous selection, tab and scroll.
-Escape first cancels editing or clears an active filter. On long spec pages,
+During ordinary browsing, Escape clears typed command text first. With
+history, it returns from a spec detail, an open file or an external link and
+restores the previous filter; otherwise it closes an open health view, then
+clears a filter, then goes back. On long spec pages,
 Up/Down scroll by default; Right enters links, then Up/Down and Enter follow them.
 `rig tui commands --json` lists the shared command registry.
 
 Agents: `tmux send-keys` of any command is the always-available floor; the
 control socket is the addressable-screen API — one command per line, one JSON
-reply per line, plus `state` for a read-only state query:
+reply per line, plus two read-only queries, `state` and `commands` (the command
+registry with live availability):
 
     printf 'agent dev.impl\n' | nc -U ~/.openrig/run/tui-tui-1.sock
+
+Terminals, Needs, System, Scopes, Config, Specs and file pages read no rigs. A
+`host`, `rig`, `pod` or `agent` address sent from one switches to Topology and
+resolves once that page's read settles. Until then the reply carries `resolving` and a `notice`; send `state`
+for the result (the drill, or the error).
 
 Socket rules (arch standing constraint): every socket command goes through the
 one resolver/mutation path, and verbs stay OBSERVE/NAVIGATE/DRIVE-STRUCTURE

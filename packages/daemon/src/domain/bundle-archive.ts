@@ -53,6 +53,57 @@ export async function pack(stagingDir: string, outputPath: string): Promise<stri
 }
 
 /**
+ * Normalize a tar entry path for safety checks: Windows backslashes to
+ * forward slashes so a `..\\escape` or `C:\\…` entry cannot slip past a
+ * POSIX-only check.
+ */
+export function normalizeArchiveEntryPath(entryPath: string): string {
+  return entryPath.replace(/\\/g, "/");
+}
+
+/**
+ * The single unsafe-entry verdict shared by bundle extraction and inspection.
+ * Returns a human-readable reason when the entry must be refused, or `null`
+ * when the entry is safe. Rejects symlinks/hardlinks, POSIX-absolute and
+ * Windows drive-absolute paths, and dot-dot traversal (POSIX or backslash).
+ *
+ * One source of truth: `unpack()` and the `/api/bundles/inspect` route both
+ * call this so a bundle cannot be refused by one and reported safe by the
+ * other. The labels (`SymbolicLink:`, `absolute path:`, `path traversal:`)
+ * are part of the refusal contract.
+ */
+export function unsafeArchiveEntryReason(entryPath: string, entryType?: string): string | null {
+  if (entryType === "SymbolicLink" || entryType === "Link") {
+    return `${entryType}: ${entryPath}`;
+  }
+  const normalizedPath = normalizeArchiveEntryPath(entryPath);
+  if (normalizedPath.startsWith("/") || /^[a-zA-Z]:/.test(normalizedPath)) {
+    return `absolute path: ${entryPath}`;
+  }
+  if (normalizedPath.split("/").some((segment) => segment === "..")) {
+    return `path traversal: ${entryPath}`;
+  }
+  return null;
+}
+
+/**
+ * Pre-scan an archive and return every unsafe entry reason (empty when clean).
+ * Shared by `unpack()` and the `/api/bundles/inspect` route so both apply the
+ * same boundary before any extraction happens.
+ */
+export async function collectUnsafeArchiveEntries(archivePath: string): Promise<string[]> {
+  const unsafeEntries: string[] = [];
+  await tar.list({
+    file: archivePath,
+    onReadEntry: (entry) => {
+      const reason = unsafeArchiveEntryReason(entry.path, entry.type);
+      if (reason) unsafeEntries.push(reason);
+    },
+  });
+  return unsafeEntries;
+}
+
+/**
  * Unpack a .rigbundle archive to a directory.
  * Requires sibling .sha256 digest file. Verifies archive integrity before extraction.
  * Rejects symlinks, hardlinks, path traversal, and absolute paths.
@@ -66,25 +117,7 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
   }
 
   // Step 2: Pre-scan archive for unsafe entries BEFORE extraction
-  const unsafeEntries: string[] = [];
-  await tar.list({
-    file: archivePath,
-    onReadEntry: (entry) => {
-      const entryPath = entry.path;
-      const entryType = entry.type;
-      if (entryType === "SymbolicLink" || entryType === "Link") {
-        unsafeEntries.push(`${entryType}: ${entryPath}`);
-      }
-      const normalizedPath = entryPath.replace(/\\/g, "/");
-      if (normalizedPath.startsWith("/") || /^[a-zA-Z]:/.test(normalizedPath)) {
-        unsafeEntries.push(`absolute path: ${entryPath}`);
-      }
-      const segments = normalizedPath.split("/");
-      if (segments.some((s: string) => s === "..")) {
-        unsafeEntries.push(`path traversal: ${entryPath}`);
-      }
-    },
-  });
+  const unsafeEntries = await collectUnsafeArchiveEntries(archivePath);
 
   if (unsafeEntries.length > 0) {
     throw new Error(`Unsafe archive entries rejected: ${unsafeEntries.join("; ")}`);
@@ -97,11 +130,8 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
     cwd: outputDir,
     filter: (p, entry) => {
       if ("isSymbolicLink" in entry && typeof entry.isSymbolicLink === "function" && entry.isSymbolicLink()) return false;
-      if ("type" in entry && (entry.type === "SymbolicLink" || entry.type === "Link")) return false;
-      const normalized = p.replace(/\\/g, "/");
-      if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) return false;
-      if (normalized.split("/").some((s) => s === "..")) return false;
-      return true;
+      const type = "type" in entry ? (entry as { type?: string }).type : undefined;
+      return unsafeArchiveEntryReason(p, type) === null;
     },
   });
 

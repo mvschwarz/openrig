@@ -159,6 +159,9 @@ export function settingsBrowser(store: SettingsStore, gateway: Record<string, un
     add("slack." + key, "slack", cfg ? flatten(cfg[key]) : null, flatten(defs[key]),
       cfg ? read.fields.includes(key) ? "file" : "default" : "unavailable", kind);
   }
+  // #192: the channel map as one read-only line, "match: channel" per entry.
+  add("slack.channelMap", "slack", read.cfg ? c.configuration!.channelMap.map((e) => `${e.match ?? "withheld"}: ${e.channel ?? "withheld"}`).join(", ") : null, "",
+    read.cfg ? read.cfg.channelMap !== undefined ? "file" : "default" : "unavailable", "names");
   add("slack.credentialFile", "slack", read.cfg ? Boolean(read.cfg.secretsEnvFile) : null, false,
     read.cfg ? read.fields.includes("secretsEnvFile") ? "file" : "default" : "unavailable");
   entries.at(-1)!.reason = "Credential file reference presence only; reference and contents withheld.";

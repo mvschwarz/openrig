@@ -22,8 +22,10 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
       return stdout;
     })).trim();
     if (!output) return undefined;
-    const match = output.match(/(?:^|\s)HOME=([^\s]+)/);
-    return match?.[1];
+    // ps prints unquoted environment values; whitespace can belong to HOME.
+    // Stop at the next environment assignment rather than the first space.
+    const match = output.match(/(?:^|\s)HOME=(.*?)(?=\s[A-Za-z_][A-Za-z0-9_]*=|$)/);
+    return match?.[1] || undefined;
   } catch {
     return undefined;
   }
@@ -32,8 +34,10 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
 export function readCodexThreadIdFromCandidateHomes(
   pid: number,
   candidateHomes: Array<string | undefined>,
-  exists?: (path: string) => boolean
+  exists?: (path: string) => boolean,
+  codexHome?: string,
 ): string | undefined {
+  if (codexHome) return readCodexThreadIdFromLogs(pid, "", exists, undefined, codexHome);
   for (const homeDir of uniqueHomes(candidateHomes)) {
     const threadId = readCodexThreadIdFromLogs(pid, homeDir, exists);
     if (threadId) return threadId;
@@ -91,6 +95,8 @@ export class CodexThreadIdResolver {
   constructor(
     private readonly opts: {
       defaultHome?: string;
+      /** Explicit provider root; never search another home's logs on a miss. */
+      codexHome?: string;
       resolveHomeDirByPid?: ResolveHomeDirByPid;
       readFromLogs?: (pid: number, homeDir: string) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
@@ -137,6 +143,7 @@ export class CodexThreadIdResolver {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
+    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome);
     const readFromLogs = this.opts.readFromLogs
       ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home, undefined, minTs));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
@@ -238,10 +245,11 @@ function readCodexThreadIdFromLogs(
   pid: number,
   homeDir: string,
   exists?: (path: string) => boolean,
-  minTs?: number
+  minTs?: number,
+  codexHome?: string,
 ): string | undefined {
   const loggedIds = new Set<string>();
-  for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists)) {
+  for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -259,7 +267,7 @@ function readCodexThreadIdFromLogs(
   // Native title generation logs another thread in the same process. Join only
   // PID-owned IDs to retained CLI conversations; recency cannot identify the TUI.
   const conversations = new Set<string>();
-  for (const dbPath of resolveCodexDbPaths(homeDir, "state", exists)) {
+  for (const dbPath of resolveCodexDbPaths(homeDir, "state", exists, codexHome)) {
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -291,8 +299,8 @@ export function lstartToMinTs(identity: string | undefined): number | undefined 
   return Math.floor(parsed / 1000);
 }
 
-export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exists?: (path: string) => boolean): string[] {
-  const codexDir = nodePath.join(homeDir, ".codex");
+export function resolveCodexDbPaths(homeDir: string, kind: "logs" | "state", exists?: (path: string) => boolean, codexHome?: string): string[] {
+  const codexDir = codexHome || nodePath.join(homeDir, ".codex");
   const discovered: Array<{ version: number; path: string }> = [];
 
   try {

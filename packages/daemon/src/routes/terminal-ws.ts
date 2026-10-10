@@ -1,7 +1,6 @@
 import type { Hono } from "hono";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
-import { hostHeaderHostname } from "../middleware/origin-guard.js";
 import {
   TerminalBrokerRegistry,
   type BrokerTmux,
@@ -12,57 +11,9 @@ import {
 const MAX_EARLY_TERMINAL_FRAMES = 32;
 const MAX_EARLY_TERMINAL_FRAME_BYTES = 256 * 1024;
 
-/** The WebSocket route's guard: Origin check on upgrades, then the terminal bearer token when one is set. */
+/** Terminal bearer authentication; server.ts applies the shared browser boundary before this route. */
 export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
   return async (c: { req: { header(name: string): string | undefined; query(name: string): string | undefined }; json(data: unknown, status: number): unknown }, next: () => Promise<void>) => {
-    const upgrade = c.req.header("Upgrade");
-    if (upgrade?.toLowerCase() === "websocket") {
-      const origin = c.req.header("Origin");
-      if (origin) {
-        try {
-          const originUrl = new URL(origin);
-          const originHost = originUrl.hostname.toLowerCase();
-          const requestHost = hostHeaderHostname(c.req.header("Host"));
-          const isLoopbackIpv4 = /^127(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)){3}$/.test(originHost);
-          const isLocal =
-            originHost === "localhost" ||
-            originHost === "127.0.0.1" ||
-            originHost === "::1" ||
-            originHost === "[::1]" ||
-            isLoopbackIpv4;
-
-          const configuredAllowed = process.env.OPENRIG_ALLOWED_ORIGINS
-            ? process.env.OPENRIG_ALLOWED_ORIGINS.split(",").map((s) => s.trim().toLowerCase())
-            : [];
-
-          const isExplicitlyAllowed = configuredAllowed.some((allowed) => {
-            if (!allowed) return false;
-            try {
-              if (allowed.startsWith("http://") || allowed.startsWith("https://")) {
-                const u = new URL(allowed);
-                return u.origin.toLowerCase() === originUrl.origin.toLowerCase();
-              }
-              return allowed.toLowerCase() === originHost;
-            } catch {
-              return false;
-            }
-          });
-
-          // In unauthenticated loopback mode (!opts.bearerToken), same-host matching
-          // requires loopback or explicitly allowed origin to prevent DNS rebinding attacks.
-          const isSameHost = Boolean(
-            requestHost &&
-            originHost === requestHost &&
-            (opts.bearerToken !== null || isLocal || isExplicitlyAllowed),
-          );
-
-          const allowed = isLocal || isExplicitlyAllowed || isSameHost;
-          if (!allowed) return c.json({ error: "origin_rejected", hint: `Origin ${origin} does not match host` }, 403);
-        } catch {
-          return c.json({ error: "origin_rejected", hint: "Malformed Origin header" }, 403);
-        }
-      }
-    }
     const token = opts.bearerToken;
     if (!token) { await next(); return; }
     const header = c.req.header("Authorization") ?? c.req.header("authorization");
@@ -113,7 +64,7 @@ export function registerTerminalWs(
     terminalAuth,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (upgradeWebSocket as any)((c: any) => {
-      const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+      const sessionName = c.req.param("sessionName")!;
       let broker: TerminalSessionBroker | null = null;
       let subscriber: TerminalSubscriber | null = null;
       // The WebSocket can close DURING the async attach (before the broker
@@ -160,7 +111,19 @@ export function registerTerminalWs(
             close: (code: number, reason: string) => { try { ws.close(code, reason); } catch { /* already closed */ } },
           };
           subscriber = sub;
-          const b = await getRegistry(tmux as unknown as BrokerTmux).attach(sessionName, sub);
+          let b: TerminalSessionBroker;
+          try {
+            b = await getRegistry(tmux as unknown as BrokerTmux).attach(sessionName, sub);
+          } catch {
+            // The WebSocket adapter does not await onOpen. Contain attach failures
+            // here; the registry disposes the failed broker before rejecting.
+            closed = true;
+            earlyFrames.length = 0;
+            earlyFrameBytes = 0;
+            subscriber = null;
+            sub.close(1011, "terminal attach failed");
+            return;
+          }
           broker = b;
           // If the socket closed while attach was in flight, detach now so the
           // broker does not retain a dead subscriber (detach is idempotent).

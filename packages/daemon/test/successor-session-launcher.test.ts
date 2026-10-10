@@ -6,6 +6,7 @@ import { SuccessorSessionLauncher } from "../src/domain/successor-session-launch
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
+import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 describe("SuccessorSessionLauncher", () => {
   let db: Database.Database;
@@ -75,6 +76,25 @@ describe("SuccessorSessionLauncher", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
     const binding = launchHarness.mock.calls[0]![0] as { model?: string };
     expect(binding.model).toBe("gpt-5.4-cheap");
+  });
+
+  it("the successor carries the resolved kernel operational default", async () => {
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", kernelAuthority: true, launchPosture: "full_bypass" },
+      departingSessionName: "dev-impl@kernel",
+    });
+    expect(res.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ kernelAuthority: true, launchPosture: "full_bypass" });
+  });
+
+  it("the successor keeps the saved non-interruptive rig choice", async () => {
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", nonInterruptive: true, launchPosture: "full_bypass" },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nonInterruptive: true, launchPosture: "full_bypass" });
   });
 
   it("#75: the successor's launch binding carries the configured effort", async () => {
@@ -274,6 +294,113 @@ describe("SuccessorSessionLauncher", () => {
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
+  describe("readiness deadline", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(0);
+    });
+
+    afterEach(() => vi.useRealTimers());
+
+    function timedLauncher(timeoutMs?: number, readinessSettings?: Pick<SettingsStore, "resolveOne">): SuccessorSessionLauncher {
+      const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+      return new SuccessorSessionLauncher(tmux, discoveryRepo, {
+        runtimeAdapters: { codex: fakeAdapter("codex") },
+        readinessTimeoutMs: timeoutMs ?? (readinessSettings ? undefined : 30_000),
+        readinessSettings,
+        sleep: async (ms) => { vi.setSystemTime(Date.now() + ms); },
+      });
+    }
+
+    it("uses the configured window for successor readiness", async () => {
+      checkReady.mockImplementation(async () => ({ ready: Date.now() >= 40_000 }));
+      const readinessSettings = {
+        resolveOne: () => ({ value: 45, source: "file", defaultValue: 30 }),
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+
+      const res = await timedLauncher(undefined, readinessSettings).createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r",
+      });
+
+      expect(res.ok).toBe(true);
+      expect(Date.now()).toBe(45_000);
+    });
+
+    it("falls back to the 30-second window with a warning when the settings read throws", async () => {
+      checkReady.mockImplementation(async () => ({ ready: Date.now() >= 20_000 }));
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const readinessSettings = {
+        resolveOne: () => { throw new Error("config.json is not valid JSON"); },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+
+      try {
+        const res = await timedLauncher(undefined, readinessSettings).createSuccessor({
+          node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r",
+        });
+
+        expect(res.ok).toBe(true);
+        expect(Date.now()).toBe(30_000);
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining("falling back to 30s default"));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it("accepts a successor ready after 20 seconds within the 30-second allowance", async () => {
+      checkReady.mockImplementation(async () => ({ ready: Date.now() >= 20_000 }));
+
+      const res = await timedLauncher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+
+      expect(res.ok).toBe(true);
+      expect(Date.now()).toBe(30_000);
+      expect(discoveryRepo.listDiscovered()).toHaveLength(1);
+      expect(killSession).not.toHaveBeenCalled();
+    });
+
+    it("waits the full allowance and reports the deadline probe's reason when never ready", async () => {
+      const probeTimes: number[] = [];
+      checkReady.mockImplementation(async () => {
+        probeTimes.push(Date.now());
+        return { ready: false, reason: Date.now() < 30_000 ? "starting" : "still starting at deadline" };
+      });
+
+      const res = await timedLauncher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+
+      expect(Date.now()).toBe(30_000);
+      expect(probeTimes).toEqual([0, 1000, 3000, 7000, 15_000, 30_000]);
+      expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_not_ready", message: "Successor did not become a ready agent: readiness timeout after 30s: still starting at deadline" });
+      expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+      expect(killSession).not.toHaveBeenCalled();
+    });
+
+    it("uses the remaining time when the allowance is shorter than the initial delay", async () => {
+      const probeTimes: number[] = [];
+      checkReady.mockImplementation(async () => {
+        probeTimes.push(Date.now());
+        return { ready: Date.now() >= 250 };
+      });
+
+      const res = await timedLauncher(500).createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+
+      expect(res.ok).toBe(true);
+      expect(Date.now()).toBe(500);
+      expect(probeTimes).toEqual([0, 500]);
+    });
+
+    it("preserves an attention blocker first observed at the deadline", async () => {
+      checkReady.mockImplementation(async () => Date.now() < 30_000
+        ? { ready: false, reason: "starting" }
+        : { ready: false, code: "trust_gate", reason: "trust prompt" });
+
+      const res = await timedLauncher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+
+      expect(Date.now()).toBe(30_000);
+      expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_attention_required", message: "Successor did not become a ready agent: trust prompt" });
+      expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+      expect(killSession).not.toHaveBeenCalled();
+    });
+  });
+
   it("checkReady THROWS (adapter/socket error) → structured start_agent failure, preserved seat NOT killed, no candidate", async () => {
     // A THROWN readiness probe must not reject createSuccessor with an unstructured error, and — under
     // the cutover invariant — must not kill the preserved seat either.
@@ -281,6 +408,7 @@ describe("SuccessorSessionLauncher", () => {
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_readiness_failed" });
     expect((res as { message: string }).message).toContain("tmux socket closed");
+    expect(checkReady).toHaveBeenCalledTimes(1);
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
@@ -289,6 +417,7 @@ describe("SuccessorSessionLauncher", () => {
     checkReady.mockResolvedValue({ ready: false, code: "trust_gate", reason: "trust prompt" });
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_attention_required" });
+    expect(checkReady).toHaveBeenCalledTimes(1);
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });

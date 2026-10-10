@@ -6,6 +6,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { StartupOrchestrator, type StartupInput } from "../src/domain/startup-orchestrator.js";
@@ -285,13 +286,37 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume PARENT-TOKEN-ABC --fork-session --name dev-impl@test-rig",
+      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'PARENT-TOKEN-ABC' --fork-session --name dev-impl@test-rig",
     );
     if (result.ok) {
       // Captured token MUST be the new post-fork token, NOT the parent.
       expect(result.resumeToken).toBe("NEW-POST-FORK-TOKEN-XYZ");
       expect(result.resumeToken).not.toBe("PARENT-TOKEN-ABC");
       expect(result.resumeType).toBe("claude_id");
+    }
+  });
+
+  it("quotes a hostile fork parent id so it cannot leave the --resume argument (the pane shell is the sink)", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("NEW-POST-FORK-TOKEN-XYZ") });
+
+    const hostileParent = "ABC-123'; touch /tmp/OPENRIG_PWNED; '";
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      forkSource: { kind: "native_id", value: hostileParent },
+    });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    const command = sendText.mock.calls[0]?.[1] as string;
+    // The parent id must arrive as ONE quoted shell word — same treatment
+    // as --model/--effort in the same template and as the codex fork path.
+    expect(command).toContain(`--resume ${shellQuote(hostileParent)}`);
+    // The raw payload must not sit unquoted behind --resume, or the pane
+    // shell would execute everything after the first quote terminator.
+    expect(command).not.toContain("--resume ABC-123");
+    if (result.ok) {
+      expect(result.resumeToken).toBe("NEW-POST-FORK-TOKEN-XYZ");
     }
   });
 
@@ -452,10 +477,8 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     const sentCmd = sendText.mock.calls[0]?.[1] as string;
-    // R2 LOW-4 reconciliation (truthful floor update, assertion intent unchanged): the
-    // no-profile floor now emits the explicit ` -s workspace-write` sandbox argument
-    // (OPR.0.4.8.2 posture helper) between the executable and the fork subcommand.
-    expect(sentCmd).toMatch(/^codex( -p [^ ]+| -s [a-z-]+)* fork/);
+    // The no-profile floor and managed update setting precede the fork subcommand.
+    expect(sentCmd).toMatch(/^codex -s workspace-write '-c' 'check_for_update_on_startup=false' fork/);
     expect(sentCmd).toContain("PARENT-THREAD-ABC");
     if (result.ok) {
       expect(result.resumeToken).toBe("NEW-CODEX-THREAD-XYZ");
@@ -669,6 +692,10 @@ function makeStubAdapter(forkResumeToken: string): RuntimeAdapter {
       if (opts.forkSource) {
         return { ok: true, resumeToken: forkResumeToken, resumeType: "claude_id" };
       }
+      if (opts.resumeToken) {
+        // Match ClaudeCodeAdapter's successful, verified resume result.
+        return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" };
+      }
       return { ok: true };
     }),
   };
@@ -776,6 +803,25 @@ describe("StartupOrchestrator forkSource integration", () => {
       isRestore: true,
     }));
     expect(result).toEqual({ ok: true, startupStatus: "ready", continuityOutcome: "resumed" });
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(s.sessionId)).toEqual({
+      status: "running", startup_status: "ready", resume_type: "claude_id",
+      resume_token: "stored-token-xyz", resume_provenance: "scrape",
+    });
+  });
+
+  it("does not certify resume when the adapter succeeds without identity evidence", async () => {
+    const s = seed();
+    const adapter = makeStubAdapter("unused-fork-token");
+    vi.mocked(adapter.launchHarness).mockResolvedValue({ ok: true });
+    const result = await createOrch().startNode(makeInput(s, {
+      adapter, resumeToken: "stored-token-xyz", isRestore: true,
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(adapter.launchHarness).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(s.sessionId)).toEqual({
+      status: "running", startup_status: "attention_required", resume_type: null,
+      resume_token: null, resume_provenance: null,
+    });
   });
 });
 

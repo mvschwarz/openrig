@@ -182,7 +182,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     }
   });
 
-  it("A1 advisory receipt: with several hand-authored fragments list --json renders all + the 0.5.7 advisory", async () => {
+  it("A1 advisory receipt: with several hand-authored fragments list --json renders all + the one-human advisory", async () => {
     // Fix-r1 F1: the SECOND human arrives by hand-authoring (the registry surface), never
     // through the add verb — the verb is the single-human boundary.
     seedSecondHuman("ana");
@@ -193,7 +193,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     const out = JSON.parse(logSpy.mock.calls.at(-1)![0] as string) as { ok: boolean; humans: unknown[]; advisory?: string };
     expect(out.ok).toBe(true);
     expect(out.humans).toHaveLength(2); // honest display
-    expect(out.advisory).toContain("0.5.7"); // never a management surface
+    expect(out.advisory).toContain("one configured human"); // never a management surface
   });
 
   it("show --json carries authored-vs-default provenance and the fragment path", async () => {
@@ -257,7 +257,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
 
   // ── fix-r1 F1: the add verb IS the single-human boundary ──
 
-  it("F1: a second DISTINCT add REFUSES with teaching (existing human named, hand-authoring + 0.5.7 pointed at) and writes ZERO fragment bytes", async () => {
+  it("F1: a second DISTINCT add REFUSES with teaching (existing human named, remove and hand-authoring pointed at) and writes ZERO fragment bytes", async () => {
     const dirBefore = readdirSync(humansDir(home)).sort();
     const mikeBytes = readFileSync(join(humansDir(home), "mike.yaml"), "utf8");
     const p = program();
@@ -271,7 +271,8 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     expect(process.exitCode).toBe(1);
     const err = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(err).toContain("mike");        // the existing human, named
-    expect(err).toContain("0.5.7");       // where multi-human management lives
+    expect(err).toContain("gateway human remove"); // how to register someone else
+    expect(err).not.toMatch(/\d+\.\d+\.\d+/);     // no promise of a release that manages several
     expect(err).toContain("hand-author"); // the sanctioned several-fragment path
     // Zero new fragment bytes: directory unchanged, existing fragment byte-identical.
     expect(readdirSync(humansDir(home)).sort()).toEqual(dirBefore);
@@ -292,6 +293,55 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     const loaded = loadHumanRegistry(home);
     expect(loaded.ok).toBe(true);
     if (loaded.ok) expect(loaded.entities[0]!.displayName).toBe("Mike Replaced");
+  });
+
+  it.each([
+    { status: 503, body: { error: "queue_unavailable" } },
+    { status: 500, body: [] },
+    { status: 200, body: { error: "invalid_queue_projection" } },
+    { status: 200, body: null },
+    { status: 204, body: undefined },
+  ].flatMap((entry) => [false, true].map((force) => ({ ...entry, force }))))("keeps human removal indeterminate for HTTP $status (force=$force)", async ({ status, body, force }) => {
+    const server = createServer((_req, res) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(body === undefined ? undefined : JSON.stringify(body));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const previousUrl = process.env.OPENRIG_URL;
+    process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const fragment = join(humansDir(home), "mike.yaml");
+    const before = readFileSync(fragment, "utf8");
+    try {
+      const command = gatewayCommand();
+      command.exitOverride();
+      await command.parseAsync(["node", "gateway", "human", "remove", "mike", ...(force ? ["--force"] : [])]);
+      expect(process.exitCode).toBe(1);
+      expect(readFileSync(fragment, "utf8")).toBe(before);
+      const rows = await daemonQueueRows("mike@external");
+      expect(rows.ok).toBe(false);
+      if (!rows.ok) expect(rows.error).toContain(`HTTP ${status}`);
+      expect(errSpy.mock.calls.map((call) => String(call[0])).join("\n")).toContain("queue could not be checked");
+    } finally {
+      if (previousUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = previousUrl;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("allows human removal after HTTP 200 proves the queue is empty", async () => {
+    const { server, url } = await stubQueueDaemon(0);
+    const previousUrl = process.env.OPENRIG_URL;
+    process.env.OPENRIG_URL = url;
+    try {
+      expect(await daemonQueueRows("mike@external")).toEqual({ ok: true, rows: [] });
+      const command = gatewayCommand();
+      command.exitOverride();
+      await command.parseAsync(["node", "gateway", "human", "remove", "mike"]);
+      expect(process.exitCode).toBeUndefined();
+      expect(existsSync(join(humansDir(home), "mike.yaml"))).toBe(false);
+    } finally {
+      if (previousUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = previousUrl;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   // ── fix-r1 F2: the remove guard's row read enumerates to EXHAUSTION ──

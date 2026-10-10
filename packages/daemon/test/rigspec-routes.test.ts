@@ -499,6 +499,30 @@ describe("Rigspec import routes (pod-aware dual-stack)", () => {
     expect(body.code).toBe("missing_rig_root");
   });
 
+  it("POST /api/rigs/import returns 409 and preserves compose project conflict guidance", async () => {
+    const message = "Replacement has multiple predecessor Compose projects (old-a: project-a; old-b: project-b). Set services.project_name in the rig spec YAML to the project you intend to use, then re-run the same command. No services were started.";
+    const routeApp = createTestApp(db, {
+      appDeps: {
+        podInstantiator: {
+          db,
+          instantiate: async () => ({ ok: false, code: "compose_project_conflict", message }),
+        } as never,
+      },
+    }).app;
+
+    const res = await routeApp.request("/api/rigs/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", "X-Rig-Root": "/tmp" },
+      body: POD_AWARE_YAML,
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("compose_project_conflict");
+    expect(body.error).toBe(message);
+    expect(body.message).toBe(message);
+  });
+
   // T8: preflight pod-aware spec without X-Rig-Root returns 400
   it("POST /api/rigs/import/preflight with pod-aware YAML but no X-Rig-Root returns 400", async () => {
     const res = await app.request("/api/rigs/import/preflight", {

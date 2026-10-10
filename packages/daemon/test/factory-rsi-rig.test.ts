@@ -14,7 +14,7 @@ import { parseAgentSpec, validateAgentSpec } from "../src/domain/agent-manifest.
 import { parseWorkflowSpec } from "../src/domain/workflow-spec-cache.js";
 
 const SPECS_ROOT = resolve(import.meta.dirname, "../specs");
-const RIG_SPEC = join(SPECS_ROOT, "rigs/launch/factory-rsi/rig.yaml");
+const RIG_SPEC = join(SPECS_ROOT, "rigs/launch/factory-rsi/world-bundle.yaml");
 const WORKFLOW_SPEC = resolve(
   import.meta.dirname,
   "../src/builtins/workflow-specs/factory-rsi.yaml",
@@ -72,7 +72,7 @@ describe("OPR.0.4.6.FAC2 factory-rsi rig starter", () => {
     // DRIFT VERDICT: STALE ASSERTION (intentional 0.4.6 change), not a
     // regression. The prior assertion pinned "Sonnet Claude seats; Codex
     // builder+checker" with model: sonnet. Release 0.4.6 (commit 8250d702)
-    // shipped `specs/rigs/launch/factory-rsi/rig.yaml` + CULTURE.md with a
+    // shipped `specs/rigs/launch/factory-rsi/world-bundle.yaml` + CULTURE.md with a
     // deliberately different design, documented verbatim in the rig.yaml
     // summary: "Seats inherit their runtime's default model; qa, review, and
     // dogfood run on the alternate runtime for cross-runtime diversity against

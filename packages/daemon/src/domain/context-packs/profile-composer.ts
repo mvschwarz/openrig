@@ -18,11 +18,15 @@
 // PURE by contract, like the manifest parser: file text arrives through the caller's
 // readFile so the same algebra serves library packs today and configured tree roots
 // (project/seat/mission sources) when the wiring atom lands. Every failure is LOUD and names
-// the atom — a compose stops rather than thinning the walk (the Q1 rationale).
+// the atom — a compose stops rather than thinning the walk (the Q1 rationale). One exception:
+// a POST-COMPACTION compose skips a genuinely absent seat recap and reports it in `skipped`,
+// because a compacted seat still has its own restore map and transcript. A handover successor
+// has neither, so its missing recap still fails.
 
 import type { ContextPackAtom, ContextPackProfile } from "./context-pack-types.js";
 import { estimateTokensFromBytes } from "./token-estimate.js";
 import { AddressResolutionError, parseAddress, resolveAddress } from "../markdown-address.js";
+import { isSeatRecapAddress, SourceAbsentError } from "./profile-source-resolver.js";
 
 export class ProfileComposeError extends Error {
   constructor(message: string) {
@@ -78,6 +82,8 @@ export interface ComposedProfile {
   /** Present only for an explicitly selected manifest profile. */
   profileId?: string;
   phases?: ComposedProfilePhase[];
+  /** Present only when a post-compaction compose skipped an absent seat recap; the caller warns. */
+  skipped?: Array<{ atomId: string; address: string }>;
   /** Present ONLY when the budget binds: the report, never a truncation. */
   budget?: {
     limitTokens: number;
@@ -105,15 +111,22 @@ const DROP_ORDER: Record<ContextPackAtom["priority"], number> = { optional: 0, r
 function resolvePieces(input: {
   atoms: ContextPackAtom[];
   readFile: (ref: string) => string;
+  situation: ComposeSituation;
+  /** Collects the atoms this compose skipped (post-compaction absent seat recap only). */
+  skipped: Array<{ atomId: string; address: string }>;
   sourceKindFor?: (atom: ContextPackAtom) => SourceKind;
   phaseId?: string;
 }): ComposedPiece[] {
-  return input.atoms.map((a) => {
+  return input.atoms.flatMap((a): ComposedPiece[] => {
     const { ref, headerPath } = parseAddress(a.address);
     let fileText: string;
     try {
       fileText = input.readFile(ref);
     } catch (err) {
+      if (input.situation === "post-compaction" && err instanceof SourceAbsentError && isSeatRecapAddress(a.address)) {
+        input.skipped.push({ atomId: a.id, address: a.address });
+        return [];
+      }
       throw new ProfileComposeError(`atom '${a.id}' (${a.address}): source file '${ref}' is unreadable — ${(err as Error).message}`);
     }
     let text: string;
@@ -129,7 +142,7 @@ function resolvePieces(input: {
         throw err;
       }
     }
-    return {
+    return [{
       atomId: a.id,
       address: a.address,
       sourceKind: input.sourceKindFor?.(a) ?? "library",
@@ -138,7 +151,7 @@ function resolvePieces(input: {
       text,
       estimatedTokens: estimateTokensFromBytes(Buffer.byteLength(text, "utf-8")),
       ...(input.phaseId !== undefined ? { phaseId: input.phaseId } : {}),
-    };
+    }];
   });
 }
 
@@ -193,14 +206,19 @@ export function composeProfile(input: ComposeInput): ComposedProfile {
   const walk = [...selected.values()].sort((x, y) => x.order - y.order || x.id.localeCompare(y.id));
 
   // 4. RESOLVE every piece through the one address machinery; label its source.
-  const pieces = resolvePieces({ atoms: walk, readFile, sourceKindFor });
+  const skipped: Array<{ atomId: string; address: string }> = [];
+  const pieces = resolvePieces({ atoms: walk, readFile, situation, skipped, sourceKindFor });
 
   const totalEstimatedTokens = pieces.reduce((sum, p) => sum + p.estimatedTokens, 0);
 
   // 5. BUDGET report (mini-req 9): flag, never govern — all pieces stay.
   const budget = budgetReport(pieces, budgetTokens);
 
-  return { situation, runtime, pieces, totalEstimatedTokens, ...(budget !== undefined ? { budget } : {}) };
+  return {
+    situation, runtime, pieces, totalEstimatedTokens,
+    ...(skipped.length > 0 ? { skipped } : {}),
+    ...(budget !== undefined ? { budget } : {}),
+  };
 }
 
 /** Compose one explicit manifest profile. Profiles change only selection and
@@ -220,6 +238,7 @@ export function composeNamedProfile(input: ComposeInput & {
   }
 
   const atomsById = new Map(atoms.map((atom) => [atom.id, atom]));
+  const skipped: Array<{ atomId: string; address: string }> = [];
   const phases: ComposedProfilePhase[] = profile.phases.map((phase) => {
     let selected: ContextPackAtom[];
     let kind: ComposedProfilePhase["kind"];
@@ -241,7 +260,7 @@ export function composeNamedProfile(input: ComposeInput & {
         selected.push(...sourceAtoms);
       }
     }
-    const pieces = resolvePieces({ atoms: selected, readFile, sourceKindFor, phaseId: phase.id });
+    const pieces = resolvePieces({ atoms: selected, readFile, situation, skipped, sourceKindFor, phaseId: phase.id });
     return {
       id: phase.id,
       kind,
@@ -260,6 +279,7 @@ export function composeNamedProfile(input: ComposeInput & {
     phases,
     pieces,
     totalEstimatedTokens,
+    ...(skipped.length > 0 ? { skipped } : {}),
     ...(budget !== undefined ? { budget } : {}),
   };
 }

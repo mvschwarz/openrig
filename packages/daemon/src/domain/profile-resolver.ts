@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { homedir as osHomedir } from "node:os";
 import type {
@@ -8,8 +9,9 @@ import type {
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { discoverSkillsForRuntime, type SkillRuntime } from "./skill-discovery.js";
-import { inspectSkillDirectory, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
+import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
+import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
+import { resolvePluginPath } from "./projection-planner.js";
 
 // -- Types --
 
@@ -51,9 +53,10 @@ export interface ResolvedNodeConfig {
    * read per-seat windows. Retained for a future per-seat decision.
    */
   activity?: { silenceWindowSeconds?: number };
-  /** The catalog-owned portion of the effective skill selection. Runtime
-   *  projection uses this for exact-byte ownership reconciliation. */
+  /** Effective managed sources, including explicitly selected bundle overrides.
+   *  Runtime projection uses these for exact-byte ownership reconciliation. */
   skillLoadout?: SkillLoadout;
+  skillWarnings?: string[];
 }
 
 export interface ResolutionContext {
@@ -164,7 +167,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // skill-discovery.listScanRoots; here we only enforce that
   // rig-local declarations are not overwritten by discovery.
   let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
-  if (runtime === "claude-code" || runtime === "codex" || runtime === "agy") {
+  if (runtime === "claude-code" || runtime === "codex" || runtime === "pi" || runtime === "agy") {
     const discovery = discoverSkillsForRuntime({
       runtime: runtime as SkillRuntime,
       homedir: ctx.homedir ?? osHomedir(),
@@ -191,8 +194,26 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     }
   }
 
+  // S04 — compose independently-selected managed skills around the existing
+  // topology selector (profile.uses.skills). System comes from catalog.yaml;
+  // project comes from project.yaml install.skills. Topology resources that
+  // are not catalog-managed retain the established AgentSpec/local behavior.
+  const catalogRoot = ctx.skillsRoot ?? nodePath.join(ctx.homedir ?? osHomedir(), ".openrig", "skills");
+  const catalogResult = resolveSkillLoadout({
+    catalogRoot,
+    ...(ctx.systemSkills !== undefined ? { systemSkills: ctx.systemSkills } : {}),
+    topologySkills: profile.uses.skills,
+    projectRoot: cwd,
+    allowMissingTopology: true,
+  });
+  // Discovery reads only the working tree, so it can't find a catalog skill whose folder or SKILL.md was deleted or
+  // whose name was edited. A profile skill the catalog skipped for uncommitted content is named below, not missing.
+  const skippedTopology = new Set(catalogResult.ok
+    ? (catalogResult.loadout.skipped ?? []).filter((skip) => skip.selectedBy.includes("topology")).map((skip) => skip.id)
+    : []);
+
   // 3. Resolve profile uses against the augmented pool
-  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors);
+  const selectedResult = resolveProfileUses(profile, pool, spec.name, errors, skippedTopology);
   if (errors.length > 0) {
     // Augment "skills: \"<id>\" not found in resource pool" errors
     // with the structural-rejection reason when the basename matches
@@ -209,20 +230,25 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     return { ok: false, errors: enhanced };
   }
 
-  // S04 — compose independently-selected managed skills around the existing
-  // topology selector (profile.uses.skills). System comes from catalog.yaml;
-  // project comes from project.yaml install.skills. Topology resources that
-  // are not catalog-managed retain the established AgentSpec/local behavior.
-  const catalogRoot = ctx.skillsRoot ?? nodePath.join(ctx.homedir ?? osHomedir(), ".openrig", "skills");
-  const catalogResult = resolveSkillLoadout({
-    catalogRoot,
-    ...(ctx.systemSkills !== undefined ? { systemSkills: ctx.systemSkills } : {}),
-    topologySkills: profile.uses.skills,
-    projectRoot: cwd,
-    allowMissingTopology: true,
-  });
   if (!catalogResult.ok) {
     return { ok: false, errors: catalogResult.errors.map((error) => `${error.code}: ${error.message}`) };
+  }
+  const skips = catalogResult.loadout.skipped ?? [];
+  const skillWarnings: string[] = skips.map((skip) => skip.message);
+  // Filesystem discovery scans the catalog's working tree too, and a profile may declare a source inside a catalog
+  // folder, so a skipped folder's bytes could still reach the adapter through the profile's selection. Drop a
+  // selection whose source is a skipped folder or inside one; a source elsewhere, such as a rig bundle, keeps it.
+  const skippedDirs = skips.map((skip) => ({ real: realDir(skip.sourceDir), dir: skip.sourceDir }));
+  for (let i = selectedResult!.skills.length - 1; i >= 0 && skippedDirs.length > 0; i--) {
+    const entry = selectedResult!.skills[i]!;
+    const resource = entry.resource as SkillResource;
+    const source = realDir(nodePath.isAbsolute(resource.path) ? resource.path : nodePath.resolve(entry.sourcePath, resource.path));
+    const skipped = skippedDirs.find(({ real }) => source === real || isWithin(real, source));
+    if (!skipped) continue;
+    selectedResult!.skills.splice(i, 1);
+    if (!skips.some((skip) => skip.id === entry.effectiveId && skip.selectedBy.length > 0)) {
+      skillWarnings.push(`selected_skill_skipped: '${entry.effectiveId}' (selected by topology) is inside ${skipped.dir}, which has uncommitted content; a copy already projected is kept as it was, and the new content is not projected until it is committed or restored`);
+    }
   }
   for (const managed of catalogResult.loadout.entries) {
     const qualified: QualifiedResource = {
@@ -231,10 +257,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       sourcePath: managed.sourceRoot,
       resource: { id: managed.id, path: nodePath.relative(managed.sourceRoot, managed.sourceDir) },
     };
-    const index = selectedResult!.skills.findIndex((entry) => {
-      const resource = entry.resource as SkillResource;
-      return entry.effectiveId === managed.id || resource.id === managed.id;
-    });
+    const index = selectedResult!.skills.findIndex((entry) => entry.effectiveId === managed.id);
     if (index >= 0) {
       const existing = selectedResult!.skills[index]!;
       const resource = existing.resource as SkillResource;
@@ -242,8 +265,28 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
         ? resource.path
         : nodePath.resolve(existing.sourcePath, resource.path);
       try {
-        const existingDigest = inspectSkillDirectory(existingPath).digest;
-        if (existingDigest !== managed.digest) {
+        const tree = inspectSkillDirectory(existingPath);
+        const bundleRoot = selectedBundleRoot(ctx, existing, existingPath);
+        if (bundleRoot) {
+          const parsed = parseSkillFrontmatter(readFileSync(nodePath.join(existingPath, "SKILL.md"), "utf8"));
+          if (!parsed.ok) throw new Error(parsed.reason);
+          if (parsed.frontmatter.name !== resource.id) {
+            throw new Error(`skill frontmatter name '${parsed.frontmatter.name}' does not match selected identity '${resource.id}'`);
+          }
+          if (tree.digest !== managed.digest) {
+            skillWarnings.push(`skill_bundle_precedence: selected '${existing.effectiveId}' from ${existingPath} instead of differing managed catalog ${managed.sourceDir}; the managed catalog was not changed`);
+          }
+          // Keep the adapter source and the pre-launch reconciler on the same bytes.
+          // The existing ownership rules still protect edits in the target workspace.
+          const sourceSpec = [baseSpec, ...importedSpecs].find((item) => item.sourcePath === existing.sourcePath) ?? baseSpec;
+          Object.assign(managed, {
+            sourceDir: existingPath, sourceRoot: bundleRoot,
+            revision: `agent-spec:${sourceSpec.hash}`, digest: tree.digest, files: tree.files,
+            selectedBy: [...new Set([...managed.selectedBy, "topology" as const])],
+          });
+          continue;
+        }
+        if (tree.digest !== managed.digest) {
           return {
             ok: false,
             errors: [
@@ -262,6 +305,29 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     else selectedResult!.skills.push(qualified);
   }
   selectedResult!.skills.sort((a, b) => a.effectiveId < b.effectiveId ? -1 : a.effectiveId > b.effectiveId ? 1 : 0);
+
+  // A selected plugin's skills reach Claude Code and Codex seats through the managed
+  // loadout, because neither runtime reads skills from the plugin folder projected into
+  // the working directory. A skill the profile already selects keeps that source.
+  if (runtime === "claude-code" || runtime === "codex") {
+    const selectedIds = new Set(selectedResult!.skills.map((skill) => skill.effectiveId));
+    for (const plugin of selectedResult!.plugins) {
+      const resource = plugin.resource as PluginResource;
+      const pluginSkills = resolvePluginSkills({
+        pluginId: resource.id,
+        pluginRoot: resolvePluginPath(resource.source.path, plugin.sourcePath),
+        runtime,
+        pluginType: resource.pluginType,
+      });
+      skillWarnings.push(...pluginSkills.warnings);
+      for (const skill of pluginSkills.entries) {
+        if (selectedIds.has(skill.id)) continue;
+        selectedIds.add(skill.id);
+        catalogResult.loadout.entries.push(skill);
+      }
+    }
+    catalogResult.loadout.entries.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  }
 
   // 7. Resolve restorePolicy with narrowing
   const restorePolicyResult = resolveRestorePolicy(spec, profile, member);
@@ -314,8 +380,40 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       // default 3s when this is missing.
       activity: profile.activity,
       skillLoadout: catalogResult.loadout,
+      ...(skillWarnings.length ? { skillWarnings } : {}),
     },
   };
+}
+
+function realDir(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return nodePath.resolve(path);
+  }
+}
+
+/** True when `child` is strictly inside `root`; `root-other` beside `root` is not. */
+function isWithin(root: string, child: string): boolean {
+  const rel = nodePath.relative(root, child);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(rel);
+}
+
+/** Only profile-selected resources reach this check. Ambient cwd/home discovery
+ * does not gain precedence merely because a profile mentions its identity. */
+function selectedBundleRoot(ctx: ResolutionContext, entry: QualifiedResource, source: string): string | null {
+  const within = (root: string, child: string): boolean => {
+    const rel = nodePath.relative(root, child);
+    return rel !== "" && rel !== ".." && !rel.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(rel);
+  };
+  const roots = entry.sourceSpec === "discovered"
+    ? (ctx.specRoot && within(nodePath.join(ctx.specRoot, "skills"), source) ? [ctx.specRoot] : [])
+    : [ctx.specRoot, entry.sourcePath].filter((root): root is string => !!root && within(root, source));
+  for (const root of roots) {
+    const canonicalRoot = realpathSync(root);
+    if (within(canonicalRoot, realpathSync(source))) return nodePath.resolve(root);
+  }
+  return null;
 }
 
 // -- Resource pool --
@@ -388,6 +486,8 @@ function resolveProfileUses(
   pool: ResourcePool,
   baseSpecName: string,
   errors: string[],
+  /** Skill references the managed catalog skipped for uncommitted content: reported there, never missing here. */
+  skippedSkills: ReadonlySet<string> = new Set(),
 ): ResolvedResources | null {
   const result: ResolvedResources = {
     skills: [],
@@ -410,6 +510,7 @@ function resolveProfileUses(
     for (const ref of refs) {
       const entries = pool[cat].get(ref);
       if (!entries || entries.length === 0) {
+        if (cat === "skills" && skippedSkills.has(ref)) continue;
         errors.push(`Profile uses ${cat}: "${ref}" not found in resource pool`);
         continue;
       }

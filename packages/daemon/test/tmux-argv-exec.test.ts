@@ -33,6 +33,7 @@ describe("tmux argv exec path", () => {
     expect(seen).toEqual([[
       "tmux", "new-session", "-d", "-s", "r01-dev1-impl",
       "-c", "/home/user/my project/code",
+      "-e", "OPENRIG_TRANSCRIPTS_LINES=", "-e", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=",
       "-e", "PATH=/a b:/c", "-e", "EMPTY=",
     ]]);
   });
@@ -48,7 +49,7 @@ describe("tmux argv exec path", () => {
     const seen: string[][] = [];
     const { adapter } = argvAdapter(seen);
     await adapter.startPipePane("seat@rig", "/tmp/out dir/x.log");
-    expect(seen).toEqual([["tmux", "pipe-pane", "-t", "seat@rig", "cat >> '/tmp/out dir/x.log'"]]);
+    expect(seen).toEqual([["tmux", "pipe-pane", "-t", "=seat@rig:", "cat >> '/tmp/out dir/x.log'"]]);
   });
 
   it("respawn keeps the command as ONE trailing unit", async () => {
@@ -67,8 +68,8 @@ describe("tmux argv exec path", () => {
     expect(seen).toEqual([
       ["tmux", "capture-pane", "-p", "-t", "%1", "-S", "-20"],
       ["tmux", "display-message", "-p", "-t", "%1", "#{pane_current_command}"],
-      ["tmux", "detach-client", "-s", "r01-dev1-impl"],
-      ["tmux", "kill-session", "-t", "r01-dev1-impl"],
+      ["tmux", "detach-client", "-s", "=r01-dev1-impl"],
+      ["tmux", "kill-session", "-t", "=r01-dev1-impl"],
     ]);
     // Every unit must survive a shell WITHOUT quoting: argv elements are
     // atomic by construction — the join layer adds nothing.

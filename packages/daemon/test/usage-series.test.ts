@@ -46,6 +46,32 @@ describe("queryUsageSeries — raw rows, time-bounded, per-seat", () => {
     store = new UsageSamplesStore(db);
   });
 
+  it.each([
+    ["2026-08-07T11:00:00+01:00", "2026-08-07T10:00:00.000Z"],
+    ["2026-08-07T09:00:00-01:00", "2026-08-07T10:00:00.000Z"],
+    ["2026-08-07T10:00:00Z", "2026-08-07T10:00:00.000Z"],
+  ])("compares the instant of bound %s, not its spelling", (bound, utc) => {
+    seedContext(store, "a@r", "2026-08-07T09:59:59.999Z", 1, 0);
+    seedContext(store, "a@r", "2026-08-07T10:00:00.000Z", 2, 0);
+    seedContext(store, "a@r", "2026-08-07T10:00:00.001Z", 3, 0);
+    expect(queryUsageSeries(db, { seatSession: "a@r", sinceIso: bound })).toEqual(queryUsageSeries(db, { seatSession: "a@r", sinceIso: utc }));
+    expect(queryUsageSeries(db, { seatSession: "a@r", untilIso: bound })).toEqual(queryUsageSeries(db, { seatSession: "a@r", untilIso: utc }));
+  });
+
+  it.each(["2026-02-30T10:00:00Z", "2026-01-32T10:00:00Z", "2026-08-07T24:00:00Z", "2026-08-07T10:60:00Z", "2026-08-07T10:00:60Z"])("keeps unsupported invalid bound %s unchanged", (bound) => {
+    seedContext(store, "a@r", "2026-03-01T10:00:00.000Z", 1, 0);
+    const expected = db.prepare("SELECT total_input_tokens FROM usage_samples WHERE captured_at >= ? ORDER BY captured_at, id").all(bound) as { total_input_tokens: number }[];
+    expect(queryUsageSeries(db, { sinceIso: bound }).map(row => row.totalInputTokens)).toEqual(expected.map(row => row.total_input_tokens));
+  });
+
+  it("keeps inclusive/exclusive edges for a bound between stored millisecond instants", () => {
+    seedContext(store, "a@r", "2026-08-07T10:00:00.000Z", 1, 0);
+    seedContext(store, "a@r", "2026-08-07T10:00:00.001Z", 2, 0);
+    const bound = "2026-08-07T11:00:00.0001+01:00";
+    expect(queryUsageSeries(db, { sinceIso: bound }).map(row => row.totalInputTokens)).toEqual([2]);
+    expect(queryUsageSeries(db, { untilIso: bound }).map(row => row.totalInputTokens)).toEqual([1]);
+  });
+
   it("serves the RAW stored rows filtered by seat and since-bound, oldest first", () => {
     seedContext(store, "a@r", "2026-08-07T10:00:00.000Z", 1000, 100);
     seedContext(store, "a@r", "2026-08-07T11:00:00.000Z", 3000, 200);
@@ -142,5 +168,50 @@ describe("computeTopBurn — tokens/hour + window velocity, facts not judgments"
     expect(top.ranked.length).toBe(2);
     expect(top.ranked[0]!.seatSession).toBe("s4@r");
     expect(top.totalRankedSeats).toBe(5);
+  });
+});
+
+
+describe("top burn across same-name node histories", () => {
+  function sample(store: UsageSamplesStore, nodeId: string, at: string, total: number) {
+    store.appendContextSample({ nodeId, seatSession: "dev.qa@reused-rig", source: "codex_token_count_jsonl",
+      sampledAt: at, totalInputTokens: total, totalOutputTokens: 0, usedPercentage: 10 }, at);
+  }
+
+  it("does not treat alternating node counter baselines as consumption or resets", () => {
+    const db = db_();
+    try {
+      const store = new UsageSamplesStore(db);
+      sample(store, "old", "2026-08-07T10:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T10:30:00.000Z", 100000);
+      sample(store, "old", "2026-08-07T11:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T12:00:00.000Z", 100000);
+      expect(computeTopBurn(db, { windowHours: 4, nowIso: NOW }).ranked[0]).toMatchObject({ tokensDelta: 0, tokensPerHour: 0, resets: 0 });
+    } finally { db.close(); }
+  });
+
+  it("sums actual deltas and resets within each node only", () => {
+    const db = db_();
+    try {
+      const store = new UsageSamplesStore(db);
+      sample(store, "old", "2026-08-07T10:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T10:30:00.000Z", 100000);
+      sample(store, "old", "2026-08-07T11:00:00.000Z", 1500);
+      sample(store, "new", "2026-08-07T11:30:00.000Z", 500);
+      sample(store, "new", "2026-08-07T12:00:00.000Z", 750);
+      expect(computeTopBurn(db, { windowHours: 4, nowIso: NOW }).ranked[0]).toMatchObject({ tokensDelta: 750, tokensPerHour: 375, resets: 1 });
+    } finally { db.close(); }
+  });
+
+  it("reports insufficient samples when neither node has a measurable pair", () => {
+    const db = db_();
+    try {
+      const store = new UsageSamplesStore(db);
+      sample(store, "old", "2026-08-07T10:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T12:00:00.000Z", 100000);
+      const result = computeTopBurn(db, { windowHours: 4, nowIso: NOW });
+      expect(result.ranked).toEqual([]);
+      expect(result.unknown).toEqual([{ seatSession: "dev.qa@reused-rig", reason: "insufficient_samples" }]);
+    } finally { db.close(); }
   });
 });

@@ -39,8 +39,8 @@ function fixture() {
   const jobs = new WatchdogJobsRepository(db); queue.attachWatchdogJobsRepository(jobs);
   const stop = queue.startWaitReminders();
   const runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue, watchdogJobsRepo: jobs });
-  const projection = () => buildExecutionView({ db, slicesRoot: () => join(root, "missions"), exec: () => { throw new Error("No repository in this fixture"); } }, { mission }) as unknown as ExecutionViewSnap;
-  const snapshot = (): FleetSnapshot => ({ ...emptySnapshot(), execution: projection(), executionMission: mission, hydratedAt: new Date().toISOString(), hosts: [{ name: "fixture", reachable: true, rigs: [{ name: "example", pods: [{ name: "orch", agents: [{ name: "orch.lead", session: owner, spec: "analyst", runtime: "codex", model: "gpt-6", context: null, tokens: null, status: "active", live: true }] }] }] }] });
+  const projection = async () => await buildExecutionView({ db, slicesRoot: () => join(root, "missions"), exec: () => { throw new Error("No repository in this fixture"); } }, { mission }) as unknown as ExecutionViewSnap;
+  const snapshot = async (): Promise<FleetSnapshot> => ({ ...emptySnapshot(), execution: await projection(), executionMission: mission, hydratedAt: new Date().toISOString(), hosts: [{ name: "fixture", reachable: true, rigs: [{ name: "example", pods: [{ name: "orch", agents: [{ name: "orch.lead", session: owner, spec: "analyst", runtime: "codex", model: "gpt-6", context: null, tokens: null, status: "active", live: true }] }] }] }] });
   return { root, missionPath, project, projectBytes, db, queue, jobs, runtime, projection, snapshot, close: () => { stop(); db.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -50,10 +50,10 @@ describe("connected workflow journey", () => {
   afterEach(() => f.close());
   it("follows real active → wait → blocker completion → resumed progress → complete with no successor", async () => {
     const run = await f.runtime.instantiateLifecycle({ missionPath: f.missionPath, operationKey: "s05-proof", rootObjective: "Deliver this release", createdBySession: owner });
-    let snap = f.snapshot();
+    let snap = await f.snapshot();
     const view = createViewState({ instanceId: "s05", getSnapshot: () => snap });
-    const save = (name: string) => {
-      snap = f.snapshot();
+    const save = async (name: string) => {
+      snap = await f.snapshot();
       if (evidenceDir) {
         mkdirSync(evidenceDir, { recursive: true });
         writeFileSync(join(evidenceDir, `${name}.json`), JSON.stringify(snap, null, 2));
@@ -61,7 +61,7 @@ describe("connected workflow journey", () => {
       }
     };
     view.dispatch(parseCommand(`mission ${mission}`));
-    save("active");
+    await save("active");
     expect(snap.execution!.lifecycle_instances![0]!.graph_source).toMatchObject({ mode: "project-profile" });
     const overview = renderScreen(view.get(), snap, { cols: 120, rows: 36 });
     expect(overview.lines.join("\n")).toContain("WORKFLOWS");
@@ -84,24 +84,24 @@ describe("connected workflow journey", () => {
     expect(view.get().contentOffset).toBe(7);
     const blocker = await f.queue.create({ sourceSession: owner, destinationSession: "review@example", body: "Inspect candidate evidence", summary: "Candidate evidence from review", nudge: false });
     await f.runtime.project({ instanceId: run.instance.instanceId, currentPacketId: run.entryQitemId, actorSession: owner, exit: "waiting", resultNote: "Waiting for candidate evidence from review", blockedOn: blocker.qitemId });
-    view.dispatch({ type: "content-scroll", delta: -100 }); save("waiting");
+    view.dispatch({ type: "content-scroll", delta: -100 }); await save("waiting");
     const frontier = snap.execution!.lifecycle_instances![0]!.frontier_packets as Array<Record<string, unknown>>;
     expect(frontier[0]).toMatchObject({ queue_state: "blocked", blocked_on: blocker.qitemId, wake: { kind: "timer", phase: "armed", live: true }, wake_schedule: { interval_seconds: 300 }, latest_transition: { actor_session: owner } });
     detail = workflowDetail(snap.execution!, `packet:${run.entryQitemId}`, 60)!.map((l) => l.text).join("\n");
     expect(detail).toContain("Candidate evidence from review");
     expect(detail).toContain("300 seconds");
     await f.queue.update({ qitemId: blocker.qitemId, actorSession: "review@example", state: "done", closureReason: "no-follow-on" });
-    save("resumed");
+    await save("resumed");
     expect((snap.execution!.lifecycle_instances![0]!.frontier_packets as Array<Record<string, unknown>>)[0]!.queue_state).toBe("pending");
     // Current YAML changing does not silently replace the compiled graph being shown.
     writeFileSync(join(f.root, "project.yaml"), f.projectBytes + "\n# later edit\n");
-    expect(f.projection().lifecycle_instances![0]!.compiled_input_digest).toBe(snap.execution!.lifecycle_instances![0]!.compiled_input_digest);
+    expect((await f.projection()).lifecycle_instances![0]!.compiled_input_digest).toBe(snap.execution!.lifecycle_instances![0]!.compiled_input_digest);
     for (const step of expectedSteps) {
       const current = f.runtime.inspect(run.instance.instanceId).frontier[0]!;
       expect(current.stepId).toBe(step);
       await f.runtime.project({ instanceId: run.instance.instanceId, currentPacketId: current.packetId, actorSession: owner, exit: step === "release-boundary" ? "done" : "handoff", closureEvidence: { evidence_ref: `proof/${step}.md` } });
     }
-    view.dispatch(parseCommand(`workflow ${run.instance.instanceId}`)); save("completed");
+    view.dispatch(parseCommand(`workflow ${run.instance.instanceId}`)); await save("completed");
     expect(snap.execution!.lifecycle_instances![0]!.status).toBe("completed");
     detail = workflowDetail(snap.execution!, `workflow:${run.instance.instanceId}`, 72)!.map((l) => l.text).join("\n");
     expect(detail).toContain("No current work packet · workflow completed");
@@ -122,7 +122,7 @@ describe("connected workflow journey", () => {
     writeFileSync(join(f.missionPath, "mission.yaml"), stringify({ kind: "mission", metadata: { name: mission }, composition: { slices: [] }, lifecycle: { profile: "release-boundary-v0", mode: "extend", workflow: { steps: [{ id: "activate-successor", actor_role: "orchestrator", depends_on: ["release-boundary"], allowed_exits: ["done", "waiting", "failed"] }] } } }));
     const run = await f.runtime.instantiateLifecycle({ missionPath: f.missionPath, operationKey: "next", rootObjective: "Release", createdBySession: owner });
     f.db.prepare("DELETE FROM workflow_frontier_bindings WHERE packet_id = ?").run(run.entryQitemId);
-    const execution = f.projection();
+    const execution = await f.projection();
     const body = workflowDetail(execution, `workflow:${run.instance.instanceId}`, 100)!.map((l) => l.text).join("\n");
     expect(body).toContain("Optional successor");
     expect(body).toContain("0 step bindings");

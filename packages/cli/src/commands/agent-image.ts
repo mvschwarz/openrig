@@ -100,7 +100,7 @@ export function agentImageCommand(depsOverride?: StatusDeps): Command {
 Examples:
   rig agent-image list
   rig agent-image show driver-release-primed
-  rig agent-image create velocity-driver@openrig-velocity --name driver-release-primed --notes "after review"
+  rig agent-image create dev-build@starter --name driver-release-primed --notes "after review"
   rig agent-image preview driver-release-primed
   rig agent-image pin driver-release-primed
   rig agent-image prune --dry-run
@@ -130,6 +130,7 @@ Examples:
       try {
         const client = await getClient();
         const res = await client.get<AgentImageEntryWire[]>("/api/agent-images/library");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         let entries = res.data ?? [];
         if (opts.runtime) entries = entries.filter((e) => e.runtime === opts.runtime);
         if (opts.json) {
@@ -216,7 +217,7 @@ Examples:
     });
 
   cmd.command("create")
-    .argument("<source-session>", "Source session canonical name (e.g., velocity-driver@openrig-velocity)")
+    .argument("<source-session>", "Source session canonical name (e.g., dev-build@starter)")
     .description("Capture a productive seat's resumable state into a new agent image")
     .requiredOption("--name <name>", "Image name (used as the directory name and library id)")
     // Use --image-version instead of --version because Commander.js

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { DaemonClient } from "../src/daemon-client.js";
+import { DaemonClient, launchNodeNotice } from "../src/daemon-client.js";
 import { StartupController, startupLines, type StartupSeat } from "../src/startup.js";
 import { createViewState, emptySnapshot } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
@@ -28,9 +28,46 @@ function fixture() {
   });
   return { controller, seat, posts, startDaemon, onWork, onNative, response: (fn: typeof response) => { response = fn; }, down: () => { probeState = "down"; } };
 }
-async function chooseOperator(f: ReturnType<typeof fixture>) { await f.controller.refresh(); await f.controller.key("enter"); }
+async function chooseOperator(f: ReturnType<typeof fixture>) { await f.controller.open(); await f.controller.key("enter"); }
 
 describe("TUI startup choices", () => {
+  const stagedWarning = "Startup prompt still staged in worker@example; press Enter in that pane.";
+  it.each([80, 140])("#736 wraps ordinary launch guidance at %s columns through layout and scroll", cols => {
+    const view = createViewState({ instanceId: "test" });
+    view.dispatch({ type: "tab", tab: "pulse" });
+    view.dispatch({ type: "layout", contentMaxOffset: 50, contentTargetCount: 0 });
+    view.dispatch({ type: "content-scroll", delta: 20 });
+    view.dispatch({ type: "notice", message: launchNodeNotice("worker", { ok: true, warnings: [stagedWarning] }) });
+    expect(view.get().contentOffset).toBe(0);
+    for (const rows of [24, 8]) {
+      let screen = renderScreen(view.get(), emptySnapshot(), { cols, rows });
+      view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+      const content = new Map<number, string>();
+      for (let offset = 0; offset <= screen.contentMaxOffset; offset++) {
+        screen = renderScreen(view.get(), emptySnapshot(), { cols, rows });
+        expect(screen.lines).toHaveLength(rows);
+        expect(screen.lines.every(line => !/[\r\n]/.test(line) && line.length <= cols)).toBe(true);
+        screen.lines.filter(line => line.includes("┃ ")).forEach((line, index) => {
+          const text = line.split("┃ ")[1]!.trim();
+          if (!text.startsWith("scroll ↑/↓")) content.set(offset + index, text);
+        });
+        view.dispatch({ type: "content-scroll", delta: 1 });
+      }
+      expect([...content.values()].join(" ").replace(/\s+/g, " ")).toContain(stagedWarning);
+      expect(view.get().notice).toContain(stagedWarning);
+      view.dispatch({ type: "content-scroll", delta: -100 });
+    }
+    view.dispatch({ type: "jump", section: "topology" });
+    expect(view.get().notice).toBeNull();
+  });
+  it("#736 keeps the successful launch warning when the following read fails, without replay", async () => {
+    const f = fixture(); await chooseOperator(f);
+    f.response(async () => { f.down(); return new Response(JSON.stringify({ ok: true, message: "Launch returned", warnings: [stagedWarning] })); });
+    await f.controller.key("enter");
+    expect(f.posts).toHaveLength(1);
+    expect(f.controller.state.notice).toBe(`Launch returned\n${stagedWarning}\nStatus refresh unavailable: connection refused`);
+    expect(f.controller.state.busy).toBe(false);
+  });
   it("opens the existing native terminal and refreshes without a launch, then explicitly continues context", async () => {
     const f = fixture(); f.seat.observed.state = "attention_required"; f.seat.contextPending = true;
     await chooseOperator(f); await f.controller.key("o");
@@ -122,6 +159,21 @@ describe("TUI startup choices", () => {
     expect(f.controller.state.notice).toBe("Hook review needs a decision");
     expect(f.posts).toHaveLength(1);
   });
+  it.each(["running", "attention_required"] as const)("#729: retains startup warnings after the %s refresh", async state => {
+    const f = fixture();
+    f.response(async () => {
+      f.seat.observed.state = state;
+      f.seat.observed.detail = "Current observed state";
+      return new Response(JSON.stringify({ ok: true, message: "Launch returned", warnings: ["Startup submission unverified: capture unavailable"] }));
+    });
+    await chooseOperator(f); await f.controller.key("enter");
+    expect(f.controller.state.notice).toContain("Startup submission unverified: capture unavailable");
+    if (state === "attention_required") {
+      expect(f.controller.state.notice).toContain("Current observed state");
+      expect(f.controller.state.notice).not.toContain("Launch returned");
+    }
+    expect(f.posts).toHaveLength(1);
+  });
   it("a lost launch response reads the actual effect and never repeats the POST", async () => {
     const f = fixture(); f.seat.intendedAction = "resume-original";
     f.response(async () => { f.seat.observed.state = "running"; f.seat.revision = "rev2"; throw new Error("response lost"); });
@@ -130,6 +182,15 @@ describe("TUI startup choices", () => {
     await f.controller.key("enter");
     expect(f.posts).toHaveLength(1);
     expect(f.onWork).toHaveBeenCalledTimes(1);
+  });
+  it("#729: keeps the warning beside an independently failed startup result", async () => {
+    const f = fixture();
+    f.response(async () => new Response(JSON.stringify({ ok: false, message: "Identity needs attention",
+      warnings: ["Startup submission unverified"] }), { status: 409 }));
+    await chooseOperator(f); await f.controller.key("f"); await f.controller.key("y");
+    expect(f.posts).toHaveLength(1);
+    expect(f.controller.state.notice).toBe("Identity needs attention\nStartup submission unverified");
+    expect(f.controller.state.busy).toBe(false);
   });
   it("provider failure is visible and does not offer fresh as its cure", async () => {
     const f = fixture();

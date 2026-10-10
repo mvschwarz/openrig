@@ -221,11 +221,13 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
     expect(result.rows[49]?.rigOrMissionName).toBe("discovery-60@rig");
   });
 
-  it("fleet view returns rows + drift indicator metadata", async () => {
+  it("fleet view reports unobserved CLI capabilities without claiming stale versions", async () => {
     const result = await readLayer.readView("fleet");
     expect(result.viewName).toBe("fleet");
     expect(typeof result.meta.rowCount).toBe("number");
-    // staleCliCount is present (may be 0 with default no-op probe).
-    expect(typeof result.meta.rigsRunningStaleCli).toBe("number");
+    expect(result.rows[0]?.confidenceFreshness).toBe("unknown");
+    expect(result.meta.rigsRunningStaleCli).toBe(0);
+    expect(result.meta.rigsWithUnknownCliCapabilities).toBe(1);
+    expect(result.meta.degradedFields).toBeUndefined();
   });
 });

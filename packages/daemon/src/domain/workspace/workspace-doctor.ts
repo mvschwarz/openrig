@@ -257,7 +257,7 @@ function allowlistPathCoversRoot(allowlistPath: string, workspaceRoot: string): 
   }
   if (normEntry === normRoot) return true;
   const rel = path.relative(normEntry, normRoot);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 export interface CheckDaemonWorkspaceInput {

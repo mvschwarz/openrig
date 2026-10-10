@@ -4,7 +4,7 @@ Use this example to adapt reviewed work to a repository with CSV handling. Choos
 
 This is a concrete CSV-validation example for adaptation, not a requirement that an arbitrary repository become a CSV project or every outcome be split into two slices. This example uses two genuinely dependent slices. Select a real, authorized repository and record its starting commit and existing CSV behavior. If it has no relevant CSV code, choose two dependent changes appropriate to that repository and rewrite the example objectives before execution; ordinary user tasks retain their appropriate size.
 
-For the example only, repository root and work root are the same absolute directory, called `PROJECT_ROOT`. The selected project ID is `csv-tool`, mission is `csv-validation`, and rig is the shipped `first-project`. These are authored example identities, not live discoveries. Resolve existing catalog/config/intent first. Never overwrite a real `project.yaml`, `workspace.yaml`, `SPEC.md`, `AGENTS.md`, or existing mission to install a template. Merge compatible fields deliberately or choose an unused work directory and preserve the existing catalog entries. If using a separate work root, launch seats in the code repository and record both roots in intent/context. Keep `project.yaml` two directories above the mission directory for this compiler path; arbitrary custom mission-root layouts are not established here.
+For the example only, repository root and work root are the same absolute directory, called `PROJECT_ROOT`. The selected project ID is `csv-tool`, mission is `csv-validation`, and rig is the shipped `starter`. These are authored example identities, not live discoveries. Resolve existing catalog/config/intent first. Never overwrite a real `project.yaml`, `workspace.yaml`, `SPEC.md`, `AGENTS.md`, or existing mission to install a template. Merge compatible fields deliberately or choose an unused work directory and preserve the existing catalog entries. If using a separate work root, launch seats in the code repository and record both roots in intent/context. Keep `project.yaml` two directories above the mission directory for this compiler path; arbitrary custom mission-root layouts are not established here.
 
 ## Manual work and the queue loop
 
@@ -16,12 +16,12 @@ in the project's existing files.
 
 When work should outlive a turn, the actual owner verifies its identity and uses
 the queue. In this example, owner/checker addresses are synthetic until verified
-against the real `first-project` team. The task file contains the real outcome,
+against the real `starter` team. The task file contains the real outcome,
 boundary, acceptance and evidence pointers; create it before sending:
 
 ```sh
 rig whoami --json
-rig queue create --destination dev-owner@first-project \
+rig queue create --destination dev-build@starter \
   --body-file ./TASK.md --summary 'Implement the agreed CSV inspection' --json
 rig queue claim <returned-qitem-id> --json
 ```
@@ -29,7 +29,7 @@ rig queue claim <returned-qitem-id> --json
 After implementing and checking the cumulative candidate, the current owner uses:
 
 ```sh
-rig queue handoff <owned-qitem-id> --to dev-check@first-project \
+rig queue handoff <owned-qitem-id> --to dev-review@starter \
   --body-file ./REVIEW-REQUEST.md --json
 ```
 
@@ -86,8 +86,8 @@ permissions, supplies a missing product decision or authorizes more work.
 
 ## Permissions at the point of work
 
-Before the first task, ask the agent to configure your choice: keep prompts,
-remember selected commands, or deliberately select broader access. Use
+Before the first task, ask the agent to configure your choice: keep the team
+default, remember selected commands, or deliberately select broader access. Use
 `rig context get skills/applying-a-permission-policy/SKILL.md`, or the
 [compatible source/package paths](../SKILL.md#find-the-compatible-permission-guide).
 The agent handles setup and verifies the actual conversation; the user need not
@@ -100,7 +100,7 @@ work unattended.
 
 ## Grow the running team
 
-Keep `first-project`'s owner and checker when they are enough. When there is useful
+Keep `starter`'s builder and reviewer when they are enough. When there is useful
 independent work, add one or two seats to that running rig. The example below adds
 two builders; it does not require a larger starter, new Workflow or replacement
 sessions. Use the actual rig name if yours differs.
@@ -112,33 +112,34 @@ general-purpose agent:
 
 ```sh
 rig ps --json
-rig ps --nodes --rig first-project --json
-rig queue list --destination dev-owner@first-project --json
+rig ps --nodes --rig starter --json
+rig queue list --destination dev-build@starter --json
 rig specs show orchestrator --kind agent --json
 rig grow --help
 ```
 
-Set `RIG_ID` to the `rigId` for the running `first-project`, and `PROJECT_ROOT`
+Set `RIG_ID` to the `rigId` for the running `starter`, and `PROJECT_ROOT`
 to the absolute code repository. Verify its existing `dev` pod and choose unused
-member names. When the user has authorized the added capacity and cost, run:
+member names. Here `parser` owns CSV parsing and `cli` owns the command interface.
+When the user has authorized the added capacity and cost, run:
 
 ```sh
-rig grow "$RIG_ID" a b --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
-rig ps --nodes --rig first-project --json
+rig grow "$RIG_ID" parser cli --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
+rig ps --nodes --rig starter --json
 ```
 
-For one builder, omit `b`. The expected new logical IDs are `dev.a` and `dev.b`,
-with addresses `dev-a@first-project` and `dev-b@first-project`; use the actual
+For one builder, omit `cli`. The expected new logical IDs are `dev.parser` and `dev.cli`,
+with addresses `dev-parser@starter` and `dev-cli@starter`; use the actual
 returned identities. The command adds and launches the named seats.
 
 To put those seats in a **new** pod instead, choose this alternative once, with an
-unused pod ID; do not run both examples for the same desired capacity:
+unused domain pod such as `data`; do not run both examples for the same desired capacity:
 
 ```sh
-rig grow "$RIG_ID" a b --new-pod build --runtime codex --cwd "$PROJECT_ROOT" --json
+rig grow "$RIG_ID" parser cli --new-pod data --runtime codex --cwd "$PROJECT_ROOT" --json
 ```
 
-That alternative produces `build.a`/`build.b` and corresponding `build-...`
+That alternative produces `data.parser`/`data.cli` and corresponding `data-...`
 addresses. `--pod` and `--new-pod` are mutually exclusive. With one existing pod,
 `--pod` can be inferred; select it explicitly when the intended target matters.
 The runtime defaults to `claude-code` and cwd defaults to the caller's current
@@ -153,7 +154,7 @@ agent specs, use the optional Architect path below and `rig expand --help`.
 Inspect each node's status/error and native pane. Confirm existing seats and work
 remain present; a created node is not readiness. Partial results can leave nodes
 persisted. After a timeout, reconcile topology before retrying. Fix the reported
-cause, then use `rig launch "$RIG_ID" dev.a` only for an already-created seat that
+cause, then use `rig launch "$RIG_ID" dev.parser` only for an already-created seat that
 failed to start. That command does not create a missing seat.
 
 New seats do not inherit the owner's conversation or task. Record the agreed
@@ -163,8 +164,8 @@ checks, next owner and stopping condition. Then deliver the context instruction,
 for example for the first builder:
 
 ```sh
-rig send dev-a@first-project "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
-rig capture dev-a@first-project
+rig send dev-parser@starter "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
+rig capture dev-parser@starter
 ```
 
 Read the actual reply and pane; resolve startup/login/permission prompts under the
@@ -174,7 +175,7 @@ the coordinator creates the distinct agreed task (or hands off an existing owned
 task instead of duplicating it):
 
 ```sh
-rig queue create --destination dev-a@first-project \
+rig queue create --destination dev-parser@starter \
   --body-file "$PROJECT_ROOT/.openrig/factory/TASK-A.md" \
   --summary 'Implement the agreed independent change A' --json
 ```
@@ -190,9 +191,9 @@ working agreement and assigned work, not the seat's name or default agent label.
 
 | Seat in this example | Deliberately agreed responsibility |
 | --- | --- |
-| `dev-owner@first-project` | Initially implements and coordinates; can become the dedicated orchestrator, selecting outcomes, separating tasks, owning integration and retaining next-work custody. |
-| `dev-a@first-project`, `dev-b@first-project` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
-| `dev-check@first-project` | Retains independent judgment under the project's review policy. The implementer does not count its own check as independent review. |
+| `dev-build@starter` | Initially implements and coordinates; can become the dedicated orchestrator, selecting outcomes, separating tasks, owning integration and retaining next-work custody. |
+| `dev-parser@starter`, `dev-cli@starter` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
+| `dev-review@starter` | Retains independent judgment under the project's review policy. The implementer does not count its own check as independent review. |
 
 This is one progression, not a required four-seat layout. One extra builder may
 be enough; a different workload may justify a specialist or additional independent
@@ -213,7 +214,7 @@ rewrite the starter or your original authored `rig.yaml`. Save a
 separate live export to an unused user-owned path:
 
 ```sh
-rig export "$RIG_ID" -o "$PROJECT_ROOT/.openrig/factory/first-project-expanded.yaml"
+rig export "$RIG_ID" -o "$PROJECT_ROOT/.openrig/factory/starter-expanded.yaml"
 ```
 
 Inspect the export and reconcile it with your user-owned authored RigSpec, retaining
@@ -240,8 +241,8 @@ YAML authoring is optional; ordinary growth uses the commands above.
 ### Remove capacity deliberately
 
 When a seat is no longer needed, preserve its work and next owner first.
-`rig remove "$RIG_ID" dev.a` removes that seat; `rig shrink "$RIG_ID" build`
-removes the whole optional build pod. These end the affected sessions. Removal
+`rig remove "$RIG_ID" dev.parser` removes that seat; `rig shrink "$RIG_ID" data`
+removes the whole optional data pod. These end the affected sessions. Removal
 refuses active work unless you explicitly select a live `--fallback <live-seat>`
 to receive it. Check the exact targets, handoff and returned outcomes; do not use
 fallback to discard an obligation or remove seats merely because they look idle.
@@ -326,14 +327,14 @@ lifecycle:
   workflow:
     objective: Add reviewed CSV validation without modifying input data
     target:
-      rig: first-project
+      rig: starter
     entry:
       role: owner
     roles:
       owner:
-        preferred_targets: [dev-owner@first-project]
+        preferred_targets: [dev-build@starter]
       checker:
-        preferred_targets: [dev-check@first-project]
+        preferred_targets: [dev-review@starter]
     context_refs:
       - SPEC.md#intent
       - SPEC.md#acceptance
@@ -457,12 +458,12 @@ Complete initial Markdown bodies are specified below, after those frontmatter bl
 
 | File relative to `PROJECT_ROOT` | Initial headings and bodies |
 | --- | --- |
-| `SPEC.md` | `# CSV tool`; `## Purpose`: “Help a person detect invalid CSV input before an import changes data.” `## Working agreement`: “Preserve existing repository rules, data and unrelated edits. The first-project owner coordinates implementation and continuity; dev-check independently checks the exact cumulative candidate. The user decides unresolved product behavior. Agreed local implementation, regression checks and review need no repeated approval; publication, destructive data changes and new external effects remain outside this task. Read the current queue and mission before acting; record evidence and unresolved facts, not invented completion.” |
+| `SPEC.md` | `# CSV tool`; `## Purpose`: “Help a person detect invalid CSV input before an import changes data.” `## Working agreement`: “Preserve existing repository rules, data and unrelated edits. The starter builder coordinates implementation and continuity; dev-review independently checks the exact cumulative candidate. The user decides unresolved product behavior. Agreed local implementation, regression checks and review need no repeated approval; publication, destructive data changes and new external effects remain outside this task. Read the current queue and mission before acting; record evidence and unresolved facts, not invented completion.” |
 | `missions/csv-validation/SPEC.md` | `# CSV validation`; `## Intent`: “A user can inspect a CSV and receive a useful validation result without changing the input file or imported data. First implement a pure inspection result; then expose it in the existing CLI.” `## Acceptance`: “Missing required headers name every missing column. Valid input passes. The CLI uses the inspection result and its chosen blank-cell rule, returns the repository's documented success/failure status and preserves input bytes. Tests exercise both slices. One independent checker records the exact candidate, commands, results and limits. The owner explains how to try it and preserves next-work custody. No publication.” |
 | `missions/csv-validation/NOTES.md` | `# Decisions`; `## Blank required cells`: “PENDING — the user must decide whether a present required column containing blank cells is rejected or accepted. Slice 01 can report those cells without choosing policy; slice 02 must not guess the CLI rule. Record the user's decision, timestamp and source here.” |
 | `missions/csv-validation/PROGRESS.md` | `# Progress`; `## Current position`: “Planned; no implementation, runtime instance or review result yet. Record the operation key, instance/frontier IDs, current owner, candidate and next action when observed.” |
 | `missions/csv-validation/slices/01-inspect/SPEC.md` | `# Inspect CSV`; `## Intent`: “Add or adapt a pure inspection function using the repository's CSV handling. Return missing required headers and blank required cells with row/column locations; do not modify input or choose the pending CLI blank-cell policy.” `## Acceptance`: “Missing-header, valid-input, quoted-field and blank-cell cases produce the documented result. Input bytes and existing import behavior remain unchanged. Record actual commands and candidate for the cumulative checker.” |
-| `missions/csv-validation/slices/02-cli/SPEC.md` | `# CLI validation`; `## Intent`: “Expose slice 01's inspection result through the existing CLI. Reuse its result rather than implementing a second parser. Resolve `../../NOTES.md#blank-required-cells` with the user before choosing the CLI outcome.” `## Acceptance`: “The CLI names missing columns, applies the recorded blank-cell rule, uses documented exit statuses and preserves input bytes. Focused valid/invalid cases and the existing relevant regression checks pass on the candidate supplied to dev-check.” |
+| `missions/csv-validation/slices/02-cli/SPEC.md` | `# CLI validation`; `## Intent`: “Expose slice 01's inspection result through the existing CLI. Reuse its result rather than implementing a second parser. Resolve `../../NOTES.md#blank-required-cells` with the user before choosing the CLI outcome.” `## Acceptance`: “The CLI names missing columns, applies the recorded blank-cell rule, uses documented exit statuses and preserves input bytes. Focused valid/invalid cases and the existing relevant regression checks pass on the candidate supplied to dev-review.” |
 | Both slices' `PROGRESS.md` | `# Progress`; `## Current position`: “Planned; no implementation or proof claimed. Record the exact candidate, completed checks, open dependency and current queue packet as work proceeds.” |
 | Both slices' `PROOF.md` | `# Proof`; `## Evidence`: “No evidence yet. For each executed check record candidate, command, result, evidence path and limits. The independent checker attributes its own judgment separately from author checks.” |
 
@@ -471,15 +472,15 @@ The CLI implementation interface and check commands are repository-derived facts
 ## Bootstrap, context and refocus
 
 1. **Current agent:** inspect the selected installation, repository instructions and existing project catalog. Use `rig --help`, `rig config get workspace.root`, `rig config get workspace.catalog_path`, `rig config get workspace.slices_root` and `rig workspace doctor` as appropriate. Preview an additive `rig config init-workspace --root <chosen-root> --dry-run` if no work tree exists. That scaffolder does not bind the roots or supply the metadata/lifecycle graph above. When setting up the intended instance, use ordinary config help to bind only the intended instance to the selected workspace/catalog/slices root; preserve other catalog entries. Do not silently point a shared daemon at a different project. Scope creation helpers may write the skeleton, but inspect and complete the actual manifests before compiling.
-2. **Current agent, with the user's existing authority:** follow the public guide's prerequisite and permission choice once, preview `first-project`, plan it with the real code cwd, then deliberately launch it. Derive both live addresses and native readiness. Reuse existing appropriate seats; do not start duplicates just to clear prompts. Daemon/kernel readiness and each native seat's readiness are separate facts.
-3. **Owner and checker:** read the repository instructions and relevant intent; derive their own identity and queue. For example, the owner can run `rig context work-install --project csv-tool --mission csv-validation --slice 01-inspect --deliver --runtime codex --cwd <actual-code-root> --json`; use `02-cli` for the dependent work and give the checker both exact slice addresses. `--deliver` returns composed bytes to its caller: it is not a transport acknowledgment. Do not use `--apply-skills` merely to make this example work. `install.skills: []` adds no private or invented skill requirement; discover applicable public skills normally.
+2. **Current agent, with the user's existing authority:** follow the public guide's prerequisite and permission choice once, preview `starter`, plan it with the real code cwd, then deliberately launch it. Derive both live addresses and native readiness. Reuse existing appropriate seats; do not start duplicates just to clear prompts. Daemon/kernel readiness and each native seat's readiness are separate facts.
+3. **Owner and checker:** read the repository instructions and relevant intent; derive their own identity and queue. For example, the builder can run `rig context work-install --project csv-tool --mission csv-validation --slice 01-inspect --deliver --runtime claude-code --cwd <actual-code-root> --json`; use `02-cli` for the dependent work and give the checker both exact slice addresses. `--deliver` returns composed bytes to its caller: it is not a transport acknowledgment. Do not use `--apply-skills` merely to make this example work. `install.skills: []` adds no private or invented skill requirement; discover applicable public skills normally.
 4. **Bootstrap context delivery:** send the two seats a short instruction naming the exact work root and addressed files to retrieve; obtain their scope/role reaction before assigning implementation. A registered context pack can be sent with `rig send --context <discovered-ref>`; an arbitrary filesystem address is not automatically a context-pack ref. Deliver the actual composed bytes when a receiver cannot retrieve them. Keep instruction delivery separate from queue ownership.
-5. **Minimal durable topology context:** derive `topology.root`, then preserve existing chain files. In a new dedicated example instance, put purpose/root pointers in `LEARNED.md`, the two-seat relationship in `rigs/first-project/LEARNED.md`, and short duties in `rigs/first-project/seats/dev-owner/LEARNED.md` and `.../dev-check/LEARNED.md`. Owner text: “Own the user's bounded outcome, implementation, exact check handoff, result and next-work custody; derive the current packet.” Checker text: “Independently judge the supplied candidate against project/mission/slice acceptance, record evidence and limits, and return judgment without self-assigning broader work.” Rig text points to the user's `SPEC.md#working-agreement` and active mission; instance text points to the configured work root. Do not copy a status roster into these files. Optional pod files and eight-region trees are unnecessary.
+5. **Minimal durable topology context:** derive `topology.root`, then preserve existing chain files. In a new dedicated example instance, put purpose/root pointers in `LEARNED.md`, the two-seat relationship in `rigs/starter/LEARNED.md`, and short duties in `rigs/starter/seats/dev-build/LEARNED.md` and `.../dev-review/LEARNED.md`. Owner text: “Own the user's bounded outcome, implementation, exact check handoff, result and next-work custody; derive the current packet.” Checker text: “Independently judge the supplied candidate against project/mission/slice acceptance, record evidence and limits, and return judgment without self-assigning broader work.” Rig text points to the user's `SPEC.md#working-agreement` and active mission; instance text points to the configured work root. Do not copy a status roster into these files. Optional pod files and eight-region trees are unnecessary.
 6. **Refocus delivery:** use the public `refocus-channel.md` and `chain-file-convention.md`, discovered under the selected instance reference directory. The ordinary hook derives roots and emits pointers at its supported prompt/compaction boundaries; it does not mean an edited file has been read. Ask each seat to run the discovered public refocusing procedure and read the relevant named sources once as part of bootstrap, recording any trace gap. Existing running seats do not inherit shell environment edits. Any explicit `OPENRIG_REFOCUS_WORK_NODE` or content override belongs in an intentionally configured launch context, not a claim that setting it in the sender changed another seat.
 
 ## Deliberate runtime creation and truthful continuation
 
-The **actual owner seat**, after choosing the Workflow path, runs the following commands after context and address checks. The example addresses below are used only after its own `rig whoami --json` confirms `dev-owner@first-project`; an unbound bootstrap shell must not pretend to be that seat. `PROJECT_ROOT` is an ordinary task variable holding the selected absolute work root. Pick and record a unique operation key once, then reuse it after a timeout. Use the following commands for the selected graph:
+The **actual owner seat**, after choosing the Workflow path, runs the following commands after context and address checks. The example addresses below are used only after its own `rig whoami --json` confirms `dev-build@starter`; an unbound bootstrap shell must not pretend to be that seat. `PROJECT_ROOT` is an ordinary task variable holding the selected absolute work root. Pick and record a unique operation key once, then reuse it after a timeout. Use the following commands for the selected graph:
 
 ```sh
 rig workflow compile "$PROJECT_ROOT/missions/csv-validation/mission.yaml" \
@@ -488,7 +489,7 @@ rig workflow compile "$PROJECT_ROOT/missions/csv-validation/mission.yaml" \
 rig workflow instantiate-lifecycle "$PROJECT_ROOT/missions/csv-validation/mission.yaml" \
   --operation-key csv-tool-csv-validation-run-1 \
   --root-objective 'Reviewed CSV validation without changing input data' \
-  --created-by dev-owner@first-project --rig first-project --json
+  --created-by dev-build@starter --rig starter --json
 
 rig workflow operation csv-tool-csv-validation-run-1 --json
 rig workflow continue <returned-instance-id> --json
@@ -500,7 +501,7 @@ At each completed step, the **current packet owner** projects its own result. Ex
 
 ```sh
 rig workflow project --instance <instance-id> --current-packet <inspect-packet> \
-  --exit handoff --actor-session dev-owner@first-project \
+  --exit handoff --actor-session dev-build@starter \
   --result-note 'Inspection contract implemented; exact candidate and checks recorded' \
   --evidence-ref <absolute-slice-01-proof-path> --json
 ```
@@ -511,7 +512,7 @@ For a **real unresolved blank-cell product choice**, ask the user the concrete q
 
 ```sh
 rig workflow project --instance <instance-id> --current-packet <cli-packet> \
-  --exit waiting --actor-session dev-owner@first-project \
+  --exit waiting --actor-session dev-build@starter \
   --blocked-on external:user/blank-required-cells \
   --result-note 'Need the user decision recorded in mission NOTES before selecting CLI behavior' \
   --evidence-ref <absolute-mission-notes-path> --json

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { DaemonClient, launchNodeNotice } from "../src/daemon-client.js";
+import { DaemonClient, launchNodeNotice, StartupRequestError } from "../src/daemon-client.js";
 
 // FR-8 / R7 no-new-data: the TUI's entire daemon surface is this ONE module,
 // and every route it can emit is on the §4.A table of EXISTING web-consumed
@@ -102,6 +102,20 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
       ["openTerminal", "launchNode"].includes(m),
     );
     expect(postCalls).toHaveLength(2);
+  });
+
+  it("#729: startup errors retain warnings without changing HTTP status", async () => {
+    const result = { ok: false, message: "Identity needs attention", warnings: ["Startup submission unverified"] };
+    const c = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: async () => new Response(JSON.stringify(result), { status: 409 }) });
+    await expect(c.startupRequest("/r1/seat", { action: "fresh" })).rejects.toMatchObject({
+      status: 409, result, message: "Identity needs attention\nStartup submission unverified",
+    });
+    await expect(c.startupRequest("/r1/seat", { action: "fresh" })).rejects.toBeInstanceOf(StartupRequestError);
+  });
+
+  it("#729: launch notice retains startup observations", () => {
+    expect(launchNodeNotice("dev.qa", { ok: true, launched: [{ logicalId: "dev.qa" }], warnings: ["Startup prompt still staged; press Enter in that pane."] }))
+      .toContain("Startup prompt still staged; press Enter in that pane.");
   });
 
   it("reports an already-running launch response honestly", () => {

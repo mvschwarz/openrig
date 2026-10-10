@@ -50,19 +50,25 @@ Established chain names on the topology tree:
 - `LEARNED.md` — what a POSITION has learned; never shared or shipped as-is.
   A seat's LEARNED is identified by its PATH: the same seat name in two rigs
   is two different files.
-- `CULTURE.md` — norms layered into members at startup.
+- `CRAFT.md` — how work is done at that altitude (shipped at instance, rig and
+  seat), with `ORCHESTRATION-CRAFT.md` at rig level for orchestration practice.
+- `CULTURE.md` — team norms. Note that startup delivers the rig spec's own
+  `culture_file` (a path beside `rig.yaml`), not a `CULTURE.md` under
+  `topology.root`.
 
 ### The project tree
 
 Rooted at the workspace keys (`workspace.root`, `workspace.slices_root`).
 Chain names there: `SPEC.md` (intent in frontmatter composes up the chain;
-specification is a leaf property), `PROOF.md`, `PROGRESS.md`.
+specification is a leaf property), `PROOF.md`, `PROGRESS.md`. The walkers also
+read `NOTES.md` (or `MISSION_NOTES.md`), and fall back to `README.md` for a node
+without a `SPEC.md`.
 
 **Project-tree context cannot ship.** It describes what *you* are building —
 mission intent, slice specifications, proof contracts. No vendor can author it
 in advance, and shipping a default would install someone else's project as
-your context. The demo project carries a worked example to copy from; real
-projects author their own. (Topology-tree context is the opposite: how a team
+your context. Real projects author their own; `rig scope mission create` and
+`rig scope slice create` start the tree. (Topology-tree context is the opposite: how a team
 of agents runs well is largely general, which is why included rigs ship
 defaults.)
 
@@ -70,8 +76,11 @@ defaults.)
 
 Before this convention the topology tree lived at `~/.openrig/shared-docs/rigs/`
 (design decision 2026-08-14: an arbitrary folder on one machine, not a product
-path). That location **stays readable** as a per-level fallback so existing
-rigs migrate instead of breaking — but every read that resolves there emits a
+path). That location **stays readable** as a per-level fallback for
+`rig context trace`, at the rig and seat levels, so existing rigs migrate instead
+of breaking. The refocus trace, `seat:` profile atoms and handover priming read
+only `topology.root`, so until migration they report those files as missing. Every
+read that resolves to the legacy location emits a
 named advisory (`legacy-topology-read: …`) stating the legacy source, the
 canonical destination under `topology.root`, and the config key. A silent
 legacy read is a defect. The legacy literal lives in exactly one helper per
@@ -93,9 +102,9 @@ reproduces the drift it was meant to catch. Run it; do not recall it.
 
 ## Shipped defaults and the curation path
 
-Included rigs (product-team first) ship sensible-default chain files at the
-applicable instance, rig, pod, and seat altitudes, installed under
-`topology.root` at rig-up.
+Included rigs ship sensible-default chain files under a `topology/` folder,
+installed under `topology.root` at rig-up. Today only `factory` ships one,
+with instance, rig and seat defaults; the installer also supports pod defaults.
 A shipped default is a **starting point** the occupying team appends to — it
 is never overwritten by a later rig-up (existing files win).
 

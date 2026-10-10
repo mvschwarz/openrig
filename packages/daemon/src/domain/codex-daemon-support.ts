@@ -33,10 +33,10 @@ export async function probeCodexDaemonSupport(runHelp: () => Promise<string>): P
 }
 
 /** The production detector: runs `codex --help` asynchronously, so the daemon keeps serving. */
-export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000): CodexDaemonSupportDetector {
+export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000, codexHome?: string): CodexDaemonSupportDetector {
   return (cwd) => probeCodexDaemonSupport(async () => {
     const { execFile } = await import("node:child_process");
-    const env = launchPath ? { ...process.env, PATH: launchPath } : process.env;
+    const env = { ...process.env, ...(launchPath ? { PATH: launchPath } : {}), ...(codexHome ? { CODEX_HOME: codexHome } : {}) };
     let deadline: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
       // execFile closes its pipes on timeout, but can report success if a wrapper

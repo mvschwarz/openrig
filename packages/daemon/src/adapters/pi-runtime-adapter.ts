@@ -12,6 +12,7 @@
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -37,10 +38,13 @@ export interface PiAdapterFsOps {
   exists(path: string): boolean;
   mkdirp(path: string): void;
   listFiles?(dirPath: string): string[];
+  statMode?(path: string): number;
+  chmod?(path: string, mode: number): void;
 }
 
 export interface PiRuntimeAdapterDeps {
   tmux: TmuxAdapter;
+  seatLaunchEnvironment?: SeatLaunchEnvironment;
   fsOps: PiAdapterFsOps;
   /** Root under which every Pi seat gets its isolated state dir (FR-7).
    *  Typically <OPENRIG_HOME>/state/pi. */
@@ -60,6 +64,7 @@ export interface PiRuntimeAdapterDeps {
 export class PiRuntimeAdapter implements RuntimeAdapter {
   readonly runtime: RunnerRuntime = "pi";
   private tmux: TmuxAdapter;
+  private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: PiAdapterFsOps;
   protected stateRoot: string;
   private runnerEntryPath: string;
@@ -69,6 +74,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   constructor(deps: PiRuntimeAdapterDeps) {
     this.tmux = deps.tmux;
+    this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.stateRoot = deps.stateRoot;
     this.runnerEntryPath = deps.runnerEntryPath;
@@ -108,18 +114,29 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return results;
   }
 
+  /** Conflict detection must inspect this seat's copy, not a Claude sibling. */
+  skillTargetPath(tmuxSession: string | null, effectiveId: string): string | null {
+    if (!tmuxSession) return null;
+    return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
+  }
+
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
     const projected: string[] = [];
+    const warnings: string[] = [];
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
     for (const entry of plan.entries) {
-      if (entry.classification === "no_op") {
+      // The planner compares only SKILL.md for directory skills. Helpers can
+      // change independently, so still copy the selected directory on reapply.
+      const directorySkill = entry.category === "skill"
+        && this.fs.exists(nodePath.join(entry.absolutePath, "SKILL.md"));
+      if (entry.classification === "no_op" && !directorySkill) {
         skipped.push(entry.effectiveId);
         continue;
       }
       try {
-        if (this.projectEntry(entry, binding)) {
+        if (this.projectEntry(entry, binding, warnings)) {
           projected.push(entry.effectiveId);
         } else {
           skipped.push(entry.effectiveId);
@@ -129,10 +146,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    return { projected, skipped, failed };
+    return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
+    const warnings: string[] = [];
     let delivered = 0;
     const failed: Array<{ path: string; error: string }> = [];
 
@@ -147,7 +165,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
             // replace Pi's default system prompt). Pi reads AGENTS.md from
             // the managed cwd as a project context file.
             const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-            const merged = this.mergeGuidance(targetPath, file.path, content);
+            const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
           }
@@ -165,7 +183,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
               if (!textResult.ok) throw new Error(textResult.message);
               await this.sleep(200);
-              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["C-m"]);
+              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
               if (!submitResult.ok) throw new Error(submitResult.message);
             }
             break;
@@ -179,7 +197,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    return { delivered, failed };
+    return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
   async launchHarness(
@@ -258,8 +276,15 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       launchId,
     });
 
+    const command = this.runtime === "pi" && this.seatLaunchEnvironment
+      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+      : cmd;
     // Stage long commands without leaving a shell above the live runner.
-    const textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
+      textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    }
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
@@ -391,11 +416,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
-  private projectEntry(entry: ProjectionEntry, binding: NodeBinding): boolean {
+  private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
       const content = this.fs.readFile(entry.absolutePath);
-      return this.mergeGuidance(targetPath, entry.effectiveId, content);
+      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings);
     }
 
     if (entry.category === "skill") {
@@ -418,12 +443,14 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
           const dest = nodePath.join(targetDir, file);
           this.fs.mkdirp(nodePath.dirname(dest));
           this.fs.writeFile(dest, this.fs.readFile(nodePath.join(entry.absolutePath, file)));
+          this.preserveMode(nodePath.join(entry.absolutePath, file), dest);
         }
       } else {
         this.fs.writeFile(
           nodePath.join(targetDir, nodePath.basename(entry.absolutePath)),
           this.fs.readFile(entry.absolutePath),
         );
+        this.preserveMode(entry.absolutePath, nodePath.join(targetDir, nodePath.basename(entry.absolutePath)));
       }
       return true;
     }
@@ -433,7 +460,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return false;
   }
 
-  private mergeGuidance(targetPath: string, blockId: string, content: string): boolean {
+  private preserveMode(source: string, target: string): void {
+    if (this.fs.statMode && this.fs.chmod) this.fs.chmod(target, this.fs.statMode(source) & 0o777);
+  }
+
+  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[]): boolean {
     // Mirrors the Claude/Codex adapters: per-seat `rig-role` content collides
     // across pod-mates when merged into a shared cwd file; it is delivered via
     // send_text instead. See ADR-0006.
@@ -444,6 +475,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       return false;
     }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {
+      warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
     return true;

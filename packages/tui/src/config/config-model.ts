@@ -82,6 +82,7 @@ const LABELS: Record<string, string> = {
   "slack.credentialFile": "Credential file reference", "slack.botToken": "Bot credential",
   "slack.appToken": "Socket Mode credential", "slack.requiredScopes": "Required scopes",
   "slack.minimumLevelThatPosts": "Minimum posting level", "slack.minimumLevelThatInterrupts": "Minimum interrupt level",
+  "slack.channelMap": "Channel map (rig or seat: channel)",
   "feed.subscriptions.action_required": "Action-required feed", "feed.subscriptions.approvals": "Approval feed",
   "feed.subscriptions.shipped": "Shipped feed", "feed.subscriptions.progress": "Progress feed", "feed.subscriptions.audit_log": "Audit feed",
 };

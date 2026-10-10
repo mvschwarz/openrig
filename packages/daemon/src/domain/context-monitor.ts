@@ -8,6 +8,7 @@ import {
 } from "./runtime-adapter.js";
 import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-samples-store.js";
 import type { ContextUsage } from "./types.js";
+import { hasPendingFreshStartup } from "./startup-orchestrator.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -86,6 +87,7 @@ export class ContextMonitor {
   }
 
   private async runPoll(): Promise<void> {
+    this.compactionEnforcer?.reconcilePreparations?.();
     const sessions = this.getEligibleSessions();
     for (const session of sessions) {
       let observed: ContextUsage | null = null;
@@ -146,20 +148,36 @@ export class ContextMonitor {
    * enforcer owns policy + dedup + send; ContextMonitor only relays
    * data and absorbs enforcer errors so a trigger-path fault never
    * crashes telemetry polling.
+   *
+   * Only a fresh, known sample can start a compaction. A stale or unknown
+   * sample still drains a post-compact stage that is already pending: the
+   * seat may take no turn after /compact, and only a turn refreshes its
+   * sample.
    */
   private async maybeAutoCompact(
     session: EligibleSession,
     usage: ContextUsage | null,
   ): Promise<void> {
     if (!this.compactionEnforcer) return;
-    if (!usage || usage.availability !== "known") return;
     try {
-      await this.compactionEnforcer.maybeAutoCompact({
+      if (usage && usage.availability === "known" && usage.fresh && usage.usedPercentage != null) {
+        await this.compactionEnforcer.maybeAutoCompact({
+          sessionName: session.session_name,
+          cwd: session.cwd,
+          runtime: session.runtime,
+          usedPercentage: usage.usedPercentage,
+          transcriptPath: usage.transcriptPath,
+          sessionId: usage.sessionId,
+        });
+        return;
+      }
+      if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name)) return;
+      await this.compactionEnforcer.drainPendingPostCompactStage({
         sessionName: session.session_name,
+        cwd: session.cwd,
         runtime: session.runtime,
-        usedPercentage: usage.usedPercentage,
-        transcriptPath: usage.transcriptPath,
-        sessionId: usage.sessionId,
+        transcriptPath: usage?.transcriptPath ?? null,
+        sessionId: usage?.sessionId ?? null,
       });
     } catch {
       // Defensive: enforcer should not throw, but absorb here so the
@@ -199,6 +217,7 @@ export class ContextMonitor {
         n.cwd,
         s.startup_status
       FROM nodes n
+      JOIN rigs r ON r.id = n.rig_id
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
       LEFT JOIN bindings b ON b.node_id = n.id
@@ -213,6 +232,7 @@ export class ContextMonitor {
             )
           )
         )
+        AND (r.archived_at IS NULL OR s.status = 'running')
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
         AND COALESCE(b.tmux_session, s.session_name) IS NOT NULL
     `).all() as EligibleSession[];
@@ -258,11 +278,14 @@ export class ContextMonitor {
         cwd: session.cwd ?? "",
       });
       if (readiness.ready) {
+        // A live prompt does not deliver saved context. Check after the await:
+        // startup may have reached an attention gate while we were observing.
+        if (hasPendingFreshStartup(this.db, session.node_id, session.session_id)) return;
         this.db.prepare(`
           UPDATE sessions
           SET startup_status = 'ready',
               startup_completed_at = ?
-          WHERE id = ?
+          WHERE id = ? AND startup_status IN ('failed', 'attention_required')
         `).run(new Date().toISOString(), session.session_id);
         return;
       }

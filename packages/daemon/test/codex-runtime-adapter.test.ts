@@ -12,6 +12,10 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import { execFileSync } from "node:child_process";
 
+// Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
+// 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
+const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
   axis: "sandbox",
@@ -79,21 +83,21 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; eff
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
 }
 
 function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -101,12 +105,12 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -p ${quote(profile)} -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
 function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -p ${quote(profile)} resume ${queueDirArg}${quote(token)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}`;
 }
 
 beforeEach(() => {
@@ -395,14 +399,14 @@ describe("Codex runtime adapter", () => {
     await adapter.deliverStartup([file], makeBinding());
 
     expect(tmux.sendText).toHaveBeenCalledWith("r01-qa", "echo hello");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["Enter"]);
   });
 
   // OPR.0.3.3.16 - a >100KB send_text startup pack must still travel through the
-  // sendText -> sleep -> sendKeys(["C-m"]) sequence unchanged. The large-payload
+  // sendText -> sleep -> sendKeys(["Enter"]) sequence unchanged. The large-payload
   // buffer mechanics live in TmuxAdapter; the adapter hands the full content to
   // sendText and fires the single trailing submit.
-  it("delivers a large (>100KB) send_text startup file via sendText then submits with C-m", async () => {
+  it("delivers a large (>100KB) send_text startup file via sendText then submits with Enter", async () => {
     const tmux = mockTmux();
     const big = "L".repeat(120 * 1024);
     const adapter = new CodexRuntimeAdapter({
@@ -422,7 +426,7 @@ describe("Codex runtime adapter", () => {
     // The full payload is handed to sendText (TmuxAdapter routes it to the buffer path).
     expect(tmux.sendText).toHaveBeenCalledWith("r01-qa", big);
     // Single trailing submit preserved.
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["Enter"]);
   });
 
   // T12: replay on restore is safe for already-projected content
@@ -558,12 +562,14 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ queueRoot: null }));
   });
 
-  it("launchHarness skips the Codex update prompt with one control key before capturing a fresh thread id", async () => {
+  it.each([
+    ["legacy", false], ["current", false], ["legacy", true], ["current", true],
+  ] as const)("launchHarness skips the %s Codex update prompt exactly once (persistent=%s)", async (layout, persistent) => {
     const initialShell = [
       expectedFreshLaunchCommand(),
       "admin@host project %",
     ].join("\n");
-    const updatePrompt = [
+    const updatePrompt = layout === "current" ? currentUpdatePrompt : [
       "✨ Update available! 0.120.0 -> 0.121.0",
       "Release notes: https://github.com/openai/codex/releases/latest",
       "› 1. Update now (runs `npm install -g @openai/codex`)",
@@ -579,7 +585,7 @@ describe("Codex runtime adapter", () => {
         .mockResolvedValueOnce(initialShell)
         .mockResolvedValueOnce(updatePrompt)
         .mockResolvedValueOnce(updatePrompt)
-        .mockResolvedValue("OpenAI Codex (v0.120.0)\n› Ask Codex to do anything"),
+        .mockResolvedValue(persistent ? updatePrompt : "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything"),
       getPanePid: vi.fn(async () => 900),
     });
     const adapter = new CodexRuntimeAdapter({
@@ -612,23 +618,29 @@ describe("Codex runtime adapter", () => {
     ]);
   });
 
-  it("launchHarness does not choose a Codex update action unless skip-until-next-version is visible", async () => {
+  it.each(["legacy", "current"])("launchHarness does not choose a %s Codex update action without option 3", async (layout) => {
     const tmux = mockTmux({
-      capturePaneContent: vi.fn(async () => [
-        "✨ Update available! 0.120.0 -> 0.121.0",
-        "Press enter to continue",
-      ].join("\n")),
+      capturePaneScreen: vi.fn(async () => (layout === "current" ? currentUpdatePrompt
+        : "✨ Update available! 0.120.0 -> 0.121.0\n  2. Skip\n  3. Skip until next version")
+        .replace(/^.*3\. Skip until next version.*$/m, "")),
+      getPanePid: vi.fn(async () => 900),
     });
     const adapter = new CodexRuntimeAdapter({
       tmux,
       fsOps: mockFs(),
-      listProcesses: () => [],
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+      readThreadIdByPid: () => "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       sleep: async () => {},
     });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
 
     expect(result.ok).toBe(true);
+    // The shell launch gets Enter; no menu key or subsequent Enter is sent.
+    expect(vi.mocked(tmux.sendKeys).mock.calls).toEqual([["r01-qa", ["Enter"]]]);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
       ["r01-qa", expectedFreshLaunchCommand()],
@@ -1469,6 +1481,22 @@ describe("Codex runtime adapter", () => {
     expect(afterSecond.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)!.length).toBe(1);
     expect((parseToml(afterSecond) as Record<string, any>).mcp_servers.exa.url)
       .toBe("https://exa.internal.example/mcp");
+  });
+
+  it("keeps $ sequences in a fragment literal when it is re-projected", async () => {
+    const userConfig = '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n';
+    const fragment = '[mcp_servers.dollar]\ncommand = "echo $$ $& $` $\'"\n';
+    const { project, read } = await projectFragment(userConfig, fragment);
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterFirst = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterSecond = read();
+
+    expect(afterSecond).toBe(afterFirst);
+    expect(afterSecond.startsWith(userConfig)).toBe(true);
+    expect(afterSecond.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)!.length).toBe(1);
+    expect((parseToml(afterSecond) as Record<string, any>).mcp_servers.dollar.command).toBe("echo $$ $& $` $'");
   });
 
   it("does not mistake a header after an ESCAPED delimiter inside a multi-line string (r2 NOT-CLEAR, 09-01)", async () => {

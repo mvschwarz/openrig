@@ -10,11 +10,9 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
   return store.resolveAllWithSource();
 }
 
-// SWEEP-c (shape f2576102) — keys the daemon reads ONLY at boot: a set while it runs
-// is stale-until-restart; the honest floor is the loud notice (live-reload = its own
-// arch item, not built here).
+// These settings remain boot-only; capture interval/line settings reload live.
 const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "db.path"];
-const BOOT_ONLY_PREFIXES = ["transcripts."];
+const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
   return BOOT_ONLY_KEYS.includes(key) || BOOT_ONLY_PREFIXES.some((p) => key.startsWith(p));
@@ -83,6 +81,8 @@ Keys:
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
   runtime.codex.*        hooks_enabled
+  runtime.readiness_timeout_seconds
+                         harness readiness window for new seats and handover successors (1–600; default 30)
   workflow.*             exception_routing (orchestrator | human_only — the maturity-dial host default)
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,
@@ -96,6 +96,7 @@ Keys:
                          wake_swap_grace_seconds (S01 wake-or-escalate ladder)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
+  launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
 
 Precedence: CLI flag > environment variable > config file > default`)

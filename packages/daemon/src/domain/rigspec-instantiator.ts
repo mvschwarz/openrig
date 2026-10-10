@@ -65,7 +65,7 @@ export class RigInstantiator {
     this.tmuxAdapter = deps.tmuxAdapter;
   }
 
-  async instantiate(spec: RigSpec): Promise<InstantiateOutcome> {
+  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean }): Promise<InstantiateOutcome> {
     // 1. Validate
     const raw = RigSpecCodec.parse(RigSpecCodec.serialize(spec));
     const validation = RigSpecSchema.validate(raw);
@@ -108,6 +108,7 @@ export class RigInstantiator {
       const txn = this.db.transaction(() => {
         const rig = this.rigRepo.createRig(spec.name);
         rigId = rig.id;
+        if (opts?.nonInterruptive !== undefined) this.rigRepo.setRigNonInterruptive(rig.id, opts.nonInterruptive);
 
         for (const specNode of spec.nodes) {
           const node = this.rigRepo.addNode(rig.id, specNode.id, {
@@ -320,7 +321,7 @@ import type {
   CompactionStrategy,
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
-import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillRuntime } from "./skill-catalog.js";
+import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
 import type { SystemWorldResolution } from "./system-world.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
@@ -1230,7 +1231,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1256,7 +1257,7 @@ export class PodRigInstantiator {
     }
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1336,11 +1337,13 @@ export class PodRigInstantiator {
             if (makeRunningSessionCounter(this.db)(id) > 0 || !this.deps.rigRepo.archiveRig(id)) throw new GenerationChanged(rigSpec.name);
           }
         }
-        return this.deps.rigRepo.createRig(rigSpec.name);
+        return this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
       });
       const rig = create();
       rigId = rig.id;
       createdRigId = rig.id;
+      const nonInterruptive = opts?.nonInterruptive ?? rigSpec.nonInterruptive;
+      if (nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, nonInterruptive);
       // PL-007: persist typed workspace block (when declared) on the rig
       // record. Whoami / node-inventory read it via getRigWorkspace().
       if (rigSpec.workspace) {
@@ -1438,13 +1441,17 @@ export class PodRigInstantiator {
     // OPR.0.3.2.22 Bug 2: if the hook fails, roll back the rig record so
     // the spec name is left free for a clean retry. Pods rely on rigs
     // via ON DELETE CASCADE so deleting the rig is sufficient.
+    let rollbackServices: (() => Promise<void>) | undefined;
     if (opts?.prelaunchHook) {
-      const hookResult = await opts.prelaunchHook(rigId);
+      const hookResult = await opts.prelaunchHook(rigId, archivedGenerations);
       if (!hookResult.ok) {
-        this.deps.rigRepo.deleteRig(rigId);
-        restoreArchived();
-        return { ok: false, code: "service_boot_failed", message: hookResult.message };
+        if (!hookResult.retainRig) {
+          this.deps.rigRepo.deleteRig(rigId);
+          restoreArchived();
+        }
+        return { ok: false, code: hookResult.code === "compose_project_conflict" ? "compose_project_conflict" : "service_boot_failed", message: hookResult.message };
       }
+      rollbackServices = hookResult.rollback;
     }
 
     // Phase 2: Process members in launch order
@@ -1610,12 +1617,29 @@ export class PodRigInstantiator {
     const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
 
     if (allTerminal) {
+      let serviceCleanupError: string | undefined;
       const cleanup = async () => {
         if (this.deps.tmuxAdapter) {
           for (const sessionName of launchedSessionNames) {
+            if (this.deps.tmuxAdapter.probeSession) {
+              let probe;
+              try {
+                probe = await this.deps.tmuxAdapter.probeSession(sessionName);
+              } catch {
+                return; // Unknown state: retain the rig for recovery.
+              }
+              if (probe.state === "absent") continue;
+              if (probe.state !== "present") return;
+            }
             const stopped = await this.deps.tmuxAdapter.killSession(sessionName);
-            if (!stopped.ok) return; // Do not forget a still-protected/uncertain session.
+            if (!stopped.ok && (stopped.code !== "session_not_found" || /no server running/i.test(stopped.message ?? ""))) return;
           }
+        }
+        try {
+          await rollbackServices?.();
+        } catch (error) {
+          serviceCleanupError = `Service cleanup failed; rig ${rigId} retained for recovery: ${String(error)}`;
+          return;
         }
         this.deps.rigRepo.deleteRig(rigId);
         restoreArchived();
@@ -1624,7 +1648,7 @@ export class PodRigInstantiator {
       if (guard) await guard.lifecycle(Object.values(nodeIdMap), cleanup);
       else await cleanup();
       const details = nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "unknown"}`).join("; ");
-      return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}` };
+      return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}` };
     }
 
     if (hasAttention && !hasLaunched) {
@@ -1998,24 +2022,39 @@ export class PodRigInstantiator {
     }
 
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
+    const keptSkillWarnings: string[] = [];
     if (
       configResult.config.skillLoadout
       && this.deps.skillReconciler
       && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex")
     ) {
-      const projection = this.deps.skillReconciler({
-        loadout: configResult.config.skillLoadout,
-        runtime: configResult.config.runtime,
+      const reconcile = (selected: SkillLoadout) => this.deps.skillReconciler!({
+        loadout: selected,
+        runtime: configResult.config.runtime as SkillRuntime,
         cwd: configResult.config.cwd,
         apply: true,
         topologyOwner: canonicalSessionName,
       });
+      const loadout = configResult.config.skillLoadout;
+      let projection = reconcile(loadout);
+      // Plugin skills never stop a seat that launched before them: if they cannot be
+      // projected, the seat starts with the rest of its loadout and says why.
+      if (!projection.ok && loadout.entries.some((entry) => entry.pluginId)) {
+        const withoutPlugins = reconcile({ ...loadout, entries: loadout.entries.filter((entry) => !entry.pluginId) });
+        if (withoutPlugins.ok) {
+          keptSkillWarnings.push(`plugin_skills_not_projected: ${projection.errors.map((error) => `${error.code}: ${error.message}`).join("; ")}`);
+          projection = withoutPlugins;
+        }
+      }
       if (!projection.ok) {
         return {
           status: "failed",
           error: projection.errors.map((error) => `${error.code}: ${error.message}`).join("; "),
           sessionName: canonicalSessionName,
         };
+      }
+      for (const receipt of projection.receipts.filter(isKeptPluginSkill)) {
+        keptSkillWarnings.push(`plugin_skill_kept: ${receipt.id}: ${receipt.detail.slice("kept: ".length)} (${receipt.target})`);
       }
     }
     // Forward per-seat silenceWindowSeconds from the resolved profile.
@@ -2070,7 +2109,10 @@ export class PodRigInstantiator {
     }
     // P17: a divergent target is never SILENT again — each conflict rides the
     // instantiate warnings surface with the file, reason, and consequence.
-    (launchResult.warnings ??= []).push(...projectionConflictWarnings(planResult.plan));
+    (launchResult.warnings ??= []).push(
+      ...[...(configResult.config.skillWarnings ?? []), ...keptSkillWarnings].map(warning => `${canonicalSessionName}: ${warning}`),
+      ...projectionConflictWarnings(planResult.plan),
+    );
 
     // Codex project() writes plan entries before startup-file delivery. Protect
     // edited skills there too; filtering only startup files is insufficient.
@@ -2281,7 +2323,7 @@ export class PodRigInstantiator {
       return {
         status: "launched",
         sessionName: canonicalSessionName,
-        warnings: launchResult.warnings,
+        warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
       };
     }
     return {
@@ -2289,7 +2331,7 @@ export class PodRigInstantiator {
       error: startupResult.errors.join("; "),
       evidence: startupResult.evidence,
       sessionName: canonicalSessionName,
-      warnings: launchResult.warnings,
+      warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
 
@@ -2389,7 +2431,7 @@ export class PodRigInstantiator {
       status: startupResult.ok ? "launched" : "failed",
       error: startupResult.ok ? undefined : startupResult.errors.join("; "),
       sessionName: canonicalSessionName,
-      warnings: launchResult.warnings,
+      warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
 

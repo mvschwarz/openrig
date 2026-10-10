@@ -153,10 +153,14 @@ export function skillsRoutes(): Hono {
     if (!service) return c.json({ ok: false, error: "skill_library_unavailable" }, 503);
 
     const { discoverSkillsWithProvenance } = await import("../domain/skill-discovery.js");
-    const { auditSkills } = await import("../domain/skill-audit.js");
+    const { auditSkills, listBundledSkillSources } = await import("../domain/skill-audit.js");
+    const { getDefaultOpenRigPath } = await import("../openrig-compat.js");
 
     const homedir = c.get("homedir" as never) as string | undefined ?? process.env.HOME ?? "/tmp";
     const cwd = c.get("cwd" as never) as string | undefined ?? process.cwd();
+    // The installed plugins the daemon projects bundled skills from (startup's userPluginsDir).
+    const pluginsDir = c.get("pluginsDir" as never) as string | undefined ?? getDefaultOpenRigPath("plugins");
+    const mirrorRepoRoot = c.get("mirrorRepoRoot" as never) as string | undefined;
 
     const claudeResult = discoverSkillsWithProvenance({ runtime: "claude-code", homedir, cwd });
     const codexResult = discoverSkillsWithProvenance({ runtime: "codex", homedir, cwd });
@@ -176,24 +180,27 @@ export function skillsRoutes(): Hono {
 
     let mirrorDrift: { stale: boolean; changes: string[] } | undefined;
     let mirrorDriftError: string | undefined;
+    let mirrorDriftSkipped: string | undefined;
     try {
       const { checkMirrorDriftSafe } = await import("../domain/skill-mirror-drift.js");
-      const driftResult = await checkMirrorDriftSafe();
-      if (driftResult.ok) {
-        mirrorDrift = { stale: driftResult.stale, changes: driftResult.changes };
-      } else {
+      const driftResult = await checkMirrorDriftSafe(mirrorRepoRoot);
+      if (!driftResult.ok) {
         mirrorDriftError = driftResult.reason;
+      } else if (driftResult.skipped) {
+        mirrorDriftSkipped = driftResult.reason;
+      } else {
+        mirrorDrift = { stale: driftResult.stale, changes: driftResult.changes };
       }
     } catch (err) {
       mirrorDriftError = `Mirror drift check unavailable: ${err instanceof Error ? err.message : String(err)}`;
     }
 
-    const auditResult = auditSkills(allSkills, { mirrorDrift });
+    const auditResult = auditSkills(allSkills, { mirrorDrift, bundledSources: listBundledSkillSources(pluginsDir) });
     const totalFindings = auditResult.entries.filter((e) => !e.shadowed).reduce((sum, e) => sum + e.findings.length, 0)
       + auditResult.mirrorDriftFindings.length;
     const rejected = [...claudeResult.rejected, ...codexResult.rejected];
 
-    return c.json({ ok: true, entries: auditResult.entries, mirrorDriftFindings: auditResult.mirrorDriftFindings, mirrorDriftError, totalFindings, rejected });
+    return c.json({ ok: true, entries: auditResult.entries, mirrorDriftFindings: auditResult.mirrorDriftFindings, mirrorDriftError, mirrorDriftSkipped, totalFindings, rejected });
   });
 
   return router;

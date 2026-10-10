@@ -15,10 +15,14 @@ function mockAdapter(opts?: {
   const pidMap = opts?.pidMap ?? {};
   const cmdMap = opts?.cmdMap ?? {};
 
+  // Resolve targets the way tmux does: one leading "=" is the exact-match
+  // marker, not part of the name ("=lit" -> "lit", "==lit:0" -> "=lit:0").
+  const exactName = (target: string) => (target.startsWith("=") ? target.slice(1) : target);
+
   return {
     listSessions: vi.fn(async () => sessions),
-    listWindows: vi.fn(async (name: string) => windows[name] ?? []),
-    listPanes: vi.fn(async (target: string) => panes[target] ?? []),
+    listWindows: vi.fn(async (name: string) => windows[exactName(name)] ?? []),
+    listPanes: vi.fn(async (target: string) => panes[exactName(target)] ?? []),
     getPanePid: vi.fn(async (paneId: string) => pidMap[paneId] ?? null),
     getPaneCommand: vi.fn(async (paneId: string) => cmdMap[paneId] ?? null),
     hasSession: vi.fn(async () => false),
@@ -196,5 +200,60 @@ describe("TmuxDiscoveryScanner", () => {
     // Successful pane has data
     expect(result.panes[1]!.pid).toBe(9999);
     expect(result.panes[1]!.activeCommand).toBe("node");
+  });
+
+  // T10-T12: a session literally named "=lit" stays distinct from "lit" (#492)
+  const pane = (id: string) => ({ id, index: 0, cwd: "/tmp", width: 80, height: 24, active: true });
+  const win = (index: number) => ({ index, name: "w", panes: 1, active: true });
+  const session = (name: string) => ({ name, windows: 1, created: "0", attached: false });
+  const found = (panes: { tmuxSession: string; tmuxWindow: string; tmuxPane: string }[]) =>
+    panes.map((p) => `${p.tmuxSession}:${p.tmuxWindow}:${p.tmuxPane}`);
+
+  it("scans a session literally named =lit with exact targets", async () => {
+    const adapter = mockAdapter({
+      sessions: [session("=lit")],
+      windows: { "=lit": [win(0), win(1)] },
+      panes: { "=lit:0": [pane("%0")], "=lit:1": [pane("%1")] },
+    });
+    const scanner = new TmuxDiscoveryScanner({ tmuxAdapter: adapter });
+
+    const result = await scanner.scan();
+
+    expect(found(result.panes)).toEqual(["=lit:0:%0", "=lit:1:%1"]);
+    expect(adapter.listWindows).toHaveBeenCalledWith("==lit");
+    expect(adapter.listPanes).toHaveBeenCalledWith("==lit:0");
+    expect(adapter.listPanes).toHaveBeenCalledWith("==lit:1");
+  });
+
+  it("scans a plain session with exact targets", async () => {
+    const adapter = mockAdapter({
+      sessions: [session("lit")],
+      windows: { lit: [win(0)] },
+      panes: { "lit:0": [pane("%2")] },
+    });
+    const scanner = new TmuxDiscoveryScanner({ tmuxAdapter: adapter });
+
+    const result = await scanner.scan();
+
+    expect(found(result.panes)).toEqual(["lit:0:%2"]);
+    expect(adapter.listWindows).toHaveBeenCalledWith("=lit");
+    expect(adapter.listPanes).toHaveBeenCalledWith("=lit:0");
+  });
+
+  it("keeps =lit and lit apart when both exist with different window indexes", async () => {
+    const adapter = mockAdapter({
+      sessions: [session("=lit"), session("lit")],
+      windows: { "=lit": [win(1), win(3)], lit: [win(0)] },
+      panes: {
+        "=lit:1": [pane("%0")],
+        "=lit:3": [pane("%1")],
+        "lit:0": [pane("%2")],
+      },
+    });
+    const scanner = new TmuxDiscoveryScanner({ tmuxAdapter: adapter });
+
+    const result = await scanner.scan();
+
+    expect(found(result.panes)).toEqual(["=lit:1:%0", "=lit:3:%1", "lit:0:%2"]);
   });
 });
