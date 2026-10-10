@@ -98,6 +98,7 @@ Keys:
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
+  output.compact         short default output for queue writes; --full restores the whole row (default off)
 
 Precedence: CLI flag > environment variable > config file > default`)
     .action((opts: { json?: boolean; withSource?: boolean }) => {

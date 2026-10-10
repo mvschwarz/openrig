@@ -117,7 +117,7 @@ export function queueRoutes(): Hono {
       return {
         ok: false,
         error: "unknown_target_repo",
-        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --json | jq .workspace.repos to see declared repos`,
+        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --full --json | jq .workspace.repos to see declared repos`,
         meta: { rigName, knownRepos: known },
       };
     }

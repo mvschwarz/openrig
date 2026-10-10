@@ -163,6 +163,12 @@ export interface RiggedConfig {
   terminal: {
     statusBar: boolean;
   };
+  // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
+  // defaults (default off: today's output). Read by the CLI only; the daemon
+  // settings-store twin keeps the two registries in lockstep.
+  output: {
+    compact: boolean;
+  };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -311,6 +317,10 @@ const DEFAULTS = {
   terminal: {
     statusBar: false,
   },
+  // Slice 15 — compact command-output defaults OFF until the switch is on.
+  output: {
+    compact: false,
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -423,6 +433,8 @@ export const VALID_KEYS = [
   // boolean (default off), lockstep with the daemon settings-store twin
   // (the parity test pins both). Flip is future-launches-only (BR-1).
   "terminal.status_bar",
+  // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
+  "output.compact",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -515,6 +527,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -593,6 +606,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "output.compact": ["output", "compact"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -1092,6 +1106,9 @@ export class ConfigStore {
       },
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
+      },
+      output: {
+        compact: v("output.compact") as boolean,
       },
       retention: {
         enabled: v("retention.enabled") as boolean,
