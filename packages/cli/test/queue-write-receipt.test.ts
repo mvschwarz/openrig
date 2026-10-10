@@ -295,7 +295,7 @@ describe("queue write receipt (output.compact)", () => {
     it("an idempotent create that returned an existing row says no new wake, and its warning stays on stderr", async () => {
       const createWarning = { code: "qitem_body_not_saved", message: "qitem q already exists with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created." };
       const out = await create(["--id", "qitem-20261010180000-aaaa"], { ...row({ lastNudgeResult: "verified", lastNudgeAttempt: "2026-10-09T00:00:00.000Z" }), createWarning });
-      expect(out).toContain("wake: verified at 2026-10-09T00:00:00.000Z — an existing row was returned; this write started no new wake");
+      expect(out).toContain("wake: an existing row was returned; this write started no new wake (the row's earlier wake result: verified at 2026-10-09T00:00:00.000Z)");
       expect(out).toContain(`WARNING: ${createWarning.message}`);
       expect(errors.join("\n")).toContain(`Warning: ${createWarning.message}`);
     });

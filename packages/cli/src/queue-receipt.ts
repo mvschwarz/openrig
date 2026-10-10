@@ -185,8 +185,11 @@ function rowLines(heading: string, r: Row): string[] {
   if (r.expiresAt) lines.push(`  expires ${String(r.expiresAt)}`);
   if (isRow(r.wake)) {
     const w = r.wake;
-    const result = w.result ? `${String(w.result)}${w.at ? ` at ${String(w.at)}` : ""} — ` : "";
-    lines.push(`  wake: ${result}${String(w.detail)}`);
+    const literal = w.result ? `${String(w.result)}${w.at ? ` at ${String(w.at)}` : ""}` : "";
+    // An existing row's result belongs to an earlier wake, so it follows the label rather than leads it.
+    lines.push(w.evidence === "existing-row"
+      ? `  wake: ${String(w.detail)}${literal ? ` (the row's earlier wake result: ${literal})` : ""}`
+      : `  wake: ${literal ? `${literal} — ` : ""}${String(w.detail)}`);
   }
   if (isRow(r.createWarning)) lines.push(`  WARNING: ${String(r.createWarning.message ?? JSON.stringify(r.createWarning))}`);
   if (isRow(r.handoffAdvisory)) lines.push(`  advisory: ${String(r.handoffAdvisory.message ?? JSON.stringify(r.handoffAdvisory))}`);
