@@ -11,6 +11,7 @@ import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { omittedReadField, readView } from "../read-view.js";
+import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -163,6 +164,43 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+/** Slice 15: the receipt context when a write should print its receipt — the
+ *  `output.compact` switch is on and `--full` was not given — else null (today's
+ *  output). Error responses always print whole, whatever this returns. */
+function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptContext | null {
+  return !full && compactOutputEnabled() ? ctx : null;
+}
+
+/** A `--host` id that may name another daemon. Empty and `local` never do; one that
+ *  equals the selected daemon's own host id is settled by {@link settleReceiptHost}. */
+function remoteHostOf(hostId: string | undefined): string | undefined {
+  return hostId && hostId !== "local" ? hostId : undefined;
+}
+
+/** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
+ *  daemon's selfHostId took the local path, so its receipt must not call the row
+ *  remote. Read only for a receipt; an unreadable id leaves the host unconfirmed. */
+async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext): Promise<ReceiptContext> {
+  if (!receipt.remoteHost) return receipt;
+  let selfHostId: string | undefined;
+  try {
+    const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
+    if (health.status === 200 && typeof health.data?.selfHostId === "string" && health.data.selfHostId.trim()) selfHostId = health.data.selfHostId;
+  } catch { /* An unreadable id must not change or fail the write's output. */ }
+  if (selfHostId === receipt.remoteHost) return { ...receipt, remoteHost: undefined };
+  return selfHostId === undefined ? { ...receipt, remoteHostUnconfirmed: true } : receipt;
+}
+
+async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
+  const settled = receipt && status < 400 ? await settleReceiptHost(client, receipt) : null;
+  const projected = settled ? buildWriteReceipt(body, settled) : null;
+  if (!projected) {
+    printResult(json, body, status);
+    return;
+  }
+  console.log(json ? JSON.stringify(projected.json) : projected.text);
+}
+
 // Recovery belongs to the selected daemon's reply; never infer a host from an ID.
 async function printQueueItemResult(
   client: DaemonClient,
@@ -170,6 +208,7 @@ async function printQueueItemResult(
   json: boolean,
   body: unknown,
   status: number,
+  receipt: ReceiptContext | null = null,
 ): Promise<void> {
   if (status >= 400 && body && typeof body === "object"
     && (body as { error?: unknown }).error === "qitem_not_found") {
@@ -187,7 +226,7 @@ async function printQueueItemResult(
         + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`,
     };
   }
-  printResult(json, body, status);
+  await printWriteResult(client, json, body, status, receipt);
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -468,6 +507,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--verify", "Boundedly wait for the existing gateway delivery receipt after persistence; never retries the create and never claims human readership")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
       source?: string;
@@ -494,6 +534,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       nudge?: boolean;
       verify?: boolean;
       json?: boolean;
+      full?: boolean;
     }) => {
       // OPR.0.4.6.MH3 D-3 (C3): resolve the host qualifier at the CLI edge —
       // the 3-part form never leaves the CLI; the request carries the 2-part
@@ -614,6 +655,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         // stderr survives an interrupted wait without adding a second JSON
         // document to stdout. This is a request identity, NOT a commit receipt.
         console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
+        const receipt = writeReceipt(opts.full, {
+          verb: "create", nudgeSuppressed: opts.nudge === false, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
+        });
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
           qitemId,
@@ -667,10 +711,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
                 detail: "create response did not include a qitem id; delivery cannot be correlated",
                 nextAction: null,
               };
-          printResult(opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status);
+          await printWriteResult(client, opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status, receipt);
           return;
         }
-        printResult(opts.json ?? false, res.data, res.status);
+        await printWriteResult(client, opts.json ?? false, res.data, res.status, receipt);
       }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 
@@ -678,15 +722,16 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .command("claim <qitemId>")
     .description("Claim a qitem (pending → in-progress); computes closure_required_at from tier")
     .option("--destination <session>", "(deprecated, ignored) the claimant is derived from the seat env (X-OpenRig-Session); P21 I3 made the claim route derive it from the transport header")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination?: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; json?: boolean; full?: boolean }) => {
       // P21 I3 reconcile: the claimant is DERIVED from the seat env — --destination deprecated + ignored,
       // no body claim. Verify the env (the header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "destination")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "claim" }));
       });
     });
 
@@ -695,8 +740,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .description("Release a claimed qitem (in-progress → pending)")
     .option("--destination <session>", "(deprecated, ignored) the releaser is derived from the seat env (X-OpenRig-Session); the unclaim route derives it from the transport header")
     .option("--reason <text>", "Reason for unclaim", "manual")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean; full?: boolean }) => {
       // P21 I3 reconcile: the releaser is DERIVED from the seat env — --destination deprecated + ignored,
       // no body claim. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "destination")) return;
@@ -705,7 +751,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, {
           reason: opts.reason,
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "unclaim" }));
       });
     });
 
@@ -723,6 +769,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "OPR.0.4.4.19 FR-6: park-time summary persisted onto the item (human-seat parks only)")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-6: park-time durable-artifact pointer persisted onto the item (human-seat parks only)")
     .option("--note <text>", "Transition note for the audit log")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       actor?: string;
@@ -737,6 +784,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       evidenceRef?: string;
       note?: string;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
@@ -756,7 +804,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }));
       });
     });
 
@@ -778,6 +826,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--continuation <text>", "What resumes. Workspace deferred/not-imminent work belongs in a mission/slice")
     .option("--wake-watchdog <jobId>", "Attach an existing live watchdog id targeting the parked owner")
     .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 --on <blocker> is always required; a wake option does not replace it.
@@ -799,6 +848,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       wakeWatchdog?: string;
       wakeAfter?: number;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: actor DERIVED from the seat env (X-OpenRig-Session) — --actor deprecated +
       // ignored, no body actorSession. Verify the env, else the daemon returns 400 actor_required (no seat identity to record). Matches `resolve`.
@@ -814,7 +864,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           wakeAfterSeconds: opts.wakeAfter,
           transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }));
       });
     });
 
@@ -878,6 +928,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       from?: string;
@@ -895,6 +946,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       host?: string;
       nudge?: boolean;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
       // --from deprecated + ignored, no body fromSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
@@ -950,7 +1002,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+          verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
+        }));
       });
     });
 
@@ -973,6 +1027,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       from?: string;
@@ -990,6 +1045,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       host?: string;
       nudge?: boolean;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
       // --from deprecated + ignored, no body fromSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
@@ -1043,7 +1099,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+          verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
+        }));
       });
     });
 

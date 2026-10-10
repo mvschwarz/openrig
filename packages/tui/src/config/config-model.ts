@@ -64,6 +64,7 @@ const LABELS: Record<string, string> = {
   "ui.preview.refresh_interval_seconds": "Preview refresh", "ui.preview.max_pins": "Preview pins",
   "ui.preview.default_lines": "Preview lines", "context.system_world": "System world",
   "onboarding.default_pack.enabled": "Default onboarding pack",
+  "output.compact": "Compact command output",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",
   "health.context_pressure.critical_percent": "Context critical threshold",
