@@ -1159,6 +1159,12 @@ export class SessionTransport {
   }
 
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // OpenRig's own notices (an `@system` actor: the watchdog, the model monitor) are never typed into
+    // a terminal seat, whose shell or TUI would run them. Queue wakes stop earlier, in performWakeSend.
+    if (opts?.actorSession?.endsWith("@system") && this.getSessionMeta(sessionName).runtime === "terminal") {
+      return { ok: false, sessionName, sent: false, reason: "terminal_seat",
+        error: `'${sessionName}' is a terminal seat (runtime: terminal); OpenRig does not type its own notices into it. Nothing was sent.` };
+    }
     // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
     // whose outbox body, hash and delivery-ID identity all key on the text actually typed.
     // Without the envelope there's no Sent: line, so stampISO is dropped too: the delivered-latency
