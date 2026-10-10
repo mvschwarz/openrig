@@ -187,11 +187,11 @@ export class InstallEngine {
       // pre-rename file replaces the old block instead of appending a
       // duplicate.
       let startIdx = existing.indexOf(startMarker);
-      let endIdx = existing.indexOf(endMarker);
+      let endIdx = existing.indexOf(endMarker, startIdx + startMarker.length);
       let matchedEndLength = endMarker.length;
       if (startIdx === -1 || endIdx === -1) {
         const legacyStartIdx = existing.indexOf(legacyStart);
-        const legacyEndIdx = existing.indexOf(legacyEnd);
+        const legacyEndIdx = existing.indexOf(legacyEnd, legacyStartIdx + legacyStart.length);
         if (legacyStartIdx !== -1 && legacyEndIdx !== -1) {
           startIdx = legacyStartIdx;
           endIdx = legacyEndIdx;
