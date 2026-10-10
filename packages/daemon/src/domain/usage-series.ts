@@ -60,6 +60,11 @@ function capturedAtBound(value: string): string {
 /** Serve the RAW stored rows, oldest first. Bounds are absolute on captured_at
  *  (since inclusive-of-later, i.e. `>=`; until exclusive `<`). */
 export function queryUsageSeries(db: Database, q: UsageSeriesQuery): UsageSeriesRow[] {
+  return readUsageSeries(db, q, false);
+}
+
+/** Complete internal projections must not inherit the public raw-row page cap. */
+function readUsageSeries(db: Database, q: UsageSeriesQuery, complete: boolean): UsageSeriesRow[] {
   const where: string[] = [];
   const params: unknown[] = [];
   if (q.seatSession) { where.push("seat_session = ?"); params.push(q.seatSession); }
@@ -75,9 +80,9 @@ export function queryUsageSeries(db: Database, q: UsageSeriesQuery): UsageSeries
          FROM usage_samples
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY captured_at ASC, id ASC
-        LIMIT ?`,
+        ${complete ? "" : "LIMIT ?"}`,
     )
-    .all(...params, limit) as Array<Record<string, unknown>>;
+    .all(...params, ...(complete ? [] : [limit])) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     id: r.id as number,
     lane: r.lane as string,
@@ -157,7 +162,7 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
   const unknown: UnknownSeat[] = [];
 
   for (const seat of seats) {
-    const rawContext = queryUsageSeries(db, { seatSession: seat, lane: "context", sinceIso, untilIso });
+    const rawContext = readUsageSeries(db, { seatSession: seat, lane: "context", sinceIso, untilIso }, true);
     if (rawContext.length === 0) {
       // history exists (the seat appeared in the census) but nothing fresh
       unknown.push({ seatSession: seat, reason: "no_fresh_samples" });
@@ -196,8 +201,9 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
     const tokensPerHour = spanHours > 0 ? tokensDelta / spanHours : 0;
 
     const windows: WindowVelocity[] = [];
+    const providerRows = readUsageSeries(db, { seatSession: seat, lane: "provider_window", sinceIso, untilIso }, true);
     for (const w of ["five_hour", "weekly"] as const) {
-      const rows = queryUsageSeries(db, { seatSession: seat, lane: "provider_window", sinceIso, untilIso }).filter(
+      const rows = providerRows.filter(
         (r) => r.window === w,
       );
       if (rows.length === 0) continue;
