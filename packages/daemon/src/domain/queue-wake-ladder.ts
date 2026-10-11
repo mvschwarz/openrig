@@ -631,7 +631,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
         await deps.queueRepo.maybeNudge(qitemId, target, true);
-        return deps.queueRepo.getById(qitemId)?.lastNudgeResult ?? "indeterminate:no transport available";
+        return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
 
     const actions: WakeLadderAction[] = [];

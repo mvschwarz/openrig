@@ -246,6 +246,7 @@ describe("queue unknown-write reconciliation", () => {
     expect(retry.code).toBe(0);
     expect(retry.data).toEqual({ ...first.data,
       lastNudgeAttempt: retry.data.lastNudgeAttempt, lastNudgeResult: retry.data.lastNudgeResult,
+      lastNudgeWireResult: retry.data.lastNudgeWireResult,
     }); // delivery may settle between persistence receipts
     expect(retry.data.createWarning).toBeUndefined();
     expect(retry.stderr.join("\n")).not.toContain("not saved");

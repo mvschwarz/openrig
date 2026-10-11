@@ -98,6 +98,18 @@ export function isTypedGateBlocker(value: unknown): boolean {
 }
 
 /**
+ * #165: a claim is the destination acting on the row, which is stronger evidence than
+ * the wake send could get. While the row is claimed, an unconfirmed wire result
+ * (`delivered-ack-pending` or `indeterminate:*`) is presented as `claimed`. The stored
+ * result is never rewritten, so a re-wake or an unclaim reads the wire result again.
+ */
+export function presentedNudgeResult(wireResult: string | null, claimedAt: string | null): string | null {
+  if (!claimedAt || wireResult === null) return wireResult;
+  if (wireResult === "delivered-ack-pending" || wireResult.startsWith("indeterminate:")) return "claimed";
+  return wireResult;
+}
+
+/**
  * 0.5.1-54 DR-1 (classifier fold, PM ruling qitem-20260811163927-74493d76) — classify a create-path
  * nudge FAILURE so the surfaced count becomes ACTIONABLE (constraint iii). Two classes:
  *   - "permanent-topology": the destination is not resolvable on THIS daemon (the nudge can never
@@ -195,7 +207,12 @@ export interface QueueItem {
   closureRequiredAt: string | null;
   claimedAt: string | null;
   lastNudgeAttempt: string | null;
+  /** #165: the wake result as presented. A claimed row whose wire result was never
+   *  confirmed (`delivered-ack-pending`, `indeterminate:*`) reads `claimed`; see
+   *  `lastNudgeWireResult` for the result as recorded. */
   lastNudgeResult: string | null;
+  /** #165: the wake send's result exactly as recorded, never rewritten by a claim. */
+  lastNudgeWireResult: string | null;
   lastHeartbeat: string | null;
   resolution: string | null;
   /** PL-007 Workspace Primitive — typed repo scope for the qitem. Validated
@@ -4018,7 +4035,8 @@ export class QueueRepository {
       closureRequiredAt: row.closure_required_at,
       claimedAt: row.claimed_at,
       lastNudgeAttempt: row.last_nudge_attempt,
-      lastNudgeResult: row.last_nudge_result,
+      lastNudgeResult: presentedNudgeResult(row.last_nudge_result, row.claimed_at),
+      lastNudgeWireResult: row.last_nudge_result,
       lastHeartbeat: row.last_heartbeat,
       resolution: row.resolution,
       // PL-007: target_repo present only when migration 038 has applied;
