@@ -152,7 +152,7 @@ export function attentionRoutes(): Hono {
         add(item, () => [`Status: ${r.status}; first observed ${r.startedAt ?? "unknown"}; last observed ${r.lastObservedAt ?? "unknown"}`, `Freshness: ${r.freshness.state}; ${r.indeterminateReason ?? ""}`, `Posture: ${r.operatingPosture?.posture ?? "unknown"} · ${r.operatingPosture?.reason ?? "not supplied by source"}`, r.explanation, r.suggestedInspection, `Threshold: ${r.threshold}`, "Canonical source and bounded evidence:", JSON.stringify(r, null, 2)]);
       }
     } catch (e) { unavailable("health", e); }
-    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? ((b.urgency === "critical" ? 2 : b.urgency === "urgent" ? 1 : 0) - (a.urgency === "critical" ? 2 : a.urgency === "urgent" ? 1 : 0)) : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
+    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? ((b.id.startsWith("queue-update:") && b.urgency === "critical" ? 2 : b.urgency === "urgent" ? 1 : 0) - (a.id.startsWith("queue-update:") && a.urgency === "critical" ? 2 : a.urgency === "urgent" ? 1 : 0)) : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
     if (wanted && !result.detail) result.detailError = "Selected source is unavailable or outside the current source window. Return to Attention to refresh; absence is not resolution.";
     return c.json(result);
   });

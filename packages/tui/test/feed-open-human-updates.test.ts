@@ -120,3 +120,16 @@ it("preserves action date ordering regardless of critical and routine priorities
   ];
   expect(composeHumanUpdates(read(rows), { limit: 20, truncated: false, items: [] })!.items.map(i => i.id)).toEqual(["queue:new", "queue:old"]);
 });
+
+
+it("leaves health episodes ordered by date when hydrating queue updates and delivery history", () => {
+  const rows: AttentionItem[] = [
+    { ...current("old"), id: "health:old-cleared", urgency: "critical", summary: "Cleared critical episode" },
+    { ...current("new"), id: "health:new-active", urgency: "warning", summary: "Active warning", at: "2026-10-08T12:00:00Z" },
+    { ...current("critical"), urgency: "critical" },
+    current("urgent"),
+  ];
+  const merged = composeHumanUpdates(read(rows), delivered("other"))!;
+  expect(merged.items.filter(i => i.id.startsWith("health:")).map(i => i.id)).toEqual(["health:new-active", "health:old-cleared"]);
+  expect(merged.items.filter(i => i.id.startsWith("queue-update:")).map(i => i.id)).toEqual(["queue-update:critical", "queue-update:urgent"]);
+});

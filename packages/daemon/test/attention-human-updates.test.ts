@@ -12,11 +12,11 @@ import { attentionRoutes } from "../src/routes/attention.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import type { AttentionRead } from "../src/attention-surface.js";
 
-async function fixture() {
+async function fixture(healthRecords: unknown[] = []) {
   const db = createDb(); migrate(db, ALL_MIGRATIONS);
   const queue = new QueueRepository(db, new EventBus(db));
   const app = new Hono();
-  app.use("*", async (c, next) => { c.set("queueRepo" as never, queue as never); await next(); });
+  app.use("*", async (c, next) => { c.set("queueRepo" as never, queue as never); c.set("healthProjection" as never, { records: () => healthRecords, coverage: () => [] } as never); await next(); });
   app.route("/api/attention", attentionRoutes());
   app.route("/api/queue", queueRoutes());
   const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
@@ -155,5 +155,22 @@ it("keeps critical, urgent then routine updates in the actual HTTP attention res
     const before = f.db.serialize();
     expect((await f.read()).items.map(i => i.id)).toEqual(["queue-update:critical", "queue-update:urgent", "queue-update:routine"]);
     expect(f.db.serialize()).toEqual(before);
+  } finally { await f.close(); }
+});
+
+
+it("keeps a newer active warning ahead of an older cleared critical health episode over HTTP", async () => {
+  const health = (id: string, severity: string, status: string, at: string) => ({ id, severity, status,
+    summary: id, lastObservedAt: at, scope: { instanceId: "fixture" } });
+  const f = await fixture([
+    health("old-cleared", "critical", "cleared", "2026-10-01T12:00:00Z"),
+    health("new-active", "warning", "active", "2026-10-08T12:00:00Z"),
+  ]);
+  try {
+    f.row("critical", { priority: "critical", at: "2026-10-01T12:00:00Z" });
+    f.row("urgent", { priority: "urgent", at: "2026-10-02T12:00:00Z" });
+    const items = (await f.read()).items;
+    expect(items.filter(i => i.id.startsWith("health:")).map(i => i.id)).toEqual(["health:new-active", "health:old-cleared"]);
+    expect(items.filter(i => i.id.startsWith("queue-update:")).map(i => i.id)).toEqual(["queue-update:critical", "queue-update:urgent"]);
   } finally { await f.close(); }
 });
