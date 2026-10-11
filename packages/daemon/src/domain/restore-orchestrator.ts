@@ -117,7 +117,13 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
-  if (!session) return { kind: "fresh", why: "saves no session for this seat" };
+  if (!session) {
+    // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
+    const prior = occupant.kind === "none" ? absentSeatResumeHistory(data.sessions, nodeId) : null;
+    return prior
+      ? { kind: "decision", why: `had no running occupant for this seat when it was taken, but an earlier occupant left a '${prior.resumeType}' resume token` }
+      : { kind: "fresh", why: "saves no session for this seat" };
+  }
   const policy = session.restorePolicy ?? "resume_if_possible";
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
   if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
