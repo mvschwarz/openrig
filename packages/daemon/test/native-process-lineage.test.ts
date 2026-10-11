@@ -196,3 +196,24 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess({ ...actualIdentity, expectedToken: "different" })).toBeNull();
   });
 });
+
+describe("observeClaudeDelivery's idle-shell policy: delivery versus launch", () => {
+  const startedAt = "Fri Oct 9 07:00:00 2026";
+  const shell: NativeProcessRow = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "/bin/bash", executableName: "bash", startedAt };
+  // A foreground wrapper starting between the two samples: its own group now owns the terminal.
+  const starting: NativeProcessRow[] = [{ ...shell, tpgid: 12 }, { pid: 12, ppid: 10, pgid: 12, tpgid: 12, command: "bash ./start-agent.sh", executableName: "bash", startedAt }];
+  const input = (...samples: NativeProcessRow[][]) => {
+    let call = 0;
+    return { target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses: async () => samples[Math.min(call++, samples.length - 1)]! };
+  };
+
+  it("delivery keeps a positive idle shell when the other sample is unknown", async () => {
+    expect((await observeClaudeDelivery(input([shell], starting))).state).toBe("idle_shell");
+  });
+
+  it("launch needs both samples idle with the same fingerprint, so a starting foreground reads unknown", async () => {
+    expect((await observeClaudeDelivery(input([shell], starting), { unknownKeepsIdle: false })).state).toBe("unknown");
+    expect((await observeClaudeDelivery(input(starting, [shell]), { unknownKeepsIdle: false })).state).toBe("unknown");
+    expect((await observeClaudeDelivery(input([shell], [shell]), { unknownKeepsIdle: false })).state).toBe("idle_shell");
+  });
+});
