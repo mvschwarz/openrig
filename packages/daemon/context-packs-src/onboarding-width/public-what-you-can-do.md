@@ -795,7 +795,7 @@ your circumstances is configuration, and the ones that are not, another agent ca
   conversation it is in the middle of. **`provider signals` reports anomalies rather than a
   listing** — unbound seats, accounts shared across several seats. A Codex seat showing its
   usage-limit banner reads activity `unknown` with reason `usage_limit`, and `provider signals` can
-  show an `at_limit` signal for it.
+  show a provider-event signal for that seat's account that allows a switch decision.
 - **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you

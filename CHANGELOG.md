@@ -92,8 +92,9 @@ uses. It is built from the commit tagged `v0.6.10`. The changes since 0.6.9:
   activity reason `session_missing`, and say in `rig ps --nodes` and `rig seat
   status` to restore or relaunch it; the stored status isn't rewritten
   ([#1074](https://github.com/mvschwarz/openrig/pull/1074)).
-- Record a Codex usage-limit banner as an `at_limit` signal; the seat's
-  activity reads `unknown` with reason `usage_limit` instead of idle
+- Read a Codex usage-limit banner as activity `unknown` with reason
+  `usage_limit` instead of idle; `rig provider signals` can show a
+  provider-event signal for that seat's account that allows a switch decision
   ([#973](https://github.com/mvschwarz/openrig/pull/973)).
 - Accept a rig name in `rig add`, as `rig down` does; a name shared by two
   active rigs is refused with `rig_ambiguous` and the candidates
@@ -128,14 +129,16 @@ uses. It is built from the commit tagged `v0.6.10`. The changes since 0.6.9:
 
 - Reply once in the thread when a decision click isn't recorded, saying why
   and, where it helps, to answer in words. A recorded click still gets its
-  usual reply ([#1067](https://github.com/mvschwarz/openrig/pull/1067)).
+  usual reply. Best effort; it needs the Slack bot token
+  ([#1067](https://github.com/mvschwarz/openrig/pull/1067)).
 
 ### Terminal and attach
 
-- Open a terminal view in cmux when no provider is named and Herdr isn't
-  available, and say so. The TUI's "Open terminals" still opens with Herdr, or
-  with plain tmux when Herdr is missing, never cmux; its preview now uses the
-  same composition as the window it opens
+- Open a terminal view in cmux when a caller of the daemon's terminal API
+  names no provider and Herdr isn't available, and say so. `rig terminal open`
+  without `--provider`, and the TUI's "Open terminals", still open Herdr, or
+  plain tmux when Herdr is missing, never cmux; the TUI's preview now asks for
+  the same provider as the window it opens
   ([#1071](https://github.com/mvschwarz/openrig/pull/1071), [#1167](https://github.com/mvschwarz/openrig/pull/1167)).
 - Recognise a tmux started inside a Herdr pane by Herdr's own markers, so
   `rig terminal open --window` opens in the current Herdr

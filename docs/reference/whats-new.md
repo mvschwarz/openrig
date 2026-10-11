@@ -54,8 +54,8 @@ after an upgrade it can still hold the previous version's note.
   `session_missing`. `rig ps --nodes` shows `tmux session missing; restore or relaunch the seat`, `rig seat status`
   prints a `Reason:` line, and `--full --json` adds `storedSessionStatus`. The stored status isn't rewritten.
 - **A Codex seat at its usage limit reads `unknown` with reason `usage_limit`,** not idle, when its screen ends with
-  the `■ You've hit your usage limit` banner. `rig provider signals` can show an `at_limit` signal for a seat bound to a
-  known Codex account.
+  the `■ You've hit your usage limit` banner. For a seat bound to a known Codex account, `rig provider signals` can show
+  a provider-event signal for that account that allows a switch decision.
 - **`rig add <rig> …` takes the rig's name as well as its ID.** A name two active rigs share is refused with
   `rig_ambiguous` and the candidates. `rig launch` still takes an ID only.
 - **`rig start` says why it skipped an existing kernel:** `Kernel auto-boot skipped (kernel rig already managed).` and,
@@ -93,9 +93,10 @@ after an upgrade it can still hold the previous version's note.
 - **Attach commands name the daemon's tmux server.** When the daemon was started inside tmux on a non-default socket,
   every attach command OpenRig prints carries `-L <name>` or `-S <path>`, including `tmuxAttachCommand` in `rig ps
   --json`. From inside tmux, run it as `env -u TMUX <tmuxAttachCommand>`. On the default server nothing changed.
-- **A terminal view with no named provider uses cmux when Herdr isn't available** and cmux is, and says so. A named
-  `--provider` is used as named. The TUI's "Open terminals" still opens with Herdr, or with plain tmux when Herdr is
-  missing; it doesn't open cmux windows.
+- **When a caller of the daemon's terminal API names no provider, the daemon uses cmux if Herdr isn't available** and
+  cmux is, and says so. A named `--provider` is used as named. `rig terminal open` without `--provider`, and the TUI's
+  "Open terminals", open Herdr, or plain tmux when Herdr is missing, never cmux. The TUI's preview now asks for the
+  same provider as the window it opens, so it isn't refused when cmux is running.
 - **A tmux started inside a Herdr pane is recognised** by Herdr's markers (`HERDR_ENV`, `HERDR_PANE_ID`,
   `HERDR_SOCKET_PATH`), so `rig terminal open --window` opens in that Herdr.
 
@@ -119,8 +120,8 @@ after an upgrade it can still hold the previous version's note.
 
 ## Smaller fixes
 
-- `rig view show <lens> --rig <name>` matches the rig name exactly in all seven lenses that filter by rig; `_` and `%`
-  are no longer wildcards.
+- `_` and `%` in a `rig view show <lens> --rig <name>` rig name are no longer wildcards, in all seven lenses that
+  filter by rig.
 - `rig ask` matches chat keywords such as `config.json` or `C++` literally.
 - `rig heartbeat` reads CRLF queue files and reads a zone-less proof timestamp as UTC when picking the latest.
 - `rig usage top` reads every sample in its window; `rig usage top|series --json` prints the daemon's error as JSON.
@@ -161,3 +162,5 @@ after an upgrade it can still hold the previous version's note.
 - **A launched team still writes into its working folder;** the operator now says what changes before you agree.
 - **After a restart, `rig status` shows `Kernel: skipped` whatever the kernel seats' state.** Read them with
   `rig ps --nodes --rig kernel --full`.
+- **`rig tui --shared` still attaches on the default tmux server,** so it can't find the dashboard when the daemon runs
+  on a non-default tmux socket. Use `rig tui` there instead.
