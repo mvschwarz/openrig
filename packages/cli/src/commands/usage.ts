@@ -50,10 +50,14 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
     return deps.clientFactory(getDaemonUrl(status));
   }
 
-  function handleHttpError(res: { status: number; data: unknown }, label: string): boolean {
+  function handleHttpError(res: { status: number; data: unknown }, label: string, json?: boolean): boolean {
     if (res.status < 400) return false;
-    const p = (res.data ?? {}) as { error?: unknown };
-    console.error(p.error ?? `${label} failed (HTTP ${res.status})`);
+    if (json) {
+      console.log(JSON.stringify(res.data, null, 2));
+    } else {
+      const p = (res.data ?? {}) as { error?: unknown };
+      console.error(p.error ?? `${label} failed (HTTP ${res.status})`);
+    }
     process.exitCode = res.status >= 500 ? 2 : 1;
     return true;
   }
@@ -79,7 +83,7 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
       const params = new URLSearchParams({ window_hours: String(hours) });
       if (opts.top !== undefined) params.set("top", opts.top);
       const res = await client.get<TopPayload>(`/api/telemetry/usage/top?${params.toString()}`);
-      if (handleHttpError(res, "usage top")) return;
+      if (handleHttpError(res, "usage top", opts.json)) return;
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         return;
@@ -127,7 +131,7 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
       const res = await client.get<{ rows: Array<Record<string, unknown>> }>(
         `/api/telemetry/usage/series${qs ? `?${qs}` : ""}`,
       );
-      if (handleHttpError(res, "usage series")) return;
+      if (handleHttpError(res, "usage series", opts.json)) return;
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         return;
