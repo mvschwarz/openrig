@@ -65,6 +65,8 @@ export interface ComposedView {
   pages: ComposedPane[][];
   /** Fixed columns for a composed layout; omitted views use the provider's auto-grid. */
   columns?: number;
+  /** A person-facing name for the view's space and tabs (the default kernel view). */
+  spaceLabel?: string;
 }
 
 /** Provider availability + version + capability map (from a version-adaptive probe). */

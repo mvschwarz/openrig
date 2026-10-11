@@ -182,6 +182,7 @@ export interface RiggedConfig {
     wakeRetryCap: number;
     wakeUnconfirmedWindowMinutes: number;
     wakeSwapGraceSeconds: number;
+    wakeHumanRung: string;
   };
 }
 
@@ -328,6 +329,7 @@ const DEFAULTS = {
     wakeRetryCap: 3,
     wakeUnconfirmedWindowMinutes: 30,
     wakeSwapGraceSeconds: 180,
+    wakeHumanRung: "always",
   },
 } as const;
 
@@ -440,6 +442,10 @@ export const VALID_KEYS = [
   "queue.wake_retry_cap",
   "queue.wake_unconfirmed_window_minutes",
   "queue.wake_swap_grace_seconds",
+  // #811 — whether the operator rung posts agent-to-agent escalations to a person.
+  // Under explicit-only, an ask that needs a person must be addressed to the person;
+  // without a human registry, explicit-only posts everything, as always does.
+  "queue.wake_human_rung",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -528,6 +534,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "queue.wake_retry_cap": { primary: "OPENRIG_QUEUE_WAKE_RETRY_CAP" },
   "queue.wake_unconfirmed_window_minutes": { primary: "OPENRIG_QUEUE_WAKE_UNCONFIRMED_WINDOW_MINUTES" },
   "queue.wake_swap_grace_seconds": { primary: "OPENRIG_QUEUE_WAKE_SWAP_GRACE_SECONDS" },
+  "queue.wake_human_rung": { primary: "OPENRIG_QUEUE_WAKE_HUMAN_RUNG" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -605,6 +612,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "queue.wake_retry_cap": ["queue", "wakeRetryCap"],
   "queue.wake_unconfirmed_window_minutes": ["queue", "wakeUnconfirmedWindowMinutes"],
   "queue.wake_swap_grace_seconds": ["queue", "wakeSwapGraceSeconds"],
+  "queue.wake_human_rung": ["queue", "wakeHumanRung"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -766,6 +774,12 @@ function positiveIntegerConstraint(key: string) {
   };
 }
 
+function wakeHumanRungConstraint(raw: string): void {
+  if (raw !== "always" && raw !== "explicit-only") {
+    throw new Error(`Invalid value for queue.wake_human_rung: must be "always" or "explicit-only", got "${raw}"`);
+  }
+}
+
 function percentageConstraint(key: string) {
   return (raw: string, coerced: string | number | boolean): void => {
     if (!/^\d+$/.test((raw ?? "").trim())
@@ -888,6 +902,7 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "queue.wake_retry_cap": positiveIntegerConstraint("queue.wake_retry_cap"),
   "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
   "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
+  "queue.wake_human_rung": wakeHumanRungConstraint,
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -1108,6 +1123,7 @@ export class ConfigStore {
         wakeRetryCap: v("queue.wake_retry_cap") as number,
         wakeUnconfirmedWindowMinutes: v("queue.wake_unconfirmed_window_minutes") as number,
         wakeSwapGraceSeconds: v("queue.wake_swap_grace_seconds") as number,
+        wakeHumanRung: v("queue.wake_human_rung") as string,
       },
     };
   }

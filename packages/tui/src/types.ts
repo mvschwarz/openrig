@@ -495,7 +495,7 @@ export type Action =
   /** slice-17: the graph-render style dimension rides the command bar */
   | { type: "style"; name: string }
   /** REGISTRY I3 — the command palette (open/query/move/close ride dispatch like all state). */
-  /** SCOPES view: m collapse + n narrative toggles (dispatch-riding). */
+  /** SCOPES view: M collapse + N narrative toggles (dispatch-riding). */
   | { type: "project-select"; id: string }
   | { type: "project-source" }
   | { type: "scopes-mission-open"; mission: string }

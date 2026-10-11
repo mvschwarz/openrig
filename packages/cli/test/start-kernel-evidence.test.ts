@@ -15,13 +15,13 @@ afterEach(async () => {
   for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   vi.restoreAllMocks(); resetFetchAllowlist(); process.exitCode = 0;
 });
-async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200) {
+async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200, kernelDetail = "fixture detail") {
   const received: string[] = [];
   const server = http.createServer((request, response) => {
     received.push(request.url!);
     const kernel = request.url === "/api/kernel/status";
     response.writeHead(kernel ? httpStatus : request.url === "/api/rigs/summary" ? summaryStatus : 200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: "fixture detail" } : request.url === "/api/rigs/summary" ? (summaryStatus === 200 ? [] : [{ id: "restorable-rig", name: "work", nodeCount: 1, lifecycleState: "recoverable" }]) : { ok: true }));
+    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: kernelDetail } : request.url === "/api/rigs/summary" ? (summaryStatus === 200 ? [] : [{ id: "restorable-rig", name: "work", nodeCount: 1, lifecycleState: "recoverable" }]) : { ok: true }));
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); servers.push(server);
   const port = (server.address() as { port: number }).port;
@@ -34,10 +34,11 @@ async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200) 
     mkdirp: () => { throw new Error("must not mkdir"); }, openForAppend: () => { throw new Error("must not open"); }, isProcessAlive: () => true,
   };
   const errors: string[] = [];
+  const logs: string[] = [];
   vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.join(" ")); });
-  vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.join(" ")); });
   await startCommand({ lifecycleDeps, clientFactory: (base) => new DaemonClient(base) }).parseAsync(["--all"], { from: "user" });
-  return { errors: errors.join("\n"), received, exitCode: process.exitCode ?? 0 };
+  return { errors: errors.join("\n"), logs: logs.join("\n"), received, exitCode: process.exitCode ?? 0 };
 }
 describe("rig start kernel wait evidence", () => {
   it.each([undefined, "booting"])("reports deadline evidence without asserting a kernel failure: %s", async (state) => {
@@ -64,6 +65,19 @@ describe("rig start kernel wait evidence", () => {
     const result = await run(state);
     expect(result.errors).toBe(""); expect(result.exitCode).toBe(0);
     expect(result.received).toContain("/api/rigs/summary");
+  });
+  it("names an already-managed kernel and how to bring it back, instead of blaming --no-kernel", async () => {
+    const result = await run("skipped", 200, 200, "kernel rig already managed");
+    expect(result.logs).not.toContain("--no-kernel or test mode");
+    expect(result.logs).toContain("kernel rig already managed");
+    expect(result.logs).toContain("rig up kernel --existing");
+    expect(result.errors).toBe(""); expect(result.exitCode).toBe(0);
+    expect(result.received).toContain("/api/rigs/summary");
+  });
+  it("keeps the opt-out explanation when the kernel was skipped on purpose", async () => {
+    const result = await run("skipped", 200, 200, "OPENRIG_NO_KERNEL=1");
+    expect(result.logs).toContain("Kernel auto-boot skipped (--no-kernel or test mode)");
+    expect(result.logs).not.toContain("rig up kernel --existing");
   });
 });
 

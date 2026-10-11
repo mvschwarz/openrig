@@ -16,6 +16,7 @@ interface NodeInventoryStubEntry {
   logicalId: string;
   canonicalSessionName: string | null;
   sessionStatus: string | null;
+  storedSessionStatus?: string | null;
   attachmentType: string | null;
 }
 
@@ -99,11 +100,13 @@ rigCmuxRoutes.post("/launch", async (c) => {
   const launchableByLogical = new Map<string, string>();
   const missing: MissingSeat[] = [];
   const nonTmuxIds = new Set<string>();
-  const STALE_STATUSES = new Set(["exited", "detached"]);
+  const EARLY_EXIT_STATUSES: Record<string, true> = { exited: true, detached: true };
+  const MISSING_SESSION_STATUSES: Record<string, true> = { exited: true, detached: true };
 
   // Collect candidates: seats with a tmux-compatible canonical name.
-  // Track original sessionStatus for reason classification.
-  interface Candidate { logicalId: string; sessionName: string; sessionStatus: string | null }
+  // Track projected status for the response and stored status for main-compatible
+  // readiness timing: projected detached + stored running still gets the wait.
+  interface Candidate { logicalId: string; sessionName: string; sessionStatus: string | null; storedSessionStatus: string | null }
   const candidates: Candidate[] = [];
   const noSessionIds = new Set<string>();
 
@@ -117,7 +120,7 @@ rigCmuxRoutes.post("/launch", async (c) => {
       missing.push({ logicalId: entry.logicalId, reason: "non-tmux" });
       continue;
     }
-    candidates.push({ logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus });
+    candidates.push({ logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus, storedSessionStatus: entry.storedSessionStatus ?? entry.sessionStatus });
   }
 
   // Bounded readiness wait with re-read for no-session seats.
@@ -138,7 +141,7 @@ rigCmuxRoutes.post("/launch", async (c) => {
         if (!noSessionIds.has(entry.logicalId)) continue;
         if (entry.canonicalSessionName && (entry.attachmentType == null || entry.attachmentType === "tmux")) {
           noSessionIds.delete(entry.logicalId);
-          pending.set(entry.logicalId, { logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus });
+          pending.set(entry.logicalId, { logicalId: entry.logicalId, sessionName: entry.canonicalSessionName, sessionStatus: entry.sessionStatus, storedSessionStatus: entry.storedSessionStatus ?? entry.sessionStatus });
           noSessionDiscovered++;
         }
       }
@@ -158,12 +161,9 @@ rigCmuxRoutes.post("/launch", async (c) => {
       }
     }
     if (pending.size === 0 && noSessionIds.size === 0) break;
-    // Early-exit when no progress was made this cycle (no new live sessions
-    // AND no new sessions discovered from no-session seats) and all remaining
-    // pending are known-stale.
     if (!firstPass && foundThisCycle === 0 && noSessionDiscovered === 0 && noSessionIds.size === 0) {
-      const allPendingStale = pending.size === 0 || [...pending.values()].every((c) => STALE_STATUSES.has(c.sessionStatus ?? ""));
-      if (allPendingStale) break;
+      const allPendingTerminal = pending.size === 0 || [...pending.values()].every((c) => EARLY_EXIT_STATUSES[c.storedSessionStatus ?? ""] === true);
+      if (allPendingTerminal) break;
     }
     firstPass = false;
     if (Date.now() < deadline) {
@@ -173,8 +173,8 @@ rigCmuxRoutes.post("/launch", async (c) => {
 
   // Classify remaining pending/no-session with reason fidelity.
   for (const [logicalId, candidate] of pending) {
-    const isStale = STALE_STATUSES.has(candidate.sessionStatus ?? "");
-    missing.push({ logicalId, reason: isStale ? "session-missing" : "still-booting" });
+    const isMissing = MISSING_SESSION_STATUSES[candidate.sessionStatus ?? ""] === true;
+    missing.push({ logicalId, reason: isMissing ? "session-missing" : "still-booting" });
   }
   for (const logicalId of noSessionIds) {
     missing.push({ logicalId, reason: "no-session" });

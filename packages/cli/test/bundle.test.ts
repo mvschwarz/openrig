@@ -397,7 +397,21 @@ describe("Bundle CLI", () => {
     const body = capturedCreateBodies.at(-1)!;
     expect(body["configuration"]).toEqual({ id: "build.lead=pi", preset: "all-pi" });
     expect(String(body["specPath"])).toContain("rig-configuration-");
+    expect(body["bundleName"]).toBe("r");
     expect(fs.readFileSync(nodePath.join(dir, "rig.yaml"), "utf-8")).toBe(rig);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("bundle create names the bundle after the rig unless --name says otherwise", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-name-"));
+    fs.writeFileSync(nodePath.join(dir, "rig.yaml"), 'version: "0.2"\nname: tipjar-team\npods: []\n');
+    capturedCreateBodies = [];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", nodePath.join(dir, "rig.yaml"), "-o", nodePath.join(dir, "a.rigbundle")]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", nodePath.join(dir, "rig.yaml"), "-o", nodePath.join(dir, "b.rigbundle"), "--name", "chosen"]);
+    });
+    expect(capturedCreateBodies.map((b) => b["bundleName"])).toEqual(["tipjar-team", "chosen"]);
+    expect(logs).toContain("  Name: tipjar-team v0.1.0");
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

@@ -18,13 +18,14 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
-import { downloadPrivateFile, postChatMessage } from "./slack-api.js";
+import { DispatchBuffer } from "../dispatch-buffer.js";
+import { downloadPrivateFile, isSlackHost, postChatMessage } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
-import { subsystemSlackDeliver } from "./slack-delivery.js";
+import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
@@ -32,7 +33,7 @@ import { makeThreadRouteResolver } from "./thread-routing.js";
 import { resolveOutboundChannel, unsupportedChannelMapFields } from "./channel-map.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
-import { hasLiveHumanGate, type QueueRepository } from "../../queue-repository.js";
+import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
 import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
@@ -97,23 +98,7 @@ export function makeHumanReplyResolver(
       // correlated inbound row. Closing the request here records the durable
       // disposition; the inbound create is already the one wake back to the
       // source, so a second nudge here would duplicate attention.
-      const direct = queueRepo.getById(input.qitemId);
-      if (
-        direct?.state !== "pending" ||
-        direct.destinationSession !== input.actorSession ||
-        parseSessionName(direct.destinationSession).kind !== "external"
-      ) {
-        return "not-applicable";
-      }
-      queueRepo.update({
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        state: "done",
-        closureReason: "no-follow-on",
-        transitionNote: "direct human reply received",
-        ownerNotificationKind: "human-decision-resolved",
-      });
-      return "resolved";
+      return queueRepo.resolveDirectHumanReply(input) ? "resolved" : "not-applicable";
     }
   };
 }
@@ -131,17 +116,10 @@ export function makeHumanReplyResolver(
  * so messages sharing a timestamp across channels cannot overwrite each other. The resolved path
  * is verified to stay inside `mediaDir` before any write.
  */
-/** R1 F1 — the anchored Slack-host verdict: https + URL-parsed hostname that is
- *  exactly `slack.com` or ends with `.slack.com`. Never a substring match. */
-function isSlackHost(url: string): boolean {
-  try {
-    const u = new URL(url);
-    return u.protocol === "https:" && (u.hostname === "slack.com" || u.hostname.endsWith(".slack.com"));
-  } catch {
-    return false;
-  }
-}
-
+/** R1 F1 — the anchored Slack-host verdict now lives in slack-api.ts and is
+ *  enforced inside `downloadPrivateFile`; the transfer-path check below keeps
+ *  the per-file "missing or non-Slack url_private" failure honest before the
+ *  download is even attempted. */
 export function makeInboundFilePort(opts: {
   token: string;
   mediaDir: string;
@@ -198,6 +176,30 @@ export function makeInboundFilePort(opts: {
 
 function stateDir(home: string): string {
   return path.join(home, "state");
+}
+
+/** The status fields for the retry pass's durable custody. Counts RECORDS across the
+ *  inbound-event and click dead-letter files — the event file also carries reactions,
+ *  and a message that left more than one record is counted once per record, so the
+ *  retry pass owns exactly these records. When any file cannot be read the count is
+ *  `null`, not 0: a number (or a zero) beside an unknown state still reads as "nothing
+ *  stuck" to a consumer that only looks at the count, so the state and the reason tell
+ *  the truth and the number says it does not know. Absent when inbound is not configured
+ *  (no stores), keeping an inert connector silent. */
+function deadLetterBacklogFields(
+  dead: DeadLetterStore<SlackEvent> | undefined,
+  deadActions: DeadLetterStore<SlackBlockActions> | undefined,
+): Record<string, unknown> {
+  if (!dead || !deadActions) return {};
+  let records = 0;
+  let reason: string | undefined;
+  for (const store of [dead, deadActions] as DeadLetterStore<unknown>[]) {
+    const result = store.readResult();
+    if (result.ok) records += result.entries.length;
+    else reason = reason ?? result.reason;
+  }
+  if (reason !== undefined) return { deadLetterBacklog: null, deadLetterBacklogState: "unknown", deadLetterBacklogReason: reason };
+  return { deadLetterBacklog: records, deadLetterBacklogState: "ok" };
 }
 
 /** Build the production Slack gateway wire from config + secrets. Never throws on a missing
@@ -318,6 +320,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     });
   };
 
+  // #822: a person's inbound reply records the item it answers as replyTo. If its seat parks
+  // that row on the person, the park is a decision and opens its own root, so only an update's
+  // replyTo steers where a post goes.
+  const threadReplyTo = (p: OutboundPostPayload): string | null => (p.humanIntent === "update" ? p.replyTo ?? null : null);
+
   // #96 — where a replyTo update posts. Walks back through earlier threaded updates (which
   // open no root of their own) to the item that owns the root.
   const MAX_REPLY_TO_CHAIN = 32;
@@ -363,6 +370,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     return choice;
   };
 
+  // One run = one wire build. The abort controller lets stop() cancel anything this
+  // run still has in flight — chiefly the inline rate-limit wait in postChatMessage,
+  // whose stale retry must never post once a restart's replay owns the decision.
+  const runCtl = new AbortController();
+
   // Late-bound so deliver can release the driver's in-flight guard (built after the wire).
   let releaseRef: (qitemId: string) => void = () => {};
 
@@ -375,12 +387,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // default channel it was made for. Otherwise the map. (The delivery layer first reuses the
         // channel of this post's first attempt.) With no map every branch is the default channel.
         resolveChannel: (p) => {
-          const recorded = p.replyTo ? opts.queueRepo.replyToChoiceFor(p.qitemId) : null;
+          const recorded = threadReplyTo(p) ? opts.queueRepo.replyToChoiceFor(p.qitemId) : null;
           return recorded ? recorded.channel ?? cfg.channel! : channelFor(p);
         },
         pinChannel: Boolean(cfg.channelMap?.length),
         sourceLabel: cfg.sourceLabel,
         fetchImpl: opts.fetchImpl,
+        stopSignal: runCtl.signal,
         delivered,
         attempted,
         outboundSeen,
@@ -391,7 +404,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // Re-delivery/new notification episodes for one qitem still reuse its exact root.
         // #96: an update may name an earlier qitem's root; the guard lives in deriveReplyToChoice.
         resolveThreadTs: (p, channel) => {
-          if (p.replyTo) {
+          if (threadReplyTo(p)) {
             const choice = chooseReplyToThread(p, channel);
             if (choice.kind === "thread") return choice.threadTs;
           }
@@ -402,7 +415,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           );
           // #96: once an update shares this root, a new decision from its owner starts a fresh
           // root instead, so the decision never lands in a thread a reader took as FYI-only.
-          if (own && !p.replyTo && opts.queueRepo.isReplyToThread(own.threadTs)) return undefined;
+          if (own && !threadReplyTo(p) && opts.queueRepo.isReplyToThread(own.threadTs)) return undefined;
           // #192: with a channel map, a root in another channel than this attempt's (the seat was
           // remapped since this item's root was posted) cannot carry this post, so a fresh root
           // opens in this attempt's channel. Without a map the root is reused as it always was,
@@ -437,6 +450,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           return undefined;
         },
         onPostedRoot: (p, ts, channel) => {
+          // A healthy connection receives each post back as an event; the inbound liveness watch
+          // waits for it. Every post, root or part, registers once, here or in onPostedPart.
+          inboundHandle?.expectEcho(ts);
           const human = p.destinationSession ?? "";
           const seat = p.sourceSession ?? "";
           threadMap.open({ threadTs: ts, channel, human, seat, conversationId: p.qitemId });
@@ -458,6 +474,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // #192: a part is recorded in the channel it was posted to, so a reaction on it in a mapped
         // channel finds its ask (thread_part_map is keyed by channel and message).
         onPostedPart: (p, messageTs, threadTs, channel) => {
+          inboundHandle?.expectEcho(messageTs); // a multipart post's supplemental parts arrive only here
           const seat = p.sourceSession ?? "";
           if (!p.qitemId || !seat || (p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return;
           const human = p.destinationSession ?? "";
@@ -537,8 +554,34 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       transitionNote: formatDeliveryTermination(decision.termination, key),
     });
   };
+  // Decisions already in the dispatch buffer when this wire is built are retained from an earlier
+  // run: posts that failed or never finished, which startServices() replays.
+  const replayedAtStart = new Set(new DispatchBuffer(opts.home).pending().map((d) => d.decisionId));
+  // A replayed notification for a row that has since left the active states is history, not news
+  // (a post that failed, retried a day later): it posts nothing, and the row says why, unless the
+  // episode already has its posted receipt. Returning ok drains it from the dispatch buffer.
+  const dropStaleNotification = (p: OutboundPostPayload, state: string): void => {
+    const key = p.notificationKey ?? p.qitemId;
+    const notes = opts.queueRepo.transitionLog.listForQitem(p.qitemId).map((t) => t.transitionNote ?? "");
+    const posted = notes.some((n) => n.startsWith("slack-owner-notification-posted ") && n.split(/\s+/).includes(`notification_key=${key}`));
+    const note = `slack-owner-notification-dropped notification_key=${key} reason=row-not-active state=${state}`;
+    if (!posted && !notes.includes(note)) {
+      opts.queueRepo.update({ qitemId: p.qitemId, actorSession: "daemon@kernel", transitionNote: note });
+    }
+    outboundSeen.mark(key, "dropped-row-not-active");
+    releaseRef(key);
+  };
   const engineDeliver: SubsystemDeliverFn = async (decision) => {
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
+    // The decision-resolved notice is written at closure, so a closed row is its normal case.
+    if (replayedAtStart.has(decision.decisionId) && p.qitemId && p.ownerNotificationKind !== "human-decision-resolved"
+      && !(p as { deliveryDigestPost?: boolean }).deliveryDigestPost) {
+      const state = opts.queueRepo.getById(p.qitemId)?.state;
+      if (state && !isBlockerLive(state)) {
+        dropStaleNotification(p, state);
+        return { ok: true as const };
+      }
+    }
     // The T+30 deferral FIRE executes an already-made decision — never re-consult
     // (a re-consult would re-defer: the immediate-plus-deferred shape AM-F3 forbids).
     // R2 B-3 belt: an episode that already carries its posted receipt (a replayed
@@ -636,9 +679,18 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     stops.push(() => driver.stop());
   }
 
+  // Hoisted out of the inbound block so status() can report the durable backlog.
+  // Both files are the retry pass's custody: the event dead-letter
+  // (`slack-inbound-deadletter.jsonl`) and the click dead-letter
+  // (`slack-inbound-action-deadletter.jsonl`), which retryActionDeadLetters owns.
+  // An inert wire omits the fields rather than inventing a count for a connector
+  // that is not running.
+  let dead: DeadLetterStore<SlackEvent> | undefined;
+  let deadActions: DeadLetterStore<SlackBlockActions> | undefined;
+
   if (inboundReady) {
     const inboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-inbound-seen.jsonl"));
-    const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
+    dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
     const receipts = new InboundReceiptStore(path.join(stateDir(opts.home), "slack-inbound-receipts.jsonl"));
     const registry: RegistrySurface = registrySurface;
     const router = new InboundRouter({
@@ -655,13 +707,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // a failed hand-back is retried with the event dead-letters, and each click is confirmed
       // in the decision's thread (a bot post, so inbound never ingests it).
       recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
-      actionDeadLetter: new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl")),
+      actionDeadLetter: (deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"))),
       ...(bot ? {
+        // A stopped run posts nothing, and its rate-limit wait ends with the run: after a restart the click's
+        // redelivery belongs to the new router, which must not race a stale retry from this one.
         acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
           const target = channel ?? cfg.channel;
-          if (!target) return;
-          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl);
+          if (!target || runCtl.signal.aborted) return false;
+          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl, undefined,
+            (ms) => abortableSleep(ms, runCtl.signal));
           if (!r.ok) log(`answer acknowledgement not posted thread=${threadTs}: ${r.error}`);
+          return r.ok;
         },
       } : {}),
       // OPR.0.5.6.2 — inbound file transfer: wired only when the bot token exists
@@ -707,6 +763,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       for (const s of starts) s();
     },
     stop: () => {
+      runCtl.abort(); // cancel this run's pending rate-limit waits before teardown
       for (const s of stops) { try { s(); } catch { /* best-effort */ } }
       baseStop();
     },
@@ -716,6 +773,13 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       inboundReady,
       recovery: recovery?.status() ?? { state: "unavailable", reason: "inbound-not-configured" },
       inbound: inboundHandle?.status() ?? { state: inboundReady ? "not-started" : "not-configured", generation: 0, reconnects: 0 },
+      // The retry pass's durable custody, counted from both dead-letter files:
+      // inbound events plus click answers. Records, not distinct messages — a
+      // message that left more than one record is counted once per record, which
+      // is why the field is named for records. Present iff inbound is configured;
+      // an unreadable file reports state "unknown" with a reason instead of a
+      // false zero.
+      ...deadLetterBacklogFields(dead, deadActions),
     }),
   };
 }

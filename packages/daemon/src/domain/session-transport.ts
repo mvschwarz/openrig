@@ -4,16 +4,16 @@ export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import type { AgentActivityStore } from "./agent-activity-store.js";
+import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -150,8 +150,18 @@ const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass 
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
 const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:running [^()·]+ hook · )?(?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+// The same live row before Claude shows its timer: glyph, text, a trailing ellipsis and nothing
+// after it, as in "✻ Compacting conversation…" during a compaction's first seconds. Completed rows
+// ("✻ Crunched for 2s") have no trailing ellipsis. Only callers that must not send into a busy
+// pane opt in (ClassifyPaneOptions.timerlessStatusIsLive); ordinary send readiness is unchanged.
+const CLAUDE_TIMERLESS_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S.*(?:…|\.{3})$/;
 
-function findClaudeComposer(paneContent: string) {
+export interface ClassifyPaneOptions {
+  /** Treat a timer-less live status row above the composer as work in progress. */
+  timerlessStatusIsLive?: boolean;
+}
+
+function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
@@ -184,7 +194,10 @@ function findClaudeComposer(paneContent: string) {
   for (let i = statusStart; i >= 0; i--) {
     if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
-    if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {
+    const livePatterns = options.timerlessStatusIsLive
+      ? [CLAUDE_LIVE_STATUS_PATTERN, CLAUDE_TIMERLESS_STATUS_PATTERN, ...MID_WORK_PATTERNS]
+      : [CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS];
+    if (livePatterns.some((pattern) => pattern.test(line))) {
       liveStatus = truncateEvidence(line);
       headSeen = true;
       break;
@@ -219,7 +232,73 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
-export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+type StyledCell = { ch: string; faint: boolean };
+
+/** A capture taken with escape sequences, as lines of cells that know whether they're faint (SGR 2).
+ *  Color parameters (38/48/58 with 5;n or 2;r;g;b) are skipped, so a color value of 2 isn't faint.
+ *  Other escape sequences carry no text. */
+function styledLines(styledPane: string): StyledCell[][] {
+  let faint = false;
+  return styledPane.replace(/\r\n/g, "\n").split("\n").map((raw) => {
+    const cells: StyledCell[] = [];
+    let offset = 0;
+    for (const match of raw.matchAll(/\x1b\[([0-9;:?]*)[ -\/]*([@-~])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b./g)) {
+      for (const ch of raw.slice(offset, match.index)) cells.push({ ch, faint });
+      offset = match.index! + match[0].length;
+      if (match[2] !== "m") continue;
+      const codes = match[1]!.split(";");
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i]!;
+        if (code === "38" || code === "48" || code === "58") { i += codes[i + 1] === "5" ? 2 : codes[i + 1] === "2" ? 4 : 0; continue; }
+        if (code === "2") faint = true;
+        else if (code === "" || code === "0" || code === "22") faint = false;
+      }
+    }
+    for (const ch of raw.slice(offset)) cells.push({ ch, faint });
+    return cells;
+  });
+}
+
+/** The last line that starts with a prompt glyph (`❯` or `›`), or -1. */
+function lastPromptLine(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) if (/^\s*[❯›]/.test(lines[i]!)) return i;
+  return -1;
+}
+
+/** True only when the last prompt line has text and all of it is faint, as Claude renders its
+ *  suggestion. An empty last prompt, or a capture without escape sequences, never proves faint. */
+export function promptTextIsFaint(styledPane: string): boolean {
+  const lines = styledLines(styledPane);
+  const last = lastPromptLine(lines.map((cells) => cells.map((cell) => cell.ch).join("")));
+  if (last < 0) return false;
+  const glyph = lines[last]!.findIndex((cell) => cell.ch === "❯" || cell.ch === "›");
+  const text = lines[last]!.slice(glyph + 1).filter((cell) => !/\s/.test(cell.ch));
+  return text.length > 0 && text.every((cell) => cell.faint);
+}
+
+/** Classifies one Claude capture taken with escape sequences, as a single frame. `suggestion` is set
+ *  only when that frame's own draft is its last prompt line and all of that text is faint: it's then
+ *  the frame classified as an empty composer. */
+export function classifyStyledFrame(styledPane: string, options: ClassifyPaneOptions = {}): { frame: string; asIs: PaneActivityClassification; composer: string | null; suggestion: PaneActivityClassification | null } {
+  const lines = styledLines(styledPane).map((cells) => cells.map((cell) => cell.ch).join(""));
+  const frame = lines.join("\n");
+  const asIs = classifyPaneActivity(frame, options);
+  const composer = draftComposerLine(lines, asIs);
+  if (composer === null || !promptTextIsFaint(styledPane)) return { frame, asIs, composer, suggestion: null };
+  const last = lastPromptLine(lines);
+  lines[last] = /^\s*[❯›]/.exec(lines[last]!)![0];
+  return { frame, asIs, composer, suggestion: classifyPaneActivity(lines.join("\n"), options) };
+}
+
+/** The full text of the line a `prompt_draft` verdict read as the draft, when that's the last prompt
+ *  line; otherwise null. Evidence is compacted and truncated, so callers compare this instead. */
+function draftComposerLine(lines: string[], verdict: PaneActivityClassification): string | null {
+  const last = lastPromptLine(lines);
+  if (verdict.reason !== "prompt_draft" || last < 0 || verdict.evidence !== truncateEvidence(lines[last]!)) return null;
+  return lines[last]!.trim();
+}
+
+export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
@@ -237,7 +316,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const claudeComposer = findClaudeComposer(paneContent);
+  const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
@@ -295,7 +374,11 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN]);
+  const midWorkEvidence = findPatternEvidence(recentLines, [
+    ...MID_WORK_PATTERNS,
+    CLAUDE_LIVE_STATUS_PATTERN,
+    ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
+  ]);
   if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
@@ -358,6 +441,8 @@ export async function probeSessionActivity(input: {
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
   captureObserver?: CaptureObserverSink;
   binding?: Omit<ObservedBinding, "sessionName">;
+  /** See ClassifyPaneOptions.timerlessStatusIsLive. */
+  timerlessStatusIsLive?: boolean;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -470,8 +555,26 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "");
-    return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
+    const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
+    let classification = classifyPaneActivity(paneContent ?? "", classifyOptions);
+    // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
+    // as a draft, one capture with styling is classified on its own. Newer attention or work there is
+    // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;
+    // the verdict is then the styled frame's, as an empty composer. Anything else leaves the draft standing.
+    let slot = captureSlot(paneContent, capturedAt, captureSeq);
+    if (classification.reason === "prompt_draft" && runtime === "claude-code" && paneContent) {
+      const styled = await tmuxAdapter.capturePaneContent(sessionName, 20, { escapeSequences: true }).catch(() => null);
+      const later = styled ? classifyStyledFrame(styled, classifyOptions) : null;
+      const newer = !later ? null
+        : later.asIs.state === "agent_active" || (later.asIs.state === "attention" && later.asIs.reason !== "prompt_draft") ? later.asIs
+        : later.suggestion && later.composer === draftComposerLine(paneContent.split("\n"), classification) ? later.suggestion
+        : null;
+      if (later && newer) {
+        classification = newer;
+        slot = captureSlot(later.frame, new Date().toISOString(), captureSeq);
+      }
+    }
+    return observeProbe(slot, {
       state: mapPaneState(classification.state),
       reason: classification.reason,
       evidence: classification.evidence,
@@ -681,6 +784,11 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
+   *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
+   *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
+   *  can be the Stop from before /compact. */
+  readinessFromPaneOnly?: boolean;
   // OPR.0.4.1.10 — interactive-prompt / permission guard.
   // `dangerouslyInteract` is the ONLY override of the prompt/permission guard (force does NOT bypass
   // it). It requires `reason` and writes an auditable `transport.prompt_override` record before the
@@ -798,7 +906,8 @@ interface SessionTransportDeps {
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null; }
+interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
+  resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
@@ -870,6 +979,7 @@ export class SessionTransport {
 
   private getSessionMeta(sessionName: string): {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
+    rotation: ClaudeResumeRotation | null;
   } {
     // One existing statement; P2 reads the binding columns it already joins plus the
     // same current-occupant subselect the delivery guard uses. No extra query.
@@ -881,6 +991,10 @@ export class SessionTransport {
         b.tmux_session AS binding_session,
         b.tmux_pane AS pane,
         s.resume_token AS resume_token,
+        s.resume_provenance AS resume_provenance,
+        s.resume_rotated_from AS resume_rotated_from,
+        s.resume_rotated_process AS resume_rotated_process,
+        s.resume_launch_process AS resume_launch_process,
         (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
       FROM sessions s
       JOIN nodes n ON s.node_id = n.id
@@ -899,6 +1013,7 @@ export class SessionTransport {
       pane: row?.binding_session === sessionName ? row?.pane ?? null : null,
       occupant: row?.binding_session === sessionName ? row?.occupant ?? null : null,
       resumeToken: row?.resume_token ?? null,
+      rotation: claudeResumeRotation(row),
     };
   }
 
@@ -1201,7 +1316,7 @@ export class SessionTransport {
     const checkClaudeTarget = async (): Promise<SendResult | null> => {
       if (runtime !== "claude-code") return null;
       if (bindingChanged()) return changedRecipient();
-      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken);
+      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken, sessionMeta.rotation);
       if (bindingChanged()) return changedRecipient();
       if (observation.state === "idle_shell" || observation.state === "conflict") {
         return { ok: false, sessionName, sent: false, reason: observation.state === "idle_shell" ? "target_runtime_not_running" : "target_runtime_conflict",
@@ -1377,6 +1492,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -1617,6 +1733,7 @@ export class SessionTransport {
     timeoutMs: number;
     signal?: AbortSignal;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -1698,7 +1815,7 @@ export class SessionTransport {
   /** One readiness observation, raced against the time left before the wait's deadline. Null
    *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
   private async observeReadinessWithin(
-    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding },
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
   ): Promise<AgentActivity | null> {
     const observation = this.classifySendReadiness(input);
@@ -1714,7 +1831,7 @@ export class SessionTransport {
     }
   }
 
-  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null): Promise<ClaudeDeliveryObservation> {
+  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null, rotation: ClaudeResumeRotation | null = null): Promise<ClaudeDeliveryObservation> {
     const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
     try {
       const panes = await this.tmuxAdapter.listPanes(sessionName);
@@ -1724,7 +1841,7 @@ export class SessionTransport {
       if (!pane || panes.length === 0) return unknown;
       const [sessionPid, panePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
       if (sessionPid && panePid && sessionPid !== panePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
-      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken });
+      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken, rotation });
       // Refusal already has positive evidence; a later failed read cannot erase it.
       if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
       const after = await this.tmuxAdapter.listPanes(sessionName);
@@ -1761,19 +1878,34 @@ export class SessionTransport {
     runtime: string | null;
     attachmentType: string | null;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<AgentActivity> {
     const now = this.now();
     const hookActivity = this.agentActivityStore?.getLatestForNode({
       sessionName: input.sessionName,
       now,
     });
-    if (hookActivity?.reason === "permission_request_pending" && hookActivity.stale !== true) {
+    const permissionPending = latestHookPermissionPending(hookActivity, input.runtime);
+    if (hookActivity && permissionPending && this.hookFreshForSend(hookActivity, now)) {
       return { ...hookActivity, state: "needs_input" };
+    }
+    // Pane-only readiness never lets a hook authorise a send, but a fresh hook showing work or a
+    // waiting person still refuses one, as it does for every other send.
+    if (
+      input.readinessFromPaneOnly &&
+      hookActivity &&
+      hookActivity.evidenceSource === "runtime_hook" &&
+      hookActivity.stale !== true &&
+      this.hookFreshForSend(hookActivity, now) &&
+      (hookActivity.state === "running" || hookActivity.state === "needs_input")
+    ) {
+      return hookActivity;
     }
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
     if (
+      !input.readinessFromPaneOnly &&
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
       hookActivity.stale !== true &&
@@ -1822,6 +1954,8 @@ export class SessionTransport {
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
+      // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
+      timerlessStatusIsLive: input.readinessFromPaneOnly === true,
     });
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
@@ -1837,6 +1971,22 @@ export class SessionTransport {
       (hookActivity.state === "running" || hookActivity.state === "needs_input")
     ) {
       return hookActivity;
+    }
+    if (probe.state === "unknown" && permissionPending) {
+      return { ...probe, state: "needs_input", reason: "permission_request_unverified" };
+    }
+    // A latest hook saying the seat waits on a person (approval, picker or elicitation) stays positive
+    // picker evidence past the send window, and past the store's freshness window: nothing newer was
+    // recorded, so nothing answered it. The pane alone can miss a picker it has no signature for (a
+    // Claude AskUserQuestion with option previews read unknown, and a watchdog wake's Enter chose its
+    // first option). An UNKNOWN pane keeps the hook's verdict; a pane that reads work or a recognized
+    // empty composer shows the seat has moved on.
+    if (probe.state === "unknown" && hookActivity && latestHookWaitsOnPerson(hookActivity, input.runtime)) {
+      return {
+        ...hookActivity,
+        state: "needs_input",
+        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; latest hook, pane unrecognized`,
+      };
     }
     return probe;
   }

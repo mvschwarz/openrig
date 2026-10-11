@@ -1,6 +1,6 @@
 {
   "name": "@openrig/cli",
-  "version": "0.6.6",
+  "version": "0.6.9",
   "type": "module",
   "description": "Build your own network of agents from Claude Code, Codex and Pi: persistent teams with roles, shared context and owned work.",
   "keywords": [
@@ -38,7 +38,7 @@
     "scripts"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/bin-wrapper.js && mkdir -p dist/schemas && cp src/schemas/*.json dist/schemas/ && mkdir -p dist/lib/scope-templates && cp src/lib/scope-templates/*.md dist/lib/scope-templates/ && cp ../../LICENSE LICENSE && cp ../../README.md README.md",
+    "build": "tsc && node ../../scripts/prepare-workspace-build.mjs cli",
     "postinstall": "node scripts/check-abi.mjs",
     "prepublishOnly": "bash ../../scripts/build-package.sh",
     "test": "vitest run",

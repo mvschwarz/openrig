@@ -331,7 +331,7 @@ export function scopeContractLines(detail: SliceScopeSnap, opts: Pick<ScopeConte
   const lines: ContentLine[] = [];
   const w = Math.max(24, opts.width);
   if (opts.narrative) {
-    lines.push({ text: "" }, rule("PROGRESS · narrative only · n closes", w));
+    lines.push({ text: "" }, rule("PROGRESS · narrative only · N closes", w));
     for (const l of (detail.narrative ?? "(no PROGRESS.md)").split("\n")) lines.push(...wrapped(l, w, "  "));
     return lines;
   }
@@ -339,7 +339,7 @@ export function scopeContractLines(detail: SliceScopeSnap, opts: Pick<ScopeConte
   lines.push({ text: "" }, rule("INTENT", w));
   lines.push(...wrapped(detail.intent, w, "  "));
 
-  lines.push({ text: "" }, rule(`REQUIREMENTS (${detail.miniRequirements.length}) · m collapses`, w));
+  lines.push({ text: "" }, rule(`REQUIREMENTS (${detail.miniRequirements.length}) · M collapses`, w));
   if (!opts.collapseReqs) {
     detail.miniRequirements.forEach((requirement, i) => {
       const chunks = wrapText(requirement, Math.max(1, w - 5));
@@ -349,7 +349,7 @@ export function scopeContractLines(detail: SliceScopeSnap, opts: Pick<ScopeConte
       ], w)));
     });
   } else {
-    lines.push(semantic([{ text: "  collapsed · m expands", token: "dim" }], w));
+    lines.push(semantic([{ text: "  collapsed · M expands", token: "dim" }], w));
   }
 
   lines.push({ text: "" }, rule(`PROOF · ${detail.proof.paired}/${detail.proof.total} paired`, w));
@@ -374,7 +374,7 @@ export function scopesContentLines(
   lines.push(...proofProvenanceLines(detail.readiness, w));
   lines.push(...scopeContractLines(detail, opts));
   lines.push({ text: "" }, semantic([{
-    text: opts.narrative ? "  esc back · n narrative · m reqs · : command bar" : "  esc back · m collapse reqs · n narrative · : command bar",
+    text: opts.narrative ? "  esc back · N narrative · M reqs · : command bar" : "  esc back · M collapse reqs · N narrative · : command bar",
     token: "dim",
   }], w));
   return lines;

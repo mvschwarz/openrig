@@ -327,12 +327,12 @@ nodesRoutes.post("/launch-subset", async (c) => {
   if (!restoreOrchestrator) {
     return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
   }
-  const body = await c.req.json().catch(() => ({})) as { seats?: string[]; holdReason?: string; snapshotId?: string; plan?: boolean };
+  const body = await c.req.json().catch(() => ({})) as { seats?: string[]; holdReason?: string; snapshotId?: string; plan?: boolean; nonTargetMode?: "unchanged" | "detach_and_hold" };
   if (!Array.isArray(body.seats) || body.seats.length === 0) {
     return c.json({ ok: false, code: "invalid_request", error: "Request body must include a non-empty 'seats' array of logical IDs" }, 400);
   }
   const result = body.plan === true
-    ? restoreOrchestrator.planNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId })
+    ? restoreOrchestrator.planNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, nonTargetMode: body.nonTargetMode })
     : await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
   if (!result.ok) {
     return c.json(result, narrowLaunchErrorStatus(result.code));

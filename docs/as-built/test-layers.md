@@ -7,13 +7,13 @@ applies-when: |
   request, what each check actually proves, and what CI will run for you. Also
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
-last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Test layers: what to run before you push, and what each layer proves
 
-> **This page is a map, not the territory.** It was checked against source at `2620dea8`
+> **This page is a map, not the territory.** It was checked against source at `e8f0ab34`
 > and it will drift. It is also incomplete on purpose. Before you rely on a command or a
 > claim here, read the script it names or run it. If a behaviour is missing from this page
 > (or from [arteries.md](arteries.md)), that tells you nothing about whether a change to it
@@ -139,7 +139,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 15 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
+| Scenario library | `packages/test-system/scenarios/`: 16 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -245,7 +245,7 @@ The stub does not fabricate product outputs. It runs the real daemon, tmux and C
 not Claude Code or Codex, and it differs from them in ways that decide what a stub green
 means:
 
-| Area | What the stub does at `2620dea8` | What that means for your test |
+| Area | What the stub does at `e8f0ab34` | What that means for your test |
 |---|---|---|
 | Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
 | Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). Otherwise Claude Code, Codex and Pi launch through `SeatLaunchEnvironment.command` and `tmux.sendShellCommand`; the stub adapter does not get that environment. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal` and `claude-code`, and only `codex` has a native-process proof; Claude Code ordinary delivery applies its own uncertainty policy at the input boundary. | A stub seat doesn't exercise the seat launch environment, managed launch, wrappers or native-process identity (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
@@ -273,8 +273,9 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 Three scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
 and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` in passing form
-only. Two more, `down-stops-every-seat` and `send-renders-in-addressed-pane`, run with the
-local runner but not in CI. Those four later scenarios are not in this table; see "Status
+only. Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
+`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI. Those five
+later scenarios are not in this table; see "Status
 today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
 other ten scenarios are authored but not yet runnable as meaningful checks:
 
@@ -382,7 +383,7 @@ not as current status.
 ## Help wanted: command families without a behavioural scenario
 
 > This list may be stale. It was taken from the `rig --help` tree of 0.6.3: 85 visible
-> top-level families. At `2620dea8`, `packages/cli/src/index.ts` registers 87 top-level
+> top-level families. At `e8f0ab34`, `packages/cli/src/index.ts` registers 87 top-level
 > commands; `roster` and `telemetry` were added since and have no row yet. Before picking one up, check `packages/test-system/scenarios/`, the cases in
 > `scripts/run-pr-scenarios.sh`, and the current `rig --help`.
 > One scenario doesn't cover a family's every option, sequence or platform. A `--help`
@@ -402,12 +403,18 @@ that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage i
 pane. The scenario catches a capture that resolves the seat by a prefix match on its member
 name (so `dev-impl` also matches `dev-impl2`) and takes the first hit, or any resolver that
 returns the same pane for both seats; it does not exercise a prefix match on the full seat
-name. All four run with the local runner (`run-scenarios.mjs`). The transcript and capture
-scenarios also run in the CI job, in passing form only; the down and send scenarios don't.
+name. All five run with the local runner (`run-scenarios.mjs`). The transcript and capture
+scenarios also run in the CI job, in passing form only; the down, send and up scenarios don't.
 They do not prove that panes are gone or that a seat consumed a message. The transcript
 case does not establish ordering, uniqueness, sibling-token absence, tail limits or restart
-persistence. `up` and `daemon` are used by the existing scenarios but have no scenario of their
-own. Everything else has none.
+persistence. `up` has partial coverage in `up-relaunch-restores-a-two-seat-team.yaml`: a
+two-seat stub team comes up, goes down, and the same spec starts a new team in place of the
+stopped one with the same name, exactly two seats, both running and not archived, so a
+relaunch that re-records the old seats into the team's row fails on the final `ps` counts.
+It does not prove that conversations survive the round trip (that is the `--existing`
+restore path), that a seat consumed a message, or that the panes are gone after `down`.
+`daemon` is used by the existing scenarios but has no scenario of its own. Everything else
+has none.
 
 Before you start, two honest constraints:
 
@@ -431,7 +438,7 @@ Before you start, two honest constraints:
 | lifecycle | `start` | Restore two stopped stub seats. Both answer distinct fresh nonces, and no second daemon starts. |
 | lifecycle | `daemon` | start/status/stop/restart. Port, process and persisted queue identity agree through public commands. |
 | lifecycle | `bootstrap` | Bootstrap a minimal stub spec. Seats come up ready and the selected spec is the one used. |
-| lifecycle | `up` | Launch two stub seats. Each consumes its own send. Relaunching doesn't duplicate identities. |
+| lifecycle | `up` (partial) | Relaunch-not-duplicating-identities is covered by `up-relaunch-restores-a-two-seat-team.yaml`. Next: each seat consumes its own send, which needs the input-consuming stub. |
 | lifecycle | `down` | (partial) Next: its panes are gone, a sibling rig still answers, retained data follows the docs. |
 | lifecycle | `create` | Create a one-seat rig through the public path. It appears and answers without a hand-written topology. |
 | lifecycle | `launch` | Fresh, relaunch, resume and fork on provider-shaped fixtures. Correct restored token, one live process. |

@@ -220,13 +220,21 @@ describe("SeatAttentionReconciler", () => {
         getPaneCommand: vi.fn(async () => null),
       },
     });
+    // clearAttention re-observes with the wall clock, and the inventory ignores a
+    // verdict from the registration's own millisecond (applicableVerdict).
+    while (Date.now() <= decodeTime(session.id)) await new Promise((resolve) => setTimeout(resolve, 1));
 
     const result = await paneReconciler.clearAttention(session.sessionName, { reason: "reattached" });
 
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("Uncleared attention class pane_identity");
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%old");
-    expect(getNodeInventory(db, rig.id)[0]!.lifecycleState).toBe("attention_required");
+    // Re-observation confirmed the whole session missing, rather than just
+    // the registered pane process being gone. Preserve that stronger fact.
+    expect(getNodeInventory(db, rig.id)[0]!).toMatchObject({
+      lifecycleState: "detached", sessionStatus: "detached",
+      storedSessionStatus: "running", identityVerdict: { reason: "session_missing" },
+    });
   });
 
   // Audit event emitted with distinct clearedBy

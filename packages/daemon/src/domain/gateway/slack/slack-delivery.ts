@@ -42,6 +42,10 @@ export interface SubsystemSlackDeliveryOpts {
   sourceLabel: string; // host/box/rig — from config, never hardcoded (item 7)
   bodyExcerpt?: number;
   fetchImpl?: FetchImpl;
+  /** The owning gateway run's stop signal. When the wire stops (restart, disable,
+   *  shutdown) a rate-limit wait inside postChatMessage rejects instead of sleeping
+   *  on: a stale retry must never post after a replay already owns the decision. */
+  stopSignal?: AbortSignal;
   /** decisionId-keyed delivered-store (idempotent redelivery: replay re-acks, never re-posts). */
   delivered: SeenStore;
   /** H — decisionId-keyed ATTEMPTED-store, marked BEFORE the HTTP post. A retry of an attempted
@@ -208,6 +212,18 @@ export function evidenceAttachment(
   return { mediaRefs: undefined, evidenceLink: undefined };
 }
 
+/** A sleep that rejects the moment the owning gateway run stops: the inline rate-limit
+ *  retry inside postChatMessage must never outlive the run that started it, or a restart
+ *  would leave both the stale retry and the replay's post in flight for one decision. */
+export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(new Error("gateway stopped during rate-limit wait")); return; }
+    const onAbort = () => { clearTimeout(timer); reject(new Error("gateway stopped during rate-limit wait")); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Build the subsystem DeliverFn. Contract mirrors the retired connector handleDecision. */
 function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true): SubsystemDeliverFn {
   const log = opts.log ?? (() => {});
@@ -347,10 +363,13 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
 
     // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
     opts.attempted.mark(decision.decisionId, "attempted");
+    const stopSignal = opts.stopSignal;
     const res = await postChatMessage(
       opts.botToken,
       { channel, text: payload.text, blocks: payload.blocks, thread_ts: threadTs },
       opts.fetchImpl,
+      undefined,
+      stopSignal ? (ms: number) => abortableSleep(ms, stopSignal) : undefined,
     );
     if (!res.ok) {
       const failureClass = res.status === 0 ? "transport" : `http-${res.status}`;

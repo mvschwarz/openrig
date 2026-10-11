@@ -148,6 +148,21 @@ export class DeadLetterStore<T = unknown> {
     return parseLines(raw) as DeadLetterEntry<T>[];
   }
 
+  /** Non-destructive read that keeps an ABSENT file apart from an UNREADABLE one.
+   *  A caller that surfaces a count must not report a false zero when the file
+   *  exists but could not be read: absent is a real empty set, any other error is
+   *  a named read failure. */
+  readResult(): { ok: true; entries: DeadLetterEntry<T>[] } | { ok: false; reason: string } {
+    let raw: string;
+    try {
+      raw = this.fsops.readFileSync(this.file);
+    } catch (error) {
+      if ((error as { code?: string }).code === "ENOENT") return { ok: true, entries: [] };
+      return { ok: false, reason: (error as Error).message || "dead-letter file could not be read" };
+    }
+    return { ok: true, entries: parseLines(raw) as DeadLetterEntry<T>[] };
+  }
+
   /** Atomically replace the durable set (temp-write + rename). Used after a retry pass. */
   replaceAll(entries: DeadLetterEntry<T>[]): void {
     this.fsops.mkdirp(path.dirname(this.file));
@@ -186,7 +201,8 @@ export type InboundReceiptStatus =
   | "ignored"
   | "refused"
   | "dead-lettered"
-  | "handler-failed";
+  | "handler-failed"
+  | "replace-requested";
 
 export interface InboundReceipt {
   at: string;
@@ -196,6 +212,8 @@ export interface InboundReceipt {
   eventTs?: string;
   channel?: string;
   reason?: string;
+  /** Slack's `hello` count of this app's open Socket Mode connections. */
+  connections?: number;
 }
 
 /** Credential-free ingress/lifecycle ledger. A received receipt is appended before

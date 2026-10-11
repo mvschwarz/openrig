@@ -14,6 +14,7 @@ import { i3IdentityProvenanceSchema } from "../src/db/migrations/067_i3_identity
 import { EventBus } from "../src/domain/event-bus.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { streamRoutes } from "../src/routes/stream.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: { eventBus: EventBus; streamStore: StreamStore }): Hono {
   const app = new Hono();
@@ -125,6 +126,11 @@ describe("stream routes", () => {
       .get(streamItemId) as { source_session: string; identity_provenance: string | null } | undefined;
     expect(row?.source_session).toBe("alice@rig");
     expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
+  it("GET /api/stream/list refuses only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["1", "2", "3"]) store.emit({ sourceSession: "alice@rig", body, hintDestination: "bob@rig" });
+    await expectLimitParsing(app, "/api/stream/list");
   });
 
   it("GET /api/stream/list returns chronological items with filters", async () => {

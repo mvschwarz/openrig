@@ -101,7 +101,9 @@ export function connectionsProjection(home: string, gateway: Record<string, unkn
     running: { state: text(gateway?.state) ?? "unavailable", activatedAt: text(gateway?.activatedAt),
       outboundReady: typeof connector?.outboundReady === "boolean" ? connector.outboundReady : null,
       inboundReady: typeof connector?.inboundReady === "boolean" ? connector.inboundReady : null,
-      inboundState: text(inbound?.state) ?? "unverified", applied },
+      inboundState: text(inbound?.state) ?? "unverified",
+      // Delivery health beside the socket state: an open socket is not proof that events arrive.
+      inboundDelivery: text(inbound?.delivery), inboundEventsMissingSince: text(inbound?.eventsMissingSince), applied },
     state, nextAction, verification,
     registry: { state: registry.ok ? "available" : "unavailable", path: text(join(home, "gateway", "humans")) },
     humans: registry.ok ? registry.entities.map((h) => ({

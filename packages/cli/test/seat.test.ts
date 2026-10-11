@@ -250,6 +250,19 @@ describe("rig seat status", () => {
     expect(output).toContain("Previous occupant: none");
   });
 
+  it("explains a confirmed missing tmux session", async () => {
+    const deps = makeDeps({
+      status: 200,
+      data: { ...STATUS, session_status: "detached", session_reason: "session_missing" },
+    }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    expect(logs.join("\n")).toContain("Reason: tmux session missing; restore or relaunch the seat");
+  });
+
   it("returns a nonzero status for an unknown seat", async () => {
     const deps = makeDeps({
       status: 404,

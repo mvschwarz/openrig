@@ -36,14 +36,14 @@ function fixture(failed: boolean): SetupDeps {
 }
 
 function expectConversationRoute(text: string): void {
-  expect(text).toContain("Open the OpenRig view now?");
+  expect(text).toContain("Show the person OpenRig: open the OpenRig TUI and operator for them now");
   expect(text).toContain("On a Mac, offer Ghostty once");
   expect(text).toContain("rig setup --ghostty");
   expect(text).toContain("--no-ghostty");
   expect(text).toContain("preserve earlier choices such as --no-herdr");
   expect(text).toContain("rig terminal open saved:kernel");
   expect(text).toContain("rig terminal open saved:kernel --window --json");
-  expect(text).toContain("On a desktop, no copying or typing for the person; confirm three visible columns, not just CLI success");
+  expect(text).toContain("On a desktop, no copying or typing for the person; check the result notes, not just CLI success");
   expect(text).toContain("Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command");
   expect(text).toContain("then hand them to the ready operator");
   expect(text).toContain("Do not implement the person's project yourself");

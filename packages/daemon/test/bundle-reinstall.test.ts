@@ -238,6 +238,32 @@ describe("bundle reinstall through both public routes", () => {
     expect(result.body.bundleInstall.resolutions).toEqual([]);
   });
 
+  it.each([["/api/up", "github-bundle"], ["/api/bundles/install", "my-bundle"]])("%s replaces a stopped team whose folder carries the earlier default name %s", async (route, earlierName) => {
+    const previous = seed("workshop", false);
+    const target = path.join(root, "target");
+    installedTarget(earlierName, target);
+    fs.writeFileSync(path.join(target, "README.md"), "my local edits\n");
+    const result = await install(route, await bundle("workshop", "99.0.0"), target);
+    expect(result.status).toBe(201);
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id)).not.toContain(previous.id);
+    expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("offered team documentation\n");
+    const backups = fs.readdirSync(path.join(root, "home", "bundle-backups"));
+    expect(fs.readFileSync(path.join(root, "home", "bundle-backups", backups[0]!, "files", "README.md"), "utf8")).toBe("my local edits\n");
+  });
+
+  it("a stopped team's folder named for another bundle still conflicts", async () => {
+    const previous = seed("workshop", false);
+    const target = path.join(root, "target");
+    installedTarget("another-team", target);
+    fs.writeFileSync(path.join(target, "README.md"), "my local edits\n");
+    const result = await install("/api/up", await bundle("workshop", "99.0.0"), target);
+    expect(result.status).toBe(400);
+    expect(result.body.code).toBe("target_conflict");
+    expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("my local edits\n");
+    expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id)).toEqual([previous.id]);
+  });
+
   it.each(["present", "transport_unavailable"])("round 2: %s old session leaves stopped-team target untouched", async state => {
     const previous = seed("workshop", false);
     vi.mocked(setup.tmuxAdapter.probeSession).mockResolvedValue(state === "present" ? { state: "present" } : { state: "transport_unavailable", cause: "fixture unavailable" });

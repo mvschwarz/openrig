@@ -36,13 +36,14 @@ function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 |
 }
 
 /** Parse the `{ provider?, view }` open body honestly (a non-object / missing view → structured 400 upstream). */
-function readOpenBody(raw: unknown): { provider?: string; view?: string; expectedPlan?: string } {
+function readOpenBody(raw: unknown): { provider?: string; view?: string; expectedPlan?: string; viewportColumns?: number } {
   if (raw === null || typeof raw !== "object") return {};
   const obj = raw as Record<string, unknown>;
   const provider = typeof obj["provider"] === "string" ? (obj["provider"] as string) : undefined;
   const view = typeof obj["view"] === "string" ? (obj["view"] as string) : undefined;
   const expectedPlan = typeof obj["expectedPlan"] === "string" ? obj["expectedPlan"] : undefined;
-  return { ...(provider !== undefined ? { provider } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}) };
+  const viewportColumns = typeof obj["viewportColumns"] === "number" ? obj["viewportColumns"] : undefined;
+  return { ...(provider !== undefined ? { provider } : {}), ...(view !== undefined ? { view } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}) };
 }
 
 /** The canonical, non-rig-scoped terminal route family. Mounted at `/api/terminal`. */
@@ -58,8 +59,8 @@ export function terminalRoutes(): Hono {
     } catch {
       return c.json({ error: "body_invalid", hint: "expected a JSON object { provider?, view }" }, 400);
     }
-    const { provider, view, expectedPlan } = readOpenBody(raw);
-    const result = await svc.openView({ ...(provider !== undefined ? { provider } : {}), view: view ?? "", ...(expectedPlan !== undefined ? { expectedPlan } : {}) });
+    const { provider, view, expectedPlan, viewportColumns } = readOpenBody(raw);
+    const result = await svc.openView({ ...(provider !== undefined ? { provider } : {}), view: view ?? "", ...(expectedPlan !== undefined ? { expectedPlan } : {}), ...(viewportColumns !== undefined ? { viewportColumns } : {}) });
     return c.json(result, statusForOpen(result.ok, result.code));
   });
 
@@ -72,7 +73,8 @@ export function terminalRoutes(): Hono {
   app.get("/preview", async (c) => {
     const svc = getService(c);
     if (!svc) return c.json({ error: "terminal_service_unavailable" }, 503);
-    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider") });
+    const width = c.req.query("viewportColumns");
+    const result = await svc.previewView({ view: c.req.query("view") ?? "", provider: c.req.query("provider"), ...(width !== undefined ? { viewportColumns: Number(width) } : {}) });
     return c.json(result, "planId" in result ? 200 : statusForOpen(result.ok, result.code));
   });
 

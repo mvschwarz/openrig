@@ -442,6 +442,126 @@ describe("rig launch --host HTTP", () => {
     expect(subsetCalls[0]!.body).toMatchObject({ seats: ["dev.impl", "dev.qa"] });
   });
 
+  function remoteLaunch(responses: Record<string, { status: number; data: unknown }>) {
+    vi.stubEnv("HOST_B_TOKEN", "remote-tok");
+    const client = mockClient(responses);
+    return import("../src/commands/launch.js").then(({ launchCommand }) => {
+      const prog = new Command();
+      prog.exitOverride();
+      prog.addCommand(launchCommand({
+        lifecycleDeps: {} as any,
+        clientFactory: () => client,
+        hostRegistryLoader: mockRegistry([
+          { id: "host-b", transport: "http", url: "http://remote:7433", bearer_env: "HOST_B_TOKEN" },
+        ]),
+      } as any));
+      return { prog, client };
+    });
+  }
+  const SUBSET = "/api/rigs/rig-1/nodes/launch-subset";
+  const VERSION = "/api/health-summary/version";
+  const HEALTH = "/healthz";
+
+  it.each([
+    ["an older stamped remote daemon", { [HEALTH]: { status: 200, data: { status: "ok", semver: "0.5.8" } } }],
+    ["an older unstamped remote daemon", { [HEALTH]: { status: 200, data: { status: "ok" } }, [VERSION]: { status: 200, data: { version: "0.5.8" } } }],
+    ["an unstamped remote daemon whose version route says unknown", { [HEALTH]: { status: 200, data: { status: "ok" } }, [VERSION]: { status: 200, data: { version: "unknown" } } }],
+    ["a remote daemon that reports no version", {}],
+  ])("--plan refuses %s before posting", async (_label, responses) => {
+    const { prog, client } = await remoteLaunch(responses);
+    const { stdout, stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
+    });
+    expect(client._calls.every((c) => c.method === "GET")).toBe(true);
+    expect(client._calls[0]!.path).toBe(HEALTH);
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("0.5.9 or later");
+    expect(stdout).toEqual([]);
+  });
+
+  it("--plan on a stamped remote daemon reads /healthz, then prints the plan, even when its version route says unknown", async () => {
+    const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
+    const { prog, client } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.4-rc.1" } },
+      [VERSION]: { status: 200, data: { version: "unknown" } },
+      [SUBSET]: { status: 200, data: plan },
+    });
+    const { stdout, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
+    });
+    expect(client._calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${HEALTH}`, `POST ${SUBSET}`]);
+    expect(client._calls[1]!.body).toMatchObject({ seats: ["dev.impl"], plan: true });
+    expect(exitCode).toBeUndefined();
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ ok: true, data: { planOnly: true } });
+  });
+
+  it.each([[["--json"]], [[]]])("--plan on a remote daemon that answers without planOnly exits non-zero (%j)", async (extra) => {
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 201, data: { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.impl", status: "fresh" }] } },
+    });
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", ...extra]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("did not return a plan");
+  });
+
+  it("--plan on a remote daemon that answers 409 without planOnly says it may have acted", async () => {
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 409, data: { ok: false, launched: [{ nodeId: "n1", logicalId: "dev.impl", status: "attention_required" }] } },
+    });
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("did not return a plan");
+    expect(stderr.join("\n")).toContain("rig ps --host host-b --nodes -A");
+  });
+
+  it("--plan on a remote daemon that refuses an unmatched seat keeps its own error, not may-have-acted", async () => {
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 404, data: { ok: false, code: "no_matching_nodes", error: "no seats match dev.typo" } },
+    });
+    const { stderr, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.typo", "--plan", "--host", "host-b"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).not.toContain("may have acted");
+    expect(stderr.join("\n")).toContain("Error on host host-b");
+  });
+
+  it("single nodeRef launch with --plan sends launch-subset with single seat array on remote host (#887)", async () => {
+    const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } };
+    const { prog, client } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 200, data: plan },
+    });
+    const { exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "dev.impl", "--host", "host-b", "--plan", "--json"]);
+    });
+    const subsetCalls = client._calls.filter((c) => c.path.includes("launch-subset"));
+    expect(subsetCalls.length).toBe(1);
+    expect(subsetCalls[0]!.body).toMatchObject({ seats: ["dev.impl"], plan: true, nonTargetMode: "unchanged" });
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("single nodeRef launch with --plan exits non-zero on remote host when daemon answers detach_and_hold (#887)", async () => {
+    const plan = { ok: true, planOnly: true, nonTargetEffects: { mode: "detach_and_hold", reason: "excluded_from_subset", affected: [] } };
+    const { prog } = await remoteLaunch({
+      [HEALTH]: { status: 200, data: { status: "ok", semver: "0.6.8" } },
+      [SUBSET]: { status: 200, data: plan },
+    });
+    const { stderr, stdout, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "launch", "rig-1", "dev.impl", "--host", "host-b", "--plan"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("this daemon can't preview a single-seat launch; upgrade or restart it, or preview the subset with --seats <seat>");
+    expect(stdout.join("\n")).not.toContain("Plan only");
+  });
+
   it("missing bearer exits nonzero with no HTTP request", async () => {
     delete process.env.MISSING_TOK;
     const client = mockClient({});

@@ -11,10 +11,11 @@ directly. Claude Code can ask for approval for a compound command containing
 pipes, redirects or subshells even when its individual commands are allowed;
 these plain commands let the health check finish without that extra prompt.
 
-For “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
+When the person wants to see their agents or OpenRig in a terminal, in any words, run
 `rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
-TUI | advisor | operator view itself in a new terminal tab/window. Inspect its
-result and visible content, or state what you cannot confirm. On a desktop, do
+OpenRig TUI and operator in a new terminal tab/window, or a space in the current Herdr session:
+below 120 measured columns, operator alone first;
+from 120, dashboard and operator equally side by side. The advisor has a separate tab or tmux window. Inspect its result and visible content, or state what you cannot confirm. On a desktop, do
 not end by showing a table or suggesting a command for the person to type. Herdr is visible
 only inside a terminal the person can see; changing the shared TUI to `:terminals`
 does not open one. Over headless SSH, explain that limitation, ask the person to
@@ -68,6 +69,13 @@ human channel; a terminal attachment is not a person's address.
 After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
+
+For a team's `/rigs` listing page, use `WebFetch` when available. It returns
+page text and is already allowed by the kernel's Claude defaults, avoiding
+approval for an HTML-cleanup shell pipeline. If it is unavailable or fails,
+use a plain `curl -fsSL <listing-url>` call and read the response directly.
+Fetch the raw registry YAML separately for the installation commit and
+configurations, as below; do not take the pin from a cached page summary.
 
 1. **Goal first.** Use a goal and folder already supplied, including a handoff
    from the installing agent; do not ask for them again. If the goal is missing,
@@ -157,7 +165,11 @@ question through the human channel instead.
      copy in `workspace.specs_root` or `~/.openrig/specs` would shadow the
      shipped team by name. Copying the folder carries every file the spec
      names relative to itself: its culture file, docs, startup files at rig,
-     pod and member level, services and policy files. Then, in the copy's
+     pod and member level, services and policy files. In Claude Code, make the
+     copy with your Read and Write tools, one file at a time (Write creates the
+     folders), not with `cp -R`: Claude Code asks for approval before `cp` or
+     `mv` with any flag, even though your launch allows them, and that prompt
+     stops the person on their first team. Then, in the copy's
      `rig.yaml`, keep `name:`, change each member's `runtime` to one they have
      and drop that member's `model:` pin. Any reference that climbs out of the
      folder (`local:../…` agent refs, any `../` path) still points at the old
@@ -176,6 +188,13 @@ question through the human channel instead.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
    what will start: how many agents, which providers, in which folder.
+   Say too what launching into their folder changes for their own agent
+   there. A Claude Code team usually adds files such as a `CLAUDE.md`, its
+   skills, `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
+   makes their own Claude Code in that folder start in accept-edits mode, with
+   the `exa` and `context7` MCP servers and OpenRig's activity hooks; what a
+   given team writes depends on its configuration. If they'd rather keep
+   their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
    Use `applying-a-permission-policy`; for an unset policy, recommend the team
    default rather than `none`. Launch without `--plan` after team-launch
@@ -226,6 +245,14 @@ question through the human channel instead.
    their goal, and identify its pane in the new space or repeat its exact
    attach command from step 8 so they can talk to it. It won't ask the opening
    question again.
+10. **Tell them when a seat waits on them.** A team seat waiting at a prompt
+    shows `needs_input` as its `agentActivity.state` in
+    `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
+    and nothing else tells the person.
+    When you see one, tell them where they already are: which seat, what its
+    prompt asks (`rig capture <session>` with the seat's
+    `canonicalSessionName` shows it) and the seat's `tmuxAttachCommand`, or
+    just its name if it has none. Don't answer another seat's prompt yourself.
 
 Avoid these:
 - launching a team without the person's yes;

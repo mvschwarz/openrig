@@ -83,6 +83,9 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
         process.exitCode = 1;
         return;
       }
+      const skippedSkills = resolved.loadout.skipped ?? [];
+      if (!opts.json) for (const skip of skippedSkills) console.error(`Warning: ${skip.message}`);
+      if (skippedSkills.some((skip) => skip.selectedBy.length > 0)) process.exitCode = 1;
       const projection = reconcileSkillLoadout({ loadout: resolved.loadout, runtime, cwd, apply: opts.apply === true });
       if (opts.json) {
         console.log(JSON.stringify({ ...resolved, projection }, null, 2));

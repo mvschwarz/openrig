@@ -38,6 +38,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
   continuity_outcome: string | null;
@@ -149,6 +150,10 @@ function display(value: string | null | undefined, empty = "none"): string {
   return value ?? empty;
 }
 
+function sessionReason(reason: string | null | undefined): string | null {
+  return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
+}
+
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
   console.log(`Rig: ${status.rig_name}`);
@@ -160,6 +165,8 @@ function printHuman(status: SeatStatusResponse): void {
     console.log("Automatic input pauses while on, including writing lifecycle. Disabling does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  const reason = sessionReason(status.session_reason);
+  if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions) {
     const p = status.permissions;
     const formatSource = (source: string): string => {

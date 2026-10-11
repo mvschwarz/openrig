@@ -263,7 +263,7 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
     build: () => ({ type: "palette-open" }),
   },
   {
-    // SCOPES view (d64d2f5c): the m-key accelerator's command form.
+    // SCOPES view (d64d2f5c): the M-key accelerator's command form.
     name: "reqs",
     aliases: [],
     args: "",

@@ -148,21 +148,36 @@ export class ContextMonitor {
    * enforcer owns policy + dedup + send; ContextMonitor only relays
    * data and absorbs enforcer errors so a trigger-path fault never
    * crashes telemetry polling.
+   *
+   * Only a fresh, known sample can start a compaction. A stale or unknown
+   * sample still drains a post-compact stage that is already pending: the
+   * seat may take no turn after /compact, and only a turn refreshes its
+   * sample.
    */
   private async maybeAutoCompact(
     session: EligibleSession,
     usage: ContextUsage | null,
   ): Promise<void> {
     if (!this.compactionEnforcer) return;
-    if (!usage || usage.availability !== "known" || !usage.fresh) return;
     try {
-      await this.compactionEnforcer.maybeAutoCompact({
+      if (usage && usage.availability === "known" && usage.fresh && usage.usedPercentage != null) {
+        await this.compactionEnforcer.maybeAutoCompact({
+          sessionName: session.session_name,
+          cwd: session.cwd,
+          runtime: session.runtime,
+          usedPercentage: usage.usedPercentage,
+          transcriptPath: usage.transcriptPath,
+          sessionId: usage.sessionId,
+        });
+        return;
+      }
+      if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name)) return;
+      await this.compactionEnforcer.drainPendingPostCompactStage({
         sessionName: session.session_name,
         cwd: session.cwd,
         runtime: session.runtime,
-        usedPercentage: usage.usedPercentage,
-        transcriptPath: usage.transcriptPath,
-        sessionId: usage.sessionId,
+        transcriptPath: usage?.transcriptPath ?? null,
+        sessionId: usage?.sessionId ?? null,
       });
     } catch {
       // Defensive: enforcer should not throw, but absorb here so the

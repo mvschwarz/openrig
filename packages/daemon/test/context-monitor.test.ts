@@ -184,10 +184,9 @@ describe("ContextMonitor", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("prepares then compacts fresh usage, pauses pending restore on stale usage, and resumes on fresh usage", async () => {
-    const now = Date.parse("2026-10-02T12:00:00Z");
-    vi.spyOn(Date, "now").mockReturnValue(now);
-    const { sessionName } = seedClaudeNode();
+  // Bring a seat to the point just after /compact: fresh 80% usage sends the preparation prompt,
+  // then the next tick sends /compact, leaving the post-compact turn boundary pending.
+  async function compactFreshSeat(sessionName: string, now: number) {
     const send = installRealCompactionEnforcer();
     const writeUsage = (percentage: number, sampledAt: number) => writeSidecar(sessionName, {
       ...VALID_SIDECAR,
@@ -201,15 +200,62 @@ describe("ContextMonitor", () => {
     await monitor.pollOnce();
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[1]?.[1]).toContain("/compact");
+    return { send, writeUsage };
+  }
+
+  it("prepares then compacts fresh usage, then drains the pending restore on stale usage, one stage per tick", async () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { sessionName } = seedClaudeNode();
+    const { send, writeUsage } = await compactFreshSeat(sessionName, now);
+    // The seat takes no turn after /compact, so its sample stays stale.
     writeUsage(30, now - 600_001);
     await monitor.pollOnce();
-    expect(send).toHaveBeenCalledTimes(2);
-    writeUsage(30, now);
-    await monitor.pollOnce();
     expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[2]?.[1]).toContain("OpenRig post-compaction turn boundary.");
     await monitor.pollOnce();
     expect(send).toHaveBeenCalledTimes(4);
     expect(send.mock.calls[3]?.[1]).toContain("restoring this Claude session after compaction");
+    await monitor.pollOnce();
+    expect(send).toHaveBeenCalledTimes(5);
+    expect(send.mock.calls[4]?.[1]).toContain("Now audit your compaction restore");
+    // Nothing is pending any more, and a stale sample never starts a compaction.
+    await monitor.pollOnce();
+    expect(send).toHaveBeenCalledTimes(5);
+  });
+
+  it("drains the pending restore when the sample is unknown (no sidecar)", async () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { node, sessionName } = seedClaudeNode();
+    const { send } = await compactFreshSeat(sessionName, now);
+    rmSync(join(tmpDir, "state", "context-usage", `${sessionName}.json`));
+    await monitor.pollOnce();
+    expect(store.getForNode(node.id, sessionName).availability).toBe("unknown");
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[2]?.[1]).toContain("OpenRig post-compaction turn boundary.");
+  });
+
+  it("a stale sample above the threshold drains the pending stage once and starts no new compaction", async () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { sessionName } = seedClaudeNode();
+    const { send, writeUsage } = await compactFreshSeat(sessionName, now);
+    writeUsage(90, now - 600_001); // the pre-compact reading, never refreshed
+    for (let i = 0; i < 4; i++) await monitor.pollOnce();
+    expect(send).toHaveBeenCalledTimes(5);
+    const texts = send.mock.calls.slice(2).map((call) => String(call[1]));
+    expect(texts[0]).toContain("OpenRig post-compaction turn boundary.");
+    expect(texts[1]).toContain("restoring this Claude session after compaction");
+    expect(texts[2]).toContain("Now audit your compaction restore");
+    expect(texts.some((text) => text.includes("preparation is now required") || text.startsWith("/compact"))).toBe(false);
+  });
+
+  it("an unknown sample with nothing pending triggers nothing", async () => {
+    seedClaudeNode();
+    const send = installRealCompactionEnforcer();
+    await monitor.pollOnce();
+    expect(send).not.toHaveBeenCalled();
   });
 
   // T1: pollOnce discovers running Claude sessions and persists usage

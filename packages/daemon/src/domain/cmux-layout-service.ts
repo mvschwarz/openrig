@@ -32,6 +32,7 @@
 // infra is ready; this is a 2-keys-plus-optional-UI-surface follow-on).
 
 import type { CmuxAdapter, CmuxResult } from "../adapters/cmux.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 
 export const MAX_COLS = 2;
 export const MAX_PER_WORKSPACE = 12;
@@ -156,7 +157,7 @@ export class CmuxLayoutService {
     const built = await this.buildWorkspacePanes(
       workspaceName,
       cwd,
-      agentSessions.map((session) => `tmux attach -t ${session}`),
+      agentSessions.map((session) => tmuxAttachCommand(session)),
     );
     if (!built.ok) return built;
     return {

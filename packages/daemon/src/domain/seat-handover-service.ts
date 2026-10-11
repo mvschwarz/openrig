@@ -640,7 +640,15 @@ export class SeatHandoverService {
         guidance: "Run discovery and list active discovered sessions before retrying.",
       });
     }
-    if (discovered.status !== "active") {
+    // #981: a composer-launched successor respawns into the seat's own pane, whose discovery row the
+    // previous handover claimed for this same node, and a rescan keeps that claim (#237). That claim is
+    // this seat's own, so commit re-claims it. A row claimed by any other node, or a discovered-source
+    // successor, still needs an active, unclaimed record.
+    const ownPaneClaim = input.reportedSource.mode !== "discovered"
+      && discovered.status === "claimed"
+      && discovered.claimedNodeId === input.node.id
+      && discovered.tmuxSession === input.latestSession.session_name;
+    if (discovered.status !== "active" && !ownPaneClaim) {
       return fail({
         ok: false,
         code: "discovered_not_active",

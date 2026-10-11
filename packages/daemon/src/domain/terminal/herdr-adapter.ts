@@ -252,6 +252,11 @@ export interface HerdrLayoutPlan {
   pages: HerdrPagePlan[];
 }
 
+/** A named view's tab: its panes' names in reading order, such as "dashboard · operator". */
+export function namedTabLabel(page: ComposedPane[]): string {
+  return page.map((pane) => pane.label).join(" · ");
+}
+
 /**
  * Build the herdr socket plan for a composed view. PURE — no I/O. Each page
  * gets a fresh tab labeled `${tabPrefix}:${view.id}#<plan>#${launchToken}/<pageIndex>`;
@@ -265,13 +270,14 @@ export function planHerdrLayout(
 ): HerdrLayoutPlan {
   // Older callers without a preview fingerprint still get fresh, non-reusable tabs.
   const base = `${tabPrefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
-  // The workspace is named for people: the rig name for a rig view, else the view id.
-  // Tab labels keep the launch token, so every open is still a fresh, distinct space.
-  const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;
+  // The workspace is named for people: a named view's own label, the rig name for a rig view, else the view id.
+  // Tab labels keep the launch token, so every open is still a fresh, distinct space. A named view's
+  // tabs carry their panes' names instead; the CLI confirms reuse by live attachments, not labels.
+  const workspaceLabel = view.spaceLabel ?? (view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id);
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
     const grid = buildGridRoot(page, view.columns);
     return {
-      tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
+      tabLabel: view.spaceLabel ? namedTabLabel(page) : view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
       root: grid.root,
       blanks: grid.blanks,
     };

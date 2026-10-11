@@ -137,7 +137,37 @@ describe("non-interruptive launch choice", () => {
     expect(fsOps.writeFile).not.toHaveBeenCalled();
     vi.mocked(tmux.sendShellCommand).mockClear();
     await adapter.launchHarness({ ...binding, nonInterruptive: false }, opts);
-    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]![1]).toBe(command.replace(/ '-c' '[^']*'/g, ""));
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]![1]).toBe(command.replace(/ '-c' 'notice\.[^']*'/g, ""));
+  });
+
+  it.each(["fresh", "resume", "fork"] as const)("Codex %s disables startup updates even without a non-interruptive choice", async mode => {
+    for (const choice of [
+      { launchPosture: "floor" as const },
+      { launchPosture: "floor" as const, codexConfigProfile: "custom" },
+      { launchPosture: "full_bypass" as const, kernelAuthority: true },
+    ]) {
+      const { tmux, fsOps, binding } = fixture("codex");
+      vi.mocked(tmux.sendShellCommand).mockResolvedValue({ ok: false, message: "inert transport" });
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps, resolveGitAddDirs: async () => [],
+        verifyProfilePreflight: async profile => ({ ok: true, profile }) });
+      await adapter.launchHarness({ ...binding, ...choice, nonInterruptive: false, model: "chosen-model", effort: "high" }, {
+        name: "dev@test",
+        ...(mode === "resume" ? { resumeToken: "old-id" } : {}),
+        ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "old-id" } } : {}),
+      });
+      const command = vi.mocked(tmux.sendShellCommand).mock.calls[0]![1];
+      expect(command.match(/check_for_update_on_startup=false/g)).toHaveLength(1);
+      expect(command).toContain("'-c' 'check_for_update_on_startup=false'");
+      expect(command).toContain("-m 'chosen-model' -c 'model_reasoning_effort=\"high\"'");
+      expect(command).toContain(choice.kernelAuthority ? "-s danger-full-access -a never"
+        : choice.codexConfigProfile ? "-p 'custom'" : "-s workspace-write");
+      if (mode !== "fresh") {
+        expect(command).toContain(` ${mode} `);
+        expect(command).toContain(" 'old-id'");
+      }
+      expect(fsOps.writeFile).not.toHaveBeenCalled();
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+    }
   });
 
   it.each(["fresh", "resume", "fork"] as const)("managed Claude %s keeps explicit native mode precedence", async mode => {

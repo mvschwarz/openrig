@@ -8,6 +8,9 @@ This is the canonical reference for the pod-aware RigSpec YAML format. Every fie
 
 ---
 
+For choosing IDs, see [naming rigs, pods and seats](topology-naming.md). Keep the same
+logical names in edges, startup instructions, workflow targets and runtime presets.
+
 ## Minimal Valid Example
 
 ```yaml
@@ -18,7 +21,7 @@ pods:
   - id: dev
     label: Development
     members:
-      - id: impl
+      - id: build
         agent_ref: "local:agents/impl"
         profile: default
         runtime: claude-code
@@ -105,7 +108,7 @@ pods:
           required: true
       actions: []
     members:
-      - id: impl
+      - id: build
         agent_ref: "local:agents/impl"
         profile: default
         runtime: claude-code
@@ -131,7 +134,7 @@ pods:
         cwd: "."
     edges:
       - kind: delegates_to
-        from: impl
+        from: build
         to: qa
 
   - id: rev
@@ -152,13 +155,13 @@ pods:
 edges:
   - kind: delegates_to
     from: orch.lead
-    to: dev.impl
+    to: dev.build
   - kind: delegates_to
     from: orch.peer
     to: dev.qa
   - kind: can_observe
     from: rev.r1
-    to: dev.impl
+    to: dev.build
   - kind: can_observe
     from: rev.r2
     to: dev.qa
@@ -453,7 +456,7 @@ The canonical session name is derived from the pod ID, member ID, and rig name:
 {podId}-{memberId}@{rigName}
 ```
 
-Example: pod `dev`, member `impl`, rig `my-team` → session `dev-impl@my-team`
+Example: pod `dev`, member `build`, rig `my-team` → session `dev-build@my-team`
 
 Pod and member IDs cannot contain `@` because the first `@` separates their portion
 of the session address from the rig name. Rig names may still contain `@`.
@@ -482,13 +485,13 @@ Edges within a pod use **unqualified member IDs** (just the member `id`, not `po
 pods:
   - id: dev
     members:
-      - id: impl
+      - id: build
         # ...
       - id: qa
         # ...
     edges:
       - kind: delegates_to
-        from: impl      # NOT dev.impl
+        from: build     # NOT dev.build
         to: qa          # NOT dev.qa
 ```
 
@@ -502,7 +505,7 @@ Edges between pods use **fully-qualified `pod.member` IDs**:
 edges:
   - kind: delegates_to
     from: orch.lead     # pod.member format
-    to: dev.impl        # pod.member format
+    to: dev.build       # pod.member format
 ```
 
 Cross-pod edges must reference different pods. An edge where both `from` and `to` are in the same pod is a validation error — use pod-local edges instead.

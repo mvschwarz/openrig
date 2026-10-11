@@ -98,6 +98,22 @@ questions by clicking a button (`rig queue create --human-questions-file`). In S
 clicks arrive over the same socket, so no request URL is needed. An app created from an older
 manifest has Interactivity off: turn it on under **Interactivity & Shortcuts**, or the buttons
 will do nothing. A typed reply in the thread still answers the decision either way.
+Each click gets one short reply in the decision's thread: what was recorded, or, when OpenRig
+refuses the click or can't record it, why and what to do instead (the sender isn't registered, the
+decision is no longer waiting for answers or was sent to someone else, the button no longer
+matches its questions, or the message can't be matched to a decision). Slack's redelivery of a
+click OpenRig already handled gets no second reply. The reply is best effort: while Slack is
+rate-limiting OpenRig's posts it may not be posted, and the click is handled the same either way.
+
+In the decision's `humanAnswers`, clicked answers remain option-id strings. A whole typed reply
+is stored as `{kind: "typed-reply", text: "…", placement: "first-unanswered", unansweredCount: N}`
+under the first unanswered question. That placement is automatic; it does not mean the person
+selected that question. `N` counts the other question slots still empty in `humanAnswers` after
+that placement. Earlier button answers are preserved; no other questions are filled in.
+Read `text` as the person's words,
+even when it equals an option id. The reply still closes the decision, so `done` is not approval.
+A file-only reply closes the decision without recording a typed answer. If all button answers were
+already recorded, they stay final and the typed reply remains in the correlated reply row.
 
 ## What the connector does with the tokens
 
@@ -140,8 +156,12 @@ rig slack channel-map remove pr@my-rig
   Without a map, OpenRig records nothing about a post's channel, so if the default channel
   changes while a post is being retried, the retry goes to the new default channel (as it always
   has); that also applies to a post first tried before the map was added.
+- **Rate limits on posts.** When Slack rate-limits a post and asks for a pause of 10 seconds or
+  less, OpenRig waits that long and retries the post once. A longer pause, or a second refusal,
+  is left to the retry of retained posts.
 - **Replies and new messages.** A reply in an item's thread reaches that item's seat, in any
-  channel. A message the human starts (or a reply in a thread OpenRig does not know) goes to
+  channel. To answer it in the same thread, the seat sends `rig queue create --human-intent update
+  --reply-to <the inbound reply's row>`. A message the human starts (or a reply in a thread OpenRig does not know) goes to
   the connector's inbound destination, whichever channel it is in. Missed-message recovery
   (below) covers the default channel only.
 
@@ -191,6 +211,9 @@ outside this recovery scope; global chronological order is not promised.
 snapshot: socket state/generation, last event, recovery interval/state/reason,
 retry time and accepted/dead-lettered recovery counts since the connector last
 started (they reset when it is enabled or disabled, and when the daemon restarts).
+It also reports the durable dead-letter backlog: the retained records for inbound messages,
+reactions and click answers that await retry, counted from both dead-letter files so the number
+survives a restart, and shown as unknown with a reason (and no count) when a file cannot be read.
 Human-readable coverage and pending bounds use ISO timestamps; JSON keeps Slack timestamps.
 The status read calls no Slack API and starts no scan. If the daemon cannot be
 observed, local configuration remains visible and live state is unknown. A

@@ -23,6 +23,7 @@ import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { BootstrapResult } from "./bootstrap-orchestrator.js";
+import type { Session } from "./types.js";
 
 export type KernelState =
   | "skipped"           // OPENRIG_NO_KERNEL=1 / VITEST auto-skip / kernel already managed
@@ -55,6 +56,10 @@ export interface KernelBootStatus {
   /** Human-readable detail for auth_blocked / spec_missing /
    *  bootstrap_failed / degraded states. null otherwise. */
   detail: string | null;
+  /** A boot failure the kernel has since recovered from: every seat it expects is ready again, so
+   *  kernelState is ready and this keeps the failure as history. null otherwise, including while
+   *  the failure is still current. */
+  lastBootFailure: { state: "bootstrap_failed" | "degraded"; detail: string | null; at: string | null } | null;
 }
 
 export interface KernelBootTrackerDeps {
@@ -74,6 +79,10 @@ export class KernelBootTracker {
   private variant: string | null = null;
   private detail: string | null = null;
   private firstUnreadySince: string | null = null;
+  private failedAt: string | null = null;
+  /** The seats the booting kernel spec declares (`pod.member`). null when unknown, which keeps a
+   *  boot failure current: recovery needs the whole expected roster, never just the rows present. */
+  private expectedSeats: string[] | null = null;
   private degradedTimer: ReturnType<typeof setTimeout> | null = null;
   private degradedEmitted = false;
   private bootstrapInFlight = false;
@@ -108,13 +117,19 @@ export class KernelBootTracker {
 
   /** Begin tracking an in-flight bootstrap. The bootstrap promise
    *  is awaited internally; the caller does NOT block on it. */
-  startBooting(variant: string, bootstrapPromise: Promise<BootstrapResult>): void {
+  startBooting(
+    variant: string,
+    bootstrapPromise: Promise<BootstrapResult>,
+    expectedSeats?: readonly string[] | null,
+  ): void {
     if (this.bootstrapInFlight) return;
     this.bootstrapInFlight = true;
     this.state = "booting";
     this.variant = variant;
     this.detail = null;
     this.firstUnreadySince = new Date().toISOString();
+    this.failedAt = null;
+    this.expectedSeats = expectedSeats && expectedSeats.length > 0 ? [...expectedSeats] : null;
     this.degradedEmitted = false;
     this.scheduleDegradedTimer();
 
@@ -127,11 +142,24 @@ export class KernelBootTracker {
    *  table so the response always reflects the freshest startup_status. */
   getStatus(): KernelBootStatus {
     const agents = this.computeAgents();
-    let kernelState = this.state;
+    const state = this.state;
+    let kernelState = state;
+    let lastBootFailure: KernelBootStatus["lastBootFailure"] = null;
     // Once bootstrap has completed (state == 'booting' before then),
     // promote to ready / partial_ready based on agent startup_status.
-    if (this.state === "booting" && !this.bootstrapInFlight) {
+    if (state === "booting" && !this.bootstrapInFlight) {
       kernelState = this.aggregateReadinessFromAgents(agents);
+    } else if (
+      (state === "bootstrap_failed" || state === "degraded")
+      && !this.bootstrapInFlight
+      && this.aggregateReadinessFromAgents(agents) === "ready"
+      && this.rosterRecovered()
+    ) {
+      // Every seat the kernel expects has since reached ready (a resolved startup gate, a
+      // `rig seat continue`), so the failure is history, not current health. A seat that is not
+      // ready, has no session, or has no node keeps it current, and so does an unknown roster.
+      kernelState = "ready";
+      lastBootFailure = { state, detail: this.detail, at: this.failedAt };
     }
     return {
       kernelState,
@@ -141,7 +169,8 @@ export class KernelBootTracker {
           ? null
           : this.firstUnreadySince,
       variant: this.variant,
-      detail: this.detail,
+      detail: lastBootFailure ? null : this.detail,
+      lastBootFailure,
     };
   }
 
@@ -158,6 +187,7 @@ export class KernelBootTracker {
       this.cancelTimer();
       this.state = "bootstrap_failed";
       this.detail = result.errors.join("; ");
+      this.failedAt = new Date().toISOString();
       return;
     }
     // Bootstrap returned cleanly. State transitions to ready /
@@ -177,6 +207,7 @@ export class KernelBootTracker {
     this.cancelTimer();
     this.state = "bootstrap_failed";
     this.detail = err instanceof Error ? err.message : String(err);
+    this.failedAt = new Date().toISOString();
   }
 
   private aggregateReadinessFromAgents(
@@ -196,18 +227,17 @@ export class KernelBootTracker {
 
   private computeAgents(): KernelAgentStatus[] {
     try {
-      const kernelRigs = this.deps.rigRepo.findRigsByName("kernel");
-      if (kernelRigs.length === 0) return [];
+      // Archived kernel generations aren't the current kernel.
       const out: KernelAgentStatus[] = [];
-      for (const rig of kernelRigs) {
-        const sessions = this.deps.sessionRegistry.getSessionsForRig(rig.id);
-        for (const s of sessions) {
-          // session-registry's Session shape carries startupStatus +
-          // sessionName; runtime comes from the node row. Read minimal
-          // fields here so the tracker doesn't pull in node-repository.
+      for (const rig of this.deps.rigRepo.findUnarchivedRigsByName("kernel")) {
+        // One entry per seat. The runtime is on the node row, not the session.
+        const runtimeByNode = new Map(
+          (this.deps.rigRepo.getRig(rig.id)?.nodes ?? []).map((node) => [node.id, node.runtime]),
+        );
+        for (const s of this.latestSessionByNode(rig.id).values()) {
           out.push({
             sessionName: s.sessionName,
-            runtime: (s as { runtime?: string }).runtime ?? "unknown",
+            runtime: runtimeByNode.get(s.nodeId) ?? "unknown",
             startupStatus: s.startupStatus,
           });
         }
@@ -218,6 +248,39 @@ export class KernelBootTracker {
       // valid envelope with empty agents[] is more useful than a 500
       // when the DB has a transient hiccup.
       return [];
+    }
+  }
+
+  /** A relaunch or `rig seat continue` adds a session row for the same node, so only each node's
+   *  newest row is the seat's current startup status. */
+  private latestSessionByNode(rigId: string): Map<string, Session> {
+    const latestByNode = new Map<string, Session>();
+    for (const s of this.deps.sessionRegistry.getSessionsForRig(rigId)) {
+      const prior = latestByNode.get(s.nodeId);
+      if (!prior || s.createdAt > prior.createdAt || (s.createdAt === prior.createdAt && s.id > prior.id)) {
+        latestByNode.set(s.nodeId, s);
+      }
+    }
+    return latestByNode;
+  }
+
+  /** True only when every kernel node's newest session is ready and every expected seat has such a
+   *  node. A node with no session is not ready, and a member that failed before its node was
+   *  created is missing. False when the expected roster is unknown, and on any read error. */
+  private rosterRecovered(): boolean {
+    if (!this.expectedSeats) return false;
+    try {
+      const readySeats = new Set<string>();
+      for (const rig of this.deps.rigRepo.findUnarchivedRigsByName("kernel")) {
+        const latest = this.latestSessionByNode(rig.id);
+        for (const node of this.deps.rigRepo.getRig(rig.id)?.nodes ?? []) {
+          if (latest.get(node.id)?.startupStatus !== "ready") return false;
+          readySeats.add(node.logicalId);
+        }
+      }
+      return readySeats.size > 0 && this.expectedSeats.every((seat) => readySeats.has(seat));
+    } catch {
+      return false;
     }
   }
 
@@ -253,6 +316,7 @@ export class KernelBootTracker {
     if (this.degradedEmitted) return;
     this.degradedEmitted = true;
     this.state = "degraded";
+    this.failedAt = new Date().toISOString();
     try {
       this.deps.eventBus.emit({
         type: "kernel.agent.degraded",

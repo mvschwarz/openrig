@@ -201,7 +201,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // K-5 HOOK-PRIMARY (founder expansion): a fresh Codex PermissionRequest hook is the PRIMARY signal —
   // it blocks default/raw/force even when the pane looks idle (a high-stakes guard must not depend on
   // screen-scraping). Only --dangerously-interact --reason drives it (+ audit).
-  it.each([0, 90_000])("K-5(hook): a pending Codex permission (%sms old) may hide a prompt — refuse sends, allow only an audited answer", async ageMs => {
+  it.each([0, 15_000])("K-5(hook): a send-fresh pending Codex permission (%sms old) may hide a prompt — refuse sends, allow only an audited answer", async ageMs => {
     const seat = seedCodexSeat();
     const now = new Date();
     agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash",
@@ -235,6 +235,83 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request_pending", overrideReason: "approve the blocked command" });
     agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "Stop" });
     expect((await t.send(seat, "hi")).ok).toBe(true);
+  });
+
+  it.each([15_001, 90_000, 300_000, 300_001, 600_000])("a pending Codex permission %sms old allows a send into a readable empty composer", async ageMs => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", ageMs, seat);
+    const { sendText, sendKeys } = spies();
+    const capture = vi.fn(async () => CODEX_PLACEHOLDER_PANE);
+    const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
+    const result = await transport.send(seat, "follow up");
+    expect(result.ok).toBe(true);
+    expect(capture).toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith(seat, "follow up");
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(overrideEvents()).toEqual([]);
+  });
+
+  it.each([{}, { waitForIdleMs: 1_000 }, { readinessFromPaneOnly: true }])("a send-stale pending permission allows readable empty-composer sends with %j", async options => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "› \n\n  test-model · ~/code", sendText }), { now: () => fixedNow });
+    expect((await transport.send(seat, "follow up", options)).ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it.each([15_001, 90_000, 600_000])("a pending Codex permission %sms old still refuses a visible approval", async ageMs => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", ageMs, seat);
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_APPROVAL, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(["null", "empty", "unrecognized", "failure"])("a send-stale pending Codex permission fails safe on %s capture", async captureKind => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText, sendKeys } = spies();
+    const capture = async () => {
+      if (captureKind === "failure") throw new Error("capture failed");
+      if (captureKind === "null") return null;
+      return captureKind === "empty" ? "" : "unrecognized provider content";
+    };
+    const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "permission_request_unverified" },
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a clock-stale pending permission still fails safe on an unreadable pane", async () => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 600_000, seat);
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => null, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { waitForIdleMs: 1_000 })).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a pending permission over readable live work sends with the existing busy advisory", async () => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "• Working (3s • esc to interrupt)", sendText }), { now: () => fixedNow });
+    const result = await transport.send(seat, "follow up");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("busy");
+    expect(sendText).toHaveBeenCalled();
   });
 
   // BOTH PATHS: when the hook is ABSENT (or stale), the capture-pane fallback still catches a Codex
@@ -362,6 +439,72 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     // It proceeded → the stale non-idle hook fell through to the pane (not trusted).
     expect(r.ok).toBe(true);
     expect(r.activity?.evidenceSource).not.toBe("runtime_hook");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  // A latest hook that says the seat waits on a person stays authoritative past the send window when
+  // the pane cannot be read. 2026-10-08: a Claude AskUserQuestion with option previews read unknown,
+  // its permission_prompt hook was 36 s old, and a watchdog wake's Enter chose the first option.
+  // No capture of that render exists, so these use a pane the classifier cannot parse.
+  const UNRECOGNIZED_PANE = "xyzzy no prompt here";
+  function seedPersonWaitingHook(fixedNow: Date, ageMs: number) {
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt",
+      occurredAt: new Date(fixedNow.getTime() - ageMs).toISOString(),
+    });
+  }
+
+  it.each([
+    ["36 s old (past the send window)", 36_000],
+    ["10 min old (past the store's freshness window)", 600_000],
+  ])("a latest permission_prompt hook %s + an unrecognized pane refuses, nothing typed", async (_label, ageMs) => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, ageMs);
+    expect(classifyPaneActivity(UNRECOGNIZED_PANE).state).toBe("unknown");
+    const { sendText, sendKeys } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText, sendKeys }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "You are parked while holding 1 open obligation");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("target_needs_input");
+    expect(r.activity).toMatchObject({ state: "needs_input", evidenceSource: "runtime_hook" });
+    // The watchdog's parked-owner policy records this exact shape as an interactive refusal.
+    expect(r.error).toMatch(/^Refused: .* is at an interactive prompt \(permission_prompt; latest hook, pane unrecognized\)/);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a recognized empty composer sends (no new refusal at an idle prompt)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale permission_prompt hook + a pane showing live work sends (an approved tool is running)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    seedPersonWaitingHook(fixedNow, 36_000);
+    const pane = "⏺ Bash(npm test)\n✻ Running… (1m 2s · esc to interrupt)";
+    expect(classifyPaneActivity(pane).state).toBe("agent_active");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => pane, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("a stale RUNNING hook + an unrecognized pane still sends (only a person-waiting hook holds)", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      occurredAt: new Date(fixedNow.getTime() - 36_000).toISOString(),
+    });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
     expect(sendText).toHaveBeenCalled();
   });
 

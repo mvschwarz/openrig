@@ -76,8 +76,10 @@ The authority lookup is `product-journey-sdlc.md#resolve-the-selected-path`.
 Bring work with evidence that its promised user outcome actually works.
 
 For a release mission, `mission.yaml` also names the Git strategy before build
-work starts: the branch/ref that is cumulative integration truth, its base, and
-when that truth is reconciled to main. Continuous integration to main and a
+work starts: the branch/ref that is cumulative integration truth
+(`arrangement.source.integration_ref`, the ref `rig view show execution` tests
+a candidate's folding against; `main` when unset), its base, and when that
+truth is reconciled to main. Continuous integration to main and a
 release-line fold followed by one explicit merge are both valid; leaving the
 choice implicit is not.
 

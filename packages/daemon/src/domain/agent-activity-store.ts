@@ -322,6 +322,56 @@ export class AgentActivityStore {
   }
 }
 
+/** The activity a runtime hook event means, before freshness or generation checks. The one mapping behind
+ *  ingest, the send gate and the wake ladder. `seatRuntime` is the managed seat's runtime: runtime_error is
+ *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. */
+export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+  if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
+  if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
+  if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
+  if (rawEvent === "Notification") {
+    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
+    return rawSubtype === "idle_prompt" ? "idle" : "unknown";
+  }
+  if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") return "idle";
+  return "unknown";
+}
+
+/** A runtime hook that leaves the agent waiting on a person: an approval, a picker or an elicitation. */
+export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): boolean {
+  return hookEventState(rawEvent, rawSubtype, seatRuntime) === "needs_input";
+}
+
+/** What the store's latest hook for a seat says: its current state, or, past the freshness window, what its
+ *  retained raw event means. Generation-mismatched or unresolvable evidence says nothing ("unknown"). */
+function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+  if (activity?.evidenceSource !== "runtime_hook") return "unknown";
+  if (activity.stale !== true) return activity.state;
+  return activity.reason === "stale_runtime_hook" ? hookEventState(activity.rawEvent, activity.rawSubtype, seatRuntime) : "unknown";
+}
+
+/** The store's latest hook still says the seat waits on a person. Nothing newer was recorded, so nothing
+ *  answered it. Shared by the send gate and the wake ladder. */
+export function latestHookWaitsOnPerson(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
+  return latestHookState(activity, seatRuntime) === "needs_input";
+}
+
+export function latestHookPermissionPending(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
+  return seatRuntime === "codex" && activity?.evidenceSource === "runtime_hook" && (
+    (activity.reason === "permission_request_pending" && activity.stale !== true) ||
+    (activity.reason === "stale_runtime_hook" && activity.rawEvent === "PermissionRequest")
+  );
+}
+
+/** The store's latest hook shows the seat moved on after `since`: observed after it, generation-valid, and
+ *  meaning work started or the turn ended. Older, absent, mismatched or unknown evidence does not. */
+export function latestHookMovedOn(activity: AgentActivity | null | undefined, since: string, seatRuntime: string | null): boolean {
+  const observedAt = activity?.eventAt ? Date.parse(activity.eventAt) : NaN;
+  if (!(observedAt > Date.parse(since))) return false;
+  const state = latestHookState(activity, seatRuntime);
+  return state === "running" || state === "idle";
+}
+
 function normalizeHookActivity(input: {
   runtime: string | null;
   /** The managed seat's runtime, never a hook's claim. */
@@ -336,37 +386,21 @@ function normalizeHookActivity(input: {
   const rawSubtype = input.subtype;
   const reason = normalizeReason(rawSubtype ?? rawEvent);
   const runtime = input.runtime;
-  let state: AgentActivity["state"] = "unknown";
+  const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime);
   let normalizedReason = reason;
-
-  if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") {
-    state = "running";
-  } else if (rawEvent === "PermissionRequest") {
-    state = input.seatRuntime === "codex" ? "unknown" : "needs_input";
+  if (rawEvent === "PermissionRequest") {
     normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
   } else if (rawEvent === "PermissionPromptConfirmed") {
-    state = "needs_input";
     normalizedReason = "permission_prompt";
   } else if (rawEvent === "PermissionPromptCleared") {
     normalizedReason = "permission_prompt_cleared";
+  } else if (rawEvent === "at_limit") {
+    normalizedReason = "usage_limit";
   } else if (rawEvent === "Notification") {
-    // runtime_error is an OMP runner signal; a hook claiming OMP on another
-    // runtime's seat must not escalate it.
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (input.seatRuntime === "omp" && rawSubtype === "runtime_error")) {
-      state = "needs_input";
-    } else if (rawSubtype === "idle_prompt") {
-      state = "idle";
-    } else {
-      state = "unknown";
-      normalizedReason = rawSubtype ? reason : "notification";
-    }
-  } else if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") {
-    state = "idle";
+    if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";
   } else if (rawEvent === "SessionStart") {
-    state = "unknown";
     normalizedReason = "session_start_observed";
-  } else {
-    state = "unknown";
+  } else if (state === "unknown") {
     normalizedReason = "unmapped_runtime_hook";
   }
 

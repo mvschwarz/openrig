@@ -6,6 +6,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { answerShowsAction, isPlanAnswer, notAPlanMessage, planSupportRefusal } from "../launch-plan-guard.js";
 
 type LaunchResponse = {
   ok: boolean;
@@ -36,6 +37,8 @@ const NON_RUNNING_LAUNCH_STATUSES = new Set(["awaiting-decision", "attention_req
 function launchStatusRunning(status: string): boolean {
   return !NON_RUNNING_LAUNCH_STATUSES.has(status);
 }
+
+const SINGLE_SEAT_PLAN_MODE_ERROR = "this daemon can't preview a single-seat launch; upgrade or restart it, or preview the subset with --seats <seat>";
 
 function printSnapshotSelection(selection: LaunchResponse["snapshotSelection"]): void {
   if (!selection) return;
@@ -92,14 +95,44 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         }
       }
 
+      const trimmedNodeRef = nodeRef?.trim();
+      const isSingleNodePlan = Boolean(opts.plan && trimmedNodeRef && !opts.seats);
+
+      if (opts.plan && opts.seats !== undefined) {
+        const rawSeats = opts.seats.split(",").map((s) => s.trim()).filter(Boolean);
+        if (rawSeats.length === 0) {
+          console.error("--seats requires a non-empty comma-separated list of seat IDs");
+          process.exitCode = 1;
+          return;
+        }
+      }
+      if (isSingleNodePlan && opts.holdReason) {
+        console.error("--hold-reason applies only to multi-seat --seats launch; single-seat launch never changes non-targets");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.plan && !trimmedNodeRef && !opts.seats) {
+        console.error("Provide a node logical ID or use --seats <a,b> for plan preview");
+        process.exitCode = 1;
+        return;
+      }
+
       if (opts.host) {
         const { runRemoteHttpOp } = await import("../remote-host-ops.js");
-        const seatList = opts.seats ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean) : [];
+        const seatList = opts.seats
+          ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean)
+          : (isSingleNodePlan && trimmedNodeRef ? [trimmedNodeRef] : []);
         let apiPath: string;
         let body: unknown;
         if (seatList.length > 0) {
           apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`;
-          body = { seats: seatList, ...(opts.holdReason ? { holdReason: opts.holdReason } : {}), ...(opts.snapshotId ? { snapshotId: opts.snapshotId } : {}), ...(opts.plan ? { plan: true } : {}) };
+          body = {
+            seats: seatList,
+            ...(opts.holdReason ? { holdReason: opts.holdReason } : {}),
+            ...(opts.snapshotId ? { snapshotId: opts.snapshotId } : {}),
+            ...(opts.plan ? { plan: true } : {}),
+            ...(isSingleNodePlan ? { nonTargetMode: "unchanged" } : {}),
+          };
         } else if (nodeRef) {
           if (opts.holdReason) {
             console.error("--hold-reason applies only to multi-seat --seats launch; single-seat launch never changes non-targets");
@@ -107,7 +140,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
             return;
           }
           if (opts.plan) {
-            console.error("--plan currently applies only to multi-seat --seats launch");
+            console.error("Provide a node logical ID or use --seats <a,b> for plan preview");
             process.exitCode = 1;
             return;
           }
@@ -118,10 +151,43 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           process.exitCode = 1;
           return;
         }
+        if (opts.plan) {
+          const host = opts.host;
+          let readError: string | undefined;
+          const refusal = await planSupportRefusal(async (path) => {
+            const read = await runRemoteHttpOp(host, "GET", path, undefined, deps, {});
+            if (!read.ok) readError = read.error;
+            return read.ok ? read.data : undefined;
+          });
+          if (refusal) {
+            console.error(`Host ${host}: ${refusal}${readError ? ` (version read: ${readError})` : ""}`);
+            process.exitCode = 1;
+            return;
+          }
+        }
         const result = await runRemoteHttpOp(opts.host, "POST", apiPath, body, deps, opts);
+        const notAPlan = Boolean(opts.plan && !isPlanAnswer(result.data) && answerShowsAction(result.ok, result.data));
+        if (notAPlan) {
+          console.error(`Host ${opts.host}: ${notAPlanMessage(opts.host)}`);
+          process.exitCode = 1;
+        }
+        const singleNodePlanModeMismatch = Boolean(
+          isSingleNodePlan &&
+          result.ok &&
+          isPlanAnswer(result.data) &&
+          (result.data as { nonTargetEffects?: { mode?: string } }).nonTargetEffects?.mode !== "unchanged"
+        );
+        if (singleNodePlanModeMismatch) {
+          console.error(`Host ${opts.host}: ${SINGLE_SEAT_PLAN_MODE_ERROR}`);
+          process.exitCode = 1;
+        }
         if (opts.json) {
           console.log(JSON.stringify(result));
-          if (!result.ok) process.exitCode = 1;
+          if (!result.ok || notAPlan || singleNodePlanModeMismatch) process.exitCode = 1;
+        } else if (singleNodePlanModeMismatch) {
+          // Handled via stderr and exit code
+        } else if (notAPlan && result.ok) {
+          console.error(JSON.stringify(result.data, null, 2));
         } else if (result.ok) {
           console.log(JSON.stringify(result.data, null, 2));
         } else {
@@ -137,17 +203,59 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      const seatList = opts.seats ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      const seatList = opts.seats
+        ? opts.seats.split(",").map((s) => s.trim()).filter(Boolean)
+        : (isSingleNodePlan && trimmedNodeRef ? [trimmedNodeRef] : []);
 
       if (seatList.length > 0) {
-        const body: { seats: string[]; holdReason?: string; snapshotId?: string; plan?: boolean } = { seats: seatList };
+        const body: { seats: string[]; holdReason?: string; snapshotId?: string; plan?: boolean; nonTargetMode?: "unchanged" | "detach_and_hold" } = { seats: seatList };
         if (opts.holdReason) body.holdReason = opts.holdReason;
         if (opts.snapshotId) body.snapshotId = opts.snapshotId;
-        if (opts.plan) body.plan = true;
+        if (isSingleNodePlan) body.nonTargetMode = "unchanged";
+        if (opts.plan) {
+          let readError: string | undefined;
+          const refusal = await planSupportRefusal(async (path) => {
+            try {
+              const read = await client.get<unknown>(path);
+              if (read.status !== 200) readError = `HTTP ${read.status}`;
+              return read.status === 200 ? read.data : undefined;
+            } catch (err) {
+              readError = (err as Error).message;
+              return undefined;
+            }
+          });
+          if (refusal) {
+            console.error(`${refusal}${readError ? ` (version read: ${readError})` : ""}`);
+            process.exitCode = 1;
+            return;
+          }
+          body.plan = true;
+        }
         const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body);
+        const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data) && answerShowsAction(res.status >= 200 && res.status < 300, res.data));
+        if (notAPlan) {
+          console.error(notAPlanMessage());
+          process.exitCode = 1;
+        }
+        const singleNodePlanModeMismatch = Boolean(
+          isSingleNodePlan &&
+          res.data?.planOnly &&
+          res.data?.nonTargetEffects?.mode !== "unchanged"
+        );
+        if (singleNodePlanModeMismatch) {
+          console.error(SINGLE_SEAT_PLAN_MODE_ERROR);
+          process.exitCode = 1;
+        }
         if (opts.json) {
           console.log(JSON.stringify(res.data, null, 2));
-          if (res.status >= 400) process.exitCode = 1;
+          if (res.status >= 400 || notAPlan || singleNodePlanModeMismatch) process.exitCode = 1;
+          return;
+        }
+        if (singleNodePlanModeMismatch) {
+          return;
+        }
+        if (notAPlan) {
+          console.error(JSON.stringify(res.data, null, 2));
           return;
         }
         if (opts.plan && res.data.planOnly) {
@@ -201,7 +309,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       if (opts.plan) {
-        console.error("--plan currently applies only to multi-seat --seats launch");
+        console.error("Provide a node logical ID or use --seats <a,b> for plan preview");
         process.exitCode = 1;
         return;
       }

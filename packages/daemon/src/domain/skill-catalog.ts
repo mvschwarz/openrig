@@ -39,6 +39,16 @@ export interface CatalogSkill {
   pluginId?: string;
 }
 
+/** A catalog skill left out of the loadout because its folder has uncommitted or untracked content. */
+export interface SkippedCatalogSkill {
+  id: string;
+  sourceDir: string;
+  /** Empty when nothing selected it. */
+  selectedBy: SkillSelectionSource[];
+  /** `catalog_skill_skipped: …`, or `selected_skill_skipped: …` when something selected it. */
+  message: string;
+}
+
 export interface SkillLoadout {
   catalogRoot: string;
   catalogRevision: string | null;
@@ -48,6 +58,8 @@ export interface SkillLoadout {
   projectSelectionDeclared: boolean;
   projectSelection: string[];
   entries: CatalogSkill[];
+  /** Dirty skills left out of `entries`; each blocks only itself. */
+  skipped?: SkippedCatalogSkill[];
 }
 
 export interface SkillCatalogFailure {
@@ -213,37 +225,88 @@ export function inspectSkillDirectory(root: string): { digest: string; files: Re
   return { digest, files };
 }
 
-function gitRevision(catalogRoot: string): string {
+/** The catalog's HEAD, and the top-level folders holding uncommitted or untracked content. A skill folder with
+ *  such content is skipped by itself; content directly in the catalog root (such as catalog.yaml) still makes the
+ *  whole catalog unavailable, because it can change what every skill selection means. */
+function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<string>; committedName: (dir: string) => string | null } {
   let repoRoot: string;
   try {
     repoRoot = execFileSync("git", ["-C", catalogRoot, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
   } catch {
     throw new Error(`managed skill catalog is not inside a readable Git repository: ${catalogRoot}`);
   }
-  const rel = nodePath.relative(realpathSync(repoRoot), realpathSync(catalogRoot)) || ".";
-  const dirty = execFileSync(
+  const rel = nodePath.relative(realpathSync(repoRoot), realpathSync(catalogRoot)).split(nodePath.sep).join("/");
+  const status = execFileSync(
     "git",
-    ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all", "--", rel],
+    ["-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rel || "."],
     { encoding: "utf8" },
-  ).trim();
-  if (dirty) {
-    throw new Error(`managed skill catalog has uncommitted content at ${catalogRoot}; commit or restore it before projection`);
+  );
+  const dirtyDirs = new Set<string>();
+  const fields = status.split("\0");
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.length < 4) continue;
+    const xy = field.slice(0, 2);
+    // A rename or copy is followed by its original path as the next field.
+    const paths = [field.slice(3), ...(/[RC]/.test(xy) ? [fields[++i] ?? ""] : [])];
+    for (const path of paths) {
+      const inCatalog = !rel ? path : path.startsWith(`${rel}/`) ? path.slice(rel.length + 1) : null;
+      if (inCatalog === null || inCatalog === "") continue;
+      const slash = inCatalog.indexOf("/");
+      if (slash < 0) {
+        throw new Error(`managed skill catalog has uncommitted content at ${nodePath.join(catalogRoot, inCatalog)}; commit or restore it before projection`);
+      }
+      dirtyDirs.add(inCatalog.slice(0, slash));
+    }
   }
-  return execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const revision = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  // The frontmatter name of `dir`'s SKILL.md at HEAD: null when HEAD has none there, "" when it doesn't parse.
+  const committedName = (dir: string): string | null => {
+    let text: string;
+    try {
+      text = execFileSync("git", ["-C", repoRoot, "show", `${revision}:${rel ? `${rel}/` : ""}${dir}/SKILL.md`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
+      return null;
+    }
+    const parsed = parseSkillFrontmatter(text);
+    return parsed.ok && SAFE_ID.test(parsed.frontmatter.name) ? parsed.frontmatter.name : "";
+  };
+  return { revision, dirtyDirs, committedName };
 }
 
 function scanCatalog(catalogRoot: string): {
   revision: string;
   digest: string;
   skills: Map<string, Omit<CatalogSkill, "selectedBy">>;
+  /** Dirty skill folders, keyed by folder name, current frontmatter name and committed frontmatter name. */
+  skipped: Map<string, string>;
 } {
   if (!existsSync(catalogRoot)) throw new Error(`managed skill catalog root does not exist: ${catalogRoot}`);
   const rootStat = lstatSync(catalogRoot);
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     throw new Error(`managed skill catalog root must be a real directory, not a symlink: ${catalogRoot}`);
   }
-  const revision = gitRevision(catalogRoot);
+  const { revision, dirtyDirs, committedName } = gitState(catalogRoot);
   const skills = new Map<string, Omit<CatalogSkill, "selectedBy">>();
+  const skipped = new Map<string, string>();
+  // A folder that is a skill now or at HEAD, with working-tree bytes that are not the committed revision: it is not
+  // projected, and nothing else is affected. It answers to every name it has had, so a selection by its committed
+  // name finds it after a rename, a deleted SKILL.md or a deleted folder. Any other dirty folder isn't a skill.
+  const skipDirty = (dir: string): void => {
+    const sourceDir = nodePath.join(catalogRoot, dir);
+    const skillFile = nodePath.join(sourceDir, "SKILL.md");
+    const committed = committedName(dir);
+    if (committed === null && !existsSync(skillFile)) return;
+    const names = [dir, ...(committed ? [committed] : [])];
+    try {
+      const parsed = parseSkillFrontmatter(readFileSync(skillFile, "utf8"));
+      if (parsed.ok && SAFE_ID.test(parsed.frontmatter.name)) names.push(parsed.frontmatter.name);
+    } catch { /* deleted or unreadable: the folder and committed names still identify it */ }
+    for (const name of names) skipped.set(name, sourceDir);
+  };
   for (const entry of readdirSync(catalogRoot, { withFileTypes: true }).sort((a, b) => compareBytes(a.name, b.name))) {
     if (!entry.isDirectory()) continue;
     const sourceDir = nodePath.join(catalogRoot, entry.name);
@@ -251,6 +314,10 @@ function scanCatalog(catalogRoot: string): {
       throw new Error(`symlinked skill directories are not allowed: ${sourceDir}`);
     }
     const skillFile = nodePath.join(sourceDir, "SKILL.md");
+    if (dirtyDirs.has(entry.name)) {
+      skipDirty(entry.name);
+      continue;
+    }
     if (!existsSync(skillFile)) continue;
     const parsed = parseSkillFrontmatter(readFileSync(skillFile, "utf8"));
     if (!parsed.ok) throw new Error(`${skillFile}: ${parsed.reason}`);
@@ -270,8 +337,12 @@ function scanCatalog(catalogRoot: string): {
       files: tree.files,
     });
   }
+  // A committed skill whose folder was deleted in the working tree is named too, not reported as missing.
+  for (const dir of [...dirtyDirs].sort(compareBytes)) {
+    if (!existsSync(nodePath.join(catalogRoot, dir))) skipDirty(dir);
+  }
   const digest = sha256([...skills.values()].map((skill) => `${skill.id}\0${skill.digest}`).join("\n"));
-  return { revision, digest, skills };
+  return { revision, digest, skills, skipped };
 }
 
 export function resolveSkillLoadout(input: {
@@ -333,8 +404,22 @@ export function resolveSkillLoadout(input: {
   }
 
   const entries: CatalogSkill[] = [];
+  const skipped: SkippedCatalogSkill[] = [];
+  const reported = new Set<string>();
   for (const [id, selectedBy] of [...selected.entries()].sort(([a], [b]) => compareBytes(a, b))) {
     const skill = catalog.skills.get(id);
+    const dirtyDir = skill ? undefined : catalog.skipped.get(id);
+    if (dirtyDir) {
+      // Only this skill fails: it is reported and left out, and every other selected skill still projects.
+      reported.add(dirtyDir);
+      skipped.push({
+        id,
+        sourceDir: dirtyDir,
+        selectedBy,
+        message: `selected_skill_skipped: '${id}' (selected by ${selectedBy.join("+")}) has uncommitted content at ${dirtyDir}; a copy already projected is kept as it was, and the new content is not projected until it is committed or restored`,
+      });
+      continue;
+    }
     if (!skill) {
       if (input.allowMissingTopology && selectedBy.every((source) => source === "topology")) continue;
       errors.push({
@@ -347,6 +432,12 @@ export function resolveSkillLoadout(input: {
     entries.push({ ...skill, selectedBy });
   }
   if (errors.length > 0) return { ok: false, errors };
+  // Unselected dirty skills are named too, so a catalog edit left uncommitted doesn't go unnoticed.
+  for (const [name, dir] of [...catalog.skipped.entries()].sort(([a], [b]) => compareBytes(a, b))) {
+    if (reported.has(dir)) continue;
+    reported.add(dir);
+    skipped.push({ id: name, sourceDir: dir, selectedBy: [], message: `catalog_skill_skipped: '${name}' has uncommitted content at ${dir}; commit or restore it` });
+  }
   return {
     ok: true,
     loadout: {
@@ -356,6 +447,7 @@ export function resolveSkillLoadout(input: {
       projectSelectionDeclared,
       projectSelection: [...project].sort(compareBytes),
       entries,
+      ...(skipped.length ? { skipped } : {}),
     },
   };
 }
@@ -827,10 +919,19 @@ export function reconcileSkillLoadout(input: {
   for (const owner of Object.keys(manifest.topologySelections).sort(compareBytes)) {
     topologySelections[owner] = [...manifest.topologySelections[owner]!].sort(compareBytes);
   }
-  const currentTopology = loadoutEntries
-    .filter((entry) => entry.selectedBy.includes("topology"))
-    .map((entry) => entry.id)
-    .sort(compareBytes);
+  // A topology skill skipped for uncommitted catalog content stays in this owner's selection while its kept copy
+  // exists, so another owner reconciling the same cwd doesn't remove that copy as deselected.
+  const keptSkippedTopology = (input.loadout.skipped ?? [])
+    .filter((skip) => skip.selectedBy.includes("topology"))
+    .filter((skip) => {
+      const prior = owned.get(skip.id);
+      return prior !== undefined && pathEntryExists(prior.target);
+    })
+    .map((skip) => skip.id);
+  const currentTopology = [...new Set([
+    ...loadoutEntries.filter((entry) => entry.selectedBy.includes("topology")).map((entry) => entry.id),
+    ...keptSkippedTopology,
+  ])].sort(compareBytes);
   if (currentTopology.length > 0) topologySelections[topologyOwner] = currentTopology;
   else delete topologySelections[topologyOwner];
   const canonicalTopologySelections: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
@@ -839,6 +940,8 @@ export function reconcileSkillLoadout(input: {
   }
   const retainedTopology = new Set(Object.values(topologySelections).flat());
   const effectiveEntries = [...loadoutEntries];
+  // Skills the catalog skipped for uncommitted content: named once by the resolver, never an error here.
+  const skippedIds = new Set((input.loadout.skipped ?? []).map((skip) => skip.id));
   for (const id of [...retainedTopology].sort(compareBytes)) {
     const current = effectiveEntries.find((entry) => entry.id === id);
     if (current) {
@@ -848,6 +951,7 @@ export function reconcileSkillLoadout(input: {
     }
     const prior = owned.get(id);
     if (!prior) {
+      if (skippedIds.has(id)) continue;
       errors.push({
         code: "topology_selection_unavailable",
         message: `topology owner still selects '${id}', but its owned source record is absent; relaunch that owner or clear its selection explicitly`,
@@ -855,6 +959,7 @@ export function reconcileSkillLoadout(input: {
       });
       continue;
     }
+    if (skippedIds.has(id) && !pathEntryExists(prior.target)) continue;
     const pluginId = pluginIdOf(prior.revision);
     effectiveEntries.push({
       id: prior.id,
@@ -879,6 +984,7 @@ export function reconcileSkillLoadout(input: {
     }
     const prior = owned.get(id);
     if (!prior) {
+      if (skippedIds.has(id)) continue;
       errors.push({
         code: "project_selection_unavailable",
         message: `installed project still selects '${id}', but its owned source record is absent; run an explicit project install to repair or clear it`,
@@ -886,6 +992,7 @@ export function reconcileSkillLoadout(input: {
       });
       continue;
     }
+    if (skippedIds.has(id) && !pathEntryExists(prior.target)) continue;
     effectiveEntries.push({
       id: prior.id,
       sourceDir: prior.sourceDir,
@@ -894,6 +1001,22 @@ export function reconcileSkillLoadout(input: {
       digest: prior.digest,
       files: prior.files,
       selectedBy: ["project"],
+    });
+  }
+  // A selected skill skipped for uncommitted catalog content keeps the copy already projected, owned and
+  // unchanged, rather than being removed as deselected; it refreshes once its catalog content is committed.
+  for (const skip of input.loadout.skipped ?? []) {
+    if (skip.selectedBy.length === 0 || effectiveEntries.some((entry) => entry.id === skip.id)) continue;
+    const prior = owned.get(skip.id);
+    if (!prior || !pathEntryExists(prior.target)) continue;
+    effectiveEntries.push({
+      id: prior.id,
+      sourceDir: prior.sourceDir,
+      sourceRoot: prior.sourceRoot,
+      revision: prior.revision,
+      digest: prior.digest,
+      files: prior.files,
+      selectedBy: skip.selectedBy,
     });
   }
   effectiveEntries.sort((a, b) => compareBytes(a.id, b.id));

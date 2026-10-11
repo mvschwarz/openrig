@@ -5,14 +5,13 @@ the advisor and TUI beside it. No starter team is needed to reach that view.
 Tell the operator what you want to do, then choose a project team for a bounded
 change you can exercise. Reuse the accounts and terminal tools you already have.
 
-Want the **welcome screen**, the **OpenRig view**, or to **show me my agents** / **see my agents**?
-After installation and sign-in, the path is `rig daemon start` (if stopped),
+After installation and sign-in, your agent opens the **OpenRig TUI and operator** for you. The path is `rig daemon start` (if stopped),
 then `rig terminal open saved:kernel --window`. The second command opens the
 desktop window itself. An agent can run it from its shell on the daemon's
 desktop; it does not need to type into your current terminal. See
 [Open the kernel conversations](#open-the-kernel-conversations).
 `rig tui` is the team dashboard; installation ends when you are talking to the
-operator in the welcome view.
+operator in the OpenRig view.
 
 ## Before you start
 
@@ -98,7 +97,7 @@ user.
 ## Install and sign in
 
 **Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
-welcome screen and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
+OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
 `~/.claude/skills` and `~/.agents/skills` when the daemon starts. Before that, add it with
 `npx skills add mvschwarz/openrig --skill rigs`, or read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md).
 
@@ -106,11 +105,11 @@ welcome screen and the handoff to the operator as one procedure. From 0.6.7, Ope
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -138,7 +137,9 @@ The other provider's CLI/login is optional. Herdr is installed by default unless
 you decline it; cmux remains optional. Do not copy credentials
 or start repeated sign-in attempts. Recheck the selected login after the user
 completes it. `rig setup --dry-run` previews the broader setup; applying
-`rig setup` checks **both** harnesses and installs a missing one with npm; on
+`rig setup` checks **both** harnesses and installs a missing one with npm, unless
+you pass the person's choice: `rig setup --providers claude` (or `codex`) leaves
+the other out, so it reads not selected instead of failed. On
 macOS it uses an existing Homebrew (it does not install Homebrew) to install a
 missing tmux (elsewhere tmux is checked, not installed). Herdr installs on
 macOS and Linux; pass `--no-herdr` to decline it. Setup also
@@ -186,18 +187,20 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
-This is the **welcome screen** or **OpenRig view**: TUI | advisor | operator, in a new terminal window or tab.
+This is the **OpenRig view**, in a new terminal window or tab.
+Below 120 measured columns, the operator fills the first page; from 120, the dashboard and operator share it equally.
+The advisor always has a separate tab or tmux window.
 **Agents:** the `rigs` skill says when to open it, what to check, what to do when it can't open, and how to hand the
 person's goal to the operator; [Install and sign in](#install-and-sign-in) says how to load it.
 
 `rig setup` installs Herdr by default on macOS and Linux. If the person declines
-Herdr, use `rig setup --no-herdr`; the welcome view can use plain tmux. Setup
+Herdr, use `rig setup --no-herdr`; the OpenRig view can use plain tmux. Setup
 checks both PATH and the installer's default `~/.local/bin/herdr` location. It
 leaves existing cmux settings alone and does not open a view during setup.
 
 On a Mac, the installing agent also asks once, "Install Ghostty for the OpenRig
 view?" On Yes it reruns setup with `--ghostty`, preserving earlier choices such
-as `--no-herdr`. This installs the
+as `--no-herdr` and `--providers`. This installs the
 [documented Homebrew cask](https://ghostty.org/docs/install/binary) and checks for
 the app. On No it uses `--no-ghostty`; Terminal.app remains available. Plain setup
 reports this offer without installing Ghostty or waiting for input. The person
@@ -212,20 +215,33 @@ rig terminal open saved:kernel --window --json
 
 Run this on the daemon's desktop, as the same user. On macOS, the command
 opens a new tab or window in the hosting Ghostty (1.3 or newer), or a new
-window when hosted by Terminal. macOS may ask for Automation permission; let the person
-answer that system prompt. A denied or uncertain action is reported once,
-not replayed in another app. On Linux, a local graphical display and a
-supported hosting terminal are required (Ghostty, GNOME Terminal, Konsole or
-xterm). Linux reports a window request; verify what actually appeared. SSH,
-headless, CI and unsupported hosts get a no-window result with the reason,
-a command for the person to run, and any follow-up the agent needs to perform.
+window when hosted by Terminal. For Claude Desktop, iTerm or VS Code, it checks
+for a local macOS desktop session and opens a new Ghostty window if its scripting
+support is confirmed (1.3 or newer), otherwise Terminal.app with an explanation.
+That window uses the app's own profile defaults because
+there is no hosting window to copy. Before running the command, the agent should say that clicking **Allow**
+on macOS's one-time control prompt is fine: it lets OpenRig open the requested
+OpenRig view. A denied or uncertain action is reported once, not replayed in
+another app. If macOS remembers a denial, enable the calling app in System Settings
+→ Privacy & Security → Automation, or use the printed command in a terminal yourself.
+Unknown width keeps the operator-only layout.
 
-OpenRig's Herdr launch and its printed manual command use a private copy of
-your Herdr settings with only the initial sidebar preference changed to
-collapsed. An endpoint's saved choice takes precedence; later sidebar toggles
-persist normally. Your global config is untouched. If that copy cannot be
-prepared, OpenRig reports why and keeps the ordinary launch or manual command
-with its usual settings and sidebar.
+When the agent already runs inside Herdr, the command focuses a space with the
+same view and plan, or creates one if none matches, preserving its config and existing spaces. The
+caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
+without opening a window or putting the view in another session.
+
+On Linux, a local graphical display and a supported hosting terminal are required
+(Ghostty, GNOME Terminal, Konsole or xterm). Linux reports a window request; verify
+what actually appeared. SSH, headless, CI and unsupported Linux hosts get a
+no-window result with the reason, a command for the person to run, and any
+follow-up the agent needs to perform.
+
+OpenRig's Herdr launch and its printed manual command keep your personal Herdr
+config when present. If it is absent, OpenRig creates private sidebar defaults;
+the new desktop terminal selects them from its measured width. The manual command
+uses the collapsed default. If private settings cannot be prepared, OpenRig
+reports why and keeps the ordinary launch or manual command with Herdr's usual settings.
 
 The command runs Herdr when installed, using the daemon's configured session and
 socket. Otherwise it creates a plain tmux viewing session. Explicitly choose the
@@ -242,17 +258,28 @@ to close them after inspection; nothing is closed automatically. If the workspac
 inventory cannot be read, the command creates a fresh workspace and reports the
 inventory problem.
 
+Terminal.app copies the person's front-window bounds to the new view without
+changing the original. Ghostty keeps the current window size when adding a tab.
+OpenRig keeps an existing personal Herdr config unchanged. Only when that config
+is absent, its private default starts the sidebar open at 160 columns or more,
+and collapsed below that width. Unknown widths use the collapsed default.
+
 ### Confirm the view
 
-The default `saved:kernel` composition is **TUI | advisor | operator**, in three
-columns, for Claude-only, Codex-only and mixed kernels. The queue worker remains
-reachable through the TUI. The composition uses the installed kernel's current
+For Claude-only, Codex-only and mixed kernels, the default `saved:kernel` layout
+uses the viewing terminal's measured width. Below 120 columns (or when width is
+unknown), **the operator** fills the first page, followed by dashboard and advisor
+pages. From 120 columns, dashboard and operator share the first page equally, with
+the advisor on a separate page. Select a Herdr tab to switch; in plain tmux, press
+**Ctrl-b, then w** and choose a `view-*` window; `view-1` is the OpenRig view's first page.
+Missing roles are reported rather than filled with another conversation. The queue worker remains
+reachable through the dashboard. The composition uses the installed kernel's current
 bindings; no YAML edit, seat launch or daemon restart is needed. A custom saved
 view named `kernel` still takes precedence.
 
 Inspect `opened`, `absent`, `degraded`, `window` and any notes. Confirm the new
-surface visibly shows the intended conversations and TUI, and that the original
-terminal remains intact. The person sees Herdr only in a terminal they can see.
+surface visibly shows the operator, with the dashboard and advisor reachable,
+and that the original terminal remains intact. The person sees Herdr only in a terminal they can see.
 Creating its workspace or switching the shared TUI to `:terminals` does not open
 that terminal. A created window or successful CLI response alone is not visual
 confirmation. A partial view remains partial. If the shared TUI tile shows a
@@ -262,7 +289,7 @@ Opening the view can happen while the kernel finishes starting. Report its actua
 state; do not start or restore seats just to obtain a view. If the kernel is absent
 or blocked, follow [Incomplete setup and restart](#incomplete-setup-and-restart).
 
-### What can interrupt installation and the welcome screen
+### What can interrupt installation and the OpenRig view
 
 For an installing agent, a blocked step needs an explanation, not silence. Name
 the command, the reported reason and what remains unfinished. These checks cover
@@ -270,14 +297,15 @@ different points in the same journey:
 
 | What you see | Why and what to do next |
 | --- | --- |
+| Codex offers to switch to a cheaper model near a rate limit | This is Codex's own menu. Ask the person to choose in the seat's terminal; do not silently change the team's configured model. OpenRig disables Codex's startup update check for managed launches, but does not answer this model-choice menu. |
 | A missing Node.js, npm or tmux; an install download or command fails | The named prerequisite or install step did not finish. Read its error and the [platform and provider instructions](#install-and-sign-in), resolve that step, then recheck it. `FAILED [4/4]` with only selected-provider sign-ins outstanding means the package installed but those logins still need the person. |
 | The installing harness refuses a tool call or asks for permission | Its native rules, sandbox or automatic permission decision apply before OpenRig can run. Claude Code's [auto mode can deny calls](https://code.claude.com/docs/en/auto-mode-config) as well as approve them. Show the specific refusal and ask the person to review it in the harness permission controls or run that named step themselves. Keep their chosen restrictions; a refused call does not prove the OpenRig command failed. |
 | Herdr or Ghostty installation is unavailable or declined | Herdr is optional for the view: `--window` uses plain tmux when Herdr is absent, and its install failure is a warning. On macOS, Terminal.app is the fallback when supported Ghostty is absent. An explicitly requested Ghostty install can fail setup; resolve that install or decline it with `--no-ghostty`, preserving earlier choices. Address separate required-tool or login failures. Existing cmux remains supported. |
 | macOS asks for Automation access, or the window action is denied | The command asks the desktop terminal app to open a new surface. Let the person answer the system prompt. Read the error and inspect any new window before retrying an uncertain action; do not silently switch apps and open a duplicate. |
 | No local display, or the configured daemon is remote | `--window` needs the daemon's desktop. An SSH shell or remote daemon address alone does not give the agent that desktop. Explain the limit and use the [manual](#talk-to-the-operator-in-any-terminal) or [SSH handoff](#headless-or-ssh-handoff) with the actual operator binding. |
 | Herdr shows its introduction or agent-integration panel | These are Herdr's first-run panels. Follow the displayed controls: Return continues the intro and Esc closes the integration panel. Opening this view does not require installing Herdr's agent integrations or changing your Claude/Codex settings. |
-| Three columns are cramped in an 80×24 window | The desktop app's window size can be smaller than the composed layout. Enlarge the newly opened window so the dashboard and conversations are readable. Changing or restarting the team is unnecessary. |
-| The command returned, but visibility is unconfirmed | With authorized desktop tools, inspect the new window and a screenshot of its contents. A window listing alone proves only that a window exists. If the agent has only shell access, report what the command confirmed and ask the person to confirm the visible TUI, advisor and operator. Do not report visual success without seeing it. |
+| A saved layout is cramped in an 80×24 window | The default kernel view gives each role a full-width page. A custom saved `kernel` view still controls its own layout; adjust that saved view if needed. Changing or restarting the team is unnecessary. |
+| The command returned, but visibility is unconfirmed | With authorized desktop tools, inspect the new window and a screenshot of its contents. A window listing alone proves only that a window exists. If the agent has only shell access, report what the command confirmed and ask the person to confirm the visible operator and that the dashboard and advisor tabs or windows are available. Do not report visual success without seeing it. |
 
 After a failure, inspect any newly opened surface before retrying. A tmux failure
 may name a newly created viewing session for inspection. Do not replace a failed
@@ -305,24 +333,26 @@ For the first desktop handoff, use `--window`. Only if the window cannot open,
 For an explicitly requested manual attachment, inspect the current bindings:
 
 ```sh
-rig ps --nodes --rig kernel --json
+rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand
 ```
 
-Find `logicalId: operator.agent` and use its `canonicalSessionName` in a new
+Find `logicalId: operator.agent` and run its `tmuxAttachCommand`, after `env -u TMUX`, in a new
 terminal on the same host and account:
 
 ```sh
-env -u TMUX tmux attach-session -t '=<canonicalSessionName>'
+env -u TMUX <tmuxAttachCommand>
 ```
 
-The installing agent fills in the actual session name. This optional manual route
+When the daemon was started inside tmux on a non-default socket, its sessions live on that
+server, and `tmuxAttachCommand` names it (`tmux -L <name> …` or `tmux -S <path> …`). The installing
+agent fills in the actual command. This optional manual route
 is separate from the first-install desktop action above.
 
 ### Plain terminal: a new viewing session
 
 `rig terminal open saved:kernel --provider tmux --window --json` creates and opens
-the three-column view itself. It reuses the daemon's composition and preserves
-existing sessions. The result names the viewing session. No pane names or shell
+the same width-based OpenRig view layout, with the advisor in a separate window. It reuses
+the daemon's composition and preserves existing sessions. The result names the viewing session. No pane names or shell
 commands need to be assembled by the person.
 
 ### Headless or SSH handoff
@@ -459,7 +489,7 @@ Read the artifact, exercise its behavior, and check the candidate reviewed.
 
 ## Share the dashboard and return to it
 
-For “show me my agents” or the welcome screen, the installing agent runs
+After install, and whenever the person wants their agents again, the installing agent runs
 `rig terminal open saved:kernel --window` and checks the result. It does not
 finish by suggesting a dashboard command for the person to type.
 
@@ -529,7 +559,9 @@ This guide remains the short first-use path.
 ## Stop your teams
 
 `rig down <rig-name>` ends that rig's agent sessions and work in progress.
-Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop.
+Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop;
+`rig down` also prints the rig's recorded agent sessions and their activity
+before stopping them.
 For example, to stop starter:
 
 ```sh
@@ -558,12 +590,43 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
+| Kernel seats fail within a second of the first start, and tmux reports "server exited unexpectedly" | Check that your tmux can capture a pane, then start the failed seats again; see the tmux check below this table. |
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
 | Host reboot lost tmux sessions | Open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
+
+**When the kernel's seats all fail at the first start.** A report on Oracle Linux 10
+([#980](https://github.com/mvschwarz/openrig/issues/980)) traced this to the distribution's packaged tmux, whose
+`tmux -V` prints `next-3.4`: its server exited on every `capture-pane -p`, also outside OpenRig. To check your tmux on
+a throwaway socket, without touching your own sessions:
+
+```sh
+tmux -L "openrig-check-$$" -f /dev/null new-session -d -s check
+tmux -L "openrig-check-$$" capture-pane -p -t check >/dev/null && echo "capture-pane works"
+tmux -L "openrig-check-$$" kill-server
+```
+
+If the second command fails because the server exited, put a tmux that passes this check first on your `PATH`; the
+reporter built tmux 3.5a into `/usr/local/bin`. Then, from a shell where `tmux -V` shows that tmux, restart the daemon
+and start the failed seats again, as the reporter did:
+
+```sh
+rig daemon stop
+rig start --last
+rig ps --nodes --rig kernel --full   # the failed seats show "failed" under STARTUP
+rig up kernel --existing --fresh <failed seats> --yes
+```
+
+This recovery is for the case the reporter hit: the kernel's seats failed and none of them is still running.
+`rig up kernel --existing` refuses a kernel that still has a live session. Name the failed seats by their logical
+IDs, for example `advisor.lead operator.agent operator.human queue.worker` when all four failed. `--fresh` starts a
+new conversation for each seat you name. Seats you don't name follow their normal recovery policy and may remain
+awaiting a decision if their old conversation can't be resumed. A later `rig daemon start` doesn't retry the failed
+seats by itself: once a kernel exists, startup skips the built-in kernel boot, and `rig status` then reads
+`Kernel: skipped` whatever its seats' state, so check `rig ps --nodes --rig kernel --full`.
 
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a
