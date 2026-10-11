@@ -1,5 +1,5 @@
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -20,6 +20,7 @@ import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { verifyClaudePaneProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -85,6 +86,8 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   // is a clean post-reconciliation outcome and rolls up like `resumed`.
   const allFailed = nodes.every((node) => node.status === "failed");
   if (allFailed) return "failed";
+  // A seat running without part of its guidance keeps its own status; the rig isn't fully restored.
+  if (nodes.some((node) => (node.guidanceGaps?.length ?? 0) > 0)) return "partially_restored";
   if (nodes.some((node) => node.status === "fresh" || node.status === "fresh-primed" || node.status === "awaiting-decision" || node.status === "failed" || node.status === "attention_required")) {
     return "partially_restored";
   }
@@ -928,7 +931,42 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    return this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    return this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
+  }
+
+  /** A seat that came back running should also have its role, culture and SOP guidance. If its
+   *  guidance file still lacks a managed block it should hold, the seat keeps its true status (a
+   *  live resumed session is still running) and the gap is disclosed on the node and in the
+   *  warnings, so the rig is reported partially_restored, not fully_restored. */
+  private checkRestoredGuidance(
+    result: RestoreNodeResult,
+    node: SnapshotData["nodes"][number],
+    rigId: string,
+    data: SnapshotData,
+    warnings?: string[],
+  ): RestoreNodeResult {
+    // Every status with a live session; attention_required keeps its status and gains the disclosure.
+    if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
+    let guidance: ReturnType<typeof seatGuidance>;
+    try {
+      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
+        this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+    } catch (err) {
+      warnings?.push(`Restore: ${node.logicalId}: could not check its guidance: ${(err as Error).message}`);
+      return { ...result, guidanceGaps: ["(guidance check failed)"] };
+    }
+    if (!guidance || guidance.items.length === 0) return result;
+    let missing: string[];
+    try {
+      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
+    } catch (err) {
+      missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
+    }
+    if (missing.length === 0) return result;
+    const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}.`;
+    warnings?.push(`Restore: ${gap}`);
+    return { ...result, guidanceGaps: missing };
   }
 
   /** OPR.0.3.4.2 (B) — roll a just-launched session back to ZERO sessions for
@@ -1022,6 +1060,33 @@ export class RestoreOrchestrator {
       }
     }
 
+    // Root's narrow amendment to D6a (qitem-20261009081619-d1537b0f): before either native
+    // resume path starts the harness, put back only the MISSING managed guidance blocks from
+    // the saved startup selection. Ordinary `rig down` strips them; without this the resumed
+    // seat came back with no role, culture or SOP. Existing blocks are never refreshed; nothing
+    // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
+    if (resumeRequested && resumeToken && launchResult) {
+      let guidance: ReturnType<typeof seatGuidance> = null;
+      try {
+        guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+      } catch (err) {
+        // Guidance never blocks the exact resume; the post-launch check discloses the gap.
+        warnings?.push(`Restore guidance: ${node.logicalId}: could not read its saved guidance selection: ${(err as Error).message}`);
+      }
+      if (guidance && guidance.items.length > 0) {
+        const repair = restoreMissingGuidance(guidance, {
+          exists: existsSync,
+          readFile: (path) => readFileSync(path, "utf-8"),
+          writeFile: (path, content) => writeFileSync(path, content, "utf-8"),
+          mkdirp: (path) => mkdirSync(path, { recursive: true }),
+        });
+        if (repair.restored.length > 0) {
+          warnings?.push(`Restore guidance: ${node.logicalId}: put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files.`);
+        }
+        for (const gap of repair.gaps) warnings?.push(`Restore guidance: ${node.logicalId}: ${gap}`);
+      }
+    }
+
     if (resumeRequested && !isPodAware) {
       // Legacy resume path
       if (!resumeToken) {
@@ -1111,6 +1176,9 @@ export class RestoreOrchestrator {
     // explicit+versioned+durable+idempotent contract in the D4 operation-id
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
+    // Amended narrowly (Root, 2026-10-09, qitem-20261009081619-d1537b0f): MISSING managed
+    // guidance blocks are put back before the harness starts (see restoreMissingGuidance above);
+    // existing blocks are still never rewritten, and nothing else is replayed.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;
