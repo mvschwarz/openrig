@@ -35,12 +35,12 @@ function mockTmux(paneContent?: string): TmuxAdapter {
 }
 
 describe("SessionFingerprinter", () => {
-  it.each(["codex-reporter", "notclaude", "claude-monitor"])("does not infer an agent from unrelated process name %s", async (activeCommand) => {
+  it.each(["codex-reporter", "notclaude", "claude-monitor", "claude-monitor-x", ".claude-unwrappx", ".codex-unwrappx"])("does not infer an agent from unrelated process name %s", async (activeCommand) => {
     const fp = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux(), fsExists: () => false });
     expect(await fp.fingerprint(makePane({ activeCommand }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
   });
 
-  it.each(["claude-code", ".claude-wrapped", ".claude-unwrapped", ".claude-unwrapp", "/usr/local/bin/claude"])("retains known Claude executable spelling %s", async (activeCommand) => {
+  it.each(["claude-code", "claude.exe", ".claude-wrapped", ".claude-unwrapped", ".claude-unwrapp", ".claude-unwrappe", "/usr/local/bin/claude"])("retains known Claude executable spelling %s", async (activeCommand) => {
     const fp = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux(), fsExists: () => false });
     expect(await fp.fingerprint(makePane({ activeCommand }))).toMatchObject({ runtimeHint: "claude-code", confidence: "high" });
   });
