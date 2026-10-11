@@ -201,7 +201,8 @@ export type InboundReceiptStatus =
   | "ignored"
   | "refused"
   | "dead-lettered"
-  | "handler-failed";
+  | "handler-failed"
+  | "replace-requested";
 
 export interface InboundReceipt {
   at: string;
@@ -211,6 +212,8 @@ export interface InboundReceipt {
   eventTs?: string;
   channel?: string;
   reason?: string;
+  /** Slack's `hello` count of this app's open Socket Mode connections. */
+  connections?: number;
 }
 
 /** Credential-free ingress/lifecycle ledger. A received receipt is appended before

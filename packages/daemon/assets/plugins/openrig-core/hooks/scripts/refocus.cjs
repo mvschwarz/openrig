@@ -102,10 +102,29 @@ function readConfiguredContent(home) {
 // current work, its basis travels to the trace script, which alone decides how to render it;
 // a failed or unreadable answer is passed as UNKNOWN. Never guess a work node here: a guess
 // would silently re-point the whole trace.
+// OPR.0.7.0.12 — the work packet, switched off by default: the trace receives the daemon's
+// labelled work candidates and carries duties and notes as text. With it off, every path below
+// is unchanged.
+function workPacketEnabled() {
+  return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, false);
+}
+
 function readQueueWhoami(timeout = 2_000) {
-  const result = spawnSync("rig", ["queue", "whoami", "--json"], {
+  const args = ["queue", "whoami", "--json", ...(workPacketEnabled() ? ["--work-candidates"] : [])];
+  let result = spawnSync("rig", args, {
     encoding: "utf8", env: process.env, timeout, maxBuffer: 16 * 1024 * 1024,
   });
+  // A rig CLI older than this hook rejects the flag. Ask again without it, inside what is left of
+  // the budget, so the role and the strict answer still arrive (just without candidates).
+  if (args.includes("--work-candidates") && !result.error && result.status !== 0
+    && /unknown option/i.test(`${result.stderr || ""}${result.stdout || ""}`)) {
+    const remaining = remainingLookupBudget();
+    if (remaining > 250) {
+      result = spawnSync("rig", ["queue", "whoami", "--json"], {
+        encoding: "utf8", env: process.env, timeout: remaining, maxBuffer: 16 * 1024 * 1024,
+      });
+    }
+  }
   if (result.error) return { unknown: `queue whoami failed: ${result.error.message}` };
   if (result.status !== 0 || !result.stdout || !result.stdout.trim()) {
     return { unknown: `queue whoami exited ${result.status ?? "without a status"} with no answer` };
@@ -208,11 +227,31 @@ function renderTrace() {
     }
     role = renderRole(whoami);
   }
-  if (work.start) args.push("--work-start", work.start);
+  const packet = workPacketEnabled();
+  let evidence = null;
+  if (packet) {
+    args.push("--packet");
+    if (trees !== "topology") {
+      if (!whoami) {
+        const timeout = remainingLookupBudget();
+        whoami = timeout > 250 ? readQueueWhoami(timeout) : { unknown: "no budget left" };
+      }
+      const candidates = whoami.answer?.workCandidates;
+      if (candidates && typeof candidates === "object") evidence = JSON.stringify(candidates);
+    }
+  }
+  // An explicit start always wins. Otherwise the candidates replace the strict answer: the
+  // strict node ignores mission-only rows, so it could hide a second mission in flight.
+  const explicitStart = Boolean(process.env.OPENRIG_REFOCUS_WORK_NODE);
+  if (work.start && (explicitStart || !evidence)) args.push("--work-start", work.start);
+  else if (evidence) args.push("--work-candidates", "-");
   else if (work.basis) args.push("--work-basis", work.basis);
   else if (work.unknown) args.push("--work-unknown", work.unknown);
+  // With an explicit start, the evidence supplies only held and next work.
+  if (explicitStart && evidence) args.push("--work-candidates", "-");
   const result = spawnSync(process.env.PYTHON || "python3", args, {
     encoding: "utf8",
+    ...(evidence ? { input: evidence } : {}),
     env: traceEnv(trees),
     timeout: 2_000,
     maxBuffer: 16 * 1024 * 1024,

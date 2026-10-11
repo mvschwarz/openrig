@@ -749,7 +749,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig add <rig-id> <pod-namespace> <member-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
+| `rig add <rig> <pod-namespace> <member-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
 
 ### create
 

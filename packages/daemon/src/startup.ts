@@ -1168,6 +1168,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     isRegisteredOccupantGeneration: (nodeId, generation) =>
       sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
   });
+  // #763 — Codex usage-limit banner detector. The reactive tap only accepts a
+  // typed at_limit hook row and no hook producer emits one for Codex, so the
+  // structural sweep reports what the seat itself shows. Attached late (rather
+  // than constructed with) so service construction order is untouched.
+  {
+    const { recordCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
+    seatStructuralActivityService.attachCodexLimitBanner((sessionName, banner) => {
+      recordCodexLimitBanner({
+        store: agentActivityStore,
+        resolveGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+        sessionName,
+        banner,
+      });
+    });
+  }
   const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,

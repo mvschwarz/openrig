@@ -386,6 +386,8 @@ function normalizeHookActivity(input: {
   let normalizedReason = reason;
   if (rawEvent === "PermissionRequest") {
     normalizedReason = "permission_request";
+  } else if (rawEvent === "at_limit") {
+    normalizedReason = "usage_limit";
   } else if (rawEvent === "Notification") {
     if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";
   } else if (rawEvent === "SessionStart") {

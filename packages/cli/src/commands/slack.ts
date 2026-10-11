@@ -38,6 +38,40 @@ import type {
 const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
 
+/** The socket's delivery health, as the daemon reports it beside the socket state. */
+export interface InboundDeliveryStatus {
+  delivery?: string; eventsMissingSince?: string; lastServerPingAt?: string; unechoedPosts?: number;
+  numConnections?: number; otherConnections?: number; otherConnectionsMayBeOurs?: boolean;
+  lastAutoReconnect?: { at?: string; reason?: string }; autoReconnectSuppressedUntil?: string;
+}
+
+/** Lines that keep "connected" from being the only word about inbound delivery. */
+export function socketDeliveryLines(inbound: InboundDeliveryStatus | undefined): string[] {
+  const lines: string[] = [];
+  if (!inbound) return lines;
+  if (inbound.delivery) {
+    const unechoed = inbound.unechoedPosts ?? 0;
+    const delivery = inbound.delivery === "events-missing" ? `events missing since ${inbound.eventsMissingSince ?? "unknown"} (${unechoed} of our posts not echoed)`
+      : inbound.delivery === "no-server-pings" ? `no server pings since ${inbound.lastServerPingAt ?? "unknown"}`
+      : inbound.delivery === "socket-mode-disabled" ? "Socket Mode is disabled in the Slack app settings; not reconnecting"
+      : inbound.delivery === "delivering" ? (unechoed > 0
+        ? `delivering, but ${unechoed} later post(s) of ours have not come back yet`
+        : "delivering (our last post came back as an event)")
+      : "not yet confirmed (no post of ours has come back since this connection opened)";
+    lines.push(`Delivery: ${delivery}${inbound.lastServerPingAt ? `; last server ping ${inbound.lastServerPingAt}` : ""}`);
+  }
+  if (inbound.lastAutoReconnect?.at) lines.push(`Last automatic reconnect: ${inbound.lastAutoReconnect.at} (${inbound.lastAutoReconnect.reason ?? "unknown"})`);
+  if (inbound.autoReconnectSuppressedUntil) {
+    lines.push(`Automatic reconnect held back until ${inbound.autoReconnectSuppressedUntil} (at most one every 5 minutes).`);
+  }
+  if ((inbound.otherConnections ?? 0) > 0) {
+    lines.push(inbound.otherConnectionsMayBeOurs
+      ? `Slack reports ${inbound.numConnections ?? "several"} open connections for this app, ${inbound.otherConnections} more than we have open: possibly one we closed moments before Slack counted (Slack may not have dropped it yet), or another consumer taking events.`
+      : `Slack reports ${inbound.numConnections ?? "several"} open connections for this app, ${inbound.otherConnections} not ours: another consumer may be taking events.`);
+  }
+  return lines;
+}
+
 function slackTime(value: unknown): string {
   if (typeof value !== "string" || !/^\d{1,12}\.\d{1,6}$/.test(value)) return "unknown";
   return new Date(Number(value) * 1000).toISOString();
@@ -172,12 +206,13 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
         const connector = observation.connector as { configurationDigest?: string;
           deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string;
-          inbound?: { state?: string; generation?: number; lastEventAt?: string };
+          inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
           recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
             coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
             limits?: string[] } } | undefined;
         if (connector) {
           log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
+          for (const line of socketDeliveryLines(connector.inbound)) log(`  ${line}`);
           const recovery = connector.recovery;
           log(`  Recovery: ${recovery?.state ?? "unknown"}${recovery?.reason ? ` (${recovery.reason})` : ""}; last scan ${recovery?.lastScanAt ?? "unknown"}`);
           const coverage = recovery?.coverage;
