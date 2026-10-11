@@ -55,6 +55,8 @@ import {
   USAGE_LIMIT_POOL_TAG_PREFIX,
 } from "./queue-wake-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
+import { parseSessionName } from "./session-name.js";
 import {
   LADDER_ATTEMPT_PREFIX,
   LADDER_RUNG_PREFIX,
@@ -71,6 +73,16 @@ export const WAKE_UNCONFIRMED_WINDOW_KEY = "queue.wake_unconfirmed_window_minute
 export const DEFAULT_WAKE_UNCONFIRMED_WINDOW_MINUTES = 30;
 export const WAKE_SWAP_GRACE_KEY = "queue.wake_swap_grace_seconds";
 export const DEFAULT_WAKE_SWAP_GRACE_SECONDS = 180;
+/** Whether the operator rung posts agent-to-agent escalations to a person.
+ *  "always" (default) keeps today's behavior; "explicit-only" ends the ladder at
+ *  the escalation row (operator seat or rig lead) unless the row's destination is
+ *  a person: any `@external` address, or one the human registry resolves to a
+ *  person. An ask that needs a person must be addressed to the person. An instance
+ *  that has never set up the human registry can't read it, so there explicit-only
+ *  posts everything, as "always" does. */
+export const WAKE_HUMAN_RUNG_KEY = "queue.wake_human_rung";
+export type WakeHumanRung = "always" | "explicit-only";
+export const DEFAULT_WAKE_HUMAN_RUNG: WakeHumanRung = "always";
 
 // S16: this margin absorbs provider reset granularity and host/provider clock
 // skew. Fleet dedup already prevents a thundering herd; narrowing it toward zero
@@ -169,6 +181,14 @@ export const resolveWakeUnconfirmedWindowMinutes = (): number =>
   resolveNumber(WAKE_UNCONFIRMED_WINDOW_KEY, DEFAULT_WAKE_UNCONFIRMED_WINDOW_MINUTES);
 export const resolveWakeSwapGraceSeconds = (): number =>
   resolveNumber(WAKE_SWAP_GRACE_KEY, DEFAULT_WAKE_SWAP_GRACE_SECONDS);
+export function resolveWakeHumanRung(): WakeHumanRung {
+  try {
+    const v = new SettingsStore().resolveOne(WAKE_HUMAN_RUNG_KEY as never).value;
+    return v === "explicit-only" ? "explicit-only" : DEFAULT_WAKE_HUMAN_RUNG;
+  } catch {
+    return DEFAULT_WAKE_HUMAN_RUNG;
+  }
+}
 
 export interface WakeLadderDeps {
   db: Database.Database;
@@ -195,6 +215,11 @@ export interface WakeLadderDeps {
    *  (or defers) through the rules engine and reports whether the outcome
    *  resolved synchronously; absent = pre-engine floor behavior. */
   deliveryEngine?: OperatorDeliveryEngine;
+  /** Defaults to the queue.wake_human_rung setting. */
+  humanRung?: WakeHumanRung;
+  /** The human registry the explicit-only rung uses to tell a handoff addressed to a
+   *  person from agent-to-agent work. Defaults to the daemon's registry. */
+  loadHumanRegistry?: () => LoadResult;
 }
 
 export interface WakeLadderAction {
@@ -1083,8 +1108,21 @@ async function advancePromptRefusals(
       }
       appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
     }
-    if (await operatorRung(deps, row, reason, actions, view)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
+    if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
   }
+}
+
+/** Whether a destination is a person, decided as the gateway destination resolver
+ *  decides it: every `@external` address is person-facing, registered or not (a one-off
+ *  such as slack:U012AB3CD@external is never in the registry), and any other address is
+ *  a person only when the human registry resolves it (a canonical alias such as
+ *  human-founder@kernel), never by its shape. An unreadable registry is not evidence
+ *  that no person was addressed, so the rung posts as it would by default. */
+function addressedToPerson(deps: WakeLadderDeps, destination: string): boolean {
+  if (parseSessionName(destination).kind === "external") return true;
+  const registry = (deps.loadHumanRegistry ?? (() => loadHumanRegistry()))();
+  if (!registry.ok) return true;
+  return resolveRegisteredHumanAddress(destination, registry.entities) !== null;
 }
 
 /** The operator rung (OPR.0.5.6.1 A1.2/AM-F3): the delivery rules engine IS the rung's
@@ -1099,6 +1137,8 @@ async function operatorRung(
   reason: string,
   actions: WakeLadderAction[],
   view: LadderView,
+  /** False for a prompt-blocked seat, which only a person can clear. */
+  humanRungSettingApplies = true,
 ): Promise<boolean> {
   const repo = deps.queueRepo;
   if (!deps.deliveryEngine) {
@@ -1106,6 +1146,22 @@ async function operatorRung(
       repo,
       row,
       `${LADDER_RUNG_PREFIX} operator floor=escalation view + daemon-health (delivery engine not wired) reason=${reason}`,
+    );
+    actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
+    return true;
+  }
+  if (
+    humanRungSettingApplies &&
+    !view.opEngineDispatched &&
+    (deps.humanRung ?? resolveWakeHumanRung()) === "explicit-only" &&
+    !addressedToPerson(deps, row.destinationSession)
+  ) {
+    // Agent-to-agent work: the escalation row stays the visible object for the
+    // operator seat or rig lead, and nothing is posted to a person.
+    appendMarker(
+      repo,
+      row,
+      `${LADDER_RUNG_PREFIX} operator floor=escalation view (human rung explicit-only; not posted to a person) reason=${reason}`,
     );
     actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
     return true;
