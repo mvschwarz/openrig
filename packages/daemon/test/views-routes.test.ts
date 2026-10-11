@@ -13,6 +13,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { ViewProjector } from "../src/domain/view-projector.js";
 import { wireViewEventBridge } from "../src/domain/view-event-bridge.js";
 import { viewsRoutes } from "../src/routes/views.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -40,7 +41,8 @@ describe("views routes (PL-004 Phase B)", () => {
     migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, viewsCustomSchema]);
     bus = new EventBus(db);
     queueRepo = new QueueRepository(db, bus);
-    projector = new ViewProjector(db, bus);
+    // A pinned clock keeps generatedAt equal across the requests a test compares.
+    projector = new ViewProjector(db, bus, { now: () => new Date("2026-10-01T00:00:00.000Z") });
     app = buildApp({ eventBus: bus, projector });
     // Seed a few qitems so views have something to project.
     await queueRepo.create({
@@ -86,6 +88,29 @@ describe("views routes (PL-004 Phase B)", () => {
     expect(res.status).toBe(404);
     const err = (await res.json()) as { error: string };
     expect(err.error).toBe("view_not_found");
+  });
+
+  it("GET /api/views/:viewName refuses only a non-numeric limit (#586)", async () => {
+    // The projector clamps the limit to 1-1000, so large values keep working here.
+    await expectLimitParsing(app, "/api/views/recently-active", { boundIntoSql: false });
+  });
+
+  it("GET /api/views/:viewName refuses a non-numeric limit only where the view binds it (#586)", async () => {
+    const status = async (url: string) => (await app.request(url)).status;
+    projector.registerCustomView({ viewName: "own-limit", definition: "SELECT qitem_id FROM queue_items LIMIT 1", registeredBySession: "alice@product-lab" });
+    projector.registerCustomView({ viewName: "no-limit", definition: "SELECT qitem_id FROM queue_items", registeredBySession: "alice@product-lab" });
+
+    // A custom view with its own LIMIT never uses ?limit=, so it answers as without one.
+    const own = await app.request("/api/views/own-limit?limit=abc");
+    expect(own.status).toBe(200);
+    expect(((await own.json()) as { rowCount: number }).rowCount).toBe(1);
+    // The execution view doesn't read the limit either.
+    expect(await status("/api/views/execution?limit=abc")).toBe(await status("/api/views/execution"));
+    // An unregistered name is still not found.
+    expect(await status("/api/views/nope?limit=abc")).toBe(404);
+    // Views that bind the limit refuse it.
+    expect(await status("/api/views/no-limit?limit=abc")).toBe(400);
+    expect(await status("/api/views/recently-active?limit=abc")).toBe(400);
   });
 
   it("GET /api/views/recently-active?limit=1 honors limit query", async () => {
