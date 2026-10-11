@@ -37,3 +37,16 @@ On re-entry read current queue state and project artifacts; do not repeat a
 finished change or launch duplicate seats. Explain the result in terms the
 user can exercise, state what was not checked, and name the next useful action.
 Leave the project ready for another outcome at the same owner address.
+
+## Commands that don't stop the person
+
+Under the team's default permissions, `rig` commands, simple read-only commands such as `ls`, `cat` and `grep`, and the
+project's test command usually run without asking. Other commands, and anything that looks like hidden shell code, can
+stop for the person's approval. So keep commands plain:
+- Run `rig` commands as they are: don't pipe their output into `python3` or another program, and don't put
+  `$VARIABLES` in them.
+- Write files with your file-writing tool, not a shell heredoc. A file outside the project folder may still ask: tell
+  the person first.
+- For a check, run the project's test command first. To try an input the tests don't cover, run one plain command at a
+  time (`python3 tip.py 1e30`), not a chained script. To give a program input, put it in a file with your file-writing
+  tool and redirect it (`python3 tip.py < input.txt`) rather than piping it in. A new program may still ask once.
