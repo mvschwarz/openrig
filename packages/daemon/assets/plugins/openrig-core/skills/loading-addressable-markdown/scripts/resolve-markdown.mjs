@@ -49,7 +49,7 @@ function scanHeaders(lines) {
 
   for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
     const line = lines[lineNumber];
-    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fenceMatch) {
       const marker = fenceMatch[1][0];
       const length = fenceMatch[1].length;

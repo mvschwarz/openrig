@@ -110,7 +110,7 @@ function scanHeaders(lines: string[]): HeaderScan {
   let fence: { marker: string; length: number; line: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fenceMatch) {
       const marker = fenceMatch[1]![0]!;
       const length = fenceMatch[1]!.length;
