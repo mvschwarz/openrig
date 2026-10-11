@@ -19,6 +19,7 @@ import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from ".
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 
 // -- Row types for SQL results --
 
@@ -677,7 +678,7 @@ function buildInventoryEntry(
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
-    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
+    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
     resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
@@ -1333,6 +1334,19 @@ export async function attachAgentActivity(
     // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — EXCEPT that a positive
     // `idle` hook now yields to live motion (D2). running/needs_input hooks are untouched.
     if (hookActivity && hookActivity.state !== "unknown") {
+      return {
+        ...entry,
+        agentActivity: withMotion(hookActivity),
+      };
+    }
+
+    // #763: a typed provider-interruption row (at_limit) is positive evidence
+    // even though its state is unknown by construction (it must never count
+    // as waiting-on-a-person). Deliver it instead of the cached pane reading
+    // so a limited seat shows the limit, not idle — but only while current.
+    // A demoted row (aged out or generation-mismatched) falls through to the
+    // structural reading like any other stale hook.
+    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
       return {
         ...entry,
         agentActivity: withMotion(hookActivity),

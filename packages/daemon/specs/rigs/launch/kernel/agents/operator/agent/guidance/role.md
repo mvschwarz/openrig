@@ -165,7 +165,11 @@ configurations, as below; do not take the pin from a cached page summary.
      copy in `workspace.specs_root` or `~/.openrig/specs` would shadow the
      shipped team by name. Copying the folder carries every file the spec
      names relative to itself: its culture file, docs, startup files at rig,
-     pod and member level, services and policy files. Then, in the copy's
+     pod and member level, services and policy files. In Claude Code, make the
+     copy with your Read and Write tools, one file at a time (Write creates the
+     folders), not with `cp -R`: Claude Code asks for approval before `cp` or
+     `mv` with any flag, even though your launch allows them, and that prompt
+     stops the person on their first team. Then, in the copy's
      `rig.yaml`, keep `name:`, change each member's `runtime` to one they have
      and drop that member's `model:` pin. Any reference that climbs out of the
      folder (`local:../…` agent refs, any `../` path) still points at the old

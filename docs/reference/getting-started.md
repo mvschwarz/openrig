@@ -137,7 +137,9 @@ The other provider's CLI/login is optional. Herdr is installed by default unless
 you decline it; cmux remains optional. Do not copy credentials
 or start repeated sign-in attempts. Recheck the selected login after the user
 completes it. `rig setup --dry-run` previews the broader setup; applying
-`rig setup` checks **both** harnesses and installs a missing one with npm; on
+`rig setup` checks **both** harnesses and installs a missing one with npm, unless
+you pass the person's choice: `rig setup --providers claude` (or `codex`) leaves
+the other out, so it reads not selected instead of failed. On
 macOS it uses an existing Homebrew (it does not install Homebrew) to install a
 missing tmux (elsewhere tmux is checked, not installed). Herdr installs on
 macOS and Linux; pass `--no-herdr` to decline it. Setup also
@@ -198,7 +200,7 @@ leaves existing cmux settings alone and does not open a view during setup.
 
 On a Mac, the installing agent also asks once, "Install Ghostty for the OpenRig
 view?" On Yes it reruns setup with `--ghostty`, preserving earlier choices such
-as `--no-herdr`. This installs the
+as `--no-herdr` and `--providers`. This installs the
 [documented Homebrew cask](https://ghostty.org/docs/install/binary) and checks for
 the app. On No it uses `--no-ghostty`; Terminal.app remains available. Plain setup
 reports this offer without installing Ghostty or waiting for input. The person
@@ -331,17 +333,19 @@ For the first desktop handoff, use `--window`. Only if the window cannot open,
 For an explicitly requested manual attachment, inspect the current bindings:
 
 ```sh
-rig ps --nodes --rig kernel --json
+rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand
 ```
 
-Find `logicalId: operator.agent` and use its `canonicalSessionName` in a new
+Find `logicalId: operator.agent` and run its `tmuxAttachCommand`, after `env -u TMUX`, in a new
 terminal on the same host and account:
 
 ```sh
-env -u TMUX tmux attach-session -t '=<canonicalSessionName>'
+env -u TMUX <tmuxAttachCommand>
 ```
 
-The installing agent fills in the actual session name. This optional manual route
+When the daemon was started inside tmux on a non-default socket, its sessions live on that
+server, and `tmuxAttachCommand` names it (`tmux -L <name> …` or `tmux -S <path> …`). The installing
+agent fills in the actual command. This optional manual route
 is separate from the first-install desktop action above.
 
 ### Plain terminal: a new viewing session

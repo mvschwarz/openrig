@@ -17,6 +17,7 @@ import { MultiRigLauncher } from "../domain/topology/multi-rig-launcher.js";
 import { remoteUpLeaf } from "../domain/topology/remote-up-leaf.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { HttpHostEntry } from "../domain/hosts/hosts-registry-reader.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 
 export const upRoutes = new Hono();
 
@@ -51,7 +52,7 @@ export function buildAttentionResponse(result: {
   const nodeCount = detail.attentionNodes.length;
   const sessionAttachHints = detail.attentionNodes
     .filter((n) => n.sessionName)
-    .map((n) => `tmux attach -t ${n.sessionName}`)
+    .map((n) => tmuxAttachCommand(n.sessionName))
   const visibleAttachHints = sessionAttachHints.slice(0, 3).join(" ; ");
   const remainingAttachHintCount = Math.max(0, sessionAttachHints.length - 3);
   const attachHintText = visibleAttachHints

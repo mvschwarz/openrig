@@ -299,9 +299,12 @@ maps (`startup.ts:989`, `:1259`); see `daemon-core.md` §4 "Startup sequence".
 Opening a seat in a terminal app goes through `TerminalProvider`s under
 `packages/daemon/src/domain/terminal/`, served by `/api/terminal`:
 `HerdrAdapter` (`herdr-adapter.ts:351`), the default
-(`terminal-service.ts:55–56`), and `CmuxProviderAdapter`
+(`terminal-service.ts:55–58`), and `CmuxProviderAdapter`
 (`cmux-provider-adapter.ts:52`), which is best effort and refuses with
-`cmux_unavailable` when cmux is not connected. These place existing tmux
+`cmux_unavailable` when cmux is not connected. A request that names no
+provider takes the first of Herdr, then cmux, that is available and alive,
+and stays on Herdr when neither is (`providerNameFor`,
+`terminal-service.ts:175`); a named provider is used as named. These place existing tmux
 sessions in views; they do not launch harnesses.
 
 ## 3. Resume honesty

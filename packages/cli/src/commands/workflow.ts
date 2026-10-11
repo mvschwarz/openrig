@@ -287,11 +287,9 @@ Examples:
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{
-          instanceId?: string;
-          entryStepId?: string;
+          instance?: { instanceId?: string; status?: string; boundRig?: string | null };
+          entryQitemId?: string;
           entryOwnerSession?: string;
-          status?: string;
-          instance?: { boundRig?: string | null };
           advisories?: string[];
         }>("/api/workflow/instantiate", {
           specPath: resolveWorkflowSource(specPath),
@@ -303,15 +301,15 @@ Examples:
         printResult(opts.json ?? false, res.data, res.status);
         printWorkflowAdvisories(res.data?.advisories);
         const body = res.data ?? {};
-        const instanceId = asString(body.instanceId) ?? "(no instance id)";
-        const entryStepId = asString(body.entryStepId);
+        const instanceId = asString(body.instance?.instanceId) ?? "(no instance id)";
+        const entryPacketId = asString(body.entryQitemId);
         const owner = asString(body.entryOwnerSession) ?? opts.entryOwner ?? "(default from spec)";
         const boundRig = asString(body.instance?.boundRig ?? undefined);
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Instantiated workflow from ${specPath} (instance ${instanceId})`,
-          state: `${body.status ?? "active"}${boundRig ? `; bound to rig ${boundRig}` : ""}; entry packet ${entryStepId ?? "pending"} owned by ${owner}`,
-          next: entryStepId
-            ? `Inspect: rig workflow show ${instanceId} | Open packet: rig queue show ${entryStepId}`
+          state: `${body.instance?.status ?? "active"}${boundRig ? `; bound to rig ${boundRig}` : ""}; entry packet ${entryPacketId ?? "pending"} owned by ${owner}`,
+          next: entryPacketId
+            ? `Inspect: rig workflow show ${instanceId} | Open packet: rig queue show ${entryPacketId}`
             : `Inspect: rig workflow show ${instanceId}`,
         });
       });
@@ -403,10 +401,10 @@ Examples:
           }
         }
         const res = await client.post<{
-          closedPacketId?: string;
-          nextPacketId?: string;
-          nextOwnerSession?: string;
-          instanceStatus?: string;
+          closurePriorPacketId?: string;
+          nextQitemId?: string | null;
+          nextOwnerSession?: string | null;
+          instance?: { status?: string };
         }>("/api/workflow/project", {
           instanceId: opts.instance,
           currentPacketId: opts.currentPacket,
@@ -429,10 +427,10 @@ Examples:
         });
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
-        const closedId = asString(body.closedPacketId) ?? opts.currentPacket;
-        const nextId = asString(body.nextPacketId);
+        const closedId = asString(body.closurePriorPacketId) ?? opts.currentPacket;
+        const nextId = asString(body.nextQitemId);
         const nextOwner = asString(body.nextOwnerSession) ?? opts.nextOwner ?? "(default from spec)";
-        const status = body.instanceStatus ?? (opts.exit === "done" ? "completed" : opts.exit === "failed" ? "failed" : "active");
+        const status = body.instance?.status ?? (opts.exit === "done" ? "completed" : opts.exit === "failed" ? "failed" : "active");
         const whatTail = nextId ? ` and projected ${nextId} to ${nextOwner}` : (opts.exit === "done" ? " (instance done)" : "");
         const nextAction = nextId
           ? `Inspect: rig queue show ${nextId}`
