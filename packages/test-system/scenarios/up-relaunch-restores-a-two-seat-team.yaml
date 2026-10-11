@@ -1,0 +1,57 @@
+# Family: lifecycle `up` (round trip: up, ps, down, up by spec again, ps).
+# Defect class: a relaunch that re-records the stopped seats into the team's row instead of
+#   replacing the team, so the team comes back with duplicated seats in that row; or a relaunch
+#   that silently comes back stopped / partial instead of a two-seat team.
+# What this proves: STUB PLUMBING plus the daemon's recorded lifecycle across a full round
+#   trip. `rig up <spec>` brings the two-seat stub team up; `rig down` records it stopped with
+#   both seats still members; the SAME spec then starts a new team in place of the stopped one
+#   (the documented up contract) and the shipped `rig ps --json` reports that name running with
+#   exactly two seats, both running, not archived.
+# What this does NOT prove: that the seats' conversations survive the round trip (that is the
+#   `--existing` restore path and needs an input-consuming stub), that any message is consumed
+#   by a seat, that the archived generation keeps its data, that the tmux panes are actually
+#   gone after `down` (the runner has no absence form), or any Claude Code / Codex behaviour.
+# Planted negative: a relaunch that re-records the stopped seats instead of replacing the team
+#   reports `runningCount: 4` on the post-up `ps`, and the final `expect` fails while the first
+#   `up`, both mid-journey `ps` reads and the post-`down` read still pass.
+#   `match` is a structural subset, so it confirms the row it names and cannot reject an extra
+#   running row for the same rig name; a relaunch that adds a second row rather than reusing
+#   the first is outside what this scenario can see.
+# Deps: R-10 runner (`up`, `down`, `ps` surface). No emit, no seed_regression, no env preconditions.
+scenario: up-relaunch-restores-a-two-seat-team
+topology: ./dev-pair-stub.yaml
+steps:
+  - up: {}
+  # the two stub seats come up as one running team
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: running
+          nodeCount: 2
+          runningCount: 2
+          isArchived: false
+  - down: {}
+  # the team is recorded stopped with both seats still members, not archived
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: stopped
+          lifecycleState: stopped
+          nodeCount: 2
+          runningCount: 0
+          isArchived: false
+  # the same spec relaunches: a new team in place of the stopped one (which is archived)
+  - up: {}
+  - expect:
+      surface: ps
+      within: 60s
+      match:
+        - name: dev-pair-stub
+          status: running
+          nodeCount: 2
+          runningCount: 2
+          isArchived: false
