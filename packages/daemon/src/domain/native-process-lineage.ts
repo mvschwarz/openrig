@@ -299,16 +299,23 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
 
 function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string): NativeProcessObservation | null {
   const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
-  if (matches.length !== 1) return null;
-  const observation = matches[0]!;
+  // #1079: a Codex launcher that spawns Codex is one runtime on one chain.
+  const chain = runtime === "codex" ? launcherChain(matches, rows) : matches;
+  if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return null;
+  const observation = chain[0]!;
   const { process } = observation;
   if (runtime === "claude-code") {
     if (!expectedToken || claudeSessionToken(tokens(process.command).slice(1)) !== expectedToken) return null;
   } else {
-    const resumeToken = codexResumeToken(tokens(process.command).slice(1));
-    if (requireResume && !expectedToken) return null;
-    if ((requireResume || (expectedToken !== undefined && resumeToken !== undefined))
-      && (!expectedToken || resumeToken !== expectedToken)) return null;
+    // Every link that names a conversation must name the expected one, and
+    // links naming different conversations stay refused. Exact resume proof
+    // needs the deepest process's own argv: a launcher's token is never
+    // inherited by a child that names nothing, which stays deliverable but unproved.
+    const identities = chain.map((link) => codexResumeToken(tokens(link.process.command).slice(1)));
+    if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return null;
+    if (requireResume && (!expectedToken || identities[0] !== expectedToken)) return null;
+    if (expectedToken !== undefined && identities.some((value) => value !== undefined
+      && (!expectedToken || value !== expectedToken))) return null;
   }
   return observation;
 }
@@ -377,12 +384,12 @@ export async function observeClaudePaneStartedAt(input: Parameters<typeof observ
   return (await verifyClaudePaneRuntime(input))?.process.startedAt ?? null;
 }
 
-/** A launcher shim that spawns (rather than execs) Claude leaves several Claude
- * processes on one parent chain. That chain is one runtime: the deepest process
+/** A launcher shim that spawns (rather than execs) Claude or Codex leaves several
+ * same-runtime processes on one parent chain. That chain is one runtime: the deepest process
  * receives input, and a shim's argv may carry the identity its child lacks.
  * Returns the chain deepest-first, or null when candidates sit on separate
  * branches, which stays ambiguous. */
-function claudeLauncherChain(candidates: NativeProcessObservation[], rows: NativeProcessRow[]): NativeProcessObservation[] | null {
+function launcherChain(candidates: NativeProcessObservation[], rows: NativeProcessRow[]): NativeProcessObservation[] | null {
   if (candidates.length <= 1) return candidates;
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const ancestors = (observation: NativeProcessObservation): Set<number> => {
@@ -399,7 +406,11 @@ function claudeLauncherChain(candidates: NativeProcessObservation[], rows: Nativ
     const above = ancestors(candidate);
     return candidates.every((other) => other === candidate || above.has(other.process.pid));
   });
-  return deepest ? [deepest, ...candidates.filter((candidate) => candidate !== deepest)] : null;
+  if (!deepest) return null;
+  // On one chain every link has a distinct depth; order them all by it, so an
+  // ancestor's identity is never read ahead of a deeper link's.
+  const depth = new Map(candidates.map((candidate) => [candidate, ancestors(candidate).size]));
+  return [...candidates].sort((a, b) => depth.get(b)! - depth.get(a)!);
 }
 
 export interface ClaudeDeliveryObservation {
@@ -423,7 +434,7 @@ export async function observeClaudeDelivery(
       if (!pid) return unknown;
       const rows = await (input.listProcesses ?? listNativeProcesses)();
       const candidates = nativeProcessCandidates(rows, pid, "claude-code", input.selectedExecutable);
-      const chain = claudeLauncherChain(candidates, rows);
+      const chain = launcherChain(candidates, rows);
       if (!chain) return { state: "conflict", detail: "Multiple Claude processes occupy the bound foreground" };
       const native = chain[0];
       if (native) {
@@ -445,7 +456,9 @@ export async function observeClaudeDelivery(
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
           : { ...unknown, fingerprint };
       }
-      const other = selectNativeProcess(rows, pid);
+      // Main's rule here: only a single Codex process is a conflicting runtime.
+      // A Codex launcher chain in a Claude seat keeps warn-and-send (#1088 review).
+      const other = nativeProcessCandidates(rows, pid, "codex").length === 1 ? selectNativeProcess(rows, pid) : null;
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
       const root = rows.find(row => row.pid === pid);
       // A wrapper's label is not an idle shell. Positive shell proof requires
