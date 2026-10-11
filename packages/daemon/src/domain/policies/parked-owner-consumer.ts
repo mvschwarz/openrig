@@ -43,6 +43,8 @@ export interface RowTransitionView {
    *  row is unchanged, so a repeat wake is never withheld on its account. */
   actorSession?: string;
   state?: string;
+  /** The persisted transition order (global across rows); orders changes that share a millisecond. */
+  transitionId?: number;
 }
 
 export interface ParkedOwnerConsumerDeps {
@@ -88,6 +90,8 @@ export const RESERVE_PREFIX = "parked-owner wake reserved:";
 export const CLOSE_PREFIX = "parked-owner episode closed:";
 export const REFUSED_PREFIX = "parked-owner wake delivery refused:";
 export const FAILED_PREFIX = "parked-owner wake delivery failed:";
+/** The engine reported the wake delivered. Only a delivered wake can make a later repeat wait. */
+export const DELIVERED_PREFIX = "parked-owner wake delivered:";
 export const NUDGE_FAIL_PREFIX = "failed: parked-owner wake delivery";
 
 /** Only the transport's interactive-prompt refusal counts — a generic failed
@@ -108,7 +112,7 @@ function idsHashOf(sortedIds: string[]): string {
 /** The key sits immediately after the prefix, delimited by ';', ' (' or EOL —
  *  anchored on the prefix so body words can never masquerade as the key. */
 function keyOfNote(note: string): string | null {
-  for (const prefix of [RESERVE_PREFIX, CLOSE_PREFIX, REFUSED_PREFIX, FAILED_PREFIX]) {
+  for (const prefix of [RESERVE_PREFIX, CLOSE_PREFIX, REFUSED_PREFIX, FAILED_PREFIX, DELIVERED_PREFIX]) {
     if (!note.startsWith(prefix)) continue;
     const rest = note.slice(prefix.length).trim();
     const m = rest.match(/^([^;()]+?)(?:;|\s*\(|$)/);
@@ -121,10 +125,9 @@ interface RowEpisodeState {
   openKey: string | null;
   refused: boolean;
   nextOrdinal: number;
-  /** When this obligation set's last wake was reserved, open or closed, if that wake isn't known to
-   *  have failed or been refused (a reserve isn't proof of delivery). Null otherwise, or before its
-   *  first wake. */
-  lastDeliveredTs: string | null;
+  /** This obligation set's last reserve, open or closed, when that wake is recorded as delivered (a
+   *  reserve alone isn't proof of delivery). Null otherwise, or before its first wake. */
+  lastDelivered: { ts: string; transitionId?: number } | null;
 }
 
 /** Derive the episode state for one idsHash from the primary row's transitions.
@@ -135,9 +138,10 @@ function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpiso
   const closed = new Set<string>();
   const refusedKeys = new Set<string>();
   const failedKeys = new Set<string>();
+  const deliveredKeys = new Set<string>();
   let openKey: string | null = null;
   let lastKey: string | null = null;
-  let lastReserveTs: string | null = null;
+  let lastReserve: { ts: string; transitionId?: number } | null = null;
   let reserves = 0;
   // listTransitions returns oldest-first; walk newest-first.
   for (let i = transitions.length - 1; i >= 0; i--) {
@@ -147,25 +151,28 @@ function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpiso
     if (note.startsWith(CLOSE_PREFIX)) closed.add(key);
     else if (note.startsWith(REFUSED_PREFIX)) refusedKeys.add(key);
     else if (note.startsWith(FAILED_PREFIX)) failedKeys.add(key);
+    else if (note.startsWith(DELIVERED_PREFIX)) deliveredKeys.add(key);
     else if (note.startsWith(RESERVE_PREFIX) && key.includes(`|${idsHash}#`)) {
       reserves += 1;
-      if (lastKey === null) { lastKey = key; lastReserveTs = transitions[i]!.ts; }
+      if (lastKey === null) { lastKey = key; lastReserve = { ts: transitions[i]!.ts, transitionId: transitions[i]!.transitionId }; }
       if (openKey === null && !closed.has(key)) openKey = key;
     }
   }
-  const lastDelivered = lastKey !== null && !refusedKeys.has(lastKey) && !failedKeys.has(lastKey);
-  return { openKey, refused: openKey !== null && refusedKeys.has(openKey), nextOrdinal: reserves + 1, lastDeliveredTs: lastDelivered ? lastReserveTs : null };
+  const delivered = lastKey !== null && deliveredKeys.has(lastKey) && !refusedKeys.has(lastKey) && !failedKeys.has(lastKey);
+  return { openKey, refused: openKey !== null && refusedKeys.has(openKey), nextOrdinal: reserves + 1, lastDelivered: delivered ? lastReserve : null };
 }
 
 /** Whether what the seat holds changed after `since`: on any of the rows, a transition by the seat
  *  itself or a state change. Notes by other seats and system bookkeeping (this consumer's own
  *  reserve and close notes) aren't changes. A transition the view can't attribute counts as one. */
-function changedSince(listTransitions: (qitemId: string) => RowTransitionView[], ids: string[], seat: string, since: string): boolean {
+function changedSince(listTransitions: (qitemId: string) => RowTransitionView[], ids: string[], seat: string, since: { ts: string; transitionId?: number }): boolean {
   for (const id of ids) {
     let prior: string | undefined;
     for (const t of listTransitions(id)) {
-      // The reserve and everything before it set the baseline state.
-      if (t.ts <= since) { prior = t.state; continue; }
+      // The reserve and everything before it set the baseline state. Transition order decides when the
+      // view carries it, since two transitions can share a millisecond.
+      const atOrBefore = since.transitionId !== undefined && t.transitionId !== undefined ? t.transitionId <= since.transitionId : t.ts <= since.ts;
+      if (atOrBefore) { prior = t.state; continue; }
       if (t.actorSession === undefined || t.state === undefined || t.actorSession === seat) return true;
       if (prior !== undefined && prior !== t.state) return true;
       prior = t.state;
@@ -214,19 +221,26 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
       // outcomes onto the reserved rows. Refusals mark the refusal cell; generic
       // failures enter the ladder's native vocabulary via last_nudge_result.
       // The episode stays OPEN either way — the consumer never re-attempts.
+      // A delivered wake is recorded too: only that lets a later repeat for the same set wait.
       const recent = deps.history.listForJob(job.jobId, Math.min(deps.history.countForJob(job.jobId), 25));
+      const rowTransitions = new Map<string, RowTransitionView[]>();
       for (const e of recent) {
-        if (e.outcome !== "sent" || !e.deliveryStatus || e.deliveryStatus === "ok") continue;
+        if (e.outcome !== "sent" || !e.deliveryStatus) continue;
         const n = e.evaluationNotes ?? {};
         const key = typeof n["episodeKey"] === "string" ? (n["episodeKey"] as string) : null;
         const primary = typeof n["primaryRow"] === "string" ? (n["primaryRow"] as string) : null;
         if (!key || !primary) continue;
-        const trans = deps.rows.listTransitions(primary);
-        const alreadyRecorded = trans.some((t) => {
+        if (!rowTransitions.has(primary)) rowTransitions.set(primary, deps.rows.listTransitions(primary));
+        const alreadyRecorded = rowTransitions.get(primary)!.some((t) => {
           const note = t.transitionNote ?? "";
-          return (note.startsWith(REFUSED_PREFIX) || note.startsWith(FAILED_PREFIX)) && keyOfNote(note) === key;
+          return (note.startsWith(REFUSED_PREFIX) || note.startsWith(FAILED_PREFIX) || note.startsWith(DELIVERED_PREFIX)) && keyOfNote(note) === key;
         });
         if (alreadyRecorded) continue;
+        rowTransitions.delete(primary);
+        if (e.deliveryStatus === "ok") {
+          deps.rows.appendNote(primary, `${DELIVERED_PREFIX} ${key}`);
+          continue;
+        }
         const reason = String(n["deliveryReason"] ?? e.deliveryStatus);
         if (isRefusedInteractive(reason)) {
           deps.rows.appendNote(primary, `${REFUSED_PREFIX} ${key}; ${reason}`);
@@ -303,7 +317,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         }
         // After a wake for the same set, no repeat until the seat writes to one of its rows or one
         // changes state. A "(seat resumed)" close alone isn't that: any turn the seat takes writes it.
-        if (ep.lastDeliveredTs !== null && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, ep.lastDeliveredTs)) {
+        if (ep.lastDelivered !== null && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, ep.lastDelivered)) {
           skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake" });
           continue;
         }

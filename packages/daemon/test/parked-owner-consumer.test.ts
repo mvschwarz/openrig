@@ -16,6 +16,7 @@ import {
   CLOSE_PREFIX,
   REFUSED_PREFIX,
   FAILED_PREFIX,
+  DELIVERED_PREFIX,
   NUDGE_FAIL_PREFIX,
   PARKED_OWNER_POLICY_NAME,
   type ParkedOwnerConsumerDeps,
@@ -83,14 +84,15 @@ class RowStore {
   openIds: (dest: string) => string[] = () => ROW_IDS;
   terminal = new Set<string>();
   private clock = Date.parse("2026-10-11T00:00:00.000Z");
+  private nextId = 1;
 
   /** One second per transition, so order never depends on the wall clock. */
   private tick(): string { this.clock += 1000; return new Date(this.clock).toISOString(); }
 
   /** A transition written by someone other than the consumer: a seat's note, or a state change. */
-  record(qitemId: string, actorSession: string, state: string, note = "note"): void {
+  record(qitemId: string, actorSession: string, state: string, note = "note", ts = this.tick()): void {
     const list = this.transitions.get(qitemId) ?? [];
-    list.push({ ts: this.tick(), transitionNote: note, actorSession, state });
+    list.push({ ts, transitionNote: note, actorSession, state, transitionId: this.nextId++ });
     this.transitions.set(qitemId, list);
   }
 
@@ -101,7 +103,7 @@ class RowStore {
         if (this.terminal.has(q)) return { ok: false };
         const list = this.transitions.get(q) ?? [];
         // The consumer's own notes: system bookkeeping that keeps the row's state.
-        list.push({ ts: this.tick(), transitionNote: note, actorSession: "watchdog@system", state: list.at(-1)?.state ?? "in-progress" });
+        list.push({ ts: this.tick(), transitionNote: note, actorSession: "watchdog@system", state: list.at(-1)?.state ?? "in-progress", transitionId: this.nextId++ });
         this.transitions.set(q, list);
         this.appended.push({ qitemId: q, note });
         return { ok: true };
@@ -245,80 +247,108 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
   });
 
   describe("a repeat for the same set waits for a change in what the seat holds", () => {
-    const wake = (store: RowStore, seat = parkedSeat()) => makeParkedOwnerConsumerPolicy(makeDeps([seat], store)).evaluate(makeJob());
-    const resume = (store: RowStore) => wake(store, parkedSeat({ parked: false }));
-    const skippedWhy = (result: Awaited<ReturnType<typeof wake>>) =>
+    // Each sent wake is reported delivered, as the engine records it; the next pass lands that on the row.
+    const harness = () => {
+      const store = new RowStore();
+      const history: WatchdogHistoryEntry[] = [];
+      const wake = async (seat = parkedSeat()) => {
+        const result = await makeParkedOwnerConsumerPolicy(makeDeps([seat], store, history)).evaluate(makeJob());
+        if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: String(result.notes?.["primaryRow"]) }));
+        return result;
+      };
+      return { store, history, wake, resume: () => wake(parkedSeat({ parked: false })) };
+    };
+    const skippedWhy = (result: { notes?: Record<string, unknown> }) =>
       ((result.notes?.["skippedSeats"] as Array<{ why: string }> | undefined) ?? []).map((s) => s.why);
 
     it("an unchanged repeat is skipped: the seat resumed and re-parked with nothing changed", async () => {
-      const store = new RowStore();
-      expect((await wake(store)).action).toBe("send");
-      await resume(store);
-      const repeat = await wake(store);
+      const { store, wake, resume } = harness();
+      expect((await wake()).action).toBe("send");
+      await resume();
+      expect(store.appended.some((a) => a.note.startsWith(DELIVERED_PREFIX))).toBe(true);
+      const repeat = await wake();
       expect(repeat.action).toBe("skip");
       expect(skippedWhy(repeat)).toEqual(["unchanged-since-last-wake"]);
       expect(store.appended.filter((a) => a.note.startsWith(RESERVE_PREFIX))).toHaveLength(1);
     });
 
     it("another seat's note on the row isn't a change", async () => {
-      const store = new RowStore();
-      await wake(store);
-      await resume(store);
+      const { store, wake, resume } = harness();
+      await wake();
+      await resume();
       store.record(ROW_IDS[1]!, SEAT2, "in-progress", "relay from another seat");
-      expect(skippedWhy(await wake(store))).toEqual(["unchanged-since-last-wake"]);
+      expect(skippedWhy(await wake())).toEqual(["unchanged-since-last-wake"]);
     });
 
     it("the seat's own note re-arms exactly one wake", async () => {
-      const store = new RowStore();
-      await wake(store);
-      await resume(store);
+      const { store, wake, resume } = harness();
+      await wake();
+      await resume();
       store.record(ROW_IDS[2]!, SEAT, "in-progress", "progress note");
-      const second = await wake(store);
+      const second = await wake();
       expect(second.action).toBe("send");
       expect(String(second.notes?.["episodeKey"])).toMatch(/#2$/);
-      await resume(store);
-      expect(skippedWhy(await wake(store))).toEqual(["unchanged-since-last-wake"]);
+      await resume();
+      expect(skippedWhy(await wake())).toEqual(["unchanged-since-last-wake"]);
+    });
+
+    it("an owner note in the same millisecond as the reserve still re-arms, by transition order", async () => {
+      const { store, wake, resume } = harness();
+      const first = await wake();
+      const primary = String(first.notes?.["primaryRow"]);
+      const reserveTs = store.transitions.get(primary)!.find((t) => t.transitionNote?.startsWith(RESERVE_PREFIX))!.ts;
+      store.record(ROW_IDS[1]!, SEAT, "in-progress", "progress note", reserveTs);
+      await resume();
+      expect((await wake()).action).toBe("send");
     });
 
     it("a state change by anyone re-arms one wake", async () => {
-      const store = new RowStore();
-      await wake(store);
-      await resume(store);
+      const { store, wake, resume } = harness();
+      await wake();
+      await resume();
       store.record(ROW_IDS[0]!, "queue@system", "pending", "auto-unparked");
-      const second = await wake(store);
+      const second = await wake();
       expect(second.action).toBe("send");
       expect(String(second.notes?.["episodeKey"])).toMatch(/#2$/);
     });
 
     it("a new obligation set wakes as today", async () => {
-      const store = new RowStore();
-      await wake(store);
-      await resume(store);
+      const { store, wake, resume } = harness();
+      await wake();
+      await resume();
       const extra = "qitem-d-0a1b2c3d";
       store.openIds = () => [...ROW_IDS, extra];
       const grown = parkedSeat({ obligations: { items: [...ROW_IDS, extra].map((qitemId) => ({ qitemId, state: "in-progress", summary: null })), held: [] } });
-      const result = await wake(store, grown);
+      const result = await wake(grown);
       expect(result.action).toBe("send");
       expect(String(result.notes?.["episodeKey"])).toMatch(/#1$/);
     });
 
-    it("a set whose last wake failed or was refused isn't suppressed: a reserve isn't proof of delivery", async () => {
-      for (const prefix of [FAILED_PREFIX, REFUSED_PREFIX]) {
-        const store = new RowStore();
-        const first = await wake(store);
-        const key = String(first.notes?.["episodeKey"]);
-        store.record(String(first.notes?.["primaryRow"]), "watchdog@system", "in-progress", `${prefix} ${key}; delivery failed`);
-        await resume(store);
-        expect((await wake(store)).action).toBe("send");
+    it("a reserve with no recorded delivery (a stop between reserve and delivery) isn't treated as delivered", async () => {
+      const { history, wake, resume } = harness();
+      await wake();
+      history.length = 0; // the engine never recorded a delivery
+      await resume();
+      expect((await wake()).action).toBe("send");
+    });
+
+    it("a set whose last wake failed or was refused isn't suppressed", async () => {
+      const refusal = `Refused: '${SEAT}' is at an interactive prompt (target_needs_input). No text was sent.`;
+      for (const reason of ["transport timeout after 5000ms", refusal]) {
+        const { history, wake, resume } = harness();
+        const first = await wake();
+        history[0] = sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: String(first.notes?.["primaryRow"]), deliveryStatus: "failed", deliveryReason: reason });
+        await resume();
+        expect((await wake()).action).toBe("send");
       }
     });
 
     it("a view without actor or state can't show a row unchanged, so the repeat is sent", async () => {
-      const store = new RowStore();
-      await wake(store);
-      await resume(store);
+      const { store, wake, resume } = harness();
+      await wake();
+      await resume();
       store.transitions.get(ROW_IDS[0]!)!.push({ ts: "2026-10-11T23:59:59.000Z", transitionNote: "legacy note" });
-      expect((await wake(store)).action).toBe("send");
+      expect((await wake()).action).toBe("send");
     });
   });
 
@@ -430,7 +460,7 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
   function realRows(): ParkedOwnerConsumerDeps["rows"] {
     return {
       // As startup.ts maps it.
-      listTransitions: (q) => repo.listTransitions(q).map((t) => ({ ts: t.ts, transitionNote: t.transitionNote ?? null, actorSession: t.actorSession, state: t.state })),
+      listTransitions: (q) => repo.listTransitions(q).map((t) => ({ ts: t.ts, transitionNote: t.transitionNote ?? null, actorSession: t.actorSession, state: t.state, transitionId: t.transitionId })),
       appendNote: (q, note) => {
         const row = repo.getById(q);
         if (!row || !isBlockerLive(row.state)) return { ok: false };
@@ -446,18 +476,22 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
   it("at the real seam: a resume and re-park with nothing changed skips; the seat's own note re-arms one wake", async () => {
     const qitemId = await mkClaimedRow();
     const items = [{ qitemId, state: "in-progress", summary: null }];
-    const run = (parked: boolean) => makeParkedOwnerConsumerPolicy({
-      diagnoseRig: () => ({ seats: [parkedSeat({ parked, obligations: { items, held: [] } })] }),
-      history: { listForJob: () => [], countForJob: () => 0 },
-      rows: realRows(),
-    }).evaluate(makeJob());
+    const history: WatchdogHistoryEntry[] = [];
+    const run = async (parked: boolean) => {
+      const result = await makeParkedOwnerConsumerPolicy({
+        diagnoseRig: () => ({ seats: [parkedSeat({ parked, obligations: { items, held: [] } })] }),
+        history: { listForJob: (_j, l) => history.slice(0, l), countForJob: () => history.length },
+        rows: realRows(),
+      }).evaluate(makeJob());
+      if (result.action === "send") history.unshift(sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: qitemId }));
+      return result;
+    };
     expect((await run(true)).action).toBe("send");
-    await run(false); // the seat took a turn: its episode closes "(seat resumed)"
+    await run(false); // the delivery lands on the row, and the seat's turn closes the episode "(seat resumed)"
     const repeat = await run(true);
     expect(repeat.action).toBe("skip");
     expect(JSON.stringify(repeat.notes)).toContain("unchanged-since-last-wake");
-    await new Promise((resolve) => setTimeout(resolve, 5)); // a later millisecond than the reserve
-    repo.update({ qitemId, actorSession: SEAT, transitionNote: "progress" });
+    repo.update({ qitemId, actorSession: SEAT, transitionNote: "progress" }); // ordered by transition id, not its millisecond
     expect((await run(true)).action).toBe("send");
   });
 
