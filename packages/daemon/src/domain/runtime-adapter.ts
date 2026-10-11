@@ -94,12 +94,16 @@ export function isAttentionRequiredReadinessCode(code: string | undefined): bool
 
 export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
+// `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
+// pinned as the one it started, kept even when a later sample saw it replaced (#1077).
 export type HarnessLaunchResult =
-  | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation }
+  | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
+    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess }
   // `evidence` carries the last-N pane lines for `attention_required` outcomes
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.
-  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string };
+  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string;
+    launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
 
 // -- Shared concrete-hint resolver --
 

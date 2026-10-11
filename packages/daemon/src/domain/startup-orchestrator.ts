@@ -23,6 +23,7 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
@@ -115,6 +116,8 @@ interface StartupOrchestratorDeps {
   /** Sleep between paste and submit for tmux-driven TUIs. */
   sleep?: (ms: number) => Promise<void>;
   readinessSettings?: Pick<SettingsStore, "resolveOne">;
+  /** Process observation for a Claude resume launch's own record of its process (#1077). */
+  listProcesses?: NativeProcessLister;
 }
 
 /**
@@ -146,6 +149,7 @@ export class StartupOrchestrator {
   private appliedLaunchStore: AppliedLaunchObservationStore;
   private sessionTransport: SessionTransport;
   private readinessSettings: Pick<SettingsStore, "resolveOne">;
+  private listProcesses: NativeProcessLister | undefined;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -157,6 +161,7 @@ export class StartupOrchestrator {
     this.readFile = deps.readFile ?? (() => "");
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
+    this.listProcesses = deps.listProcesses;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -168,6 +173,22 @@ export class StartupOrchestrator {
   }
 
   private readFile: (path: string) => string;
+
+  /** The process this Claude resume launch started, as the launch itself observes it (#1077): the one
+   *  the adapter's readiness check pinned first, else one observed now. A rotation its hook later
+   *  reports counts only for this process; unobserved, none counts. */
+  private async recordClaudeResumeLaunch(sessionId: string, target: string | null | undefined, token: string,
+    pinned: ClaudeLaunchedProcess | undefined): Promise<void> {
+    try {
+      if (pinned) {
+        this.sessionRegistry.recordResumeLaunchProcess(sessionId, token, pinned);
+        return;
+      }
+      if (!target) return;
+      const launched = await observeClaudeResumeLaunch({ target, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, token });
+      if (launched) this.sessionRegistry.recordResumeLaunchProcess(sessionId, token, launched);
+    } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+  }
 
   async startNode(input: StartupInput): Promise<StartupResult> {
     const warnings: string[] = [];
@@ -298,6 +319,12 @@ export class StartupOrchestrator {
         let attemptedFreshFallback = false;
 
         while (true) {
+          if (input.adapter.runtime === "claude-code") {
+            // Before the launch: Claude's SessionStart hook can land before launchHarness returns.
+            try {
+              this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
+            } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
@@ -305,6 +332,9 @@ export class StartupOrchestrator {
           });
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
+            if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
+              await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim(), launchResult.launchedProcess);
+            }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
@@ -350,6 +380,10 @@ export class StartupOrchestrator {
                   normalizedResumeToken,
                 );
               } catch { /* best-effort */ }
+            }
+            // The launch is retained for reconciliation; record its process as it does when ready.
+            if (input.adapter.runtime === "claude-code" && normalizedResumeToken) {
+              await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, normalizedResumeToken, launchResult.launchedProcess);
             }
             errors.push(`Harness launch requires attention: ${launchResult.error}`);
             // isRestore selects context, not native continuity: pod-aware exact
@@ -528,7 +562,9 @@ export class StartupOrchestrator {
     if (!input.skipHarnessLaunch && input.adapter.runtime === "claude-code"
       && continuityOutcome === "resumed" && input.resumeToken
       && ((input.resumeType !== undefined && !isClaudeResumeType(input.resumeType))
-        || !this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim()))) {
+        || !(this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim())
+          // Claude continued this resume under a new id; its current-generation hook said so.
+          || this.sessionRegistry.claudeResumeRotatedFrom(input.sessionId, input.resumeToken)))) {
       return this.fail(deliveryInput, "attention_required", [
         "Native resume was observed but its requested type or current session metadata conflicts or could not be retained; session preserved.",
       ]);

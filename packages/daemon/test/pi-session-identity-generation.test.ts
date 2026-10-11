@@ -21,7 +21,8 @@ function fixture() {
   db.exec(`
     CREATE TABLE nodes (id TEXT, rig_id TEXT, runtime TEXT);
     CREATE TABLE sessions (id INTEGER, node_id TEXT, session_name TEXT, resume_type TEXT,
-      resume_token TEXT, resume_provenance TEXT, resume_last_verified TEXT, resume_last_probe_status TEXT);
+      resume_token TEXT, resume_provenance TEXT, resume_last_verified TEXT, resume_last_probe_status TEXT,
+      resume_rotated_from TEXT, resume_rotated_process TEXT, resume_launch_token TEXT);
     CREATE TABLE events (seq INTEGER PRIMARY KEY, node_id TEXT, type TEXT, payload TEXT);
     CREATE TABLE occupant_tenures (id TEXT, node_id TEXT, generation_ordinal INTEGER,
       generation_uuid TEXT, kind TEXT, native_session_id_at_boot TEXT, boot_at TEXT);

@@ -1012,9 +1012,10 @@ describe("RestoreOrchestrator", () => {
       if (failure === "bare") rows.pop();
       if (failure === "background") rows[2]!.pgid = 9000;
       if (failure === "unrelated") rows[2]!.ppid = 9000;
-      if (failure === "unstable" && calls > 1) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
+      // The launch's own record of its process (#1077) takes the first two samples; the A3 proof follows.
+      if (failure === "unstable" && calls > 3) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
       if (failure === "missing-metadata") rows[2]!.startedAt = "";
-      if (failure === "pane-changed") tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+      if (failure === "pane-changed" && calls > 2) tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
       return rows;
     };
     if (failure === "ambiguous-pane") tmux.listPanes = vi.fn(async () => ["%1", "%2"].map(id => ({ id, index: 0, cwd: "/", width: 80, height: 24, active: true })));
@@ -3295,6 +3296,34 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(seeded.nodeId)).toEqual({ verdict: "verified" });
       expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    // #1077 — the seat launched with --resume tok-abc-123 and Claude continued as a new id. The
+    // strict reconciler keeps main's exact current-token path and accepts the launch token only as
+    // the alternative a qualified rotation names: the launched process's own first hook, a resume.
+    it.each([
+      ["a resume from the launched process", "resume", "tok-abc-123", "tok-abc-123", true],
+      ["a /clear from the launched process", "clear", "tok-abc-123", "tok-abc-123", false],
+      ["a resume from a Claude started by hand in the pane (no marker)", "resume", null, "tok-abc-123", false],
+      ["a resume carrying another launch's marker", "resume", "tok-other-789", "tok-abc-123", false],
+      // An operator relaunched Claude on the stored token after a rotation was recorded: main's path.
+      ["argv on the current token after an old rotation record", "resume", "tok-abc-123", "tok-rotated-456", true],
+      ["argv on an unrelated token after a rotation record", "resume", "tok-abc-123", "tok-other-789", false],
+    ] as const)("reconciles Claude after %s", async (_label, source, resumeLaunch, argvToken, accepted) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("Claude Code v2.1.220\n ❯ accept edits on");
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+      const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(seeded.nodeId) as { id: string };
+      sessionRegistry.recordResumeLaunch(session.id, "tok-abc-123");
+      sessionRegistry.recordResumeLaunchProcess(session.id, "tok-abc-123", { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" });
+      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true, resumeLaunch, launchedProcess: { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" } });
+      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows(argvToken) }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(result.ok).toBe(accepted);
+      if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
       expect(tmux.sendKeys).not.toHaveBeenCalled();
       expect(tmux.sendText).not.toHaveBeenCalled();
     });

@@ -4,7 +4,7 @@ export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
@@ -13,7 +13,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -906,7 +906,8 @@ interface SessionTransportDeps {
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null; }
+interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
+  resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
@@ -978,6 +979,7 @@ export class SessionTransport {
 
   private getSessionMeta(sessionName: string): {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
+    rotation: ClaudeResumeRotation | null;
   } {
     // One existing statement; P2 reads the binding columns it already joins plus the
     // same current-occupant subselect the delivery guard uses. No extra query.
@@ -989,6 +991,10 @@ export class SessionTransport {
         b.tmux_session AS binding_session,
         b.tmux_pane AS pane,
         s.resume_token AS resume_token,
+        s.resume_provenance AS resume_provenance,
+        s.resume_rotated_from AS resume_rotated_from,
+        s.resume_rotated_process AS resume_rotated_process,
+        s.resume_launch_process AS resume_launch_process,
         (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
       FROM sessions s
       JOIN nodes n ON s.node_id = n.id
@@ -1007,6 +1013,7 @@ export class SessionTransport {
       pane: row?.binding_session === sessionName ? row?.pane ?? null : null,
       occupant: row?.binding_session === sessionName ? row?.occupant ?? null : null,
       resumeToken: row?.resume_token ?? null,
+      rotation: claudeResumeRotation(row),
     };
   }
 
@@ -1309,7 +1316,7 @@ export class SessionTransport {
     const checkClaudeTarget = async (): Promise<SendResult | null> => {
       if (runtime !== "claude-code") return null;
       if (bindingChanged()) return changedRecipient();
-      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken);
+      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken, sessionMeta.rotation);
       if (bindingChanged()) return changedRecipient();
       if (observation.state === "idle_shell" || observation.state === "conflict") {
         return { ok: false, sessionName, sent: false, reason: observation.state === "idle_shell" ? "target_runtime_not_running" : "target_runtime_conflict",
@@ -1824,7 +1831,7 @@ export class SessionTransport {
     }
   }
 
-  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null): Promise<ClaudeDeliveryObservation> {
+  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null, rotation: ClaudeResumeRotation | null = null): Promise<ClaudeDeliveryObservation> {
     const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
     try {
       const panes = await this.tmuxAdapter.listPanes(sessionName);
@@ -1834,7 +1841,7 @@ export class SessionTransport {
       if (!pane || panes.length === 0) return unknown;
       const [sessionPid, panePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
       if (sessionPid && panePid && sessionPid !== panePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
-      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken });
+      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken, rotation });
       // Refusal already has positive evidence; a later failed read cannot erase it.
       if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
       const after = await this.tmuxAdapter.listPanes(sessionName);

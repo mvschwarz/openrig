@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
@@ -18,7 +18,7 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { observeClaudeDelivery, verifyClaudePaneProcess } from "./native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudeResumeLaunch, verifyClaudePaneProcess, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
 import type {
@@ -1153,9 +1153,25 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
+        const launchedSessionId = launchResult?.session.id;
+        if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
+          // Before the resume: Claude's SessionStart hook can land before attemptResume returns.
+          try {
+            this.sessionRegistry.recordResumeLaunch(launchedSessionId, resumeToken);
+          } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+        }
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort, warnings);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
+          if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
+            // The process this resume started, as the launch itself observes it (#1077): the one its
+            // identity check proved, else one observed now.
+            try {
+              const launched = resumeOutcome.launchedProcess ?? await observeClaudeResumeLaunch({ target: sessionName, tmux: this.tmuxAdapter,
+                ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}), token: resumeToken });
+              if (launched) this.sessionRegistry.recordResumeLaunchProcess(launchedSessionId, resumeToken, launched);
+            } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+          }
         } else if (resumeOutcome.kind === "attention_required") {
           // L3 Decision 2: Claude resume-selection prompt -> attention_required.
           // Do NOT auto-answer. Reconcile later via reconcileNodeRuntimeTruth
@@ -1327,7 +1343,8 @@ export class RestoreOrchestrator {
 
           try {
             const { StartupOrchestrator } = await import("./startup-orchestrator.js");
-            const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
+            const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter,
+              ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
             const replayAsRestore = baseStatus !== "fresh-primed";
             const shouldLaunchHarness = isPodAware;
             const startupResult = await startupOrch.startNode({
@@ -1497,7 +1514,10 @@ export class RestoreOrchestrator {
       // join; a hook/operator may have changed it meanwhile. Never backfill here.
       const retained = sameSession && (managedClaudeResume
         ? this.sessionRegistry.resumeTokenMatches(sessionId, "claude_id", resumeToken)
+          // Claude continued the resumed conversation under a new id (its hook said so).
+          || this.sessionRegistry.claudeResumeRotatedFrom(sessionId, resumeToken)
         : current.resume_token === resumeToken
+          || (node.runtime === "claude-code" && this.sessionRegistry.claudeResumeRotatedFrom(sessionId, resumeToken))
           || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
       if (!retained) {
         markManagedResumeAttention();
@@ -1603,7 +1623,7 @@ export class RestoreOrchestrator {
     effort?: string | null,
     warnings?: string[],
   ): Promise<
-    | { kind: "resumed" }
+    | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
     | { kind: "failed"; message: string }
     | { kind: "attention_required"; message: string; evidence?: string }
@@ -1632,7 +1652,7 @@ export class RestoreOrchestrator {
         const notice = nonInterruptiveNotice("claude-code", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
-        return { kind: "resumed" };
+        return { kind: "resumed", ...(result.launchedProcess ? { launchedProcess: result.launchedProcess } : {}) };
       }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // L3: surface attention_required from the Claude probe (resume-selection prompt).
@@ -1783,12 +1803,16 @@ export class RestoreOrchestrator {
     }
 
     const sessRow = this.db.prepare(
-      "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
+      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from, resume_rotated_process, resume_launch_process FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null } | undefined;
     if (!sessRow || sessRow.session_name !== sessionName) {
       return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
     }
     const expectedResumeToken = sessRow.resume_token;
+    // The one alternative argv may carry: the token OpenRig launched this row to resume, when the
+    // first hook after that launch recorded Claude continuing it as the stored token (#1077), and
+    // only in the process that sent that hook.
+    const rotation = sessRow.resume_type === "claude_id" ? claudeResumeRotation(sessRow) : null;
     if (!expectedResumeToken) {
       return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
     }
@@ -1812,6 +1836,7 @@ export class RestoreOrchestrator {
       "SELECT runtime FROM nodes WHERE id = ?"
     ).get(nodeId) as { runtime: string | null } | undefined;
     const runtime = nodeRow?.runtime ?? null;
+    // One exact-lineage check per process, accepting the stored token or the recorded rotation.
     const identity = await rebindAndVerifyPaneIdentity({
       db: this.db,
       sessionRegistry: this.sessionRegistry,
@@ -1821,6 +1846,7 @@ export class RestoreOrchestrator {
       runtime,
       expectedResumeToken,
       requireExactResumeLineage: true,
+      resumeRotation: rotation,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
     if (!identity.ok) {
@@ -1832,6 +1858,7 @@ export class RestoreOrchestrator {
       target: identity.pane,
       tmux: this.tmuxAdapter,
       expectedToken: expectedResumeToken,
+      rotation,
       requireResume: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });

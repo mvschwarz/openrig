@@ -13,8 +13,9 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { observeClaudePaneProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { observeClaudePaneProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
@@ -63,7 +64,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -324,8 +325,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
-      ? `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name],
+      opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
@@ -341,11 +343,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    this.autoLaunches.set(binding.nodeId, { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable });
+    const launch = { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable } as
+      { binding: NodeBinding; token: string; executable?: string; fingerprint?: string; process?: ClaudeLaunchedProcess };
+    this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
-      if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch };
+      // The process readiness pinned first, if it observed one: the caller records it, not a later read.
+      const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
+      if (!verification.ok) return { ...verification, ...launchedProcess };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch, ...launchedProcess };
     }
 
     // Fresh launches already have an explicit --session-id. A same-name file
@@ -404,8 +410,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable };
       const first = await observeClaudePaneProcess(observation);
       if (!first) return probe;
-      // Pin the first exact process for this launch; retries cannot adopt a replacement.
-      launch.fingerprint ??= first.fingerprint;
+      // Pin the first exact process for this launch; retries cannot adopt a replacement. It is also
+      // the launch's record of the process it started (#1077).
+      if (!launch.fingerprint) {
+        launch.fingerprint = first.fingerprint;
+        if (first.process.startedAt) launch.process = { pid: first.process.pid, startedAt: first.process.startedAt };
+      }
       if (first.fingerprint !== launch.fingerprint) return probe;
       const native = await observeClaudePaneProcess(observation);
       if (native?.fingerprint !== launch.fingerprint) return probe;
