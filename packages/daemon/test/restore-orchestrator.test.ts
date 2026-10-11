@@ -272,6 +272,60 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
+  // Backlog finding 5: a seat with no occupant at capture (stopped, or nothing running at a reboot)
+  // whose earlier occupant left a resume token is not silently fresh-primed.
+  describe("a seat with no occupant at capture", () => {
+    function absentSeat(opts: { resumeToken?: string | null; restorePolicy?: string } = {}) {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [],
+        resumeType: opts.resumeToken === null ? undefined : "claude_id",
+        resumeToken: opts.resumeToken === null ? undefined : (opts.resumeToken ?? "earlier-thread"),
+      });
+      const node = snap.data.nodes[0]!;
+      return updateSnapshotData(snap, (data) => {
+        data.sessions = data.sessions.map((session) => ({
+          ...session, status: "exited", ...(opts.restorePolicy ? { restorePolicy: opts.restorePolicy } : {}),
+        }));
+        data.activeOccupantsByNode = { [node.id]: { kind: "absent" } };
+      });
+    }
+
+    it("stops for a decision when an earlier occupant left a resume token", async () => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat().id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes).toEqual([
+        expect.objectContaining({ logicalId: "worker", status: "awaiting-decision", error: expect.stringContaining("--fresh worker") }),
+      ]);
+      expect(result.result.nodes[0]!.error).toContain("no running occupant when this snapshot was taken");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it("--fresh still starts it fresh", async () => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat().id, { freshLogicalIds: ["worker"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("awaiting-decision");
+      expect(tmux.createSession).toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no earlier row carries a token", { resumeToken: null }],
+      ["the earlier occupant's policy is not to resume", { restorePolicy: "relaunch_fresh" }],
+    ] as const)("starts it fresh as before when %s", async (_label, opts) => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat(opts).id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("awaiting-decision");
+      expect(tmux.createSession).toHaveBeenCalled();
+    });
+  });
+
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
     const otherRepo = new RigRepository(otherDb);

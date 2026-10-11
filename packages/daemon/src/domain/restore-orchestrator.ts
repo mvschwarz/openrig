@@ -75,7 +75,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
-import { resolveActiveSnapshotSession, activeOccupantAmbiguityError } from "./active-occupant.js";
+import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError } from "./active-occupant.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -117,7 +117,13 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
-  if (!session) return { kind: "fresh", why: "saves no session for this seat" };
+  if (!session) {
+    // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
+    const prior = occupant.kind === "none" ? absentSeatResumeHistory(data.sessions, nodeId) : null;
+    return prior
+      ? { kind: "decision", why: `had no running occupant for this seat when it was taken, but an earlier occupant left a '${prior.resumeType}' resume token` }
+      : { kind: "fresh", why: "saves no session for this seat" };
+  }
   const policy = session.restorePolicy ?? "resume_if_possible";
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
   if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
@@ -886,6 +892,16 @@ export class RestoreOrchestrator {
           status: "awaiting-decision",
           error: `Original session unresumable: ${sourceNote}. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
         };
+      }
+      // The same rule for a seat with no occupant at capture (it was stopped, or a reboot found
+      // nothing to resume) whose earlier occupant left a resume token: it HAD a session, so a fresh
+      // launch would silently replace that conversation. Which earlier conversation to resume is not
+      // the restore's to guess.
+      const priorWithToken = occupantResolution.kind === "none" && !freshRequested
+        ? absentSeatResumeHistory(data.sessions, nodeId)
+        : null;
+      if (priorWithToken) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType) };
       }
     }
 
