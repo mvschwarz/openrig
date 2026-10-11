@@ -353,9 +353,14 @@ describe("#25 carriage — the selection holds across the lifecycle", () => {
     expect(f.read("CLAUDE.md")).toBe(OLD_BLOCKS_CLAUDE_MD);
   });
 
-  it("restore by exact native resume writes neither file (containment unchanged)", { timeout: 30000 }, async () => {
-    const { f } = await restoreAfterRestart(true);
-    expect(f.read("CLAUDE.local.md")).toBeNull();
+  // Was "restore by exact native resume writes neither file (containment unchanged)". Root's narrow
+  // amendment to D6a (2026-10-09, qitem-20261009081619-d1537b0f): an exact resume puts back only the
+  // MISSING managed guidance blocks, into the rig's selected Claude file (CLAUDE.md by default; this
+  // fixture selects CLAUDE.local.md), before the harness starts. The other file is still never written.
+  it("restore by exact native resume puts the missing blocks back in the rig's selected file (here CLAUDE.local.md), never the other", { timeout: 30000 }, async () => {
+    const { f, restored } = await restoreAfterRestart(true);
+    expect(restored.result.nodes[0]!.status, JSON.stringify(restored)).not.toBe("failed");
+    expect(f.read("CLAUDE.local.md")).toContain(BEGIN);
     expect(f.read("CLAUDE.md")).toBe(OLD_BLOCKS_CLAUDE_MD);
   });
 

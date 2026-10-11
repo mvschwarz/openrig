@@ -1302,13 +1302,19 @@ Node-granular managed partial restore (v0.3.4+):
 ### Add a member to an existing pod — v0.3.3+
 
 ```bash
-rig add <rig-id> <pod-namespace> <member-fragment-path> [--json]
+rig add <rig> <pod-namespace> <member-fragment-path> [--json]
 ```
 
 `rig add` is the top-level verb for the `add_member` converge op. It adds a
 single member to an existing pod from a YAML/JSON member fragment file. The
 daemon resolves the named pod, validates the member, runs preflight, and
 launches the member in place.
+
+`<rig>` is the rig id or its exact name (the `rigName` that `rig whoami --json`
+reports). A name shared by more than one rig is refused before anything is
+added, with the matching ids listed (`rig_ambiguous` under `--json`). `rig add`
+always targets the local daemon: while a remote host is selected it refuses to
+resolve a name (`remote_host_selected`); an exact local id still works.
 
 HTTP outcomes:
 - `201` — member added; per-node launch state included in the response.

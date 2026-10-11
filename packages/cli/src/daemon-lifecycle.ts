@@ -201,8 +201,12 @@ export interface LifecycleDeps {
   // /healthz body (event-loop evidence). Optional so existing mocks that
   // return `{ ok }` are unchanged; production (realDeps) supplies it.
   fetch: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  /** Exclusive bind check used only after a no-state health probe times out. */
+  isPortOccupied?: (host: string, port: number) => Promise<boolean>;
   kill: (pid: number, signal: string) => boolean;
   readFile: (path: string) => string | null;
+  fileSize?: (path: string) => number;
+  readFileFrom?: (path: string, offset: number) => string | null;
   writeFile: (path: string, content: string) => void;
   removeFile: (path: string) => void;
   exists: (path: string) => boolean;
@@ -598,6 +602,10 @@ export async function verifyRequiredListeners(input: {
   return { ok: true, verified };
 }
 
+function occupiedPortGuidance(port: number): string {
+  return `Address already in use (EADDRINUSE) on port ${port}. Inspect the listener before stopping it, or run 'rig daemon start --port <unused-port>'.`;
+}
+
 class StartupIdentityError extends Error {}
 class StartupChildPendingError extends Error {}
 
@@ -644,9 +652,11 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     try {
       await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
-    } catch (err) {
-      if (err instanceof HealthProbeTimeoutError) {
-        throw new Error(`Daemon on port ${port} is unresponsive, and daemon state is missing — recover it before starting a new daemon.`);
+    } catch (error) {
+      // WSL2 can silently drop probes to an unused port. A slow live daemon can
+      // also time out: do not run a second child's initialization against its DB.
+      if (error instanceof HealthProbeTimeoutError && await deps.isPortOccupied?.(probeHost, port)) {
+        throw new Error(occupiedPortGuidance(port));
       }
     }
     if (recoveredRunning) {
@@ -667,6 +677,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
   }
 
+  const logOffset = deps.fileSize?.(LOG_FILE) ?? Buffer.byteLength(deps.readFile(LOG_FILE) ?? "");
   const logFd = deps.openForAppend(LOG_FILE);
 
   let child: ChildProcess;
@@ -699,7 +710,13 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     rejectExit(childFailure);
   };
   const onExit = (code: number | null, signal: string | null): void => {
-    childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"})`);
+    const startupLog = deps.readFileFrom
+      ? deps.readFileFrom(LOG_FILE, logOffset) ?? ""
+      : Buffer.from(deps.readFile(LOG_FILE) ?? "").subarray(logOffset).toString();
+    const guidance = /\bEADDRINUSE\b/.test(startupLog)
+      ? ` ${occupiedPortGuidance(port)}`
+      : ` See ${LOG_FILE} for details.`;
+    childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);
     rejectExit(childFailure);
     resolveExit();
   };

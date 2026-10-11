@@ -139,7 +139,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 15 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
+| Scenario library | `packages/test-system/scenarios/`: 16 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -273,8 +273,9 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 Three scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
 and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` in passing form
-only. Two more, `down-stops-every-seat` and `send-renders-in-addressed-pane`, run with the
-local runner but not in CI. Those four later scenarios are not in this table; see "Status
+only. Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
+`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI. Those five
+later scenarios are not in this table; see "Status
 today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
 other ten scenarios are authored but not yet runnable as meaningful checks:
 
@@ -402,12 +403,18 @@ that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage i
 pane. The scenario catches a capture that resolves the seat by a prefix match on its member
 name (so `dev-impl` also matches `dev-impl2`) and takes the first hit, or any resolver that
 returns the same pane for both seats; it does not exercise a prefix match on the full seat
-name. All four run with the local runner (`run-scenarios.mjs`). The transcript and capture
-scenarios also run in the CI job, in passing form only; the down and send scenarios don't.
+name. All five run with the local runner (`run-scenarios.mjs`). The transcript and capture
+scenarios also run in the CI job, in passing form only; the down, send and up scenarios don't.
 They do not prove that panes are gone or that a seat consumed a message. The transcript
 case does not establish ordering, uniqueness, sibling-token absence, tail limits or restart
-persistence. `up` and `daemon` are used by the existing scenarios but have no scenario of their
-own. Everything else has none.
+persistence. `up` has partial coverage in `up-relaunch-restores-a-two-seat-team.yaml`: a
+two-seat stub team comes up, goes down, and the same spec starts a new team in place of the
+stopped one with the same name, exactly two seats, both running and not archived, so a
+relaunch that re-records the old seats into the team's row fails on the final `ps` counts.
+It does not prove that conversations survive the round trip (that is the `--existing`
+restore path), that a seat consumed a message, or that the panes are gone after `down`.
+`daemon` is used by the existing scenarios but has no scenario of its own. Everything else
+has none.
 
 Before you start, two honest constraints:
 
@@ -431,7 +438,7 @@ Before you start, two honest constraints:
 | lifecycle | `start` | Restore two stopped stub seats. Both answer distinct fresh nonces, and no second daemon starts. |
 | lifecycle | `daemon` | start/status/stop/restart. Port, process and persisted queue identity agree through public commands. |
 | lifecycle | `bootstrap` | Bootstrap a minimal stub spec. Seats come up ready and the selected spec is the one used. |
-| lifecycle | `up` | Launch two stub seats. Each consumes its own send. Relaunching doesn't duplicate identities. |
+| lifecycle | `up` (partial) | Relaunch-not-duplicating-identities is covered by `up-relaunch-restores-a-two-seat-team.yaml`. Next: each seat consumes its own send, which needs the input-consuming stub. |
 | lifecycle | `down` | (partial) Next: its panes are gone, a sibling rig still answers, retained data follows the docs. |
 | lifecycle | `create` | Create a one-seat rig through the public path. It appears and answers without a hand-written topology. |
 | lifecycle | `launch` | Fresh, relaunch, resume and fork on provider-shaped fixtures. Correct restored token, one live process. |

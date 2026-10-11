@@ -1,6 +1,9 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { DaemonClient } from "../client.js";
+import { shellQuote } from "../cross-host-executor.js";
+import { readSelectedHost } from "../host-selection.js";
+import { resolveRigHandle } from "../rig-handle.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -20,17 +23,29 @@ interface AddMemberResponse {
   error?: string;
 }
 
+/** Quote a shell argument only when it needs it, so plain suggestions stay readable. */
+function shellArg(s: string): string {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : shellQuote(s);
+}
+
 export function addMemberCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("add").description("Add a member to an existing pod in a running rig");
+  const cmd = new Command("add").description("Add a member to an existing pod in a running rig")
+    .addHelpText("after", `
+The rig can be named the way rig whoami --json reports it, or by id. A name that
+matches more than one rig is refused; use one of the listed ids instead.
+
+Examples:
+  rig add my-rig dev ./reviewer.member.yaml
+  rig add 01KXYZ... dev ./reviewer.member.yaml --json`);
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<rig-id>", "ID of the target rig")
+    .argument("<rig>", "Rig name or ID of the target rig")
     .argument("<pod-namespace>", "Namespace of the existing pod to add the member to")
     .argument("<member-fragment-path>", "Path to YAML/JSON member fragment file (spec snake_case fields)")
     .option("--json", "JSON output for agents")
     .option("--rig-root <path>", "Root directory for agent resolution")
-    .action(async (rigId: string, podNamespace: string, fragmentPath: string, opts: { json?: boolean; rigRoot?: string }) => {
+    .action(async (rigHandle: string, podNamespace: string, fragmentPath: string, opts: { json?: boolean; rigRoot?: string }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
       if (!daemonStatusGuard(status)) return;
@@ -80,6 +95,43 @@ export function addMemberCommand(depsOverride?: StatusDeps): Command {
       if (opts.rigRoot) body["rigRoot"] = opts.rigRoot;
 
       const client = deps.clientFactory(getDaemonUrl(status));
+
+      const refuse = (error: Record<string, unknown> & { message: string }) => {
+        if (opts.json) console.log(JSON.stringify({ ok: false, ...error }, null, 2));
+        else console.error(error.message);
+        process.exitCode = 1;
+      };
+
+      // Resolve before the POST: an ambiguous name must stop here, before any
+      // mutation, rather than add the member to whichever rig matched first.
+      const resolution = await resolveRigHandle(client, rigHandle);
+
+      // rig add has no --host and always targets the local daemon, while a
+      // selected remote host makes whoami/ps report THAT host's rigs. A name
+      // copied from them must not land on a same-named local rig (every
+      // install has a `kernel`). Exact local ids keep working as before.
+      const selectedHost = readSelectedHost();
+      if (selectedHost !== "local" && (resolution.kind === "ambiguous" || (resolution.kind === "resolved" && resolution.byName))) {
+        refuse({
+          code: "remote_host_selected",
+          message: `Host '${selectedHost}' is selected, but rig add only targets the local daemon, so it does not resolve the rig name '${rigHandle}'. Nothing was added. `
+            + "Run rig add on that host, or pass the local rig id (find it with rig ps --json after rig host select local).",
+        });
+        return;
+      }
+
+      if (resolution.kind === "ambiguous") {
+        const rigRoot = opts.rigRoot ? ` --rig-root ${shellArg(opts.rigRoot)}` : "";
+        const suggestions = resolution.ids.map((id) => `rig add ${id} ${shellArg(podNamespace)} ${shellArg(fragmentPath)}${rigRoot}`);
+        refuse({
+          code: "rig_ambiguous",
+          message: `'${rigHandle}' matches ${resolution.ids.length} rigs. Nothing was added. Re-run with the specific id, e.g. ${suggestions.join("  |  ")}`,
+          candidates: resolution.ids,
+        });
+        return;
+      }
+      const rigId = resolution.kind === "resolved" ? resolution.id : rigHandle;
+
       const res = await client.post<AddMemberResponse>(
         `/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podNamespace)}/members`,
         body,
@@ -103,6 +155,9 @@ export function addMemberCommand(depsOverride?: StatusDeps): Command {
           ?? (data.errors && data.errors.length > 0 ? data.errors.join("; ") : data.error)
           ?? `Add member failed (HTTP ${res.status})`;
         console.error(msg);
+        if (resolution.kind === "passthrough" && data.code === "rig_not_found") {
+          console.error("Could not list rigs to resolve a name. If this is a rig name, pass the rig id instead (rig ps --json).");
+        }
         process.exitCode = 1;
         return;
       }
@@ -111,7 +166,7 @@ export function addMemberCommand(depsOverride?: StatusDeps): Command {
       const icon = node.status === "launched" ? "OK" : "FAIL";
       const session = node.sessionName ? ` (${node.sessionName})` : "";
       const error = node.error ? ` - ${node.error}` : "";
-      console.log(`Added member to rig ${rigId}`);
+      console.log(`Added member to rig ${rigId === rigHandle ? rigId : `${rigHandle} (${rigId})`}`);
       console.log(`  Pod: ${data.result!.podNamespace}`);
       console.log(`  Member: [${icon}] ${node.logicalId}${session}${error}`);
 

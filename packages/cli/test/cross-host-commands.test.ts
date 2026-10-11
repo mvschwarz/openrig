@@ -270,7 +270,31 @@ describe("capture --host (cross-host short-circuit)", () => {
       },
     }));
     await cmd.parseAsync(["--host", "vm-a", "--rig", "my-rig", "--pod", "dev", "--json"], { from: "user" });
-    expect(captureCalls.argv).toEqual(["rig", "capture", "--rig", "my-rig", "--pod", "dev", "--lines", "20", "--json"]);
+    expect(captureCalls.argv).toEqual(["rig", "capture", "--rig", "my-rig", "--pod", "dev", "--json"]);
+  });
+
+  it("forwards an explicit --lines as given, even one this CLI wouldn't cut on (the remote decides)", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = captureCommand(deps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "--lines", "5x"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "5x"]);
+  });
+
+  it("forwards --history-plus-pane with the --lines it applies to", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = captureCommand(deps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "--lines", "5", "--history-plus-pane"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "5", "--history-plus-pane"]);
   });
 
   it("unknown host id surfaces a friendly error", async () => {
