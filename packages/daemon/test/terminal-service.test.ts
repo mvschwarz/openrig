@@ -602,3 +602,60 @@ describe("default saved kernel conversations", () => {
     expect((await service.openView({ view: "saved:kernel" })).code).toBe("view_not_found");
   });
 });
+
+describe("TerminalService — an omitted provider falls back from herdr to cmux (#1069)", () => {
+  const down = (provider: RecordingProvider, how: "unavailable" | "not-alive") => {
+    if (how === "unavailable") provider.status = async () => ({ provider: provider.name, available: false, capabilities: {} });
+    else provider.liveness = async () => ({ alive: false, detail: "herdr control socket is not answering ping" });
+  };
+
+  it.each(["unavailable", "not-alive"] as const)("opens in a live cmux when herdr is %s, and says so", async (how) => {
+    const { deps, herdr, cmux } = makeDeps();
+    down(herdr, how);
+    const r = await new TerminalService(deps).openView({ view: "acme-build" });
+    expect(r).toMatchObject({ provider: "cmux", ok: true });
+    expect(cmux.lastView).not.toBeNull();
+    expect(herdr.lastView).toBeNull();
+    expect(r.notes?.join("\n")).toContain("Herdr isn't available here (not installed or not answering), so this view uses cmux.");
+  });
+
+  it("previews with the same fallback, so the preview's plan matches the open", async () => {
+    const { deps, herdr } = makeDeps();
+    down(herdr, "unavailable");
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "acme-build" });
+    expect(preview).toMatchObject({ provider: "cmux" });
+    const r = await service.openView({ view: "acme-build", expectedPlan: (preview as { planId: string }).planId });
+    expect(r).toMatchObject({ provider: "cmux", ok: true });
+  });
+
+  it("with neither available, keeps herdr's honest failure and the direct attach commands", async () => {
+    const { deps, herdr, cmux } = makeDeps();
+    down(herdr, "unavailable");
+    down(cmux, "not-alive");
+    herdr.openView = async (view) => ({ provider: "herdr", ok: false, opened: [], absent: view.absent, degraded: view.degraded, pages: 0, error: "herdr control socket is not answering ping; is herdr running?", code: "herdr_unavailable" });
+    const r = await new TerminalService(deps).openView({ view: "acme-build" });
+    expect(r).toMatchObject({ provider: "herdr", ok: false, code: "herdr_unavailable" });
+    expect(r.notes?.join("\n")).toContain("attach directly using one of these commands");
+    expect(r.notes?.join("\n")).toContain("env -u TMUX");
+    expect(cmux.lastView).toBeNull();
+  });
+
+  it("keeps an explicitly named provider exactly as named, with no fallback", async () => {
+    const { deps, herdr, cmux } = makeDeps();
+    down(herdr, "unavailable");
+    const r = await new TerminalService(deps).openView({ provider: "herdr", view: "acme-build" });
+    expect(r.provider).toBe("herdr");
+    expect(herdr.lastView).not.toBeNull();
+    expect(cmux.lastView).toBeNull();
+    expect(r.notes?.join("\n") ?? "").not.toContain("Herdr isn't available here");
+  });
+
+  it("prefers a live herdr when both are there", async () => {
+    const { deps, herdr, cmux } = makeDeps();
+    const r = await new TerminalService(deps).openView({ view: "acme-build" });
+    expect(r.provider).toBe("herdr");
+    expect(herdr.lastView).not.toBeNull();
+    expect(cmux.lastView).toBeNull();
+  });
+});
