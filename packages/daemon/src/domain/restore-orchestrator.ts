@@ -1116,9 +1116,9 @@ export class RestoreOrchestrator {
       }
     }
 
-    // Root's narrow amendment to D6a (qitem-20261009081619-d1537b0f): before either native
-    // resume path starts the harness, put back only the MISSING managed guidance blocks from
-    // the saved startup selection. Ordinary `rig down` strips them; without this the resumed
+    // A narrow exception to the replay containment below: before either native resume path
+    // starts the harness, put back only the MISSING managed guidance blocks from the saved
+    // startup selection. Ordinary `rig down` strips them; without this the resumed
     // seat came back with no role, culture or SOP. Existing blocks are never refreshed; nothing
     // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
     if (resumeRequested && resumeToken && launchResult) {
@@ -1248,9 +1248,9 @@ export class RestoreOrchestrator {
     // explicit+versioned+durable+idempotent contract in the D4 operation-id
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
-    // Amended narrowly (Root, 2026-10-09, qitem-20261009081619-d1537b0f): MISSING managed
-    // guidance blocks are put back before the harness starts (see restoreMissingGuidance above);
-    // existing blocks are still never rewritten, and nothing else is replayed.
+    // One narrow exception: MISSING managed guidance blocks are put back before the harness
+    // starts (see restoreMissingGuidance above); existing blocks are still never rewritten, and
+    // nothing else is replayed.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;
