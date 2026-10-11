@@ -52,7 +52,7 @@ describe("advisory bundle check", () => {
     fs.rmSync(path.join(root, "README.md")); fs.mkdirSync(path.join(root, "README.md"));
     const result = await checkBundleFolder(root);
     expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "readme_in_docs", status: "finding" }));
-    expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "README.md" }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", reason: "Declared file is a directory, expected a file.", path: "README.md" }));
   });
 
   it("checks startup paths relative to the declaring local agent", async () => {
@@ -65,7 +65,7 @@ describe("advisory bundle check", () => {
     fs.rmSync(path.join(dir, "context.md"));
     expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
     fs.mkdirSync(path.join(dir, "context.md"));
-    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
+    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", reason: "Declared file is a directory, expected a file.", path: "agent/context.md" })]));
   });
 
   it("command does not resolve a daemon, create a bundle, or invoke preflight", async () => {

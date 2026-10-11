@@ -47,7 +47,12 @@ export async function checkBundleFolder(folder: string) {
       const full = fs.realpathSync(path.resolve(base, relative));
       if (!within(full)) throw new Error();
       const kind = fs.statSync(full);
-      if (expected === "directory" ? !kind.isDirectory() : expected === "file" ? !kind.isFile() : !kind.isFile() && !kind.isDirectory()) throw new Error();
+      if (expected === "directory" ? !kind.isDirectory() : expected === "file" ? !kind.isFile() : !kind.isFile() && !kind.isDirectory()) {
+        const actual = kind.isDirectory() ? "a directory" : kind.isFile() ? "a file" : "a special file";
+        const wanted = expected === "either" ? "a file or directory" : `a ${expected}`;
+        add("referenced_files", "finding", `Declared file is ${actual}, expected ${wanted}.`, path.relative(root, path.resolve(base, relative)));
+        return null;
+      }
       fs.accessSync(full, fs.constants.R_OK);
       return full;
     } catch { add("referenced_files", "finding", "Declared file is missing, unreadable or outside the bundle folder.", path.relative(root, path.resolve(base, relative))); return null; }
