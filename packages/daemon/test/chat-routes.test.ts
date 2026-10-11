@@ -89,14 +89,30 @@ describe("chat routes", () => {
     ["topic", { topic: ["discussion"], body: "message" }, { topic: "discussion", body: "message" }],
     ["topic", { topic: "discussion", body: ["message"] }, { topic: "discussion", body: "message" }],
     ["topic", { topic: [], body: ["message", "discussion"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: {}, body: ["message", "discussion"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: ["message", "discussion"], body: {} }, { topic: "discussion", body: "message" }],
   ])("preserves SQLite-bound %s values and transport identity: %j", async (route, payload, expected) => {
-    const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
-      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
-      body: JSON.stringify(payload),
-    });
-    expect(response.status).toBe(201);
-    expect(await response.json()).toMatchObject({ ...expected, sender: "wire@rig" });
-    expect(chatRepo.history(rigId)).toEqual([expect.objectContaining({ ...expected, sender: "wire@rig" })]);
+    const emitted: unknown[] = [];
+    const unsubscribe = eventBus.subscribe(event => emitted.push(event));
+    try {
+      const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+        body: JSON.stringify(payload),
+      });
+      expect(response.status).toBe(201);
+      const returned = await response.json();
+      expect(returned).toMatchObject({ ...expected, sender: "wire@rig" });
+      const stored = chatRepo.history(rigId);
+      expect(stored).toEqual([expect.objectContaining({ ...expected, sender: "wire@rig" })]);
+      expect(returned).toEqual(stored[0]);
+      expect(emitted).toEqual([expect.objectContaining({
+        type: "chat.message", rigId, messageId: stored[0]!.id,
+        sender: stored[0]!.sender, kind: stored[0]!.kind, body: stored[0]!.body,
+        ...(route === "topic" ? { topic: stored[0]!.topic } : {}),
+      })]);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it.each([["send", { body: 0 }], ["topic", { topic: 0 }]])("keeps required zero %s fields missing", async (route, payload) => {
