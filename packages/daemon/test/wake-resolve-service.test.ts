@@ -26,6 +26,26 @@ describe("WakeResolveService — L3b route service (query + resolve)", () => {
     expect(result).not.toHaveProperty("token");
   });
 
+  it.each([
+    [undefined, "fixture-new"], [null, "fixture-new"], [2, "fixture-old"],
+    ["2", "fixture-old"], [" 2 ", "fixture-old"], ["2.0", "fixture-old"],
+    [[2], "fixture-old"], [true, "fixture-new"], [1.5, null], ["bad", null],
+  ])("HTTP preserves convertible generation %j", async (generation, expectedToken) => {
+    const svc = new WakeResolveService({ listSessionsBySeat: () => [row(2, "fixture-new"), row(1, "fixture-old")] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("wakeResolveService" as never, svc as never); await next(); });
+    app.route("/api/wake-resolve", wakeResolveRoutes);
+    const response = await app.request("/api/wake-resolve", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: "dev-planner@my-rig", generation }),
+    });
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.resolved).toBe(expectedToken !== null);
+    if (expectedToken !== null) expect(result.token).toBe(expectedToken);
+    else { expect(result.reason).toMatch(/Generation .* does not exist/); expect(result.known).toHaveLength(2); }
+  });
+
   it.each([NaN, 0.5, -1, Infinity])("refuses non-index generation %s", (generation) => {
     const svc = new WakeResolveService({ listSessionsBySeat: () => [row(2, "fixture-new"), row(1, "fixture-old")] });
     expect(svc.resolve("dev-planner@my-rig", generation).resolved).toBe(false);

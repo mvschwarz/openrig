@@ -51,7 +51,7 @@ export function resolveWakeTarget(rows: WakeSessionRow[], input: WakeResolveInpu
     };
   }
 
-  const gen = input.generation ?? 1;
+  const gen = Number(input.generation ?? 1);
   if (!Number.isInteger(gen) || gen < 1 || gen > rows.length) {
     return {
       resolved: false,
