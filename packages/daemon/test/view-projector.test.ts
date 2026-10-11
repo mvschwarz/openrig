@@ -136,7 +136,7 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
     expect(result.rowCount).toBe(3); // all 3 product-lab qitems
   });
 
-  it.each(["dev_team", "dev%team", "dev\\team"])("HTTP rig filter treats %s as a literal session suffix", async (rig) => {
+  it.each(["dev_team", "dev%team", "dev\\team"])("HTTP rig filter treats %s as a literal session suffix, in recently-active and activity", async (rig) => {
     const exact = [];
     for (const [sourceSession, destinationSession] of [
       [`alice@${rig}`, "bob@elsewhere"],
@@ -152,11 +152,14 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
       await next();
     });
     app.route("/api/views", viewsRoutes());
-    const response = await app.request(`/api/views/recently-active?rig=${encodeURIComponent(rig)}`);
-    expect(response.status).toBe(200);
-    const result = await response.json();
-    expect(result.rows.map((row: { qitem_id: string }) => row.qitem_id).sort()).toEqual(exact.sort());
-    expect(result.rowCount).toBe(2);
+    // activity has its own rig clause over the transitions join; each row here is one created transition.
+    for (const lens of ["recently-active", "activity"]) {
+      const response = await app.request(`/api/views/${lens}?rig=${encodeURIComponent(rig)}`);
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result.rows.map((row: { qitem_id: string }) => row.qitem_id).sort()).toEqual(exact.sort());
+      expect(result.rowCount).toBe(2);
+    }
   });
 
   it("show <unknown-view> throws view_not_found", () => {
