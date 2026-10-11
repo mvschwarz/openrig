@@ -75,6 +75,7 @@ interface NodeEntry {
     needsInput: { count: number; reason: string | null };
     decidedBy: string | null;
   } | null;
+  identityVerdict?: { reason?: string | null } | null;
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -590,6 +591,12 @@ function needsAttention(node: NodeEntry): boolean {
     || node.startupStatus === "attention_required"
     || node.startupStatus === "failed"
     || node.agentActivity?.state === "needs_input";
+}
+
+function missingSessionGuidance(node: NodeEntry): string | null {
+  return node.identityVerdict?.reason === "session_missing"
+    ? "tmux session missing; restore or relaunch the seat"
+    : null;
 }
 
 // OPR.0.4.0.34 — the compact orch field set (PRD FR-4). Carries the
@@ -1206,9 +1213,9 @@ async function handleNodes(
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON"));
     for (const n of humanList as NodeEntry[]) {
       const attn = needsAttention(n);
-      const reason = attn
+      const reason = missingSessionGuidance(n) ?? (attn
         ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
-        : "—";
+        : "—");
       console.log(padCompactNodeRow(
         n.rigName,
         n.canonicalSessionName ?? "—",
@@ -1242,7 +1249,7 @@ async function handleNodes(
         formatActivity(n),
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
-        n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—",
+        missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—"),
       ));
     }
   }
