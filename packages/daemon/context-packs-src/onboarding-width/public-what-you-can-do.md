@@ -185,7 +185,8 @@ your context, your compaction and your replacement — and it is the only thing 
   told, read the row's transitions, or use `--verify`. For a seat it reports the wake's terminal
   receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
   pickup, not proof the body was read. For a row the seat already claimed, `outcome` can read
-  `indeterminate` while `claim` is accurate: read `claim`.
+  `indeterminate` while `claim` is accurate: read `claim`. It isn't a failed handoff, so don't
+  re-run the create.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.

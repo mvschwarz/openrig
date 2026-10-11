@@ -150,7 +150,8 @@ after an upgrade it can still hold the previous version's note.
 ## Known gaps in 0.6.10
 
 - **`rig queue create --verify` can report `outcome: "indeterminate"` for a row the seat already claimed,** with
-  "Terminal receipt unconfirmed (claimed)." The `claim` field is accurate: read it.
+  "Terminal receipt unconfirmed (claimed)." Read `claim` for pickup: neither the claim nor this outcome shows the
+  message was displayed or read. It isn't a failed handoff, so don't re-run the create.
 - **The latest first-install check used 0.6.9 on Linux only.** macOS was last checked with 0.6.8, and native Windows
   hasn't been checked.
 - **Only one selected lifecycle-help command has been checked in a live Claude session;** source and parser coverage
