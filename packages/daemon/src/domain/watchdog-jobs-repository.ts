@@ -137,18 +137,16 @@ export class WatchdogJobsError extends Error {
   }
 }
 
-/** Optional scan/wake cadences influence the same scheduler as the main interval. */
+/** Preserve optional cadence conversion while rejecting an uncomputable scan. */
 function validateCadences(input: RegisterWatchdogJobInput): void {
-  for (const [field, value] of [
-    ["interval_seconds", input.intervalSeconds],
-    ["scan_interval_seconds", input.scanIntervalSeconds],
-    ["active_wake_interval_seconds", input.activeWakeIntervalSeconds],
-  ] as const) {
-    if (field !== "interval_seconds" && value == null) continue;
-    if (!Number.isInteger(value) || (value ?? 0) <= 0) {
-      throw new WatchdogJobsError("interval_invalid", `${field} must be a positive integer (got ${String(value)})`,
-        { field, intervalSeconds: value });
-    }
+  if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {
+    throw new WatchdogJobsError("interval_invalid", `interval_seconds must be a positive integer (got ${String(input.intervalSeconds)})`,
+      { field: "interval_seconds", intervalSeconds: input.intervalSeconds });
+  }
+  const scan = input.scanIntervalSeconds;
+  if (scan != null && !Number.isFinite(Number(scan))) {
+    throw new WatchdogJobsError("interval_invalid", `scan_interval_seconds cannot be turned into a cadence (got ${String(scan)})`,
+      { field: "scan_interval_seconds", intervalSeconds: scan });
   }
 }
 

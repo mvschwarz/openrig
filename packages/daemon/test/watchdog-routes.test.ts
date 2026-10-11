@@ -55,21 +55,34 @@ describe("watchdog routes (PL-004 Phase C)", () => {
 
   afterEach(() => db.close());
 
-  it.each(["scanIntervalSeconds", "activeWakeIntervalSeconds"])("POST /register rejects invalid %s before creating a job", async (field) => {
-    for (const value of [0, -1, 1.5, "invalid"]) {
+  it("POST /register rejects an uncomputable scan cadence with a named error", async () => {
+    const response = await app.request("/api/watchdog/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...validRegisterBody, scanIntervalSeconds: "invalid" }),
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()).message).toMatch(/scan_interval_seconds.*invalid/);
+    expect(jobsRepo.listActive()).toHaveLength(0);
+  });
+
+  it.each(["scanIntervalSeconds", "activeWakeIntervalSeconds"])("POST /register preserves accepted optional %s values", async (field) => {
+    for (const value of [1.5, 0, -1, "1.5", "0", "", null, undefined]) {
       const response = await app.request("/api/watchdog/register", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...validRegisterBody, [field]: value }),
       });
-      expect(response.status, `${field}=${value}`).toBe(400);
-      expect(jobsRepo.listActive()).toHaveLength(0);
+      expect(response.status, `${field}=${String(value)}`).toBe(201);
+      expect((await response.json())[field]).toBe(value == null ? null : value === "" ? "" : Number(value));
     }
+  });
+
+  it("POST /register does not impose a new active-wake cadence check", async () => {
     const response = await app.request("/api/watchdog/register", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...validRegisterBody, [field]: 30 }),
+      body: JSON.stringify({ ...validRegisterBody, activeWakeIntervalSeconds: "invalid" }),
     });
     expect(response.status).toBe(201);
-    expect((await response.json())[field]).toBe(30);
+    expect((await response.json()).activeWakeIntervalSeconds).toBe("invalid");
   });
 
   it("POST /register returns 201 + persists job + emits watchdog.job_registered", async () => {

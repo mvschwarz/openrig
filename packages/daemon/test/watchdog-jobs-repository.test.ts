@@ -48,10 +48,10 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     };
   }
 
-  it.each(["intervalSeconds", "scanIntervalSeconds", "activeWakeIntervalSeconds"])("auto-registration refuses invalid %s without changing the saved schedule", (field) => {
+  it.each([["intervalSeconds", 0], ["scanIntervalSeconds", "invalid"]])("auto-registration refuses invalid %s without changing the saved schedule", (field, value) => {
     const input = validInput({ registeredBySession: "daemon@kernel", scanIntervalSeconds: 30, activeWakeIntervalSeconds: 90 });
     const original = repo.ensureAutoRegistration(input);
-    expect(() => repo.ensureAutoRegistration({ ...input, [field]: 0 })).toThrow(WatchdogJobsError);
+    expect(() => repo.ensureAutoRegistration({ ...input, [field]: value })).toThrow(WatchdogJobsError);
     expect(repo.getById(original.jobId)).toEqual(original);
   });
 
