@@ -239,7 +239,11 @@ Examples:
       const kernelResult = await waitForKernelReady(baseUrl, KERNEL_WAIT_MS);
       if (!kernelResult.ok) {
         if (kernelResult.kernelState === "skipped") {
-          if (!opts.json) console.log("Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
+          // The daemon also skips its boot when a kernel rig already exists (kernel-boot.ts).
+          // That rig need not be running, after a reboot it is not, and this command does not restore it.
+          if (!opts.json) console.log(kernelResult.detail === "kernel rig already managed"
+            ? "Kernel auto-boot skipped (kernel rig already managed). If its seats are not running, for example after a reboot, bring it back with: rig up kernel --existing"
+            : "Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
         } else {
           const terminalFailure = ["auth_blocked", "spec_missing", "bootstrap_failed", "degraded"].includes(kernelResult.kernelState ?? "");
           console.error(`${terminalFailure ? "Kernel failed to start" : "Kernel did not report ready before the deadline"}: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);

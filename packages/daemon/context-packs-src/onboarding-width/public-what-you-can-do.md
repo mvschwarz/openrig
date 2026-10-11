@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-seven top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.8`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.6.9`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -89,6 +89,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
   can't be read: read it with `rig capture` and get the question answered instead of retrying.
+  Over `--host` to an http-registered host, a send that may have reached the remote reads
+  `remote-outcome-unknown` ("Delivery UNCONFIRMED"): check the target with `rig capture <session>
+  --host <id>` before any resend. Only a host that was never reached reads as unreachable.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -110,7 +113,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   runtime tokens.
 - **`rig chatroom wait`** — block until a peer actually says something, instead of polling
   `capture` in a loop. Also `history`, `watch`, `topic` for a named thread that stays retrievable.
-  Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds.
+  Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds. Poll timeouts,
+  connection refusals, and reset or closed connections are retried until that deadline; other errors,
+  including an error answer from the daemon such as a removed rig, still end the wait.
 - **`rig stream emit` / `list` / `watch` / `archive`** — drop an observation somewhere the *next*
   agent will find it. Emitting costs nothing and does not interrupt anyone; the value appears when
   someone lists the stream before starting.
@@ -148,7 +153,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   readiness for the delivery decision and `queue create --verify` for its receipt; connector
   setup or verification is not an outbound human message. After a connection gap the daemon
   catches up on missed channel messages and marks them late; `rig slack status` shows the
-  connection and the catch-up state. **`rig slack channel-map list` / `set <match> <channel>` /
+  connection, the catch-up state, and the count of retained retry records for inbound messages,
+  reactions and click answers (kept across restarts, not a distinct-message count). A retained alert whose row closed before its retry isn't
+  posted; the row says why. Its `Delivery:` line says whether events are confirmed arriving;
+  "connected" alone is not delivery, and a connection that stops delivering is replaced. **`rig slack channel-map list` / `set <match> <channel>` /
   `remove <match>`** sends a rig's or seat's human-bound posts to its own channel (a seat match
   beats a rig match; the rest use the default channel). After a change, invite the app to each
   channel, run `rig slack verify`, and rewire the connector (`rig slack disable` then `enable`, or
@@ -169,7 +177,9 @@ your context, your compaction and your replacement — and it is the only thing 
 
 - **`rig queue create`** — a row with an owner, a body and a transition history. Its reply, like
   `handoff`'s, confirms the row was saved; the owner is woken after that. Before you say they were
-  told, read the row's transitions (or use `--verify` for a person's request).
+  told, read the row's transitions, or use `--verify`. For a seat it reports the wake's terminal
+  receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
+  pickup, not proof the body was read.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.
@@ -340,8 +350,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   human mode it first prints one line with each agent's last known activity, or “unknown”: a
   best-effort snapshot, not a record of what was interrupted. With `--host`, a remote teardown
   that reports errors exits 2.
-- **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
-  rest. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
+- **`rig launch <rigId> [seat]`** — one seat is down; start just that one, without disturbing the
+  rest. It takes the rig ID from `rig ps --json`; a rig name gives `rig_not_found`. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
   daemon older than 0.5.9, which would ignore it and launch.
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
@@ -519,7 +529,8 @@ scheme, and nothing downstream can see it.
 - **`rig scope slice progress` / `mission progress`** — record that a step moved, in a form the
   progress view can parse.
 - **`rig scope slice approve`** — freeze a decision — *this is the plan* or *this is delivered* —
-  so the freeze is recorded rather than asserted in chat.
+  so the freeze is recorded rather than asserted in chat. With `--workspace`, approve stamps the
+  tree you named, and refuses one with no `missions/` folder.
 - **`rig scope slice close` / `ship` / `move`** — retire it with the reason attached, move it into
   the release it belongs to preserving git history, or re-file it under a different mission.
 - **`rig scope slice stage` / `verified`** — how mature is this, and *when was it last checked and
@@ -679,7 +690,8 @@ reaching them is ordinary work rather than an escalation.
   request, then boundedly inspect its transport receipt. Posted means posted, not read;
   pending, failed, or indeterminate delivery leaves the row intact. Inspect the same row's
   transitions before retrying. `rig send` remains agent-terminal delivery only.
-  `--human-questions-file` adds clickable decision questions.
+  `--human-questions-file` adds clickable decision questions. A typed Slack reply to one is kept
+  in `humanAnswers`, placed under the first unanswered question; closing isn't approval.
 - **When project policy calls for human judgment or an update, load `messaging-the-human`.**
   Use `rig context get skills/core/messaging-the-human/SKILL.md` for a complete decision brief,
   related supplemental detail and explicit quiet-update intent. An FYI creates no approval
