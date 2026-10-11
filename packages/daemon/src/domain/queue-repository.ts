@@ -179,9 +179,9 @@ export interface QueueItem {
    *  (convention C3). NULL for all non-human-routed items (BR-1); required
    *  at the domain write path only when the §5 predicate is true. */
   evidenceRef: string | null;
-  /** Present only on compact list rows so omitted content cannot be mistaken
-   *  for an author-supplied empty value. Full reads never carry this marker. */
-  fieldsElided?: Array<"body" | "summary" | "evidenceRef" | "humanDetail" | "waiting">;
+  /** Present only on compact list rows, which omit these fields entirely so omitted content
+   *  can't be mistaken for an empty value. Full reads never carry this marker. */
+  fieldsElided?: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
   closureReason: ClosureReason | null;
   closureTarget: string | null;
   /** Reporting only: local absence never proves a foreign successor is missing.
@@ -527,9 +527,28 @@ function detectTable(db: Database.Database, tableName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
-// Reduced column set for compact list rows (body/summary/evidence_ref omitted →
-// rowToItem backfills them empty). Shared by `list` and `findOverdue` (Slice 15)
-// so the compact projection cannot drift between the two.
+// Reduced column set for compact rows. `list`, `findOverdue` and `findUndelivered` all select it
+// (plus summary, through QueueRepository.compactColumns) and pass each row through compactRow, so
+// the compact projection is one thing: present text is shown, and what isn't selected is left out
+// and named in fieldsElided, never backfilled as empty.
+const COMPACT_ELIDED_FIELDS = [
+  "body", "evidenceRef", "humanDetail", "waiting", "chainOfRecord", "replyTo", "humanQuestions", "humanAnswers",
+] as const;
+
+/** A compact listing row: the elided fields are absent, not empty, and `fieldsElided` names them. */
+export type CompactQueueItem = Omit<QueueItem, (typeof COMPACT_ELIDED_FIELDS)[number] | "fieldsElided"> & {
+  fieldsElided: Array<(typeof COMPACT_ELIDED_FIELDS)[number]>;
+};
+
+type FindOverdueOptions = { now?: string; rig?: string; limit?: number; compact?: boolean };
+type FindUndeliveredOptions = { rig?: string; limit?: number; compact?: boolean };
+
+function compactRow(item: QueueItem): CompactQueueItem {
+  const row: Record<string, unknown> = { ...item, fieldsElided: [...COMPACT_ELIDED_FIELDS] };
+  for (const field of COMPACT_ELIDED_FIELDS) delete row[field];
+  return row as unknown as CompactQueueItem;
+}
+
 const COMPACT_QUEUE_COLUMNS =
   "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo";
 
@@ -3242,7 +3261,10 @@ export class QueueRepository {
     return choice?.kind === "fallback" ? describeReplyToFallback(choice) : null;
   }
 
-  list(opts?: QueueListOptions): QueueItem[] {
+  list(opts: QueueListOptions & { compact: true }): CompactQueueItem[];
+  list(opts?: QueueListOptions & { compact?: false }): QueueItem[];
+  list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem>;
+  list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem> {
     const limit = opts?.limit ?? 100;
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -3283,7 +3305,7 @@ export class QueueRepository {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS + (this.hasHumanIntentColumn ? ", human_intent" : "") : "*";
+    const columns = opts?.compact ? this.compactColumns() : "*";
     const useActiveFirst = !!(opts?.rig || opts?.asSession || opts?.activeOnly);
     const orderBy = useActiveFirst
       ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
@@ -3304,12 +3326,7 @@ export class QueueRepository {
         ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
       };
     });
-    return opts?.compact
-      ? items.map((item) => ({
-          ...item,
-          fieldsElided: ["body", "summary", "evidenceRef", "humanDetail", "waiting"],
-        }))
-      : items;
+    return opts?.compact ? items.map(compactRow) : items;
   }
 
   /**
@@ -3420,6 +3437,11 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r));
   }
 
+  /** The compact listings' columns: the shared set plus the summary, which is short and is what people search for. */
+  private compactColumns(): string {
+    return COMPACT_QUEUE_COLUMNS + (this.hasSummaryColumn ? ", summary" : "") + (this.hasHumanIntentColumn ? ", human_intent" : "");
+  }
+
   /**
    * Find qitems whose `closure_required_at` is past now. Used by watchdog;
    * does NOT itself emit events — callers decide whether to nudge or escalate.
@@ -3429,7 +3451,10 @@ export class QueueRepository {
    * dumping every rig's full qitem bodies to a single caller. No args = the prior
    * behavior (all overdue, full rows) for the watchdog.
    */
-  findOverdue(opts?: { now?: string; rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
+  findOverdue(opts: FindOverdueOptions & { compact: true }): CompactQueueItem[];
+  findOverdue(opts?: FindOverdueOptions & { compact?: false }): QueueItem[];
+  findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem>;
+  findOverdue(opts?: FindOverdueOptions): Array<QueueItem | CompactQueueItem> {
     const cutoff = opts?.now ?? new Date().toISOString();
     const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
     const params: unknown[] = [cutoff];
@@ -3438,14 +3463,15 @@ export class QueueRepository {
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
       params.push(`%@${escaped}`, `%@${escaped}`);
     }
-    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS + (this.hasHumanIntentColumn ? ", human_intent" : "") : "*";
+    const columns = opts?.compact ? this.compactColumns() : "*";
     let sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY closure_required_at ASC`;
     if (opts?.limit !== undefined) {
       sql += " LIMIT ?";
       params.push(opts.limit);
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    return rows.map((r) => this.rowToItem(r, !opts?.compact));
+    const items = rows.map((r) => this.rowToItem(r, !opts?.compact));
+    return opts?.compact ? items.map(compactRow) : items;
   }
 
   /**
@@ -3508,7 +3534,10 @@ export class QueueRepository {
    * A generic null nudge is still excluded; only a structured OWNER episode
    * makes that absence meaningful. READ only — no retry or unwind.
    */
-  findUndelivered(opts?: { rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
+  findUndelivered(opts: FindUndeliveredOptions & { compact: true }): CompactQueueItem[];
+  findUndelivered(opts?: FindUndeliveredOptions & { compact?: false }): QueueItem[];
+  findUndelivered(opts?: FindUndeliveredOptions): Array<QueueItem | CompactQueueItem>;
+  findUndelivered(opts?: FindUndeliveredOptions): Array<QueueItem | CompactQueueItem> {
     // OPR.0.5.6.14 — delivery truth belongs to the CURRENT human-notification
     // episode, not to the row's whole history. Pull every active row that can
     // carry a current episode or a legacy nudge/receipt, then derive/filter in
@@ -3536,7 +3565,7 @@ export class QueueRepository {
       conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
       params.push(`%@${escaped}`, `%@${escaped}`);
     }
-    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS + (this.hasHumanIntentColumn ? ", human_intent" : "") : "*";
+    const columns = opts?.compact ? this.compactColumns() : "*";
     const sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY ts_created ASC`;
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const out: QueueItem[] = [];
@@ -3569,7 +3598,7 @@ export class QueueRepository {
       }
       if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
-    return out;
+    return opts?.compact ? out.map(compactRow) : out;
   }
 
   /** OPR.0.5.6.14 — the one destination-classification seam, as the wake path consults it.
