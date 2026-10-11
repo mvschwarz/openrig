@@ -55,6 +55,38 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     expect(repo.getById(original.jobId)).toEqual(original);
   });
 
+  it.each([
+    ["above signed range", 2n ** 63n],
+    ["below signed range", -(2n ** 63n) - 1n],
+    ["singleton above signed range", [2n ** 63n]],
+    ["singleton below signed range", [-(2n ** 63n) - 1n]],
+  ])("rejects %s scan with a named error and preserves auto-registration", (_name, value) => {
+    const input = validInput({ registeredBySession: "daemon@kernel", scanIntervalSeconds: 30 });
+    const original = repo.ensureAutoRegistration(input);
+    for (const register of [
+      () => repo.register({ ...input, scanIntervalSeconds: value as never }),
+      () => repo.ensureAutoRegistration({ ...input, scanIntervalSeconds: value as never }),
+    ]) {
+      let error: unknown;
+      try { register(); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(WatchdogJobsError);
+      expect(error).toMatchObject({ code: "interval_invalid", details: { field: "scan_interval_seconds" } });
+      expect(repo.listAll()).toEqual([original]);
+    }
+  });
+
+  it.each([
+    ["signed maximum", 2n ** 63n - 1n],
+    ["signed minimum", -(2n ** 63n)],
+    ["singleton signed maximum", [2n ** 63n - 1n]],
+    ["singleton signed minimum", [-(2n ** 63n)]],
+  ])("retains native SQLite binding for %s scan", (_name, value) => {
+    const bound = Array.isArray(value) ? value[0] : value;
+    const job = repo.register(validInput({ scanIntervalSeconds: value }));
+    expect(job.scanIntervalSeconds).toBe(Number(bound));
+    expect(repo.getById(job.jobId)?.scanIntervalSeconds).toBe(Number(bound));
+  });
+
   it("register stores every accepted policy + actionable defaults to false", () => {
     for (const p of PHASE_C_POLICIES) {
       const job = repo.register(validInput({
