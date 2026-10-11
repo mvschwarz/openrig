@@ -147,6 +147,35 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendText).toHaveBeenCalledOnce();
   });
 
+  // #1079: a `codex` launcher that spawns Codex, which spawns its native child.
+  function launcherProcesses(): NativeProcessRow[] {
+    const [shell, sh] = wrapperProcesses();
+    const link = (pid: number, ppid: number, command: string): NativeProcessRow =>
+      ({ ...sh!, pid, ppid, executableName: "codex", command });
+    return [shell!, sh!,
+      link(1199, 1196, "codex --no-daemon -s workspace-write -c check_for_update_on_startup=false"),
+      link(1203, 1199, "codex --no-daemon -s workspace-write"),
+      link(1205, 1203, "codex -c model_provider=local")];
+  }
+
+  it.each(["ordinary verified send", "watchdog wake"])("#1079 Codex behind a spawning launcher receives %s", async kind => {
+    const { transport, sendText, sendKeys } = wrappedSeat(vi.fn(async () => launcherProcesses()));
+    const result = kind === "watchdog wake"
+      ? await watchdogSend(transport, "dev-check@my-rig")
+      : await transport.send("dev-check@my-rig", "existing review", { verify: true });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+  });
+
+  it("#1079 two Codex processes on different branches still refuse", async () => {
+    const siblings = [...launcherProcesses(), { ...launcherProcesses()[4]!, pid: 1206 }];
+    const { transport, sendText, sendKeys } = wrappedSeat(vi.fn(async () => siblings));
+    expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   const unproved: [string, (rows: NativeProcessRow[]) => NativeProcessRow[]][] = [
     ["exited native with stale UI", rows => rows.slice(0, -1)],
     ["background native", rows => rows.map(r => r.pid === 1205 ? { ...r, pgid: 999 } : r)],
@@ -250,6 +279,15 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     else expect(result.warning).toContain("without verified native identity");
     expect(sendText).toHaveBeenCalledTimes(conflict ? 0 : 1);
     expect(sendKeys).toHaveBeenCalledTimes(conflict ? 0 : 1);
+  });
+
+  it("#1088 a Codex launcher chain in a Claude seat keeps main's warn-and-send", async () => {
+    const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () => launcherProcesses()));
+    const result = await transport.send("dev-check@my-rig", "existing review");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("without verified native identity");
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
   });
 
   it("#197 still refuses native approval after proving the Claude wrapper", async () => {

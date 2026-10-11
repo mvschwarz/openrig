@@ -20,6 +20,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -977,6 +978,19 @@ describe("queue routes", () => {
     const data = (await list.json()) as Array<{ body: string }>;
     expect(data).toHaveLength(1);
     expect(data[0]!.body).toBe("fyi");
+  });
+
+  it("queue, inbox and outbox list refuse only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    await expectLimitParsing(app, "/api/queue/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/inbox/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
   });
 
   it("GET /api/queue/list filters by destination + state", async () => {

@@ -6,6 +6,7 @@ const ulid = monotonicFactory();
 import type { Session, Binding } from "./types.js";
 import { validateSessionName } from "./session-name.js";
 import { formatWatchdogRegistrationError } from "./watchdog-auto-registration.js";
+import type { ClaudeLaunchedProcess, ClaudeResumeRotation } from "./native-process-lineage.js";
 
 // GHOST-STAGE atom-B (P12 3548d8eb) — the occupant-generation tenure.
 export type OccupantKind = "initial" | "handover" | "adopt" | "fresh";
@@ -36,6 +37,44 @@ interface BindingFields {
   externalSessionName?: string;
   cmuxWorkspace?: string;
   cmuxSurface?: string;
+}
+
+/** A token write that changes the value invalidates what was known about how the old one began. */
+const CLEAR_ROTATION_ON_TOKEN_CHANGE =
+  "resume_rotated_from = CASE WHEN resume_token IS ? THEN resume_rotated_from ELSE NULL END, " +
+  "resume_rotated_process = CASE WHEN resume_token IS ? THEN resume_rotated_process ELSE NULL END";
+
+/** The columns `claudeResumeRotation` reads. */
+export const CLAUDE_RESUME_ROTATION_COLUMNS = "resume_token, resume_provenance, resume_rotated_from, resume_rotated_process, resume_launch_process";
+
+function launchedProcess(json: string | null | undefined): (ClaudeLaunchedProcess & { token?: unknown }) | null {
+  try {
+    const process = JSON.parse(json ?? "null") as (Partial<ClaudeLaunchedProcess> & { token?: unknown }) | null;
+    return process && Number.isInteger(process.pid) && typeof process.startedAt === "string" && process.startedAt
+      ? { pid: process.pid!, startedAt: process.startedAt, token: process.token } : null;
+  } catch { return null; }
+}
+
+/** The rotation a Claude identity proof may accept besides the stored token (#1077): the token
+ *  OpenRig launched this row's process to resume, when the first hook after that launch, sent by
+ *  that process, said Claude continued it as the stored token; and that process, the only one whose
+ *  argv may name it. The hook's process must be the one the launch path itself observed starting on
+ *  that token (`resume_launch_process`): a process that replaced it before its hook arrived is not.
+ *  Null unless the stored token is still that hook's own record. Callers pass it as `rotation`. */
+export function claudeResumeRotation(row: {
+  resume_token?: string | null;
+  resume_provenance?: string | null;
+  resume_rotated_from?: string | null;
+  resume_rotated_process?: string | null;
+  resume_launch_process?: string | null;
+} | null | undefined): ClaudeResumeRotation | null {
+  if (!row || row.resume_provenance !== "hook") return null;
+  const from = row.resume_rotated_from?.trim();
+  if (!from || from === row.resume_token?.trim()) return null;
+  const hooked = launchedProcess(row.resume_rotated_process);
+  const launch = launchedProcess(row.resume_launch_process);
+  if (!hooked || !launch || launch.token !== from || launch.pid !== hooked.pid || launch.startedAt !== hooked.startedAt) return null;
+  return { token: from, process: { pid: hooked.pid, startedAt: hooked.startedAt } };
 }
 
 /** Resume-token provenance precedence (OPR.0.4.0.22; adoption rung added by
@@ -345,10 +384,74 @@ export class SessionRegistry {
     this.db
       .prepare(
         "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = COALESCE(?, resume_provenance), " +
-          "resume_last_verified = datetime('now'), resume_last_probe_status = 'resumable' WHERE id = ?",
+          "resume_last_verified = datetime('now'), resume_last_probe_status = 'resumable', " +
+          `${CLEAR_ROTATION_ON_TOKEN_CHANGE} WHERE id = ?`,
       )
-      .run(type, token, prov, sessionId);
+      .run(type, token, prov, token, token, sessionId);
     return true;
+  }
+
+  /** Record a Claude SessionStart hook's session id, with the evidence of how it began (#1077).
+   *
+   * The write itself follows `updateResumeToken`'s hook rank. The first hook carrying the node's
+   * current occupant generation after OpenRig launched this row with `--resume <T1>` consumes that
+   * launch, whatever its source: only that hook can name T1 as the token it replaced, and only when
+   * it reports `source: "resume"`, a different id, and the launch marker OpenRig put on that
+   * process's command (`OPENRIG_RESUME_LAUNCH=T1`), which a Claude started by hand in the pane does
+   * not carry, and when the caller observed that the hook came from the launched process itself
+   * (`claudeHookFromLaunchedProcess`): a child `claude -p --resume` inherits the marker but is a
+   * different process. The rotation keeps that process (pid and start time), and only it may later
+   * name T1. Any later hook (an in-process `/resume`, a child `claude -p --resume` sharing the
+   * seat's environment, a replacement process) has no launch to name, which leaves today's refusal
+   * in place. */
+  recordHookSessionIdentity(
+    sessionId: string,
+    type: string,
+    token: string,
+    evidence: { source: string | null; currentGeneration: boolean; resumeLaunch?: string | null; launchedProcess?: ClaudeLaunchedProcess | null },
+  ): boolean {
+    return this.db.transaction(() => {
+      const launched = (this.db.prepare("SELECT resume_launch_token FROM sessions WHERE id = ?").get(sessionId) as
+        { resume_launch_token: string | null } | undefined)?.resume_launch_token?.trim() || null;
+      const written = this.updateResumeToken(sessionId, type, token, "hook");
+      if (launched && evidence.currentGeneration) {
+        this.db.prepare("UPDATE sessions SET resume_launch_token = NULL WHERE id = ?").run(sessionId);
+        if (written && evidence.source === "resume" && evidence.resumeLaunch?.trim() === launched
+          && evidence.launchedProcess && launched !== token.trim()) {
+          this.db.prepare("UPDATE sessions SET resume_rotated_from = ?, resume_rotated_process = ? WHERE id = ?").run(launched,
+            JSON.stringify({ pid: evidence.launchedProcess.pid, startedAt: evidence.launchedProcess.startedAt }), sessionId);
+        }
+      }
+      return written;
+    })();
+  }
+
+  /** The resume launch armed for this row and not yet consumed by a hook, if any. */
+  armedResumeLaunch(sessionId: string): string | null {
+    return (this.db.prepare("SELECT resume_launch_token FROM sessions WHERE id = ?").get(sessionId) as
+      { resume_launch_token: string | null } | undefined)?.resume_launch_token?.trim() || null;
+  }
+
+  /** Arm the launch about to resume `token` in this row's Claude process (null for a fresh launch).
+   *  Recorded before the launch, since the SessionStart hook can land before the launch returns. It
+   *  certifies nothing: it only lets the first hook after this launch name the token it replaced. */
+  recordResumeLaunch(sessionId: string, token: string | null): void {
+    this.db.prepare("UPDATE sessions SET resume_launch_token = ?, resume_launch_process = NULL WHERE id = ?").run(token?.trim() || null, sessionId);
+  }
+
+  /** The process the launch path observed starting on `token`, right after that launch succeeded
+   *  (`observeClaudeResumeLaunch`). Only a rotation whose hook came from this process counts. */
+  recordResumeLaunchProcess(sessionId: string, token: string, process: ClaudeLaunchedProcess): void {
+    this.db.prepare("UPDATE sessions SET resume_launch_process = ? WHERE id = ?")
+      .run(JSON.stringify({ token: token.trim(), pid: process.pid, startedAt: process.startedAt }), sessionId);
+  }
+
+  /** True when this row's hook-recorded resume rotation started from `token`. */
+  claudeResumeRotatedFrom(sessionId: string, token: string): boolean {
+    const row = this.db.prepare(
+      `SELECT ${CLAUDE_RESUME_ROTATION_COLUMNS} FROM sessions WHERE id = ? AND resume_type = 'claude_id'`,
+    ).get(sessionId) as Parameters<typeof claudeResumeRotation>[0];
+    return claudeResumeRotation(row)?.token === token.trim();
   }
 
   /** Test durable identity without returning the stored credential or changing
@@ -373,7 +476,7 @@ export class SessionRegistry {
     const result = this.db
       .prepare(
         "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = NULL, " +
-          "resume_last_verified = NULL, resume_last_probe_status = NULL " +
+          "resume_last_verified = NULL, resume_last_probe_status = NULL, resume_rotated_from = NULL, resume_rotated_process = NULL " +
           "WHERE id = ? AND (resume_token IS NULL OR trim(resume_token) = '') " +
           "AND resume_provenance IS NULL AND resume_last_verified IS NULL AND resume_last_probe_status IS NULL",
       )
@@ -439,7 +542,7 @@ export class SessionRegistry {
     // validate path marks-stale instead of clearing, so this has no in-tree
     // caller on the live path; kept for explicit-clear callers/tests.
     this.db
-      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL, resume_last_verified = NULL, resume_last_probe_status = NULL WHERE id = ?")
+      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL, resume_last_verified = NULL, resume_last_probe_status = NULL, resume_rotated_from = NULL, resume_rotated_process = NULL WHERE id = ?")
       .run(sessionId);
   }
 

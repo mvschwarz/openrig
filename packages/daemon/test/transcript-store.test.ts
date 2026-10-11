@@ -219,6 +219,28 @@ describe("TranscriptStore", () => {
       expect(result).toBe("echo DEV_ALPHA_READY\nDEV_ALPHA_READY\n");
     });
 
+    it("removes prompt redraw duplicates after filtering status lines", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      writeFileSync(
+        store.getTranscriptPath("my-rig", "dev@my-rig"),
+        "Checking for updates\necho READY%\necho READY\nREADY\n",
+      );
+
+      expect(store.readTail("my-rig", "dev@my-rig", 10)).toBe("echo READY\nREADY\n");
+    });
+
+    it("preserves percent-ending output when an earlier line matches its prefix", () => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      writeFileSync(
+        store.getTranscriptPath("my-rig", "dev@my-rig"),
+        "Checking for updates\n? for shortcuts\nStep 1\nProgress 50\nProgress 50%\nDone\n",
+      );
+
+      expect(store.readTail("my-rig", "dev@my-rig", 10)).toBe("Step 1\nProgress 50\nProgress 50%\nDone\n");
+    });
+
     it("drops TUI chrome and redraw fragments from transcript tails", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");

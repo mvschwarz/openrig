@@ -134,3 +134,11 @@ test("the CLI executes with preserve-symlinks-main and imports without argv rema
     assert.equal(imported.stderr, "");
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
+
+test("keeps added header-shaped text as source content inside a hunk", () => {
+  const text = ["+++ b/file.md", "@@ -0,0 +1,2 @@", "+++ b/literal.md", "+see /Users/alice/work"].join("\n");
+  assert.deepEqual(addedLines(text), [
+    { file: "file.md", line: 1, text: "++ b/literal.md" },
+    { file: "file.md", line: 2, text: "see /Users/alice/work" },
+  ]);
+});

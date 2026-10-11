@@ -444,6 +444,13 @@ describe("attentionRowsFromNodes (R5 — triage: seat + exact need)", () => {
     expect(rows[0]!.need).toContain("--fresh dev.qa");
   });
 
+  it("attention_required with no evidence carries the node's own error, such as an exited agent, not a live-prompt label", () => {
+    const exited = "Session alive, agent not running for 'dev.driver': tmux session 'dev-driver@r' holds an idle shell";
+    const rows = attentionRowsFromNodes("r", [{ logicalId: "dev.driver", status: "attention_required", error: exited }]);
+    expect(rows[0]!.need).toBe(exited);
+    expect(attentionRowsFromNodes("r", [{ logicalId: "dev.y", status: "attention_required" }])[0]!.need).toContain("live runtime prompt");
+  });
+
   it("awaiting-decision with NO node error falls back to the generic sentence (never blank)", () => {
     const rows = attentionRowsFromNodes("r", [{ logicalId: "dev.x", status: "awaiting-decision" }]);
     expect(rows[0]!.need).toContain("choose fresh-prime or skip");

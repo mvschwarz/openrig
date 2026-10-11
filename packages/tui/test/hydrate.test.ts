@@ -407,6 +407,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
 
   it("gives failed, attention, and needs-input truth precedence over terminal active/idle", async () => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+
     const nodes = [
       { ...base, logicalId: "dev.failed", startupStatus: "failed", lifecycleState: "attention_required", terminalActive: true },
       { ...base, logicalId: "dev.attention", startupStatus: "attention_required", lifecycleState: "attention_required", terminalActive: false },
@@ -433,6 +434,35 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
     expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
+  });
+  it("shows confirmed missing sessions as detached unless lifecycle still requires attention", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const nodes = [
+      {
+        ...base,
+        logicalId: "dev.missing-session",
+        sessionStatus: "detached",
+        startupStatus: "failed",
+        lifecycleState: "detached",
+        terminalActive: false,
+        identityVerdict: { verdict: "pane_missing", reason: "session_missing" },
+      },
+      {
+        ...base,
+        logicalId: "dev.missing-attention",
+        sessionStatus: "detached",
+        startupStatus: "attention_required",
+        lifecycleState: "attention_required",
+        terminalActive: false,
+        identityVerdict: { verdict: "pane_missing", reason: "session_missing" },
+      },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    expect(statuses).toEqual({
+      "dev.missing-session": "detached",
+      "dev.missing-attention": "attention_required",
+    });
   });
 
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {

@@ -115,3 +115,15 @@ describe("setProgressRow", () => {
     expect(() => setProgressRow(dup, { text: "Dupe", status: "done" })).toThrow(ScopeCliError);
   });
 });
+
+it("creates the requested H2 section when the document title has the same text", () => {
+  const source = "# Rail\n\nDocument introduction.\n";
+  expect(addProgressRow(source, { section: "Rail", text: "Release verified", status: "done" }).content)
+    .toBe("# Rail\n\nDocument introduction.\n\n## Rail\n\n- [x] Release verified\n");
+});
+
+it("does not mistake a deeper subsection for the requested H2 section", () => {
+  const source = "# Progress\n\n## Work\n\n### Rail\n\nExisting detail.\n";
+  expect(addProgressRow(source, { section: "Rail", text: "Release verified", status: "done" }).content)
+    .toBe(source + "\n## Rail\n\n- [x] Release verified\n");
+});
