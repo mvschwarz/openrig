@@ -1956,6 +1956,34 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("guard_unavailable");
     expect(sendTextSpy).not.toHaveBeenCalled();
   });
+
+  it("#1084: idle at a dead budget still sends via one unraced observation", async () => {
+    seedCanonicalRig();
+    const started = Date.now();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const localTmux = mockTmux({
+      // Busy until the budget is nearly spent, then idle — but slow to read,
+      // so a raced observation against the leftover budget would lose it.
+      // Flip early enough that the slow read still resolves in-budget.
+      capturePaneContent: async () =>
+        Date.now() - started >= 2700
+          ? new Promise<string>((resolve) => setTimeout(() => resolve(IDLE_PANE), 200))
+          : BUSY_PANE,
+      sendText: sendTextSpy,
+    });
+    attachGuard(localTmux);
+    const localTransport = createTransport(localTmux, {
+      sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.min(ms, 5))),
+      waitForIdlePollMs: 300,
+    });
+
+    const result = await localTransport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 3000 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sent).toBe(true);
+    expect(result.activity?.state).toBe("idle");
+    expect(sendTextSpy).toHaveBeenCalledTimes(1);
+  });
 });
 
 // #1084/#1103 edge cases, contributed by z4cc in review (taken verbatim,

@@ -789,7 +789,7 @@ export interface SendOpts {
    *  before the serial lease; sendUnguarded consumes this evidence instead of
    *  waiting again, then re-checks readiness just before typing. Never
    *  client-supplied. */
-  preWaitedIdle?: { activity: AgentActivity; waitedMs: number; attempts: number };
+  preWaitedIdle?: { activity: AgentActivity; waitedMs: number; attempts: number; deadlineAt: number };
   /** Internal #1084 seam: the delivery-guard target bound before the
    *  lease-free wait; the leased send refuses with guard_target_changed when
    *  the seat changed hands meanwhile. Never client-supplied. */
@@ -1387,6 +1387,17 @@ export class SessionTransport {
     } catch {
       return null;
     }
+    // External CLI seats never wait: main refuses them before anything else,
+    // and a probe or wait would only delay that refusal (or mistake it for
+    // an absent session).
+    if (meta.attachmentType === "external_cli") {
+      return { ok: false, failure: {
+        ok: false,
+        sessionName,
+        reason: "transport_unavailable",
+        error: `Session '${sessionName}' is attached as an external CLI node. Inbound tmux transport is unavailable for this target.`,
+      } };
+    }
     const runtime = meta.runtime;
     if (runtime && runtime !== "terminal" && runtime !== "claude-code") {
       const unverified = await this.unverifiedShellForeground(sessionName, runtime, meta.pane, meta.resumeToken);
@@ -1447,6 +1458,7 @@ export class SessionTransport {
         error: `The tmux session probe failed unexpectedly (${err instanceof Error ? err.message : String(err)}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
       } };
     }
+    const deadlineAt = Date.now() + timeoutMs;
     const preWait = await this.waitForIdle({
       sessionName,
       runtime: meta.runtime,
@@ -1467,7 +1479,7 @@ export class SessionTransport {
         attempts: preWait.attempts,
       } };
     }
-    return { ok: true, evidence: { activity: preWait.activity, waitedMs: preWait.waitedMs, attempts: preWait.attempts }, bound };
+    return { ok: true, evidence: { activity: preWait.activity, waitedMs: preWait.waitedMs, attempts: preWait.attempts, deadlineAt }, bound };
   }
 
   private async sendUnguarded(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
@@ -1697,31 +1709,78 @@ export class SessionTransport {
           };
         }
       }
-      // Idle re-check (review round 1): the wait-mode contract holds at type
-      // time too — only idle types. A busy or unknown seat keeps waiting
-      // within the original deadline (rare: only when another send got in
-      // first), ending with the existing timeout/unknown reasons.
-      const rewait = await this.waitForIdle({
-        sessionName,
-        runtime,
-        attachmentType: sessionMeta.attachmentType,
-        timeoutMs: Math.max(0, waitForIdleMs - opts.preWaitedIdle.waitedMs),
-        binding: observed?.binding,
-        readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
-      });
-      waitEvidence = {
-        activity: rewait.activity,
-        waitedMs: opts.preWaitedIdle.waitedMs + rewait.waitedMs,
-        attempts: opts.preWaitedIdle.attempts + rewait.attempts,
-      };
-      if (!rewait.ok) {
-        return {
-          ok: false,
+      // Idle re-check (review round 1 + bot round 2): the wait-mode contract
+      // holds at type time too — only idle types. The budget is measured
+      // from the ORIGINAL deadline (lease-queue time counts too), so the
+      // total wait never exceeds what the caller asked for. Below one poll
+      // interval, waiting buys nothing: one unraced observation decides, so
+      // an idle seat at a dead budget still sends instead of losing a race
+      // against a zero timer.
+      const preEvidence = opts.preWaitedIdle;
+      const deadlineRemainingMs = preEvidence.deadlineAt - Date.now();
+      if (deadlineRemainingMs > this.waitForIdlePollMs) {
+        const rewait = await this.waitForIdle({
           sessionName,
-          reason: rewait.reason,
-          error: rewait.error,
-          sent: false,
-          ...waitEvidence,
+          runtime,
+          attachmentType: sessionMeta.attachmentType,
+          timeoutMs: deadlineRemainingMs,
+          binding: observed?.binding,
+          readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+        });
+        waitEvidence = {
+          activity: rewait.activity,
+          waitedMs: preEvidence.waitedMs + rewait.waitedMs,
+          attempts: preEvidence.attempts + rewait.attempts,
+        };
+        if (!rewait.ok) {
+          return {
+            ok: false,
+            sessionName,
+            reason: rewait.reason,
+            error: rewait.error,
+            sent: false,
+            ...waitEvidence,
+          };
+        }
+      } else {
+        const recheck = await this.classifySendReadiness({
+          sessionName,
+          runtime,
+          attachmentType: sessionMeta.attachmentType,
+          binding: observed?.binding,
+          readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+        });
+        if (recheck.state !== "idle") {
+          const late: { reason: string; error: string } =
+            recheck.state === "needs_input"
+              ? {
+                  reason: "target_needs_input",
+                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+                }
+              : recheck.state === "unknown"
+                ? {
+                    reason: "target_activity_unknown",
+                    error: `Target activity could not be determined (${recheck.reason}) when the ${waitForIdleMs}ms wait ended. No text was sent.`,
+                  }
+                : {
+                    reason: "wait_for_idle_timeout",
+                    error: `Target was still busy (${recheck.reason}) when the ${waitForIdleMs}ms wait ended. No text was sent.`,
+                  };
+          return {
+            ok: false,
+            sessionName,
+            sent: false,
+            reason: late.reason,
+            error: late.error,
+            activity: recheck,
+            waitedMs: preEvidence.waitedMs,
+            attempts: preEvidence.attempts + 1,
+          };
+        }
+        waitEvidence = {
+          activity: recheck,
+          waitedMs: preEvidence.waitedMs,
+          attempts: preEvidence.attempts + 1,
         };
       }
     }
