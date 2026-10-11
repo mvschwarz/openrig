@@ -6,7 +6,7 @@ import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
-import { resolveBindPlan } from "./domain/bind-plan.js";
+import { resolveBindPlan, type BindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
   createStuckSweepStatus,
@@ -22,6 +22,7 @@ import {
 } from "./domain/queue-wake-ladder.js";
 import {
   assertBindAuthInvariant,
+  AuthBearerTokenStartupError,
   detectTailscaleInterface,
   isLoopbackBind,
   isTailscaleBind,
@@ -231,12 +232,11 @@ export function startWakeLadderScheduler(deps: {
   return scheduler;
 }
 
-async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
+async function isTrustedLocalBind(host: string): Promise<boolean> {
   if (isLoopbackBind(host)) return true;
-  if (isTailscaleBind(host)) return true;
   if (!/^[\d.]+$/.test(host) && !host.includes(":")) {
     const resolvedIp = await resolveToIpOrNull(host);
-    if (resolvedIp) return isLoopbackBind(resolvedIp) || isTailscaleBind(resolvedIp);
+    if (resolvedIp) return isLoopbackBind(resolvedIp);
   }
   return false;
 }
@@ -294,14 +294,48 @@ export async function startServer(port?: number) {
     // Operator opt-in path — invariant enforces bearer requirement for
     // genuinely public/LAN binds; loopback/tailscale binds short-circuit.
     await assertBindAuthInvariant({ host: explicitHost, bearerToken });
-    if (!terminalBearerToken && !(await isTrustedLocalOrTailnetBind(explicitHost))) {
-      terminalBearerToken = bearerToken;
+    const isLocal = await isTrustedLocalBind(explicitHost);
+    if (!isLocal) {
+      if (!terminalBearerToken && !bearerToken) {
+        throw new AuthBearerTokenStartupError(
+          `daemon refusing to start: explicit bind host '${explicitHost}' exposes terminal routes, ` +
+            `but neither OPENRIG_TERMINAL_BEARER_TOKEN nor OPENRIG_AUTH_BEARER_TOKEN is set. ` +
+            `Refusing to expose unauthenticated terminal access on non-loopback interface.`,
+        );
+      }
+      if (!terminalBearerToken) {
+        terminalBearerToken = bearerToken;
+      }
     }
     bindHosts = [explicitHost];
   } else {
     // Default path — the plan already computed loopback + tailscale-when-active.
-    bindHosts = bindPlan.hosts;
+    const hasNetworkHost = bindPlan.hosts.some((h) => !isLoopbackBind(h));
+    if (hasNetworkHost) {
+      if (!terminalBearerToken && !bearerToken) {
+        const networkHost = bindPlan.hosts.find((h) => !isLoopbackBind(h));
+        console.warn(
+          `[security] Tailscale interface detected (${networkHost}) but neither ` +
+            `OPENRIG_AUTH_BEARER_TOKEN nor OPENRIG_TERMINAL_BEARER_TOKEN is set. ` +
+            `Tailscale listener disabled to prevent unauthenticated terminal access. ` +
+            `Set OPENRIG_AUTH_BEARER_TOKEN to enable the Tailscale listener.`,
+        );
+        bindHosts = ["127.0.0.1"];
+      } else {
+        if (!terminalBearerToken) {
+          terminalBearerToken = bearerToken;
+        }
+        bindHosts = bindPlan.hosts;
+      }
+    } else {
+      bindHosts = bindPlan.hosts;
+    }
   }
+
+  const effectiveBindPlan: BindPlan = {
+    ...bindPlan,
+    hosts: bindHosts,
+  };
 
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
@@ -309,7 +343,7 @@ export async function startServer(port?: number) {
     terminalBearerToken,
     // S20 — the effective bind plan rides the health surface so adoption gates verify
     // listeners from BINDING EVIDENCE (probe each host) instead of config echo.
-    bindPlan,
+    bindPlan: effectiveBindPlan,
   });
 
   // Multi-bind via N serve() instances sharing the same Hono app.
