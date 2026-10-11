@@ -1,90 +1,85 @@
-# What changed in OpenRig 0.6.8
+# What changed in OpenRig 0.6.9
 
-This note is for an agent on an install that was just upgraded to 0.6.8. It lists only what behaves differently from
-0.6.7 and what to do about it. For everything OpenRig can do, read the capability map:
+This note is for an agent on an install that was just upgraded to 0.6.9. It lists only what behaves differently from
+0.6.8 and what to do about it. For everything OpenRig can do, read the capability map:
 `rig context get onboarding-width/public-what-you-can-do.md`. Each release replaces this file, so
 `rig context get reference/whats-new.md` describes the installed version once the upgraded daemon is running. Without
 a running daemon, read `$OPENRIG_HOME/reference/whats-new.md`. The daemon refreshes that copy when it starts, so right
 after an upgrade it can still hold the previous version's note.
 
-## Skills from the managed catalog
-
-- **A skill with uncommitted changes in the catalog now blocks only itself.** Before, one edited skill made the whole
-  catalog unavailable to work-install, launch and restore preflight. Now that skill is skipped and named, and the
-  remaining clean skills stay available for projection.
-- **Read the warning, don't retry.** `catalog_skill_skipped` names a skill nobody selected; `selected_skill_skipped`
-  names the selector and the folder. The fix is to commit or restore that folder's content in the catalog, then run the
-  projection again.
-- **A selected skipped skill makes the inspection commands exit 1.** `rig context work-install --runtime <runtime>`
-  and `rig skill loadout --runtime <runtime>` inspect by default. Use `--apply-skills` with work-install or `--apply`
-  with skill loadout to project the remaining clean skills. Read the warnings and projection result; exit 1 alone does
-  not say whether files were changed. With `--json`, skipped skills are in `skillLoadout.skipped` or
-  `loadout.skipped`, respectively.
-- **A seat keeps the copy it already has** of a skipped skill, unchanged. After the catalog change is committed or
-  restored, the next applied projection can refresh it. No seat receives the skipped skill's uncommitted files, and
-  launch only warns about the skip.
-- **An uncommitted `catalog.yaml` still makes the whole catalog unavailable,** because it changes every selection.
-
-## Launch plans
-
-- **`rig launch <rig> <seat> --plan` previews one seat's launch** without launching it, locally or with `--host`. Use
-  it before starting a single seat, as `--seats … --plan` already allowed for several.
-- **A plan is never sent to a daemon older than 0.5.9,** which would ignore the flag and launch. If `rig launch --plan`
-  refuses for that reason, restart or upgrade that daemon. If it exits non-zero saying the daemon may have acted, check
-  `rig ps --nodes -A` before retrying.
-
 ## Slack
 
-- **Answer a person's thread reply in that thread.** When someone replies inside a thread OpenRig opened, answer with
-  `rig queue create --human-intent update --reply-to <the inbound reply's row>`, and the answer posts in that thread.
-  A top-level message is still answered top-level.
-- **A short rate limit is waited out.** When Slack asks for a pause of 10 seconds or less, OpenRig waits and retries the
-  post once. A longer pause is still left to the usual retry of retained messages.
+- **A typed reply to a decision with structured questions is kept.** It's recorded on the row in `humanAnswers` as a
+  tagged entry (`kind: "typed-reply"`), placed under the first unanswered question, with the count of questions still
+  unanswered. A clicked answer is still the option's ID. Typed text that matches an option's ID is never read as clicking
+  it. The decision still closes, and closing doesn't mean approval: read the reply and its placement before acting. The
+  `messaging-the-human` skill says how.
+- **`rig slack status` shows the inbound retry backlog:** how many retained records for inbound messages, reactions
+  and click answers are waiting to be retried, kept across restarts. This counts records, not distinct messages.
+  If the records can't be read, the line says the count is unknown and why; it never reads as an empty backlog.
+- **An alert retried after its row closed isn't posted.** A Slack post that failed is kept and retried when the gateway
+  next starts. If the row has left the active states by then, the alert is dropped and the row records
+  `slack-owner-notification-dropped … reason=row-not-active`. Alerts for rows still open, decision-resolved notices and
+  digests still post. `rig slack enable` says how many earlier undelivered posts wait to be retried.
+- **"Connected" is no longer the only word about the Slack connection.** OpenRig now notices a connection that stays
+  open while Slack stops delivering events to it, and replaces it: a new connection opens first, then the old one
+  closes. Two signals catch it, each counted only once the connection has shown it: Slack's server pings stopping for
+  30 seconds, and two of OpenRig's own posts not coming back as events within a minute. Automatic replacements are at
+  most one every 5 minutes; Slack's own refresh requests are exempt.
+- **Read delivery beside the socket state.** `rig slack status` adds a `Delivery:` line (`delivering`, `not yet
+  confirmed`, `events missing since …`, `no server pings since …`, or Socket Mode disabled), the last automatic
+  reconnect and why, a held-back reconnect and until when, and Slack's connection count when it's more than ours. The
+  connections view shows `connected; delivering` or `connected; delivery not yet confirmed`. Report "not yet
+  confirmed" as that, never as working.
 
-## Managed compaction
+## Sends and waits
 
-- **A quiet seat is restored after `/compact`.** The turn boundary, the restore request and the read-depth
-  audit now reach a Claude seat that takes no turn after compacting. Before, they waited for the seat's next turn,
-  so a seat with nothing to do could sit unrestored. Each stage still waits until the seat's screen shows it idle.
+- **A cross-host send that may have arrived reads as unconfirmed, not failed.** `rig send <session> --host <id>` to an
+  http-registered host now has a 30-second request budget, plus any `--wait-for-idle` time. When the answer doesn't come back, or the connection drops after the
+  request went out, the send exits 1 with `failedStep: "remote-outcome-unknown"` and "Delivery UNCONFIRMED". **Check the
+  target with `rig capture <session> --host <id>` before any resend**; a blind resend can deliver twice. Only a host
+  that was never reached reads as unreachable.
+- **`rig chatroom wait` keeps waiting through a slow or restarting daemon.** Poll timeouts, connection refusals, and
+  reset or closed connections are retried until your `--timeout`; the first failure in a run prints a line on stderr.
+  Other errors, including an error answer from the daemon such as a removed rig, still end the wait. If the last
+  recorded poll failure remains unresolved at the deadline, the timeout says new messages may have arrived unseen.
 
-## Workflows
+## Kernel status
 
-- **Validate before you run.** `rig workflow validate` reports `step_cannot_finish` when no allowed exit can finish a
-  step or route onward, and such a workflow cannot be instantiated. Allow `done` or an exit with a route onward. In a
-  dependency graph, `handoff` can also finish a sink without a next step. A spec that validated on 0.6.7 may need a
-  correction.
+- **A kernel that recovered from a failed start reads ready.** When every declared kernel seat reports ready, for
+  example after `rig seat continue`, `rig status` says so and adds an indented line naming the earlier failure and
+  when it happened. `GET /api/kernel/status` returns that as `last_boot_failure`. The kernel's agent list shows each
+  seat once, with its runtime.
 
-## The TUI
+## Scope approval
 
-- **Type whole commands on an empty command line.** The footer toggle is now `F`, and in a selected Scopes view the
-  mini-requirements and narrative keys are `M` and `N`, so `find`, `feed`, `mission`, `narrative` and `needs` reach the
-  command line intact.
-- **`j` and `k` move the selection down and up** when the command line is empty. With text on the line they're ordinary
-  letters.
+- **`rig scope <tier> approve --workspace <path>` stamps the work tree you named.** Before, it reported success while
+  the stamp landed in the daemon's own work tree. A named workspace with no `missions/` folder is now refused instead
+  of falling back to the configured one. The approval record names the root it wrote under.
 
-## Smaller changes
+## Claude seats on NixOS
 
-- **A Claude seat launched with `--remote-control`** confirms its identity instead of staying "identity not confirmed".
-- **`rig down` still saves its recovery snapshot** when finding one seat's resume details fails.
-- **A wake for a handed-off task shows its summary** on one line, so read it to see what the task is for.
-- **`rig scope audit` accepts slice folders numbered 100 and above.** `rig proof add --file` keeps a leading UTF-8
-  byte-order mark.
-- **Building from source no longer needs POSIX shell tools** for the CLI and TUI output. It hasn't been run on Windows
-  yet; WSL2 is still the way to run OpenRig there.
-- **A topology naming reference** explains how to name a team's pods and seats: `rig context get
-  reference/topology-naming.md`.
+- **A Claude Code installed from nixpkgs is recognised as the seat's runtime,** so its seats read `running` and sends
+  no longer warn that the runtime couldn't be established. A seat that still carries an attention marker from an
+  earlier failed launch keeps it: clear it with `rig seat clear-attention <seat>`.
+
+## A correction to the 0.6.8 note
+
+- **`rig launch` takes a rig ID, not a rig name.** The 0.6.8 note wrote `rig launch <rig> <seat> --plan`. Read the ID
+  from `rig ps --json`; a name gives `rig_not_found`.
 
 ## What to stop doing
 
-- **Stop treating a non-zero work-install exit as proof that nothing changed.** Read the skipped-skill warnings and
-  projection result. Inspection alone changes no skill files; an applied projection can update clean skills while
-  reporting a skipped one.
-- **Stop scripting around the TUI's single-letter keys.** Type the command whole.
-- **Stop assuming a workflow that validated on 0.6.7 can finish.** Validate it again on 0.6.8.
+- **Stop resending a cross-host message after a timeout.** Check the target first; the first send may have arrived.
+- **Stop restarting a kernel whose status read `bootstrap_failed` after its seats recovered.** Read `rig status`
+  again on 0.6.9; a recovered kernel reads ready.
+- **Stop passing a rig's name to `rig launch`.** Pass its ID.
 
-## Known gaps in 0.6.8
+## Known gaps in 0.6.9
 
-- **Not yet checked on a real machine:** the full first install from nothing, on Mac, Linux and Windows.
+- **The latest first-install check used 0.6.8 on a fresh Mac account in Terminal,** with assistance to install the
+  candidate. It reached setup, the kernel window and a team plan; team launch and work weren't exercised.
+  Linux and Windows first installs remain unchecked in the evidence behind this note.
 - **Only one selected lifecycle-help command has been checked in a live Claude session;** source and parser coverage
   is broader. If a help command still asks, report it.
 - **Codex team seats aren't asked before lifecycle commands yet.**

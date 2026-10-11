@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
+import { detectCodexLimitBanner, clearRecordedBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -43,6 +44,9 @@ export class SeatStructuralActivityService {
   private readonly latestBySession = new Map<string, StructuralObservation>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
+  private bannerEmitter:
+    | ((sessionName: string, banner: CodexLimitBanner, observedAt: Date) => void)
+    | null = null;
 
   constructor(
     private readonly tmuxAdapter: Pick<TmuxAdapter, "capturePaneContent"> & Partial<Pick<TmuxAdapter, "capturePanesContent">>,
@@ -50,6 +54,17 @@ export class SeatStructuralActivityService {
     private readonly captureLines: number = 20,
     private readonly staleAfterMs: number = DEFAULT_STRUCTURAL_STALE_MS,
   ) {}
+
+  /**
+   * Attach the Codex limit-banner emitter (#763). Kept as late attachment
+   * (rather than a constructor dep) so construction order with the activity
+   * store is untouched: startup attaches it once the store exists.
+   */
+  attachCodexLimitBanner(
+    emitter: (sessionName: string, banner: CodexLimitBanner, observedAt: Date) => void,
+  ): void {
+    this.bannerEmitter = emitter;
+  }
 
   /** The cached structural observation — ONLY while current (capture-FREE read). Returns null AND evicts
    *  once the observation is older than the freshness window, so a stalled/failed poller never leaves a
@@ -68,7 +83,7 @@ export class SeatStructuralActivityService {
    *  null or failed capture INVALIDATES the prior row (never leaves a stale positive verdict) and
    *  returns null (MUST-FIX 1). `prefetched` (#308) is the sweep's batched capture: a session it holds (null = gone or
    *  empty) is used as is; one it lacks is captured here, per seat. */
-  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null): Promise<StructuralObservation | null> {
+  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null): Promise<StructuralObservation | null> {
     let content: string | null;
     let observedAt: Date | null = null;
     if (prefetched?.has(sessionName)) {
@@ -88,13 +103,24 @@ export class SeatStructuralActivityService {
       return null;
     }
     const c = classifyPaneActivity(content);
+    const at = observedAt ?? this.now();
     const obs: StructuralObservation = {
       state: c.state,
       reason: c.reason,
       evidence: c.evidence,
-      observedAt: (observedAt ?? this.now()).toISOString(),
+      observedAt: at.toISOString(),
     };
     this.latestBySession.set(sessionName, obs);
+    // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
+    // so the reactive tap never fires for it. Report what the seat shows, on
+    // transition only (the recorder skips an already-reported banner). A poll
+    // with no current banner ends the episode: the memory is cleared so a
+    // banner that appears later counts as new even with identical text.
+    if (runtime === "codex" && this.bannerEmitter) {
+      const banner = detectCodexLimitBanner(content);
+      if (banner) this.bannerEmitter(sessionName, banner, at);
+      else clearRecordedBanner(sessionName);
+    }
     return obs;
   }
 
@@ -106,7 +132,7 @@ export class SeatStructuralActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name
+        SELECT s.session_name as session_name, n.runtime as runtime
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -114,8 +140,9 @@ export class SeatStructuralActivityService {
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
           AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-      `).all() as Array<{ session_name: string }>;
+      `).all() as Array<{ session_name: string; runtime: string | null }>;
       const live = new Set(rows.map((r) => r.session_name));
+      const runtimeBySession = new Map(rows.map((r) => [r.session_name, r.runtime] as const));
       for (const s of Array.from(this.latestBySession.keys())) {
         if (!live.has(s)) this.latestBySession.delete(s); // release memory + never serve a stale read
       }
@@ -125,7 +152,7 @@ export class SeatStructuralActivityService {
         ? await this.tmuxAdapter.capturePanesContent(rows.map((r) => r.session_name), this.captureLines, this.now).catch(() => null)
         : null;
       await Promise.all(rows.map(async (r) => {
-        try { await this.pollSeat(r.session_name, prefetched); } catch { /* isolate: one seat's failure never crashes the sweep */ }
+        try { await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null); } catch { /* isolate: one seat's failure never crashes the sweep */ }
       }));
     } finally {
       this.sweeping = false;
