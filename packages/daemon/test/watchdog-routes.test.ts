@@ -55,6 +55,37 @@ describe("watchdog routes (PL-004 Phase C)", () => {
 
   afterEach(() => db.close());
 
+  it.each([[], [[1]], false, true])("POST /register rejects an unbindable scan cadence before insertion or overwrite: %j", async value => {
+    const send = () => app.request("/api/watchdog/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...validRegisterBody, scanIntervalSeconds: value }),
+    });
+    const first = await send();
+    expect(first.status).toBe(400);
+    expect(await first.json()).toMatchObject({ error: "interval_invalid", message: expect.stringContaining("scan_interval_seconds") });
+    expect(jobsRepo.listAll()).toEqual([]);
+    const original = jobsRepo.register({ ...validRegisterBody, scanIntervalSeconds: 7 });
+    const retry = await send();
+    expect(retry.status).toBe(400);
+    expect(jobsRepo.listAll()).toEqual([original]);
+  });
+
+  it.each([[1, 1], ["1.5", 1.5], ["", ""], [null, null]])("POST /register preserves successful single-element scan array: %j", async (value, stored) => {
+    const response = await app.request("/api/watchdog/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...validRegisterBody, scanIntervalSeconds: [value] }),
+    });
+    expect(response.status).toBe(201);
+    expect((await response.json()).scanIntervalSeconds).toBe(stored);
+    expect(jobsRepo.listAll()[0]?.scanIntervalSeconds).toBe(stored);
+  });
+
+  it("direct registration keeps a named validation error for an invalid bigint array", () => {
+    expect(() => jobsRepo.register({ ...validRegisterBody, scanIntervalSeconds: [1n, 2n] as never }))
+      .toThrow(/scan_interval_seconds.*1,2/);
+    expect(jobsRepo.listAll()).toEqual([]);
+  });
+
   it("POST /register rejects an uncomputable scan cadence with a named error", async () => {
     const response = await app.request("/api/watchdog/register", {
       method: "POST", headers: { "Content-Type": "application/json" },

@@ -143,8 +143,13 @@ function validateCadences(input: RegisterWatchdogJobInput): void {
     throw new WatchdogJobsError("interval_invalid", `interval_seconds must be a positive integer (got ${String(input.intervalSeconds)})`,
       { field: "interval_seconds", intervalSeconds: input.intervalSeconds });
   }
-  const scan = input.scanIntervalSeconds;
-  if (scan != null && !Number.isFinite(Number(scan))) {
+  const scan: unknown = input.scanIntervalSeconds;
+  // better-sqlite3 flattens one array level in positional arguments. Preserve
+  // successful single-value arrays, but refuse values that cannot bind one cell.
+  const boundScan = Array.isArray(scan) ? (scan.length === 1 ? scan[0] : undefined) : scan;
+  const bindable = boundScan === null || typeof boundScan === "number" || typeof boundScan === "string"
+    || typeof boundScan === "bigint" || Buffer.isBuffer(boundScan);
+  if (scan != null && (!bindable || !Number.isFinite(Number(scan)))) {
     throw new WatchdogJobsError("interval_invalid", `scan_interval_seconds cannot be turned into a cadence (got ${String(scan)})`,
       { field: "scan_interval_seconds", intervalSeconds: scan });
   }
