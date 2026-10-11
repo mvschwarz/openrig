@@ -295,6 +295,7 @@ function mockTmux(overrides?: Partial<{
   sendKeys: (target: string, keys: string[]) => Promise<TmuxResult>;
   capturePaneContent: (paneId: string, lines?: number) => Promise<string | null>;
   getPaneCommand: (paneId: string) => Promise<string | null>;
+  isPaneInMode: (paneId: string) => Promise<boolean | null>;
 }>): TmuxAdapter {
   const hasSession = overrides?.hasSession ?? (async () => true);
   return {
@@ -315,6 +316,7 @@ function mockTmux(overrides?: Partial<{
     stopPipePane: async () => ({ ok: true as const }),
     getPanePid: async () => null,
     getPaneCommand: overrides?.getPaneCommand ?? (async () => null),
+    isPaneInMode: overrides?.isPaneInMode ?? (async () => false),
   } as unknown as TmuxAdapter;
 }
 
@@ -397,6 +399,51 @@ describe("SessionTransport", () => {
     const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(true);
     expect(callOrder).toEqual(["sendText", "sendKeys:Enter"]);
+  });
+
+  describe("#331: pane in tmux copy mode", () => {
+    it("refuses before typing anything, since copy mode would swallow the Enter", async () => {
+      seedCanonicalRig();
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const sendKeys = vi.fn(async () => ({ ok: true as const }));
+      const transport = createTransport(mockTmux({ sendText, sendKeys, isPaneInMode: async () => true }));
+
+      const result = await transport.send("dev-impl@my-rig", "hello");
+      expect(result).toMatchObject({ ok: false, reason: "pane_in_mode", sent: false });
+      expect(result.error).toContain("copy mode");
+      expect(result.error).toContain("No text was sent.");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    });
+
+    it("refuses a submitOnly Enter while the pane is in copy mode", async () => {
+      seedCanonicalRig();
+      const sendKeys = vi.fn(async () => ({ ok: true as const }));
+      const transport = createTransport(mockTmux({
+        sendKeys,
+        capturePaneContent: async () => "❯ staged message",
+        isPaneInMode: async () => true,
+      }));
+
+      const result = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: "staged message" });
+      expect(result).toMatchObject({ ok: false, reason: "pane_in_mode" });
+      expect(result.error).toContain("Nothing was submitted.");
+      expect(sendKeys).not.toHaveBeenCalled();
+    });
+
+    it("sends as before when the mode is unknown", async () => {
+      seedCanonicalRig();
+      const callOrder: string[] = [];
+      const transport = createTransport(mockTmux({
+        sendText: async () => { callOrder.push("sendText"); return { ok: true }; },
+        sendKeys: async (_t, keys) => { callOrder.push(`sendKeys:${keys.join(",")}`); return { ok: true }; },
+        isPaneInMode: async () => null,
+      }));
+
+      const result = await transport.send("dev-impl@my-rig", "hello");
+      expect(result.ok).toBe(true);
+      expect(callOrder).toEqual(["sendText", "sendKeys:Enter"]);
+    });
   });
 
   // Test 2: send to canonical session name resolves correctly

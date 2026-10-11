@@ -1234,6 +1234,18 @@ export class SessionTransport {
       if (observation.state === "unknown") runtimeAdvisory = `runtime: ${observation.detail}; delivery proceeds without verified native identity.`;
       return null;
     };
+    // #331: with mouse on, scrolling a seat pane puts it in tmux copy mode. A paste still reaches
+    // the input there, but copy mode swallows the Enter, so the send would report ok while the
+    // text sits unsubmitted. Refuse before typing anything. An unknown answer keeps today's path.
+    const checkCopyMode = async (outcome: string): Promise<SendResult | null> => {
+      let inMode: boolean | null = null;
+      try {
+        if (typeof this.tmuxAdapter.isPaneInMode === "function") inMode = await this.tmuxAdapter.isPaneInMode(sessionName);
+      } catch { inMode = null; }
+      if (inMode !== true) return null;
+      return { ok: false, sessionName, sent: false, reason: "pane_in_mode",
+        error: `Refused: '${sessionName}' is in tmux copy mode (scrolled back), where Enter would not reach the agent. Press q or scroll to the bottom of the pane, then resend. ${outcome}` };
+    };
     // S01/S02 P2 observation context, frozen at attempt entry before any await.
     const observed = this.captureObserver ? {
       attemptId: randomUUID(),
@@ -1383,6 +1395,8 @@ export class SessionTransport {
       }
       const targetFailure = await checkClaudeTarget();
       if (targetFailure) return targetFailure;
+      const copyModeFailure = await checkCopyMode("Nothing was submitted.");
+      if (copyModeFailure) return copyModeFailure;
       const submitResult = await this.runStage(
         "session_transport.submit",
         () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
@@ -1531,6 +1545,8 @@ export class SessionTransport {
     // Recheck the selected recipient after readiness/capture awaits, at the input boundary.
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
+    const copyModeFailure = await checkCopyMode("No text was sent.");
+    if (copyModeFailure) return observe({ ...copyModeFailure, ...(waitMode ? waitEvidence : {}) });
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);

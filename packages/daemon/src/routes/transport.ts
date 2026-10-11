@@ -136,6 +136,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         send_failed: 502,
         invalid_submit_only: 400,
         staged_mismatch: 409,
+        pane_in_mode: 409,
       };
       const status = (statusMap[result.reason ?? ""] ?? 500) as 400 | 404 | 409 | 500 | 502 | 503;
       return c.json(result, status);

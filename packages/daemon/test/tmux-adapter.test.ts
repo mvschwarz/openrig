@@ -761,6 +761,25 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  describe("isPaneInMode", () => {
+    it("reads #{pane_in_mode} from the exact pane target", async () => {
+      const exec: ExecFn = vi.fn(async () => "1\n") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.isPaneInMode("dev-impl@my-rig")).toBe(true);
+      expect(exec).toHaveBeenCalledWith(`tmux display-message -p -t '=dev-impl@my-rig:' "#{pane_in_mode}"`);
+    });
+
+    it("returns false outside copy mode", async () => {
+      const adapter = new TmuxAdapter(async () => "0\n");
+      expect(await adapter.isPaneInMode("%0")).toBe(false);
+    });
+
+    it("returns null on error or unexpected output", async () => {
+      expect(await new TmuxAdapter(async () => { throw new Error("no server"); }).isPaneInMode("%0")).toBeNull();
+      expect(await new TmuxAdapter(async () => "\n").isPaneInMode("%0")).toBeNull();
+    });
+  });
+
   describe("capturePaneContent", () => {
     it("calls exact tmux capture-pane command with shell quoting", async () => {
       const exec: ExecFn = vi.fn(async () => "line 1\nline 2\n") as unknown as ExecFn;

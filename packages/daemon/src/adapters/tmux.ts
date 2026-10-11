@@ -934,6 +934,21 @@ export class TmuxAdapter {
     }
   }
 
+  /** Whether a pane is in a mode such as copy mode. Returns null if unavailable. */
+  async isPaneInMode(paneId: string): Promise<boolean | null> {
+    const target = exactTarget(paneId, "pane");
+    try {
+      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_in_mode}"],
+        `tmux display-message -p -t ${shellQuote(target)} "#{pane_in_mode}"`);
+      const trimmed = output.trim();
+      if (trimmed === "1") return true;
+      if (trimmed === "0") return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   /** A launch metadata read. Callers must never put credential values in terminal input. */
   async getSessionEnv(session: string, key: string): Promise<string | undefined> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
