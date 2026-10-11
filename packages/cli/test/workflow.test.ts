@@ -243,6 +243,64 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(body.resultNote).toBe("produced");
   });
 
+  it("instantiate summary names the instance and entry packet the daemon returned", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/instantiate": {
+          status: 201,
+          data: {
+            instance: { instanceId: "wf-1", status: "active", boundRig: "rig" },
+            entryQitemId: "q-1",
+            entryOwnerSession: "dev-a@rig",
+            advisories: [],
+          },
+        },
+      },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "instantiate", "/abs/spec.yaml",
+      "--root-objective", "test obj",
+      "--created-by", "ops@rig",
+    ]);
+    const out = logs.join("\n");
+    expect(out).toMatch(/what:\s+Instantiated workflow from \/abs\/spec\.yaml \(instance wf-1\)/);
+    expect(out).toMatch(/state:\s+active; bound to rig rig; entry packet q-1 owned by dev-a@rig/);
+    expect(out).toMatch(/next:\s+Inspect: rig workflow show wf-1 \| Open packet: rig queue show q-1/);
+  });
+
+  it("project summary names the packet the daemon projected and its owner", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/project": {
+          status: 200,
+          data: {
+            instance: { instanceId: "inst-1", status: "active" },
+            closurePriorPacketId: "q-1",
+            closureReason: "handoff",
+            nextQitemId: "q-2",
+            nextOwnerSession: "dev-b@rig",
+            nextStepId: "two",
+          },
+        },
+      },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "project",
+      "--instance", "inst-1",
+      "--current-packet", "q-1",
+      "--exit", "handoff",
+      "--actor-session", "dev-a@rig",
+    ]);
+    const out = logs.join("\n");
+    expect(out).toMatch(/what:\s+Closed q-1 \(handoff\) and projected q-2 to dev-b@rig/);
+    expect(out).toMatch(/state:\s+instance inst-1 = active/);
+    expect(out).toMatch(/next:\s+Inspect: rig queue show q-2/);
+  });
+
   it("list GETs /api/workflow/list optionally with status filter", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/workflow/list?status=active": { status: 200, data: [] } },
