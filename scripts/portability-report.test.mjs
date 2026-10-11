@@ -112,3 +112,25 @@ test("the CLI executes through a script path containing spaces and a hash", asyn
     assert.match(result.stderr, /Unknown argument: --unknown-option/);
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
+
+
+test("the CLI executes with preserve-symlinks-main and imports without argv remain inert", async () => {
+  const { mkdtempSync, symlinkSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { spawnSync } = await import("node:child_process");
+  const temp = mkdtempSync(join(tmpdir(), "openrig preserved # "));
+  const source = new URL("./portability-report.mjs", import.meta.url);
+  try {
+    const script = join(temp, "report.mjs");
+    symlinkSync(fileURLToPath(source), script);
+    const run = spawnSync(process.execPath, ["--preserve-symlinks-main", script, "--unknown-option"], { encoding: "utf8" });
+    assert.equal(run.status, 2, run.stderr);
+    assert.match(run.stderr, /Unknown argument/);
+    const imported = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(source.href)})`], { encoding: "utf8" });
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.equal(imported.stdout, "");
+    assert.equal(imported.stderr, "");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});

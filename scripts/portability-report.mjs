@@ -166,7 +166,7 @@ export function main(argv = process.argv.slice(2)) {
 
 function invokedDirectly() {
   try {
-    return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+    return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
   } catch { return false; }
 }
 
