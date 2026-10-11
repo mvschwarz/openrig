@@ -81,7 +81,8 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
   Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
   way. The operator helps them pick a team that fits their logins, starts it on their yes and gives the goal to the
-  team's lead. Show them where the operator answers, and don't build the project yourself.
+  team's lead. Before that yes, it says what launching into their folder changes for their own agent there; relay
+  that with the question. Show them where the operator answers, and don't build the project yourself.
 - **Relay the operator's questions:** the operator asks in its own pane, and the person may not be looking there.
   After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
   something (start this team? which folder? which option?), ask them here in the operator's words and send their
