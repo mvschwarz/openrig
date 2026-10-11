@@ -211,6 +211,73 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   return token;
 }
 
+const DELETED_WITNESS = " (deleted)";
+
+/** A Claude process with a present executable witness: `claudeProcess`, or a native
+ * or Nix Claude whose Linux witness is its unlinked binary (`<path> (deleted)` after
+ * an upgrade or garbage collection) and whose stripped path passes `claudeProcess`.
+ * Kept out of `claudeProcess` itself, which delivery also uses. Any other present
+ * path that does not match stays unverified. */
+function witnessedClaudeRow(row: NativeProcessRow): boolean {
+  return claudeProcess(row) || (needsClaudeExecutablePath(row) && row.executablePath?.endsWith(DELETED_WITNESS) === true
+    && claudeProcess({ ...row, executablePath: row.executablePath.slice(0, -DELETED_WITNESS.length) }));
+}
+
+/** A Claude runtime where only main's result is kept: a witnessed Claude, or a
+ * native or Nix Claude (argv0 claude, a version or Nix OS name) whose witness is
+ * unavailable (unreadable, exited or over budget). Used for the parent role and the
+ * intermediate stop only, never to recognise a child that refuses its launcher or
+ * takes the proof. */
+function claudeRuntimeRow(row: NativeProcessRow): boolean {
+  return witnessedClaudeRow(row) || (needsClaudeExecutablePath(row) && row.executablePath === undefined);
+}
+
+/** Verified Claude runtimes that `parent` starts directly (same process group,
+ * no shell or other Claude runtime between), keyed by the conversation each
+ * names. A child counts only on a present executable witness
+ * (`witnessedClaudeRow`), never on an argument that mentions claude, and only an
+ * explicitly parsed `--session-id`/`--resume` names one: an opaque or unparsed
+ * child names nothing. The lowest pid wins, so row order cannot change it. */
+function directClaudeChildren(parent: NativeProcessRow, processes: NativeProcessRow[], byPid: Map<number, NativeProcessRow>): Map<string, NativeProcessRow> {
+  const children = new Map<string, NativeProcessRow>();
+  if (parent.pgid === undefined) return children;
+  const isShell = (row: NativeProcessRow) => isShellForeground(executableName(tokens(row.command)[0]?.replace(/^-/, "") ?? ""));
+  for (const row of processes) {
+    if (row === parent || row.pgid !== parent.pgid || !witnessedClaudeRow(row)) continue;
+    const identity = claudeSessionIdentity(tokens(row.command).slice(1));
+    if (typeof identity !== "string") continue;
+    const seen = new Set<number>();
+    let current = byPid.get(row.ppid);
+    while (current && !seen.has(current.pid)) {
+      if (current.pid === parent.pid) {
+        const known = children.get(identity);
+        if (!known || row.pid < known.pid) children.set(identity, row);
+        break;
+      }
+      // A child of an intermediate runtime belongs to that runtime, not to parent.
+      if (isShell(current) || claudeRuntimeRow(current)) break;
+      seen.add(current.pid);
+      current = byPid.get(current.ppid);
+    }
+  }
+  return children;
+}
+
+/** Parents main already accepts as a Claude runtime, for keeping main's result
+ * when a child names another conversation: a Claude runtime by OS evidence
+ * (`claudeRuntimeRow`); Node (OS name node or unknown) with a Claude executable
+ * among its arguments, which is main's own match and is kept for compatibility,
+ * not as runtime evidence (it never feeds child recognition); or an older row
+ * with no OS name whose argv0 is claude. A shell script launcher and a helper
+ * whose argv merely mentions claude are not runtimes. */
+function claudeRuntimeParent(row: NativeProcessRow): boolean {
+  if (claudeRuntimeRow(row)) return true;
+  const [argv0 = "", ...args] = tokens(row.command);
+  if (executableName(argv0) === "node" && args.some((arg) => claudeExecutable(arg))
+    && (row.executableName === undefined || executableName(row.executableName) === "node")) return true;
+  return row.executableName === undefined && claudeExecutable(argv0);
+}
+
 /** Require a live process in the pane's own lineage whose argv names both the
  * declared runtime and the exact native resume identity. */
 export function findExactNativeResumeProcess(
@@ -235,7 +302,21 @@ export function findExactNativeResumeProcess(
     if (visited.has(pid)) continue;
     visited.add(pid);
     const process = byPid.get(pid);
-    if (process && commandUsesExpectedToken(process.command, runtime, expectedToken)) return process;
+    if (process && commandUsesExpectedToken(process.command, runtime, expectedToken)) {
+      const deeper = directClaudeChildren(process, processes, byPid);
+      const exact = deeper.get(expectedToken);
+      // A deeper runtime naming the token is the proof process, returned directly so
+      // the descent never stops at a helper. The pane root keeps its own row: pane
+      // identity stays the root, as on main.
+      if (exact) return pid === panePid ? process : exact;
+      // A launcher that is not itself a Claude runtime is refused only when a
+      // deeper runtime positively names another conversation; its subtree
+      // is that runtime chain, so nothing below it is searched. A verified Claude
+      // on the token keeps its proof: ps cannot tell a launcher binary over the
+      // real Claude from a real Claude that started a child Claude.
+      if (claudeRuntimeParent(process) || deeper.size === 0) return process;
+      continue;
+    }
     for (const child of byParent.get(pid) ?? []) queue.push(child.pid);
   }
   return null;
