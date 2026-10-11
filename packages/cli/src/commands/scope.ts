@@ -48,7 +48,7 @@ import {
   moveSlice,
   rollbackMovedSlice,
   nextSliceNN,
-  withSliceCreationGuard,
+  tryClaimSliceNN,
   NOTES_FILE_PRECEDENCE,
   pad2,
   readFrontmatter,
@@ -79,6 +79,7 @@ import { deriveScopeTrust } from "../lib/scope/trust.js";
 import { capabilityDeltaExpiryFindings } from "../lib/scope/capability-delta.js";
 import {
   applyMissionCompositionEdits,
+  appendMissionMembership,
   nextMissionMembershipOrder,
   planMissionMembershipAdd,
   planMissionMembershipRemove,
@@ -335,29 +336,18 @@ function buildSliceCreateCommand(): Command {
           });
         }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
-        const missionPath = findMission(missionsRoot, missionName).absPath;
-        const payload = withSliceCreationGuard(missionPath, () => {
-          const mission = findMission(missionsRoot, missionName);
-          const nn = nextSliceNN(mission.absPath);
-          const sliceFolder = `${pad2(nn)}-${slug}`;
-          const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
-          if (fs.existsSync(sliceAbs)) {
-            throw new ScopeCliError({
-              fact: `Slice folder ${sliceAbs} already exists.`,
-              consequence: "Refusing to overwrite.",
-              action: "Pick a different slug, or rm -rf the existing folder first.",
-            });
-          }
-          const title = opts.title ?? titleFromSlug(slug);
-          const intent = opts.intent ?? title;
-          const compositionEdit = planMissionMembershipAdd(
-            mission.absPath,
-            `slices/${sliceFolder}/slice.yaml`,
-            nextMissionMembershipOrder(mission.absPath),
-          );
-          const missionId = ensureMissionId(mission, missionsRoot);
-          const id = sliceIdFromMission(missionId, nn);
-          const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        const mission = findMission(missionsRoot, missionName);
+        let nn = nextSliceNN(mission.absPath);
+        const title = opts.title ?? titleFromSlug(slug);
+        const intent = opts.intent ?? title;
+        const missionId = ensureMissionId(mission, missionsRoot);
+        let id = sliceIdFromMission(missionId, nn);
+        const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        // Validate before reserving any number; re-check self-dependency if a
+        // competing creator claimed the initial candidate.
+        let sliceFolder: string;
+        let sliceAbs: string;
+        for (;;) {
           for (const dependency of dependsOn) {
             if (dependency === id) {
               throw new ScopeCliError({
@@ -374,59 +364,83 @@ function buildSliceCreateCommand(): Command {
               });
             }
           }
-          const createdDate = todayDateISO();
-          const body = renderSliceTemplate(kind, {
-            id,
-            slice_number: pad2(nn),
-            slug,
-            mission: mission.name,
-            title,
-            created_date: createdDate,
-            intent,
-            depends_on: dependsOn,
-          });
-          const proofBody = renderSliceProofTemplate({ id, title });
-          const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
-          const readmePath = path.join(sliceAbs, "SPEC.md");
-          try {
-            // Persist the parent id in the same rollback boundary as the child
-            // and composition membership. Validation above performs no writes.
-            ensureMissionIdPersisted(mission, missionsRoot);
-            fs.mkdirSync(sliceAbs, { recursive: true });
-            fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
-            // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
-            const readmeOnly = Boolean(opts.readmeOnly);
-            if (readmeOnly) {
-              const markerBody = body.replace(
-                /^(---\n)/,
-                `---\nprogress_rail: readme-only\n`,
-              );
-              fs.writeFileSync(readmePath, markerBody, "utf8");
-            } else {
-              fs.writeFileSync(readmePath, body, "utf8");
-              const progressPath = path.join(sliceAbs, "PROGRESS.md");
-              fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
-            }
-            fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
-            fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
-            applyMissionCompositionEdits(compositionEdit ? [compositionEdit] : []);
-          } catch (error) {
+          sliceFolder = `${pad2(nn)}-${slug}`;
+          sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
+          if (fs.existsSync(sliceAbs)) {
+            throw new ScopeCliError({
+              fact: `Slice folder ${sliceAbs} already exists.`,
+              consequence: "Refusing to overwrite.",
+              action: "Pick a different slug, or rm -rf the existing folder first.",
+            });
+          }
+          // Validate an explicit manifest before reserving an ordinal. The
+          // post-scaffold write re-plans from the latest manifest and disk.
+          planMissionMembershipAdd(
+            mission.absPath, `slices/${pad2(nn)}-${slug}/slice.yaml`,
+          );
+          if (tryClaimSliceNN(mission.absPath, nn)) break;
+          nn++;
+          id = sliceIdFromMission(missionId, nn);
+        }
+        const createdDate = todayDateISO();
+        const body = renderSliceTemplate(kind, {
+          id,
+          slice_number: pad2(nn),
+          slug,
+          mission: mission.name,
+          title,
+          created_date: createdDate,
+          intent,
+          depends_on: dependsOn,
+        });
+        const proofBody = renderSliceProofTemplate({ id, title });
+        const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
+        const readmePath = path.join(sliceAbs, "SPEC.md");
+        const proofPath = path.join(sliceAbs, "PROOF.md");
+        let scaffoldCompleted = false;
+        try {
+          // Persist the parent id before building the scaffold. Incomplete
+          // scaffolds roll back; the ordinal remains reserved even then.
+          ensureMissionIdPersisted(mission, missionsRoot);
+          fs.mkdirSync(sliceAbs, { recursive: true });
+          fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
+          // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
+          const readmeOnly = Boolean(opts.readmeOnly);
+          if (readmeOnly) {
+            const markerBody = body.replace(
+              /^(---\n)/,
+              `---\nprogress_rail: readme-only\n`,
+            );
+            fs.writeFileSync(readmePath, markerBody, "utf8");
+          } else {
+            fs.writeFileSync(readmePath, body, "utf8");
+            const progressPath = path.join(sliceAbs, "PROGRESS.md");
+            fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
+          }
+          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
+          fs.writeFileSync(proofPath, proofBody, "utf8");
+          scaffoldCompleted = true;
+          await appendMissionMembership(mission.absPath, `slices/${sliceFolder}/slice.yaml`);
+        } catch (error) {
+          // PROOF.md is the final scaffold file. Once complete, leave this
+          // slice available for another creator's manifest union to repair.
+          if (!scaffoldCompleted) {
             fs.rmSync(sliceAbs, { recursive: true, force: true });
             if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
-            throw error;
           }
-          return {
-            ok: true,
-            slice: {
-              mission: mission.name,
-              name: sliceFolder,
-              id,
-              path: sliceAbs,
-              readmePath,
-              template: kind,
-            },
-          };
-        });
+          throw error;
+        }
+        const payload = {
+          ok: true,
+          slice: {
+            mission: mission.name,
+            name: sliceFolder,
+            id,
+            path: sliceAbs,
+            readmePath,
+            template: kind,
+          },
+        };
         emit(out, payload, json, [
           `Created ${payload.slice.mission}/slices/${payload.slice.name}`,
           `  id: ${payload.slice.id}`,

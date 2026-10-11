@@ -498,44 +498,32 @@ function findOwningMission(missionsRoot: string, slicePath: string): string | nu
 // Auto-numbering
 // ---------------------------------------------------------------------
 
-/** Prevent overlapping slice creates in one mission from reusing an ordinal.
- *  Only an acquired guard is removed; interrupted creators require inspection,
- *  never automatic stale-lock stealing. This does not serialize ship or move. */
-export function withSliceCreationGuard<T>(missionAbsPath: string, create: () => T): T {
-  const guard = path.join(missionAbsPath, ".openrig-slice-create-lock");
+/** Claim one slice ordinal exclusively. Interrupted creates retain only their
+ *  number, rather than blocking every later create in the mission. */
+export function tryClaimSliceNN(missionAbsPath: string, nn: number): boolean {
+  const slices = path.join(missionAbsPath, "slices");
+  fs.mkdirSync(slices, { recursive: true });
+  let claim: number;
   try {
-    fs.mkdirSync(guard);
+    claim = fs.openSync(path.join(slices, `.nn-${pad2(nn)}`), "wx");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    throw new ScopeCliError({
-      fact: `A slice creation guard already exists for ${missionAbsPath}.`,
-      consequence: "Slice not created; existing work was not changed.",
-      action: "Retry after the other create finishes. If it was interrupted, inspect the guard before removing it.",
-    });
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
   }
-  // Release before the command's outer error handler can call process.exit.
-  try {
-    return create();
-  } finally {
-    try {
-      fs.rmdirSync(guard);
-    } catch (releaseError) {
-      const detail = releaseError instanceof Error ? releaseError.message : String(releaseError);
-      process.stderr.write(`Warning: could not remove slice creation guard ${guard}: ${detail}. Inspect the guard before retrying.\n`);
-    }
-  }
+  fs.closeSync(claim);
+  return true;
 }
 
 /** Find the next available NN for a mission's slices/ folder. Scans
- *  BOTH slices/ AND closed/ so numbers are never reused (§3.2). */
+ *  BOTH slices/ AND closed/, including ordinal claims, so numbers are never reused (§3.2). */
 export function nextSliceNN(missionAbsPath: string): number {
   let max = 0;
   for (const subdir of ["slices", "closed"]) {
     const root = path.join(missionAbsPath, subdir);
     if (!fs.existsSync(root)) continue;
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const m = SLICE_DIRNAME_RE.exec(entry.name);
+      const marker = subdir === "slices" ? /^\.nn-(\d+)$/.exec(entry.name) : null;
+      const m = marker ?? (entry.isDirectory() ? SLICE_DIRNAME_RE.exec(entry.name) : null);
       if (!m) continue;
       const n = Number(m[1]);
       if (Number.isFinite(n) && n > max) max = n;
