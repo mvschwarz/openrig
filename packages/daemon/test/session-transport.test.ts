@@ -16,7 +16,8 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, classifyStyledFrame, probeSessionActivity, promptTextIsFaint, SessionTransport } from "../src/domain/session-transport.js";
-import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
@@ -1932,6 +1933,167 @@ describe("SessionTransport", () => {
     expect(result.reason).toBe("typing_guard_enabled");
     expect(captures).toBe(0);
     expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("#1084: a late wait failure surfaces instead of silently waiting twice", async () => {
+    seedCanonicalRig();
+    let sleeps = 0;
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const localTmux = mockTmux({
+      capturePaneContent: async () => BUSY_PANE,
+      sendText: sendTextSpy,
+    });
+    attachGuard(localTmux);
+    const localTransport = createTransport(localTmux, {
+      // Second poll sleep throws: a late failure inside the lease-free wait.
+      sleep: async () => { sleeps++; if (sleeps === 2) throw new Error("timer fault"); },
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await localTransport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1000 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("guard_unavailable");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+});
+
+// #1084/#1103 edge cases, contributed by z4cc in review (taken verbatim,
+// credit theirs): a real SeatDeliveryGuard, a stub pane whose busy/idle
+// state the test flips, and writes that call guard.checkInput() the way the
+// real adapter does.
+const LEASE_SEAT = "dev-impl@my-rig";
+const LEASE_BUSY = "Working on task...\n⠋ Processing files\nesc to interrupt";
+const LEASE_IDLE = "› Use /skills to list available skills\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig";
+
+function leaseGate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { opened, open };
+}
+
+async function leaseUntil(check: () => boolean, ms = 2000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error("condition not reached in time");
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
+describe("wait-for-idle outside the seat delivery lease (review cases)", () => {
+  let db: Database.Database;
+  let busy: boolean;
+  let writes: string[];
+  let blockWrite: Map<string, Promise<void>>;
+  let transport: SessionTransport;
+  let sessionRegistry: SessionRegistry;
+  let target: GuardTarget;
+  let guard: SeatDeliveryGuard;
+  let tmux: Record<string, unknown>;
+
+  beforeEach(() => {
+    db = createDb(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "codex" });
+    const session = sessionRegistry.registerSession(node.id, LEASE_SEAT);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: LEASE_SEAT });
+
+    target = { nodeId: node.id, session: LEASE_SEAT, occupant: "g1", pane: "%1" };
+    guard = new SeatDeliveryGuard(db, (name) => (name === LEASE_SEAT || name === node.id ? { ...target } : null));
+    busy = true;
+    writes = [];
+    blockWrite = new Map();
+    tmux = {
+      deliveryGuard: guard,
+      hasSession: async () => true,
+      probeSession: async () => ({ state: "present" as const }),
+      capturePaneContent: async () => (busy ? LEASE_BUSY : LEASE_IDLE),
+      sendText: async (_target: string, text: string) => {
+        guard.checkInput(LEASE_SEAT);
+        writes.push(`start ${text}`);
+        await (blockWrite.get(text) ?? Promise.resolve());
+        writes.push(`end ${text}`);
+        return { ok: true as const };
+      },
+      sendKeys: async () => ({ ok: true as const }),
+      getPaneCommand: async () => null,
+      getPanePid: async () => null,
+      listPanes: async () => [],
+    };
+    transport = new SessionTransport({
+      db, rigRepo, sessionRegistry, tmuxAdapter: tmux as unknown as TmuxAdapter,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      waitForIdlePollMs: 5,
+    });
+  });
+
+  afterEach(() => { db.close(); });
+
+  it("re-checks a seat that turned busy again between the wait and the write", async () => {
+    const blocker = leaseGate();
+    blockWrite.set("blocker", blocker.opened);
+    const holding = transport.send(LEASE_SEAT, "blocker");
+    await leaseUntil(() => writes.includes("start blocker"));
+    busy = false;
+    const waiter = transport.send(LEASE_SEAT, "after idle", { waitForIdleMs: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    busy = true;
+    blocker.open();
+    await holding;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(writes).toEqual(["start blocker", "end blocker"]);
+    busy = false;
+    const result = await waiter;
+    expect(result).toMatchObject({ ok: true, sent: true });
+    expect(writes).toEqual(["start blocker", "end blocker", "start after idle", "end after idle"]);
+  });
+
+  it("refuses with guard_target_changed when the occupant is replaced during the wait", async () => {
+    const pending = transport.send(LEASE_SEAT, "for the old occupant", { waitForIdleMs: 3000 });
+    await new Promise((r) => setTimeout(r, 40));
+    target = { ...target, occupant: "g2", pane: "%9" };
+    busy = false;
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "guard_target_changed" });
+    expect(writes).toEqual([]);
+  });
+
+  it("refuses with guard_target_changed when the typing guard goes on and the occupant changes during the wait", async () => {
+    const pending = transport.send(LEASE_SEAT, "for the old occupant", { waitForIdleMs: 3000 });
+    await new Promise((r) => setTimeout(r, 40));
+    await guard.set(target.nodeId, true, "person", "protect a draft");
+    target = { ...target, occupant: "g2", pane: "%9" };
+    busy = false;
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "guard_target_changed" });
+    expect(writes).toEqual([]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE delivery_state = 'retained'").get()).toEqual({ n: 0 });
+  });
+
+  it("refuses a missing session at once with session_missing", async () => {
+    (tmux as unknown as { probeSession: unknown }).probeSession = async () => ({ state: "absent" as const });
+    (tmux as unknown as { hasSession: unknown }).hasSession = async () => false;
+    const started = Date.now();
+    const result = await transport.send(LEASE_SEAT, "hi", { waitForIdleMs: 1500 });
+    expect(result).toMatchObject({ ok: false, reason: "session_missing" });
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("retains a wait send to a guarded external_cli seat, as main does", async () => {
+    sessionRegistry.updateBinding(target.nodeId, { attachmentType: "external_cli", externalSessionName: "ext-1" });
+    await guard.set(target.nodeId, true, "person", "protect a draft");
+    const result = await transport.send(LEASE_SEAT, "hi", { waitForIdleMs: 1500 });
+    expect(result).toMatchObject({ ok: true, outcome: "retained" });
+  });
+
+  it("retains a forced wait send to a guarded seat, as main does", async () => {
+    await guard.set(target.nodeId, true, "person", "protect a draft");
+    const result = await transport.send(LEASE_SEAT, "hi", { waitForIdleMs: 1500, force: true });
+    expect(result).toMatchObject({ ok: true, outcome: "retained" });
   });
 });
 
