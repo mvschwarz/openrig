@@ -327,6 +327,16 @@ a daemon route or reconnect policy.
 
 ## 5. Route surface
 
+The TUI FEED reads `/api/attention` for human requests and current explicit
+human-addressed updates. Its independent update query filters open states and
+strict human destinations before the 1001-row sentinel, serves at most 1000
+updates with critical then urgent rows first, and requires no transport receipt. These local
+FYIs create no approval obligation. `/api/queue/human-updates` remains confirmed
+delivery history; the TUI suppresses a history card when the same queue item is
+in the current update window. Current-update coverage is independent of the
+receipt window, so an unavailable current reader cannot retain closed delivery
+history beyond a successful history read. Both reads leave queue state intact.
+
 - `/api/stream` (`server.ts:783`) — `POST /emit` (`routes/stream.ts:56`),
   `GET /list` (`:91`, including `sourceSession`, `hintDestination`, `hintTag`,
   `since`, `until` and `direction` filters), `GET /watch` + `/sse` SSE

@@ -57,6 +57,37 @@ export function attentionRoutes(): Hono {
         if (q === detailOnly) result.items = result.items.filter(i => i.id !== item.id);
       }
     } catch (e) { unavailable("queue", e); }
+    try {
+      if (!queue) throw new Error("Queue repository unavailable");
+      const rows = queue.listOpenHumanUpdates({ limit: 1001 });
+      result.sources.push({ source: "queue updates", state: rows.length >= 1001 ? "partial" : "available",
+        detail: rows.length >= 1001 ? "Open human updates reached 1001 rows; showing at most 1000, critical then urgent first." : "Open explicit human-addressed updates, critical then urgent first; local FYIs do not require a delivery receipt or decision." });
+      const current = rows.slice(0, 1000);
+      const opened = wanted?.startsWith("queue-update:") ? queue.getById(wanted.slice(13)) : null;
+      const detailOnly = opened?.humanIntent === "update" && isHumanSeatSessionRef(opened.destinationSession)
+        && !current.some(q => q.qitemId === opened.qitemId) ? opened : null;
+      for (const q of [...current, ...(detailOnly ? [detailOnly] : [])]) {
+        const tags = [...new Set((q.tags ?? []).filter(t => t.startsWith("project:")).map(t => t.slice(8)))];
+        const p = tags.length === 1 ? projects.find(p => p.id === tags[0] && !p.error) : undefined;
+        const item: AttentionItem = { id: `queue-update:${q.qitemId}`, kind: "update", recipient: q.destinationSession,
+          summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Update summary unavailable",
+          urgency: q.priority, unblocks: null, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown",
+          project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };
+        add(item, () => ["Informational update; no action needed. Viewing is not approval or proof of delivery.",
+          q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
+          `State: ${q.state}`, `To: ${q.destinationSession}`, `From: ${q.sourceSession}`,
+          `Evidence reference: ${q.evidenceRef ?? "none recorded"}`, `Inspect: rig queue show ${q.qitemId} --full`,
+          "Queue history (read/delivery is not approval):", ...queue.listTransitions(q.qitemId).map(t => JSON.stringify(t))], () => {
+          if (!q.evidenceRef || !path.isAbsolute(q.evidenceRef) && (!p || /^[a-z][a-z\d+.-]*:/i.test(q.evidenceRef))) return [];
+          const hash = q.evidenceRef.indexOf("#"), anchor = hash < 0 ? "" : q.evidenceRef.slice(hash);
+          let file = hash < 0 ? q.evidenceRef : q.evidenceRef.slice(0, hash);
+          file = path.isAbsolute(file) ? file : path.resolve(p!.root, file);
+          try { file = fs.realpathSync(file); } catch { /* The file reader reports the unavailable source. */ }
+          return [{ label: "Update evidence", path: file + anchor }];
+        });
+        if (q === detailOnly) result.items = result.items.filter(i => i.id !== item.id);
+      }
+    } catch (e) { unavailable("queue updates", e); }
     for (const p of projects) {
       const source = `proof: project ${p.id}`;
       try {
@@ -121,7 +152,7 @@ export function attentionRoutes(): Hono {
         add(item, () => [`Status: ${r.status}; first observed ${r.startedAt ?? "unknown"}; last observed ${r.lastObservedAt ?? "unknown"}`, `Freshness: ${r.freshness.state}; ${r.indeterminateReason ?? ""}`, `Posture: ${r.operatingPosture?.posture ?? "unknown"} · ${r.operatingPosture?.reason ?? "not supplied by source"}`, r.explanation, r.suggestedInspection, `Threshold: ${r.threshold}`, "Canonical source and bounded evidence:", JSON.stringify(r, null, 2)]);
       }
     } catch (e) { unavailable("health", e); }
-    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
+    result.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? ((b.urgency === "critical" ? 2 : b.urgency === "urgent" ? 1 : 0) - (a.urgency === "critical" ? 2 : a.urgency === "urgent" ? 1 : 0)) : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));
     if (wanted && !result.detail) result.detailError = "Selected source is unavailable or outside the current source window. Return to Attention to refresh; absence is not resolution.";
     return c.json(result);
   });
