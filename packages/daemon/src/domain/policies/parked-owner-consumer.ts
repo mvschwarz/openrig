@@ -39,6 +39,10 @@ export interface ParkedSeatDiagnosisView {
 export interface RowTransitionView {
   ts: string;
   transitionNote: string | null;
+  /** Who wrote the transition and the row state it records. A view without them can't show that a
+   *  row is unchanged, so a repeat wake is never withheld on its account. */
+  actorSession?: string;
+  state?: string;
 }
 
 export interface ParkedOwnerConsumerDeps {
@@ -117,6 +121,10 @@ interface RowEpisodeState {
   openKey: string | null;
   refused: boolean;
   nextOrdinal: number;
+  /** When this obligation set's last wake was reserved, open or closed, if that wake isn't known to
+   *  have failed or been refused (a reserve isn't proof of delivery). Null otherwise, or before its
+   *  first wake. */
+  lastDeliveredTs: string | null;
 }
 
 /** Derive the episode state for one idsHash from the primary row's transitions.
@@ -126,7 +134,10 @@ interface RowEpisodeState {
 function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpisodeState {
   const closed = new Set<string>();
   const refusedKeys = new Set<string>();
+  const failedKeys = new Set<string>();
   let openKey: string | null = null;
+  let lastKey: string | null = null;
+  let lastReserveTs: string | null = null;
   let reserves = 0;
   // listTransitions returns oldest-first; walk newest-first.
   for (let i = transitions.length - 1; i >= 0; i--) {
@@ -135,12 +146,32 @@ function rowEpisode(transitions: RowTransitionView[], idsHash: string): RowEpiso
     if (!key) continue;
     if (note.startsWith(CLOSE_PREFIX)) closed.add(key);
     else if (note.startsWith(REFUSED_PREFIX)) refusedKeys.add(key);
+    else if (note.startsWith(FAILED_PREFIX)) failedKeys.add(key);
     else if (note.startsWith(RESERVE_PREFIX) && key.includes(`|${idsHash}#`)) {
       reserves += 1;
+      if (lastKey === null) { lastKey = key; lastReserveTs = transitions[i]!.ts; }
       if (openKey === null && !closed.has(key)) openKey = key;
     }
   }
-  return { openKey, refused: openKey !== null && refusedKeys.has(openKey), nextOrdinal: reserves + 1 };
+  const lastDelivered = lastKey !== null && !refusedKeys.has(lastKey) && !failedKeys.has(lastKey);
+  return { openKey, refused: openKey !== null && refusedKeys.has(openKey), nextOrdinal: reserves + 1, lastDeliveredTs: lastDelivered ? lastReserveTs : null };
+}
+
+/** Whether what the seat holds changed after `since`: on any of the rows, a transition by the seat
+ *  itself or a state change. Notes by other seats and system bookkeeping (this consumer's own
+ *  reserve and close notes) aren't changes. A transition the view can't attribute counts as one. */
+function changedSince(listTransitions: (qitemId: string) => RowTransitionView[], ids: string[], seat: string, since: string): boolean {
+  for (const id of ids) {
+    let prior: string | undefined;
+    for (const t of listTransitions(id)) {
+      // The reserve and everything before it set the baseline state.
+      if (t.ts <= since) { prior = t.state; continue; }
+      if (t.actorSession === undefined || t.state === undefined || t.actorSession === seat) return true;
+      if (prior !== undefined && prior !== t.state) return true;
+      prior = t.state;
+    }
+  }
+  return false;
 }
 
 /** Every open reserve key on a row, across all obligation-set hashes — the set a
@@ -270,6 +301,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           });
           continue;
         }
+        // After a wake for the same set, no repeat until the seat writes to one of its rows or one
+        // changes state. A "(seat resumed)" close alone isn't that: any turn the seat takes writes it.
+        if (ep.lastDeliveredTs !== null && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, ep.lastDeliveredTs)) {
+          skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake" });
+          continue;
+        }
 
         // B4 — reserve BEFORE the engine delivers: the durable receipt is this
         // transition; a terminal race at the row is the final honest guard.
@@ -287,7 +324,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `You are parked (arbitrated: idle at prompt) while holding ${namedIds.length} open ` +
           `obligation${namedIds.length === 1 ? "" : "s"}: ${namedIds.join(", ")}. ` +
           `Resume the work or update each row honestly (close, park-with-wake, or hand off). ` +
-          `This is the one wake for this park episode; the wake-or-escalate ladder owns anything further.`;
+          `There's no further wake for these same rows until you update one of them or one changes state; held rows stay listed in rig view show held, and the wake-or-escalate ladder handles a wake that failed to deliver.`;
         return {
           action: "send",
           target: { session: seat.sessionName },
