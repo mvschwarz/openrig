@@ -232,6 +232,72 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
+type StyledCell = { ch: string; faint: boolean };
+
+/** A capture taken with escape sequences, as lines of cells that know whether they're faint (SGR 2).
+ *  Color parameters (38/48/58 with 5;n or 2;r;g;b) are skipped, so a color value of 2 isn't faint.
+ *  Other escape sequences carry no text. */
+function styledLines(styledPane: string): StyledCell[][] {
+  let faint = false;
+  return styledPane.replace(/\r\n/g, "\n").split("\n").map((raw) => {
+    const cells: StyledCell[] = [];
+    let offset = 0;
+    for (const match of raw.matchAll(/\x1b\[([0-9;:?]*)[ -\/]*([@-~])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b./g)) {
+      for (const ch of raw.slice(offset, match.index)) cells.push({ ch, faint });
+      offset = match.index! + match[0].length;
+      if (match[2] !== "m") continue;
+      const codes = match[1]!.split(";");
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i]!;
+        if (code === "38" || code === "48" || code === "58") { i += codes[i + 1] === "5" ? 2 : codes[i + 1] === "2" ? 4 : 0; continue; }
+        if (code === "2") faint = true;
+        else if (code === "" || code === "0" || code === "22") faint = false;
+      }
+    }
+    for (const ch of raw.slice(offset)) cells.push({ ch, faint });
+    return cells;
+  });
+}
+
+/** The last line that starts with a prompt glyph (`❯` or `›`), or -1. */
+function lastPromptLine(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) if (/^\s*[❯›]/.test(lines[i]!)) return i;
+  return -1;
+}
+
+/** True only when the last prompt line has text and all of it is faint, as Claude renders its
+ *  suggestion. An empty last prompt, or a capture without escape sequences, never proves faint. */
+export function promptTextIsFaint(styledPane: string): boolean {
+  const lines = styledLines(styledPane);
+  const last = lastPromptLine(lines.map((cells) => cells.map((cell) => cell.ch).join("")));
+  if (last < 0) return false;
+  const glyph = lines[last]!.findIndex((cell) => cell.ch === "❯" || cell.ch === "›");
+  const text = lines[last]!.slice(glyph + 1).filter((cell) => !/\s/.test(cell.ch));
+  return text.length > 0 && text.every((cell) => cell.faint);
+}
+
+/** Classifies one Claude capture taken with escape sequences, as a single frame. `suggestion` is set
+ *  only when that frame's own draft is its last prompt line and all of that text is faint: it's then
+ *  the frame classified as an empty composer. */
+export function classifyStyledFrame(styledPane: string, options: ClassifyPaneOptions = {}): { frame: string; asIs: PaneActivityClassification; composer: string | null; suggestion: PaneActivityClassification | null } {
+  const lines = styledLines(styledPane).map((cells) => cells.map((cell) => cell.ch).join(""));
+  const frame = lines.join("\n");
+  const asIs = classifyPaneActivity(frame, options);
+  const composer = draftComposerLine(lines, asIs);
+  if (composer === null || !promptTextIsFaint(styledPane)) return { frame, asIs, composer, suggestion: null };
+  const last = lastPromptLine(lines);
+  lines[last] = /^\s*[❯›]/.exec(lines[last]!)![0];
+  return { frame, asIs, composer, suggestion: classifyPaneActivity(lines.join("\n"), options) };
+}
+
+/** The full text of the line a `prompt_draft` verdict read as the draft, when that's the last prompt
+ *  line; otherwise null. Evidence is compacted and truncated, so callers compare this instead. */
+function draftComposerLine(lines: string[], verdict: PaneActivityClassification): string | null {
+  const last = lastPromptLine(lines);
+  if (verdict.reason !== "prompt_draft" || last < 0 || verdict.evidence !== truncateEvidence(lines[last]!)) return null;
+  return lines[last]!.trim();
+}
+
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
@@ -489,8 +555,26 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "", { timerlessStatusIsLive: input.timerlessStatusIsLive === true });
-    return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
+    const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
+    let classification = classifyPaneActivity(paneContent ?? "", classifyOptions);
+    // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
+    // as a draft, one capture with styling is classified on its own. Newer attention or work there is
+    // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;
+    // the verdict is then the styled frame's, as an empty composer. Anything else leaves the draft standing.
+    let slot = captureSlot(paneContent, capturedAt, captureSeq);
+    if (classification.reason === "prompt_draft" && runtime === "claude-code" && paneContent) {
+      const styled = await tmuxAdapter.capturePaneContent(sessionName, 20, { escapeSequences: true }).catch(() => null);
+      const later = styled ? classifyStyledFrame(styled, classifyOptions) : null;
+      const newer = !later ? null
+        : later.asIs.state === "agent_active" || (later.asIs.state === "attention" && later.asIs.reason !== "prompt_draft") ? later.asIs
+        : later.suggestion && later.composer === draftComposerLine(paneContent.split("\n"), classification) ? later.suggestion
+        : null;
+      if (later && newer) {
+        classification = newer;
+        slot = captureSlot(later.frame, new Date().toISOString(), captureSeq);
+      }
+    }
+    return observeProbe(slot, {
       state: mapPaneState(classification.state),
       reason: classification.reason,
       evidence: classification.evidence,

@@ -73,6 +73,10 @@ interface CustomViewRow {
   last_evaluated_at: string | null;
 }
 
+function customDefinitionHasLimit(definition: string): boolean {
+  return definition.toLowerCase().includes("limit");
+}
+
 export class ViewProjectorError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -151,6 +155,16 @@ export class ViewProjector {
       throw new ViewProjectorError("view_not_found", `view '${viewName}' is not registered (built-in or custom)`);
     }
     return this.runCustom(custom, limit);
+  }
+
+  /** #586: whether showing this view binds `limit` into SQL. The execution view
+   *  never reads it, a custom view with its own LIMIT keeps that one, and an
+   *  unregistered name is refused before any SQL runs. */
+  bindsLimit(viewName: string): boolean {
+    if (viewName === "execution") return false;
+    if ((BUILT_IN_VIEW_NAMES as readonly string[]).includes(viewName)) return true;
+    const custom = this.getCustomView(viewName);
+    return custom !== null && !customDefinitionHasLimit(custom.definition);
   }
 
   list(): { builtIn: BuiltInViewName[]; custom: CustomView[] } {
@@ -328,7 +342,7 @@ export class ViewProjector {
     // Custom view definitions are operator-supplied SQL. Append LIMIT if
     // the operator's SQL does not already include one. We do not parse SQL;
     // operators are responsible for the definition's correctness.
-    const sql = view.definition.toLowerCase().includes("limit")
+    const sql = customDefinitionHasLimit(view.definition)
       ? view.definition
       : `${view.definition.trim().replace(/;$/, "")} LIMIT ${limit}`;
     let rows: Record<string, unknown>[];

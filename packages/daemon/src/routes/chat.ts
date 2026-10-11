@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { ChatRepository } from "../domain/chat-repository.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
+import { queryLimit } from "./query-limit.js";
 
 /** Render control characters (newline, ESC, DEL and the C1 range, whose U+009B
  *  is a single-byte CSI) as visible \x0a / \x1b / \x9b text so a rejected value
@@ -60,12 +61,9 @@ export function chatRoutes(): Hono {
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
     const topic = c.req.query("topic");
-    const limitStr = c.req.query("limit");
     const after = c.req.query("after");
     const since = c.req.query("since");
     const sender = c.req.query("sender");
-    const limit = limitStr ? parseInt(limitStr, 10) : undefined;
-
     const chatRepo = getChatRepo(c);
     // An unparseable since silently matches no rows (julianday returns NULL),
     // which reads as an empty room — refuse it instead. An empty value is not a
@@ -73,6 +71,11 @@ export function chatRoutes(): Hono {
     if (since && !chatRepo.timestampParses(since)) {
       return c.json({ error: `since must be a datetime SQLite can parse, such as 'YYYY-MM-DD HH:MM:SS'; got '${escapeControlChars(since)}'` }, 400);
     }
+    // A topic that hasn't started answers [] before the limit is used.
+    const parsed = queryLimit(c, { used: !topic || chatRepo.topicStarted(rigId, topic) });
+    if (!parsed.ok) return parsed.response;
+    const limit = parsed.limit;
+
     const messages = chatRepo.history(rigId, { topic, limit, after, since, sender });
 
     return c.json(messages);

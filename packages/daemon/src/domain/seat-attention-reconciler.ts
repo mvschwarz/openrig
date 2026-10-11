@@ -9,8 +9,7 @@ import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { defaultListProcesses } from "./resume-metadata-refresher.js";
-import { verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess } from "./native-process-lineage.js";
+import { verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
@@ -122,7 +121,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
   } else if (pid !== null && runtimeMatch === "match" && strictNativeLineage) {
     try {
       lineageMatch = findExactNativeResumeProcess(
-        await (input.listProcesses ?? defaultListProcesses)(),
+        // Full rows (process group, OS executable): the strict finder's launcher rules need them.
+        await (input.listProcesses ?? listNativeProcesses)(),
         pid,
         input.runtime,
         expectedResumeToken!,

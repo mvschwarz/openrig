@@ -215,7 +215,7 @@ export function evidenceAttachment(
 /** A sleep that rejects the moment the owning gateway run stops: the inline rate-limit
  *  retry inside postChatMessage must never outlive the run that started it, or a restart
  *  would leave both the stale retry and the replay's post in flight for one decision. */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(new Error("gateway stopped during rate-limit wait")); return; }
     const onAbort = () => { clearTimeout(timer); reject(new Error("gateway stopped during rate-limit wait")); };

@@ -186,6 +186,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.wake_retry_cap",
       "queue.wake_unconfirmed_window_minutes",
       "queue.wake_swap_grace_seconds",
+      "queue.wake_human_rung",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });

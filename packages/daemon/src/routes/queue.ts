@@ -24,6 +24,7 @@ import { deriveCurrentWork, deriveRole, deriveWorkCandidates, type RoleOrientati
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import type { HumanQuestion } from "../domain/human-questions.js";
+import { queryLimit } from "./query-limit.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -923,7 +924,9 @@ export function queueRoutes(): Hono {
     const sourceSession = c.req.query("sourceSession") || undefined;
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
-    const userLimit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    const parsedLimit = queryLimit(c);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const userLimit = parsedLimit.limit;
     const asSession = c.req.query("as") || undefined;
     const compact = c.req.query("compact") === "1";
     const rig = c.req.query("rig") || undefined;
@@ -1085,9 +1088,12 @@ export function queueRoutes(): Hono {
   // GET /:qitemId — show one
   app.get("/:qitemId", (c) => {
     const qitemId = c.req.param("qitemId");
-    const item = getRepo(c).getById(qitemId);
+    const repo = getRepo(c);
+    const item = repo.getById(qitemId);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
-    return c.json(item);
+    // #1029: the wake path's own routing decision, so a reader never guesses a registered
+    // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
+    return c.json({ ...item, destinationClass: repo.classifyDestinationOf(item.destinationSession).class });
   });
 
   // ---- Inbox routes (mailbox) ----
@@ -1171,8 +1177,9 @@ export function queueRoutes(): Hono {
   app.get("/inbox/list", (c) => {
     const destinationSession = c.req.query("destinationSession");
     if (!destinationSession) return c.json({ error: "destinationSession is required" }, 400);
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
-    return c.json(getInbox(c).listForDestination(destinationSession, limit));
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    return c.json(getInbox(c).listForDestination(destinationSession, parsed.limit));
   });
 
   // ---- Outbox routes ----
@@ -1209,8 +1216,9 @@ export function queueRoutes(): Hono {
   app.get("/outbox/list", (c) => {
     const senderSession = c.req.query("senderSession");
     if (!senderSession) return c.json({ error: "senderSession is required" }, 400);
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
-    return c.json(getOutbox(c).listForSender(senderSession, limit));
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    return c.json(getOutbox(c).listForSender(senderSession, parsed.limit));
   });
 
   return app;

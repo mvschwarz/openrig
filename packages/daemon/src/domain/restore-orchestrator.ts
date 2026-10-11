@@ -1,5 +1,5 @@
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -18,8 +18,9 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { observeClaudeResumeLaunch, verifyClaudePaneProcess, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudeResumeLaunch, verifyClaudePaneProcess, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -85,6 +86,8 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   // is a clean post-reconciliation outcome and rolls up like `resumed`.
   const allFailed = nodes.every((node) => node.status === "failed");
   if (allFailed) return "failed";
+  // A seat running without part of its guidance keeps its own status; the rig isn't fully restored.
+  if (nodes.some((node) => (node.guidanceGaps?.length ?? 0) > 0)) return "partially_restored";
   if (nodes.some((node) => node.status === "fresh" || node.status === "fresh-primed" || node.status === "awaiting-decision" || node.status === "failed" || node.status === "attention_required")) {
     return "partially_restored";
   }
@@ -104,6 +107,22 @@ export const NON_RUNNING_LAUNCH_STATUSES: ReadonlySet<string> = new Set([
  *  successful launch): resumed / rebuilt / fresh / fresh-primed / operator_recovered. */
 export function launchStatusIsRunning(status: string): boolean {
   return !NON_RUNNING_LAUNCH_STATUSES.has(status);
+}
+
+/** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
+ *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
+ *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
+function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
+  { kind: "resume" } | { kind: "fresh" | "decision" | "unrecoverable"; why: string } {
+  const occupant = resolveActiveSnapshotSession(data, nodeId);
+  if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
+  const session = occupant.kind === "resolved" ? occupant.session : null;
+  if (!session) return { kind: "fresh", why: "saves no session for this seat" };
+  const policy = session.restorePolicy ?? "resume_if_possible";
+  if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
+  if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
+  if (!session.resumeType || session.resumeType === "none") return { kind: "fresh", why: "records no resume source for this seat" };
+  return { kind: "resume" };
 }
 
 export interface NarrowLaunchResult {
@@ -492,11 +511,31 @@ export class RestoreOrchestrator {
 
       let isLive = false;
       let isUnknown = false;
+      let idleSession: string | undefined;
 
       for (const session of sessions) {
         try {
           const alive = await this.tmuxAdapter.hasSession(session.sessionName);
-          if (alive) { isLive = true; break; }
+          if (alive) {
+            // A preserved shell is not a running agent. Reuse the process-lineage
+            // check's positive idle-shell evidence; opaque wrappers stay untouched.
+            isLive = true;
+            const binding = this.sessionRegistry.getBindingForNode(node.id);
+            const pane = binding?.tmuxSession === session.sessionName ? binding.tmuxPane : null;
+            const runtime = allNodes.find(current => current.id === node.id)?.runtime ?? node.runtime;
+            // Launch needs consistent positive evidence: both samples idle with the same fingerprint, and the
+            // bound pane still in this session (a recycled pane id could name another session's shell).
+            if (pane && ["claude-code", "codex", "pi", "omp"].includes(runtime ?? "")
+              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
+              && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
+              && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell"
+              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")) {
+              idleSession = session.sessionName;
+              isLive = false;
+              continue;
+            }
+            break;
+          }
         } catch {
           isUnknown = true;
         }
@@ -504,6 +543,26 @@ export class RestoreOrchestrator {
 
       if (isLive) {
         alreadyRunning.push({ nodeId: node.id, logicalId: node.logicalId });
+        continue;
+      }
+      if (idleSession) {
+        // Keep the pane/history and the existing per-target failure contract.
+        // Choosing a fresh versus resumed conversation belongs to the person. Stopping closes the pane, so
+        // stop-then-launch is offered as a resume only when this snapshot can resume the seat; otherwise the
+        // message says what that launch would do instead. The command pins the snapshot that was checked.
+        const outcome = snapshotLaunchOutcome(snapshot.data, node.id);
+        const launchCommand = `rig launch ${rigId} ${node.logicalId} --snapshot-id ${snapshot.id}`;
+        const relaunch = outcome.kind === "resume"
+          ? `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
+          : `Stopping it and launching from snapshot ${snapshot.id} won't resume this conversation: that snapshot ${outcome.why}, so launch would `
+            + `${outcome.kind === "fresh" ? "start a fresh conversation" : outcome.kind === "decision" ? "start nothing and ask for a decision" : "fail"}. `;
+        launched.push({
+          nodeId: node.id, logicalId: node.logicalId, status: "attention_required",
+          error: `Session alive, agent not running for '${node.logicalId}': tmux session '${idleSession}' holds an idle shell, and its pane and history are preserved. `
+            + `The person chooses how to bring the agent back. ${relaunch}`
+            + `To start a blank occupant: rig seat launch ${idleSession} --fresh --stop --reason "<why>". `
+            + `To keep the pane: attach to tmux session '${idleSession}' and restart the agent there by hand.`,
+        });
         continue;
       }
       if (isUnknown) {
@@ -928,7 +987,42 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    return this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    return this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
+  }
+
+  /** A seat that came back running should also have its role, culture and SOP guidance. If its
+   *  guidance file still lacks a managed block it should hold, the seat keeps its true status (a
+   *  live resumed session is still running) and the gap is disclosed on the node and in the
+   *  warnings, so the rig is reported partially_restored, not fully_restored. */
+  private checkRestoredGuidance(
+    result: RestoreNodeResult,
+    node: SnapshotData["nodes"][number],
+    rigId: string,
+    data: SnapshotData,
+    warnings?: string[],
+  ): RestoreNodeResult {
+    // Every status with a live session; attention_required keeps its status and gains the disclosure.
+    if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
+    let guidance: ReturnType<typeof seatGuidance>;
+    try {
+      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
+        this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+    } catch (err) {
+      warnings?.push(`Restore: ${node.logicalId}: could not check its guidance: ${(err as Error).message}`);
+      return { ...result, guidanceGaps: ["(guidance check failed)"] };
+    }
+    if (!guidance || guidance.items.length === 0) return result;
+    let missing: string[];
+    try {
+      missing = missingGuidanceBlocks(guidance, { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") });
+    } catch (err) {
+      missing = [`(could not read ${guidance.targetPath}: ${(err as Error).message})`];
+    }
+    if (missing.length === 0) return result;
+    const gap = `${node.logicalId} is running without part of its guidance: ${guidance.targetPath} lacks the OpenRig blocks ${missing.join(", ")}.`;
+    warnings?.push(`Restore: ${gap}`);
+    return { ...result, guidanceGaps: missing };
   }
 
   /** OPR.0.3.4.2 (B) — roll a just-launched session back to ZERO sessions for
@@ -1019,6 +1113,33 @@ export class RestoreOrchestrator {
       } catch (error) {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
+      }
+    }
+
+    // Root's narrow amendment to D6a (qitem-20261009081619-d1537b0f): before either native
+    // resume path starts the harness, put back only the MISSING managed guidance blocks from
+    // the saved startup selection. Ordinary `rig down` strips them; without this the resumed
+    // seat came back with no role, culture or SOP. Existing blocks are never refreshed; nothing
+    // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
+    if (resumeRequested && resumeToken && launchResult) {
+      let guidance: ReturnType<typeof seatGuidance> = null;
+      try {
+        guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+      } catch (err) {
+        // Guidance never blocks the exact resume; the post-launch check discloses the gap.
+        warnings?.push(`Restore guidance: ${node.logicalId}: could not read its saved guidance selection: ${(err as Error).message}`);
+      }
+      if (guidance && guidance.items.length > 0) {
+        const repair = restoreMissingGuidance(guidance, {
+          exists: existsSync,
+          readFile: (path) => readFileSync(path, "utf-8"),
+          writeFile: (path, content) => writeFileSync(path, content, "utf-8"),
+          mkdirp: (path) => mkdirSync(path, { recursive: true }),
+        });
+        if (repair.restored.length > 0) {
+          warnings?.push(`Restore guidance: ${node.logicalId}: put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files.`);
+        }
+        for (const gap of repair.gaps) warnings?.push(`Restore guidance: ${node.logicalId}: ${gap}`);
       }
     }
 
@@ -1127,6 +1248,9 @@ export class RestoreOrchestrator {
     // explicit+versioned+durable+idempotent contract in the D4 operation-id
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
+    // Amended narrowly (Root, 2026-10-09, qitem-20261009081619-d1537b0f): MISSING managed
+    // guidance blocks are put back before the harness starts (see restoreMissingGuidance above);
+    // existing blocks are still never rewritten, and nothing else is replayed.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;

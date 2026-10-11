@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
-import { identityVerdictDownranksRunning } from "./types.js";
+import { identityVerdictConfirmsSessionMissing, identityVerdictDownranksRunning } from "./types.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
@@ -19,6 +19,7 @@ import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from ".
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 
 // -- Row types for SQL results --
 
@@ -235,16 +236,23 @@ export function deriveNodeLifecycleState(input: {
   return "detached";
 }
 
+/**
+ * Project occupant lifecycle using a verdict already gated to the current binding.
+ * Confirmed session absence suppresses stored active state without rewriting it.
+ */
 function deriveOccupantLifecycle(
   row: InventoryRow,
-  identityVerdict?: SeatIdentityVerdictKind | null,
+  identityVerdict: SeatIdentityVerdict | null,
 ): NodeInventoryEntry["occupantLifecycle"] {
+  if (row.occupant_lifecycle === "active" && identityVerdictConfirmsSessionMissing(identityVerdict)) {
+    return "unknown";
+  }
   if (row.occupant_lifecycle) {
     return row.occupant_lifecycle as NodeInventoryEntry["occupantLifecycle"];
   }
   // OPR.0.4.3.19 — the derived `active` occupant requires a verified (or
   // not-yet-observed) pane identity, mirroring the lifecycleState gate.
-  if (row.session_status === "running" && !identityVerdictDownranksRunning(identityVerdict)) {
+  if (row.session_status === "running" && !identityVerdictDownranksRunning(identityVerdict?.verdict)) {
     return "active";
   }
   return "unknown";
@@ -612,6 +620,11 @@ interface InventoryBuildContext {
   orienteds: Map<string, NodeOriented>;
 }
 
+/**
+ * Build the shared inventory projection from a registration and its rig context.
+ * Apply only current-occupant identity evidence and retain stored status alongside
+ * effective status so readers can distinguish absence from registration history.
+ */
 function buildInventoryEntry(
   db: Database.Database,
   row: InventoryRow,
@@ -635,8 +648,12 @@ function buildInventoryEntry(
   // seat), it does NOT itself down-rank. Only a MATCHING mismatch/pane_missing
   // verdict down-ranks.
   const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
+  // Keep registry history intact; only an applicable, explicit absence changes
+  // the current status. Unavailable tmux and process mismatches are not absence.
+  const sessionStatus = row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict)
+    ? "detached" : row.session_status;
   const lifecycleState = deriveNodeLifecycleState({
-    sessionStatus: row.session_status,
+    sessionStatus,
     startupStatus: row.startup_status,
     restoreOutcome,
     nodeId: row.node_id,
@@ -658,11 +675,12 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    sessionStatus: row.session_status,
+    sessionStatus,
+    storedSessionStatus: row.session_status,
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
-    startupStatus: row.session_status === "running"
+    startupStatus: sessionStatus === "running"
       && identityVerdictDownranksRunning(identityVerdict?.verdict)
       ? "attention_required"
       : row.startup_status as NodeInventoryEntry["startupStatus"],
@@ -672,12 +690,12 @@ function buildInventoryEntry(
     // no proof events, matching deriveOriented's no-challenge branch).
     oriented: orienteds.get(row.node_id) ?? "n-a",
     lifecycleState,
-    occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict?.verdict ?? null),
+    occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict),
     continuityOutcome: deriveContinuityOutcome(row, restore),
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
-    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
+    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
     resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
@@ -706,7 +724,7 @@ function buildInventoryEntry(
     // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
-    heldReason: deriveHeldReason(db, row.rig_id, row.node_id, row.session_status),
+    heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
   };
 }
 
@@ -1061,23 +1079,24 @@ export function attachTerminalActivityAndWork(
   const seatActivity = deps.seatActivity ?? null;
   const assignedByDest = readAssignedWorkBySession(deps.db);
   return entries.map((entry) => {
-    let terminalActive: boolean | null | undefined = undefined;
+    const sessionMissing = identityVerdictConfirmsSessionMissing(entry.identityVerdict);
+    let terminalActive: boolean | null | undefined = sessionMissing ? false : undefined;
     // ARCH RULING 3a947fb1 (FR-7 additive): project the RAW lastActivityAt fact
     // alongside terminalActive from the SAME observation — honest-absence ladder
     // (obs → value, no obs → null, no service → undefined). No ageSeconds
     // sibling; age is derived renderer-side from this fact + a reader clock (C3).
-    let lastActivityAt: string | null | undefined = undefined;
-    if (seatActivity && entry.canonicalSessionName) {
+    let lastActivityAt: string | null | undefined = sessionMissing ? null : undefined;
+    if (!sessionMissing && seatActivity && entry.canonicalSessionName) {
       const obs = seatActivity.getSeatActivity(entry.canonicalSessionName);
       terminalActive = obs ? obs.isActiveWithinWindow : null;
       lastActivityAt = obs ? obs.lastActivityAt : null;
     }
     // S19 — the arbitrated taxonomy state from the ONE oracle, display pre-derived
     // through the single bridge (consumers render, never re-arbitrate).
-    let activityState: NodeInventoryEntry["activityState"] = undefined;
+    let activityState: NodeInventoryEntry["activityState"] = sessionMissing ? null : undefined;
     // Capability-checked: a partial injected double without the S19 surface keeps the
     // pre-taxonomy shape (undefined) rather than faking a null oracle answer.
-    if (seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function") {
+    if (!sessionMissing && seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function") {
       const arb = seatActivity.getSeatStateBySession(entry.canonicalSessionName);
       activityState = arb
         ? {
@@ -1246,6 +1265,20 @@ export async function attachAgentActivity(
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
   return Promise.all(entries.map(async (entry) => {
+    // A cached hook, pane sample or motion cannot revive a confirmed absent
+    // session. Preserve the identity observation's provenance without probing.
+    if (identityVerdictConfirmsSessionMissing(entry.identityVerdict)) {
+      return {
+        ...entry,
+        agentActivity: {
+          state: "unknown",
+          reason: "session_missing",
+          evidenceSource: "tmux_session",
+          sampledAt: entry.identityVerdict!.observedAt,
+          evidence: entry.canonicalSessionName,
+        },
+      };
+    }
     // ACTIVITY D1+D2 — the MOTION reading, resolved once and applied to every exit below.
     const motion = entry.canonicalSessionName
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
@@ -1333,6 +1366,19 @@ export async function attachAgentActivity(
     // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — EXCEPT that a positive
     // `idle` hook now yields to live motion (D2). running/needs_input hooks are untouched.
     if (hookActivity && hookActivity.state !== "unknown") {
+      return {
+        ...entry,
+        agentActivity: withMotion(hookActivity),
+      };
+    }
+
+    // #763: a typed provider-interruption row (at_limit) is positive evidence
+    // even though its state is unknown by construction (it must never count
+    // as waiting-on-a-person). Deliver it instead of the cached pane reading
+    // so a limited seat shows the limit, not idle — but only while current.
+    // A demoted row (aged out or generation-mismatched) falls through to the
+    // structural reading like any other stale hook.
+    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
       return {
         ...entry,
         agentActivity: withMotion(hookActivity),

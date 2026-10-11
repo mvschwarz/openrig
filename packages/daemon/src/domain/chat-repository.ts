@@ -64,6 +64,19 @@ export class ChatRepository {
     );
   }
 
+  /** Whether a topic marker exists for this rig, i.e. history for it can return rows. */
+  topicStarted(rigId: string, topic: string): boolean {
+    return this.topicMarker(rigId, topic) !== undefined;
+  }
+
+  private topicMarker(rigId: string, topic: string): { id: string } | undefined {
+    return this.db
+      .prepare(
+        "SELECT id FROM chat_messages WHERE rig_id = ? AND kind = 'topic' AND topic = ? ORDER BY id DESC LIMIT 1"
+      )
+      .get(rigId, topic) as { id: string } | undefined;
+  }
+
   history(rigId: string, opts?: HistoryOptions): ChatMessage[] {
     const limit = opts?.limit ?? 100;
     const after = opts?.after;
@@ -77,11 +90,7 @@ export class ChatRepository {
 
     // Topic windowing: find the topic marker and constrain to its window
     if (topic) {
-      const topicMarker = this.db
-        .prepare(
-          "SELECT id FROM chat_messages WHERE rig_id = ? AND kind = 'topic' AND topic = ? ORDER BY id DESC LIMIT 1"
-        )
-        .get(rigId, topic) as { id: string } | undefined;
+      const topicMarker = this.topicMarker(rigId, topic);
 
       if (!topicMarker) return [];
 
@@ -121,8 +130,11 @@ export class ChatRepository {
     }
 
     params.push(limit);
-    const sql = `SELECT * FROM chat_messages WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
+    // With a starting point, page forward from it; without one, keep the newest rows.
+    const forward = Boolean(after || since);
+    const sql = `SELECT * FROM chat_messages WHERE ${conditions.join(" AND ")} ORDER BY id ${forward ? "ASC" : "DESC"} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params) as ChatMessageRow[];
+    if (!forward) rows.reverse();
     return rows.map((r) => this.rowToMessage(r));
   }
 

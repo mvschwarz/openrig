@@ -23,6 +23,7 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
 import type { SeatStructuralActivityService } from "../domain/seat-structural-activity-service.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
+import { identityVerdictConfirmsSessionMissing } from "../domain/types.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
@@ -478,10 +479,13 @@ rigsRoutes.post("/:id/archive", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const force = body["force"] === true;
 
-  // AC-6 running-rig guard (daemon-layer, so every client inherits it): a
-  // running/degraded rig requires --force, with a 3-part honest error.
-  const inventory = getNodeInventory(repo.db, rigId);
-  const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+  // Preserve main's action decision: only a stored running session with
+  // confirmed absence was attention_required before this read projection.
+  const lifecycleState = deriveRigLifecycleState(getNodeInventory(repo.db, rigId).map((entry) =>
+    entry.storedSessionStatus === "running" && identityVerdictConfirmsSessionMissing(entry.identityVerdict)
+      ? "attention_required"
+      : entry.lifecycleState
+  ));
   if ((lifecycleState === "running" || lifecycleState === "degraded") && !force) {
     return c.json({
       error: {
