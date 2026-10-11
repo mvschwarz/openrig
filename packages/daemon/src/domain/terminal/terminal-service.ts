@@ -54,9 +54,11 @@ import type {
 /** The v1 provider name set (herdr = proof-gated primary; cmux = best-effort). */
 export type TerminalProviderName = "herdr" | "cmux";
 export const DEFAULT_PROVIDER: TerminalProviderName = "herdr";
+/** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. */
+const DEFAULT_PROVIDER_ORDER: readonly TerminalProviderName[] = ["herdr", "cmux"];
 
 export interface OpenViewRequest {
-  /** Provider name; defaults to herdr when omitted. */
+  /** Provider name. Omitted: the first of herdr, then cmux, that is available and alive; herdr when neither is. */
   provider?: string;
   /** The view argument: a rig name | `mission:<id>` | `slice:<id>` | a saved-view id. */
   view: string;
@@ -167,9 +169,27 @@ export class TerminalService {
     return this.localTmux;
   }
 
+  /** An omitted provider takes the first in DEFAULT_PROVIDER_ORDER that is available and alive. With neither, it stays
+   *  herdr, whose honest failure carries the direct attach commands. A named provider is used as named, errors and all.
+   *  This picks only which provider; choosing a herdr session belongs inside the herdr provider. */
+  private async providerNameFor(req: OpenViewRequest): Promise<{ name: string; fellBack: boolean }> {
+    const named = req.provider?.trim();
+    if (named) return { name: named, fellBack: false };
+    for (const name of DEFAULT_PROVIDER_ORDER) {
+      const candidate = this.deps.resolveProvider(name);
+      if (!candidate) continue;
+      try {
+        if ((await candidate.status()).available && (await candidate.liveness()).alive) return { name, fellBack: name !== DEFAULT_PROVIDER };
+      } catch {
+        // A probe that throws is not an available provider; try the next.
+      }
+    }
+    return { name: DEFAULT_PROVIDER, fellBack: false };
+  }
+
   /** Open a view in the chosen provider. Always returns the one shared result shape. */
   async openView(req: OpenViewRequest): Promise<OpenViewResult> {
-    const providerName = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    const { name: providerName, fellBack } = await this.providerNameFor(req);
     const provider = this.deps.resolveProvider(providerName);
     if (!provider) {
       return errorResult(
@@ -186,6 +206,7 @@ export class TerminalService {
       return errorResult(providerName, "preview_changed", "View membership or layout changed. Refresh the preview before Open; nothing was launched.");
     }
     const notes = composed.kernelLayout ? [`Default kernel view: ${composed.kernelLayout}.`] : [];
+    if (fellBack) notes.push(`Herdr isn't available here (not installed or not answering), so this view uses ${providerName}.`);
     if (composed.kernelLayout && composed.opened.length === 0) {
       return {
         ...errorResult(providerName, "kernel_seats_unavailable", `No kernel conversations are attachable: ${composed.absent.map(member => `${member.seat} (${member.reason})`).join("; ")}`),
@@ -226,7 +247,7 @@ export class TerminalService {
 
   /** Passive: inventory, local has-session and provider probe only. Never openView. */
   async previewView(req: OpenViewRequest): Promise<TerminalPreview | OpenViewResult> {
-    const providerName = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    const { name: providerName } = await this.providerNameFor(req);
     const provider = this.deps.resolveProvider(providerName);
     if (!provider) return errorResult(providerName, "unknown_provider", `unknown provider '${providerName}'`);
     const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);

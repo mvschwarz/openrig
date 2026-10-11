@@ -1339,6 +1339,19 @@ export async function attachAgentActivity(
       };
     }
 
+    // #763: a typed provider-interruption row (at_limit) is positive evidence
+    // even though its state is unknown by construction (it must never count
+    // as waiting-on-a-person). Deliver it instead of the cached pane reading
+    // so a limited seat shows the limit, not idle — but only while current.
+    // A demoted row (aged out or generation-mismatched) falls through to the
+    // structural reading like any other stale hook.
+    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
+      return {
+        ...entry,
+        agentActivity: withMotion(hookActivity),
+      };
+    }
+
     // Hook ABSENT or unknown/stale → consult the CACHED structural observation. This read is
     // capture-FREE: the pane capture already happened on the background SeatStructuralActivityService
     // tick, never here (the healthz-wedge no-per-request-capture invariant is preserved). A structural

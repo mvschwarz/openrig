@@ -476,6 +476,9 @@ export interface RestoreNodeResult {
   error?: string;
   /** Pane evidence captured when status is `attention_required` (L3, optional). */
   attentionEvidence?: string | null;
+  /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
+   *  its own status (a resumed session is still running); this only discloses the gap. */
+  guidanceGaps?: string[];
 }
 
 export type RestoreOutcome =

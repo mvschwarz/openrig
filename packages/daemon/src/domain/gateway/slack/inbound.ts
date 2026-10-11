@@ -52,6 +52,27 @@ export interface SlackBlockActions {
 
 export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string }) => RecordHumanAnswerResult;
 
+/** What a person reads in the thread when OpenRig refuses a click or can't record it. Plain words: what happened, and
+ *  who may answer or what to do instead. The same clicks are refused as before; they just aren't silent. */
+export const CLICK_REPLIES = {
+  unregistered: "This click wasn't recorded: only the person this decision was sent to can answer it, and your Slack account isn't registered with this OpenRig.",
+  unmapped: "This click wasn't recorded: OpenRig can't find the decision this message belongs to. Reply in this thread in words instead.",
+  closed: "This decision is no longer waiting for answers, so this click wasn't recorded.",
+  onRecord: "Your answer is recorded, and this decision is no longer waiting for answers.",
+  someoneElse: "This click wasn't recorded: this decision was sent to someone else, and only they can answer it.",
+  stale: "This click wasn't recorded: the button no longer matches this decision's questions. Reply in this thread in words instead.",
+  unavailable: "This click wasn't recorded: OpenRig couldn't record a button answer here. Reply in this thread in words instead.",
+  notClosed: "Your answers were recorded and sent to the agent that asked, but the decision itself didn't close.",
+} as const;
+
+/** The reply for a click recordHumanAnswer didn't record, by its reason. */
+export function clickNotRecordedReply(reason: string): string {
+  if (reason.startsWith("state-")) return CLICK_REPLIES.closed;
+  if (reason === "not-the-asked-human") return CLICK_REPLIES.someoneElse;
+  if (reason === "unknown-option" || reason === "no-questions") return CLICK_REPLIES.stale;
+  return CLICK_REPLIES.unavailable;
+}
+
 /** The root message a click was made on: buttons live on the decision's root post, whose ts is
  *  the thread map's key (a click inside a thread would carry that thread's root instead). */
 export function clickedRootTs(payload: SlackBlockActions): string | undefined {
@@ -140,8 +161,8 @@ export interface InboundDeps {
   /** #193 — clicks whose continuation (reply row + resolve) failed; retried with the event
    *  dead-letters. Absent → a failed click is only logged. */
   actionDeadLetter?: DeadLetterStore<SlackBlockActions>;
-  /** #193 — tell the human in the decision's thread what a click did. Best-effort. */
-  acknowledgeAnswer?: (input: { channel?: string; threadTs: string; text: string }) => Promise<void>;
+  /** #193 — tell the human in the decision's thread what a click did. Best-effort; false when the post failed. */
+  acknowledgeAnswer?: (input: { channel?: string; threadTs: string; text: string }) => Promise<boolean | void>;
   /** OPR.0.5.6.2 — inbound file transfer. Absent with a file-bearing event →
    *  every file is a NAMED failure on the row ("transfer unavailable"), never
    *  a silent drop of message or file. */
@@ -152,6 +173,7 @@ export interface InboundDeps {
 
 export class InboundRouter {
   private readonly inflight = new Set<string>(); // same-channel message identity double-dispatch guard
+  private readonly replyingTo = new Set<string>(); // click replies being posted now
   private retryPass: Promise<{ retried: number; landed: number }> | undefined;
   constructor(private readonly deps: InboundDeps) {}
 
@@ -329,30 +351,57 @@ export class InboundRouter {
     return r;
   }
 
+  /** The key a live click's one thread reply is recorded under: Slack can redeliver an envelope we already handled, and
+   *  the person must not read a second reply, such as "already closed" after "All answered". The click's user and
+   *  action_ts identify it; a click without an action_ts can't be told from its redelivery, so it replies as before. */
+  private clickReplyKey(payload: SlackBlockActions): string | undefined {
+    const actionTs = payload.actions?.[0]?.action_ts;
+    return actionTs ? `click-reply:${payload.user?.id ?? "-"}:${actionTs}` : undefined;
+  }
+
   private async attemptAction(payload: SlackBlockActions, live: boolean): Promise<{ status: InboundDisposition; reason?: string }> {
     const action = payload.actions?.[0];
     const picked = parseQuestionAction(action?.block_id, action?.action_id);
     if (!picked) return { status: "ignored", reason: "not-a-question-button" };
+    const rootTs = clickedRootTs(payload);
+    // A thread reply about this click: once per live click; the dead-letter retry (live false) only confirms success.
+    // A posted reply is recorded in the durable seen store, so a redelivery or a restart doesn't repeat it; one being
+    // posted is held in memory, so a redelivery arriving meanwhile is skipped. A reply that failed to post isn't
+    // recorded, so a later redelivery can still tell the person.
+    const acknowledge = async (text: string) => {
+      if (!rootTs || !this.deps.acknowledgeAnswer) return; // nothing can post (no bot token): record no reply either
+      const key = live ? this.clickReplyKey(payload) : undefined;
+      if (key && (this.replyingTo.has(key) || this.deps.seen.load().has(key))) return;
+      if (key) this.replyingTo.add(key);
+      try {
+        const posted = await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
+        if (key && posted !== false) this.deps.seen.mark(key, "click-reply");
+      } catch (e) {
+        this.deps.log?.(`click reply failed thread=${rootTs}: ${(e as Error).message}`);
+      } finally {
+        if (key) this.replyingTo.delete(key);
+      }
+    };
     const who = this.deps.resolveSender(payload.user?.id ?? "");
     if (!who.admitted) {
       this.deps.log?.(`click REFUSED — unregistered sender ${payload.user?.id}: ${who.teaching}`);
+      if (live) await acknowledge(CLICK_REPLIES.unregistered);
       return { status: "refused", reason: "unregistered" };
     }
-    const rootTs = clickedRootTs(payload);
     const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel: payload.channel?.id }) : undefined;
     const qitemId = route?.correlationQitemId;
-    if (!rootTs || !route || !qitemId) return { status: "ignored", reason: "unmapped-message" };
+    if (!rootTs || !route || !qitemId) {
+      if (live) await acknowledge(CLICK_REPLIES.unmapped);
+      return { status: "ignored", reason: "unmapped-message" };
+    }
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
     if (!recorded || recorded.status !== "recorded") {
-      return { status: "ignored", reason: recorded?.reason ?? "answers-unavailable" };
+      const reason = recorded?.reason ?? "answers-unavailable";
+      // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
+      // it, after that click's own confirmation failed to post. It was recorded, so say that.
+      if (live) await acknowledge(recorded?.answerOnRecord ? CLICK_REPLIES.onRecord : clickNotRecordedReply(reason));
+      return { status: "ignored", reason };
     }
-    const acknowledge = async (text: string) => {
-      try {
-        await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
-      } catch (e) {
-        this.deps.log?.(`answer acknowledgement failed qitem=${qitemId}: ${(e as Error).message}`);
-      }
-    };
     const lines = formatHumanAnswers(recorded.questions, recorded.answers);
     if (!recorded.complete) {
       this.deps.log?.(`answer recorded qitem=${qitemId} question=${picked.questionId}`);
@@ -382,6 +431,7 @@ export class InboundRouter {
       // The reply row reached the seat, but the decision did not close: say so on the log and
       // the receipt instead of reporting success. Retrying cannot change this outcome.
       this.deps.log?.(`answers complete but resolve not applicable qitem=${qitemId}`);
+      if (live) await acknowledge(CLICK_REPLIES.notClosed);
       return { status: "refused", reason: "resolve-not-applicable" };
     }
     this.deps.log?.(`answers complete qitem=${qitemId} -> ${route.destination}`);

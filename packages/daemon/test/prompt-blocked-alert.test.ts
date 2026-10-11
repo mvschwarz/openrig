@@ -127,6 +127,18 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
   });
 
+  it("HUMAN RUNG EXPLICIT-ONLY: a prompt-blocked seat still reaches a person, since only a person can clear it", async () => {
+    await refusal(); const posts: unknown[] = [];
+    await runWakeLadderTick({ db, queueRepo: repo, resolveOrchestrator: () => null,
+      readPromptState: () => state, retryIntervalSeconds: 1, now: new Date(Date.now() + 60_000), deliveryEngine: engine(posts),
+      humanRung: "explicit-only", loadHumanRegistry: () => ({ ok: true as const, entities: [] }),
+      attemptWake: async () => "failed:fixture", log: () => {},
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(posts).toHaveLength(1);
+    expect(JSON.stringify(posts)).toContain("assigned work");
+  });
+
   it("positive sink control: the existing production operator port posts and records the receipt", async () => {
     const row = await refusal(); const posts: unknown[] = [];
     const result = await engine(posts).dispatchEscalation(row, "interactive prompt blocks outstanding work");

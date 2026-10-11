@@ -1,4 +1,5 @@
 import net from "node:net";
+import { execSync } from "node:child_process";
 import { accessSync, mkdirSync, constants } from "node:fs";
 import { dirname } from "node:path";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
@@ -19,6 +20,14 @@ export interface PreflightCheck {
 export interface PreflightResult {
   ready: boolean;
   checks: PreflightCheck[];
+}
+
+/** Run a preflight probe with its stderr captured, not echoed. Without `stdio`, `execSync` also copies the child's
+ *  stderr to the terminal, so a first `rig daemon start` printed tmux's "error connecting to … (No such file or
+ *  directory)" for the ordinary no-server case. The text still reaches the probe in the thrown error, so a real tmux
+ *  failure is still classified and reported. */
+export async function quietPreflightExec(cmd: string): Promise<string> {
+  return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
 }
 
 interface PreflightDeps {
