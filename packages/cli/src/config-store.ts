@@ -169,6 +169,11 @@ export interface RiggedConfig {
   output: {
     compact: boolean;
   };
+  // Slice 01 (OPR.0.7.0.1) — Codex usage windows in the provider view (default
+  // off). Read by the daemon; the CLI key is the lockstep twin.
+  provider: {
+    usageWindows: boolean;
+  };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -322,6 +327,10 @@ const DEFAULTS = {
   output: {
     compact: false,
   },
+  // Slice 01 — Codex usage windows OFF until the switch is on.
+  provider: {
+    usageWindows: false,
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -437,6 +446,8 @@ export const VALID_KEYS = [
   "terminal.status_bar",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
+  // Slice 01 — Codex usage windows in the provider view; lockstep with the daemon twin.
+  "provider.usage_windows",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -534,6 +545,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
+  "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -614,6 +626,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "output.compact": ["output", "compact"],
+  "provider.usage_windows": ["provider", "usageWindows"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -1145,6 +1158,9 @@ export class ConfigStore {
       },
       output: {
         compact: v("output.compact") as boolean,
+      },
+      provider: {
+        usageWindows: v("provider.usage_windows") as boolean,
       },
       retention: {
         enabled: v("retention.enabled") as boolean,

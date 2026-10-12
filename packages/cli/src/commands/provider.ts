@@ -107,6 +107,48 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const prov = hostUsage[0]?.["provenance"] as Record<string, unknown> | undefined;
       if (prov?.["note"]) console.log(`  provenance: ${prov["note"]}`);
     }
+
+    // Slice 01 — observed usage windows (present only while provider.usage_windows is on). Level and
+    // freshness print side by side, each window with its own observation time; a failed refresh
+    // prints beside the kept reading.
+    if (Array.isArray(m["usage"])) renderUsage(m["usage"] as Array<Record<string, unknown>>);
+  }
+
+  function windowName(w: Record<string, unknown>): string {
+    const mins = w["durationMins"];
+    const label = mins === 300 ? "5h" : mins === 10080 ? "weekly" : typeof mins === "number" ? `${mins} min` : null;
+    return label ? `${label} (${w["window"]})` : String(w["window"]);
+  }
+
+  function renderUsage(rows: Array<Record<string, unknown>>): void {
+    console.log("USAGE (read on request: rig provider status --refresh)");
+    for (const r of rows) {
+      const id = r["identity"] as Record<string, unknown> | null;
+      if (!id) {
+        console.log(`  ${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+        continue;
+      }
+      const labels = [
+        id["email"] ?? "email not reported",
+        id["planType"],
+        id["accountId"] ? `account ${id["accountId"]}` : `account id not reported (${id["partial"] ?? "partial"})`,
+        `bucket ${id["limitId"]}`,
+        "seats unknown",
+      ].filter((x) => x !== null && x !== undefined);
+      console.log(`  ${r["provider"]}  ${labels.join(" · ")}${r["latestFromSource"] ? "" : "  [last seen; a later read answered for another account]"}`);
+      for (const w of (r["windows"] as Array<Record<string, unknown>>) ?? []) {
+        const left = w["remainingPercent"] === null ? "?% left" : `${w["remainingPercent"]}% left`;
+        const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
+        const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
+        console.log(`    ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]} (${fresh})`);
+      }
+      if (r["limitEvidence"]) console.log(`    limit evidence: ${r["limitEvidence"]}`);
+      const last = r["lastRefresh"] as Record<string, unknown> | null;
+      if (last?.["outcome"] === "failed") {
+        console.log(`    refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); last reading kept, marked old`);
+      }
+      console.log(`    current availability: ${r["currentAvailability"]}`);
+    }
   }
 
   // Shared daemon-backed read for the FILTERED blocks: --json verbatim, human = pretty JSON (§3
@@ -126,13 +168,28 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .action(async (opts: { json?: boolean }) => {
+    .option("--refresh", "First read the Codex login's usage windows natively (up to 35 s; needs provider.usage_windows on)")
+    .action(async (opts: { json?: boolean; refresh?: boolean }) => {
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
+      let refreshFailed = false;
+      if (opts.refresh) {
+        // The daemon bounds the read at 35 s plus stop grace; wait a little longer than that.
+        const refreshed = await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider: "codex" }, { timeoutMs: 45_000 });
+        if (refreshed.status === 409) {
+          const p = (refreshed.data ?? {}) as { message?: unknown };
+          console.error(p.message ?? "Codex usage windows are off (provider.usage_windows)");
+          process.exitCode = 1;
+          return;
+        }
+        if (handleHttpError(refreshed, "refresh usage windows")) return;
+        refreshFailed = (refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed";
+      }
       const res = await client.get<Record<string, unknown>>("/api/provider/status");
+      if (refreshFailed) process.exitCode = 1;
       if (handleHttpError(res, "read provider status")) return;
       if (opts.json) console.log(JSON.stringify(res.data));
       else renderStatusHuman(res.data);

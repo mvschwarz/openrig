@@ -42,6 +42,36 @@ export function providerRoutes(): Hono {
     return c.json({ hostUsage: model.hostUsage ?? [] }, 200);
   });
 
+  // Slice 01 (OPR.0.7.0.1) — the ONLY route that starts a native usage read: one bounded Codex read
+  // (35 s), shared by matching overlapping requests. A failed read is a 200 outcome that keeps the
+  // last reading; the switch off is a 409 naming the key. Synchronous because the read is local;
+  // a cross-host refresh needs an asynchronous receipt (later change).
+  router.post("/usage/refresh", async (c) => {
+    const svc = svcOf(c);
+    if (!svc || !svc.refreshUsage) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    let raw: unknown = {};
+    try {
+      raw = await c.req.json();
+    } catch {
+      raw = {};
+    }
+    const provider = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)["provider"] ?? "codex"
+      : "codex";
+    if (provider !== "codex") {
+      return c.json({ error: `usage windows can be refreshed for codex only in this version (got ${String(provider)})` }, 400);
+    }
+    const result = await svc.refreshUsage("codex");
+    if ("disabled" in result) {
+      return c.json({
+        error: "usage_windows_disabled",
+        message: "Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true",
+      }, 409);
+    }
+    const model = await svc.getReadModel();
+    return c.json({ ...result, usage: model.usage ?? [] }, 200);
+  });
+
   router.get("/accounts", async (c) => {
     const svc = svcOf(c);
     if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);

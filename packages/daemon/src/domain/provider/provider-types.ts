@@ -143,4 +143,58 @@ export interface FourBlockReadModel {
    *  row per (host, provider) aggregated from the seat-sourced signal rows. Optional so the
    *  sealed assembler stays untouched; the collect layer always populates it. */
   hostUsage?: HostUsageRow[];
+  /** Slice 01 (OPR.0.7.0.1) — observed usage windows by allowance identity, ADDITIVE and present
+   *  only while `provider.usage_windows` is on. Read from memory; never probed by a read. */
+  usage?: ProviderUsageAllowance[];
+}
+
+/** Slice 01 — allowance identity: (provider, accountId, limitId). Email and plan are labels. */
+export interface UsageAllowanceIdentity {
+  accountId: string | null;
+  limitId: string;
+  email: string | null;
+  planType: string | null;
+  /** Set when the backend supplied no account id: the row is never merged with another. */
+  partial?: string;
+}
+
+export interface UsageWindowRow {
+  /** The provider-native window name (Codex: primary / secondary). */
+  window: string;
+  durationMins: number | null;
+  usedPercent: number | null;
+  /** 100 − usedPercent: a percentage; the provider reports no absolute amount. */
+  remainingPercent: number | null;
+  resetsAt: string | null;
+  /** When the native read answered: freshness ages from this. */
+  observedAt: string;
+  level: "ok" | "nearing" | "exhausted" | "unknown";
+  levelReason?: string;
+  freshness: "fresh" | "stale" | "unavailable";
+  freshnessReason?: string;
+}
+
+export interface UsageRefreshOutcome {
+  at: string;
+  outcome: "ok" | "failed";
+  reason?: string;
+  detail?: string;
+}
+
+export interface ProviderUsageAllowance {
+  provider: ProviderKind;
+  /** Null only for the explicit row of a source never read since the daemon started. */
+  identity: UsageAllowanceIdentity | null;
+  source: { kind: "codex_app_server"; host: "local" };
+  observedAt: string | null;
+  /** Seat links are not observed by this read. */
+  seats: "unknown";
+  windows: UsageWindowRow[];
+  /** The bucket's provider-reported limit evidence (Codex `rateLimitReachedType`), shown once. */
+  limitEvidence: string | null;
+  /** False when a later read of this source answered for another allowance: last seen, kept. */
+  latestFromSource: boolean;
+  lastRefresh: UsageRefreshOutcome | null;
+  currentAvailability: "known" | "unknown";
+  unavailableReason?: string;
 }

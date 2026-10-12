@@ -173,6 +173,8 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "terminal.status_bar",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
+      // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
+      "provider.usage_windows",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
