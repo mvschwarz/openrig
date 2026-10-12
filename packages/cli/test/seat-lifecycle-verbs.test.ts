@@ -285,3 +285,61 @@ describe("fresh launch preview", () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
+  const report = (outcome?: string) => ({
+    ok: true, planOnly: outcome === undefined, ...(outcome ? { outcome } : {}), message: "Done.",
+    seat: { logicalId: "dev.codex", rigName: "r" }, sessionName: "dev-codex@r", pane: "%1", paneShape: "shell_backed",
+    conversationId: "tok", conversationProof: "argv", activity: { state: "working", detail: "Mid-turn." },
+    childProcesses: [{ pid: 9, name: "node" }], codexHome: "/h/.codex", billingRoute: { detail: "Unknown." },
+    account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: null },
+    peers: [{ logicalId: "dev.peer", effect: "Not restarted; account unverified." }], warnings: [],
+  });
+
+  it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const missing = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--json"]).then(() => undefined));
+    expect(missing.exitCode).toBe(1);
+    expect(JSON.parse(missing.logs.join("\n"))).toMatchObject({ code: "missing_reason" });
+    const both = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--plan", "--verify"]).then(() => undefined));
+    expect(both.exitCode).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("plan posts to restart-plan and prints activity, children and peers", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: report() }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--plan"]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/restart-plan/dev%40r", body: {} }]);
+    expect(output.exitCode).toBeUndefined();
+    const text = output.logs.join("\n");
+    expect(text).toContain("Activity: working. Mid-turn.");
+    expect(text).toContain("Child processes (stopped with Codex): node 9.");
+    expect(text).toContain("Peer dev.peer: Not restarted; account unverified.");
+  });
+
+  it.each([
+    ["restarted_account_unverified", false, undefined], ["incomplete", false, 1], ["not_started", true, 1], ["native_unknown", true, 1],
+  ] as const)("restart %s (json=%s) exits %s", async (outcome, json, exitCode) => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: report(outcome) }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "new account", "--operator", "op@r",
+      ...(json ? ["--json"] : [])]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/restart/dev%40r", body: { reason: "new account", operator: "op@r" } }]);
+    expect(output.exitCode).toBe(exitCode);
+    if (json) expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ outcome });
+    else expect(output.logs[0]).toContain(`${outcome}: dev.codex@r`);
+  });
+
+  it("verify posts the expected account and prints the outcome", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const data = { ok: true, outcome: "moved", message: "Moved.", toolTurn: { state: "observed", completed: 1, errors: 0 }, accountEvidence: { detail: "Matched." } };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--verify", "--expect-account", "me@example.com"]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/restart-verify/dev%40r", body: { expectAccount: "me@example.com" } }]);
+    expect(output.logs.join("\n")).toContain("moved: Moved.");
+    expect(output.exitCode).toBeUndefined();
+  });
+});
