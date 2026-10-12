@@ -1,16 +1,16 @@
 // A seat's working guidance across `rig down` then `rig up --existing` (an exact resume).
 //
-// The specimen (0.6.6, ovh08, 2026-10-09): a fresh launch merged the seat's role, culture and SOP
+// The case (0.6.6, 2026-10-09): a fresh launch merged the seat's role, culture and SOP
 // into its CLAUDE.md as OpenRig managed blocks. After `rig down` and `rig up <rig> --existing`, the
 // lead resumed on the same session and the result said `fully_restored`, but the cwd had no
 // CLAUDE.md: ordinary teardown strips OpenRig's managed blocks (deleting a file left empty), and
-// the OPR.0.5.7.1 D6a containment replays no startup content into an exact resume.
+// the replay containment sends no startup content into an exact resume.
 //
-// Root's narrow amendment to D6a (qitem-20261009081619-d1537b0f), pinned here: before the native
-// harness starts, only MISSING managed guidance blocks are put back from the saved startup
-// selection. Existing blocks and user text are untouched; nothing is sent to the conversation; no
-// startup action runs; the activity-hook restore is unchanged. A block that can't be put back is
-// disclosed without changing the seat's native status, and the rig is not fully_restored.
+// The narrow exception, pinned here: before the native harness starts, only MISSING managed
+// guidance blocks are put back from the saved startup selection. Existing blocks and user text are
+// untouched; nothing is sent to the conversation; no startup action runs; the activity-hook restore
+// is unchanged. A block that can't be put back is disclosed without changing the seat's native
+// status, and the rig is not fully_restored.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";

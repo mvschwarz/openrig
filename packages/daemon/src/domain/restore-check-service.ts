@@ -256,6 +256,10 @@ export class RestoreCheckService {
     this.deps = deps;
   }
 
+  /**
+   * Compute scoped restore checks and recovery guidance from daemon, rig and
+   * seat evidence without launching occupants.
+   */
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
     // rev1-r2 no-false-ready: ready-seat caveat signals that default compact
@@ -383,7 +387,7 @@ export class RestoreCheckService {
         checks.push(transcriptCheck);
         rigChecks.push(transcriptCheck);
 
-        const resumeCheck = this.checkResumePath(node);
+        const resumeCheck = this.checkResumePath(node, rig.name);
         checks.push(resumeCheck);
         rigChecks.push(resumeCheck);
 
@@ -870,7 +874,11 @@ export class RestoreCheckService {
     };
   }
 
-  private checkResumePath(node: NodeInventoryEntry): CheckEntry {
+  /**
+   * Report available seat attachment or a read-only restore-plan command.
+   * Missing attachment does not establish whether an earlier token can resume.
+   */
+  private checkResumePath(node: NodeInventoryEntry, rigName: string): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
     if (node.tmuxAttachCommand) {
       return { check: `seat.${session}.resume-path`, status: "green", evidence: node.tmuxAttachCommand, remediation: "" };
@@ -878,7 +886,8 @@ export class RestoreCheckService {
     return {
       check: `seat.${session}.resume-path`, status: "yellow",
       evidence: "No attach command available",
-      remediation: "Session will be created fresh on restore",
+      // Whether restore resumes, starts fresh or stops for a decision is per seat; the plan says which.
+      remediation: `No live session to attach. Preview what restore would do for this seat with: rig up ${shellQuote(rigName)} --existing --plan`,
       remediationSafe: true,
     };
   }

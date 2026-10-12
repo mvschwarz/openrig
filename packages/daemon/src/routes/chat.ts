@@ -29,7 +29,13 @@ export function chatRoutes(): Hono {
     const rigId = c.req.param("rigId");
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
-    const body = await c.req.json<{ sender?: string; body?: string }>().catch(() => ({} as { sender?: string; body?: string }));
+    const payload: unknown = await c.req.json().catch(() => null);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return c.json({ error: "Expected a JSON object" }, 400);
+    }
+    const body = payload as { sender?: unknown; body?: unknown };
+    if (body.sender != null && typeof body.sender !== "string") return c.json({ error: "sender must be a string" }, 400);
+    if (!Array.isArray(body.body) && body.body !== undefined && typeof body.body !== "string" && typeof body.body !== "number") return c.json({ error: "body must be a string or number" }, 400);
     if (!body.body) return c.json({ error: "Missing body" }, 400);
 
     // P21 I5: the chat sender is the transport-derived identity, never body.sender (the `?? "anonymous"`
@@ -41,7 +47,7 @@ export function chatRoutes(): Hono {
     const chatRepo = getChatRepo(c);
     const eventBus = getEventBus(c);
 
-    const msg = chatRepo.send(rigId, sender, body.body);
+    const msg = chatRepo.send(rigId, sender, body.body as string);
 
     eventBus.emit({
       type: "chat.message",
@@ -149,7 +155,17 @@ export function chatRoutes(): Hono {
     const rigId = c.req.param("rigId");
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
-    const body = await c.req.json<{ sender?: string; topic?: string; body?: string }>().catch(() => ({} as { sender?: string; topic?: string; body?: string }));
+    const payload: unknown = await c.req.json().catch(() => null);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return c.json({ error: "Expected a JSON object" }, 400);
+    }
+    const body = payload as { sender?: unknown; topic?: unknown; body?: unknown };
+    if (body.sender != null && typeof body.sender !== "string") return c.json({ error: "sender must be a string" }, 400);
+    // Arrays retain the existing SQLite binding path, including combined topic/body arrays.
+    if (!Array.isArray(body.topic) && !Array.isArray(body.body)) {
+      if (body.topic !== undefined && typeof body.topic !== "string" && typeof body.topic !== "number") return c.json({ error: "topic must be a string or number" }, 400);
+      if (body.body != null && typeof body.body !== "string" && typeof body.body !== "number") return c.json({ error: "body must be a string or number" }, 400);
+    }
     if (!body.topic) return c.json({ error: "Missing topic" }, 400);
 
     // P21 I5: the topic sender is the transport-derived identity, never body.sender (P18 deliver-and-label:
@@ -160,7 +176,7 @@ export function chatRoutes(): Hono {
     const chatRepo = getChatRepo(c);
     const eventBus = getEventBus(c);
 
-    const msg = chatRepo.sendTopic(rigId, sender, body.topic, body.body);
+    const msg = chatRepo.sendTopic(rigId, sender, body.topic as string, body.body as string | undefined);
 
     eventBus.emit({
       type: "chat.message",
