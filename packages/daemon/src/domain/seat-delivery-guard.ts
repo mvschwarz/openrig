@@ -142,6 +142,13 @@ export class SeatDeliveryGuard {
     return true;
   }
 
+  /** Serialize filesystem/configuration work with launches and delivery, without
+   * granting an input lease or requiring the seat's typing guard to be disabled. */
+  async configure<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
+    if (this.ownsLifecycle(nodeId)) return fn();
+    return this.serial(nodeId, fn);
+  }
+
   /** Multi-seat restore takes leases in stable order before any rig mutation.
    * Nested per-seat launch joins these leases; it must not reacquire them. */
   async lifecycle<T>(nodeIds: string[], fn: () => Promise<T>): Promise<T> {

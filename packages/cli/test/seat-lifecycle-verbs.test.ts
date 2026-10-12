@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
 import { seatCommand } from "../src/commands/seat.js";
+import { DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -146,6 +147,69 @@ describe("rig seat set-permissions", () => {
       body: { mode: "floor", reason: "future launch choice", operator: "human@example.test" } }]);
     expect(logs.join("\n")).toContain("Permission mode: floor");
     expect(exitCode).toBeUndefined();
+  });
+});
+
+describe("rig seat set-cwd", () => {
+  const args = ["node", "rig", "seat", "set-cwd", "planner@project", "--cwd", "/srv/remote/space dir/../planner", "--reason", "isolate planning"];
+
+  it("requires cwd and reason before contacting the daemon", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: {} }, calls);
+    await expect(makeCommand(deps).parseAsync(args.slice(0, 5))).rejects.toThrow(/--cwd/);
+    await expect(makeCommand(deps).parseAsync(args.slice(0, 7))).rejects.toThrow(/--reason/);
+    expect(calls).toEqual([]);
+  });
+
+  it("forwards the daemon-host path unchanged and describes the future-launch effect", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, seat: { logicalId: "planner", rigName: "project" },
+      from: "/srv/shared", to: "/srv/remote/planner", changed: true, effect: "next_launch", warnings: ["Retained local guidance"] } }, calls);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--operator", "operator@project"]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/set-cwd/planner%40project", body: {
+      cwd: "/srv/remote/space dir/../planner", reason: "isolate planning", operator: "operator@project",
+    } }]);
+    expect(logs.join("\n")).toContain("/srv/remote/planner");
+    expect(logs.join("\n")).toContain("existing process keeps its current directory");
+    expect(warn).toHaveBeenCalledWith("Warning: Retained local guidance");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it.each([200, 409, 500])("preserves the daemon response in JSON, including failed preparation (HTTP %s)", async status => {
+    const data = status === 200
+      ? { ok: true, changed: false, to: "/srv/remote/planner", effect: "next_launch", warnings: [] }
+      : { ok: false, code: "cwd_preparation_failed", message: "Selection was not committed", preparedCwd: "/srv/remote/planner", warnings: ["Inspect prepared files"] };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status, data }, calls)).parseAsync([...args, "--json"]).then(() => {}));
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!)).toEqual(data);
+    expect(warn).not.toHaveBeenCalled();
+    expect(exitCode).toBe(status === 200 ? undefined : status === 500 ? 2 : 1);
+  });
+
+  it("treats a timeout as an unknown outcome and directs the caller to status", async () => {
+    const post = vi.fn(async () => { throw new DaemonTimeoutError("directory preparation timed out"); });
+    const deps = { ...makeDeps({ status: 200, data: {} }, []), clientFactory: () => ({ post }) as never };
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--json"]).then(() => {}));
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/seat/set-cwd/planner%40project", expect.any(Object), { timeoutMs: 120_000 });
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code: "set_cwd_outcome_unknown", status: "unknown",
+      guidance: expect.stringContaining("rig seat status planner@project") });
+    expect(exitCode).toBe(1);
+  });
+
+  it("prints protected destination paths and recovery guidance for a conflict", async () => {
+    const protectedPath = "/srv/remote/planner/.claude/agents/reviewer.md";
+    const data = { ok: false, code: "cwd_destination_conflict", message: "Destination files conflict; cwd was not committed",
+      guidance: "Use a clean destination, or inspect and move/merge the reported files before retrying.",
+      warnings: [`Protected destination file: ${protectedPath}`] };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, [])).parseAsync(args).then(() => {}));
+    expect(warn).toHaveBeenCalledWith(`Warning: Protected destination file: ${protectedPath}`);
+    expect(errors.join("\n")).toContain("cwd was not committed");
+    expect(errors.join("\n")).toContain("inspect and move/merge");
+    expect(exitCode).toBe(1);
   });
 });
 

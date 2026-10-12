@@ -20,6 +20,11 @@ import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
+import fs from "node:fs";
+import path from "node:path";
+import { resolveConcreteHint, type NodeBinding } from "./runtime-adapter.js";
+import { ProjectionManifestStore } from "./projection-manifest-store.js";
+import { planCwdPreparation, recordCwdPreparation } from "./seat-cwd-preparation.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -67,6 +72,12 @@ export interface SeatRefusal {
     | "seat_not_found"
     | "seat_ambiguous"
     | "missing_model"
+    | "missing_cwd"
+    | "invalid_cwd"
+    | "cwd_preparation_failed"
+    | "cwd_persistence_failed"
+    | "cwd_configuration_changed"
+    | "cwd_destination_conflict"
     | "missing_reason"
     | "permission_selection_refused"
     | "no_session"
@@ -101,6 +112,18 @@ export interface SeatDescriptor {
 export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
   | SeatRefusal;
+
+export type SetCwdResult =
+  | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean;
+      effect: "next_launch"; warnings: string[] }
+  | (SeatRefusal & { preparedCwd?: string; warnings?: string[] });
+
+interface SetCwdInput {
+  seatRef: string;
+  cwd: string;
+  reason: string;
+  operator?: string | null;
+}
 
 export type StopSeatResult =
   | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string }
@@ -219,6 +242,139 @@ export class SeatLifecycleService {
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
     return { ok: true, seat, from, to: model, changed: true };
+  }
+
+  /** Prepare a future launch directory without moving or replacing the current occupant.
+   * Filesystem preparation precedes the atomic cwd + audit write. A failed preparation
+   * may leave files in the destination; it never commits a partly prepared launch cwd.
+   */
+  async setCwd(input: SetCwdInput): Promise<SetCwdResult> {
+    input = { ...input };
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    if (!input.cwd?.trim()) return { ok: false, code: "missing_cwd", message: "An absolute working directory is required (--cwd)." };
+    if (!path.isAbsolute(input.cwd) || input.cwd.includes("\0")) {
+      return { ok: false, code: "invalid_cwd", message: "The working directory must be an absolute path on the daemon's host." };
+    }
+    const to = path.resolve(input.cwd);
+    if (to === path.parse(to).root) {
+      return { ok: false, code: "invalid_cwd", message: "Choose a project directory, not a filesystem root, for managed startup files." };
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const prepare = () => this.prepareCwd({ ...input, cwd: to }, resolved.nodeId);
+    return guard ? guard.configure(resolved.nodeId, prepare) : prepare();
+  }
+
+  private async prepareCwd(input: SetCwdInput, expectedNodeId: string): Promise<SetCwdResult> {
+    let to = input.cwd;
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    if (resolved.nodeId !== expectedNodeId) {
+      return { ok: false, code: "cwd_configuration_changed", message: "The seat reference changed while waiting to prepare its directory." };
+    }
+    const seat = this.describe(resolved);
+    const node = this.rigRepo.getRig(seat.rigId)?.nodes.find(candidate => candidate.id === seat.nodeId);
+    if (!node) return { ok: false, code: "seat_not_found", message: "The seat no longer exists.", guidance: SEAT_LOOKUP_GUIDANCE };
+    const from = node.cwd;
+    const startup = this.readStartupContext(node.id, to);
+    if (!startup.ok) return startup.refusal;
+    if (!node.runtime || startup.context.runtime !== node.runtime) {
+      return { ok: false, code: "startup_context_runtime_mismatch", message: "The saved startup context belongs to a different runtime." };
+    }
+    const adapter = this.runtimeAdapters[node.runtime];
+    if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
+
+    const warnings: string[] = [];
+    // Resolve legacy auto hints once, then pass concrete hints to the adapter. No
+    // send_text file or startup action can enter this filesystem-only operation.
+    const files: ResolvedStartupFile[] = [];
+    for (const file of startup.context.resolvedStartupFiles) {
+      if (!file.appliesOn.includes("fresh_start") || file.deliveryHint === "send_text") continue;
+      try {
+        const hint = file.deliveryHint === "auto"
+          ? resolveConcreteHint(file.path, fs.readFileSync(file.absolutePath, "utf8")) : file.deliveryHint;
+        if (hint !== "send_text") files.push({ ...file, deliveryHint: hint });
+      } catch (error) {
+        const detail = `Startup file ${file.path}: ${(error as Error).message}`;
+        if (file.required) return { ok: false, code: "cwd_preparation_failed", message: detail, warnings };
+        warnings.push(detail);
+      }
+    }
+
+    try {
+      fs.mkdirSync(to, { recursive: true });
+      to = fs.realpathSync(to);
+      if (to === path.parse(to).root || !fs.statSync(to).isDirectory()) throw new Error("Destination must be a project directory.");
+    } catch (error) {
+      return { ok: false, code: "invalid_cwd", message: `Cannot use the requested working directory: ${(error as Error).message}` };
+    }
+    const oldBinding = this.sessionRegistry.getBindingForNode(node.id);
+    const managedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(seat.rigId);
+    let binding: NodeBinding = {
+      id: oldBinding?.id ?? `cwd:${node.id}`, nodeId: node.id,
+      attachmentType: oldBinding?.attachmentType ?? "tmux",
+      tmuxSession: oldBinding?.tmuxSession ?? deriveCanonicalFromEntry(resolved.entry),
+      tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null,
+      updatedAt: oldBinding?.updatedAt ?? new Date().toISOString(),
+      cwd: to, model: node.model ?? undefined, effort: node.effort ?? undefined,
+      codexConfigProfile: node.codexConfigProfile ?? undefined,
+      launchPosture: this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
+        ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture ?? "floor",
+      ...(managedBlockFile ? { claudeManagedBlockFile: managedBlockFile } : {}),
+    };
+    const inspect = `Inspect the configured directory with: rig seat status ${input.seatRef}`;
+    const preparationGuidance = `Startup preparation may have written files in the requested directory or runtime-managed state directories. ${inspect} The previous directory's files are not cleaned up.`;
+    try {
+      binding = new NativePermissionStore(this.db).apply(binding, node.runtime);
+      const manifest = new ProjectionManifestStore(this.db);
+      const preparation = planCwdPreparation({ ...startup.context.plan, cwd: to }, files, binding, adapter, manifest);
+      warnings.push(...preparation.warnings);
+      if (preparation.conflicts.length) {
+        warnings.push(...preparation.conflicts.map(copy => `Protected destination file: ${copy.targetPath}`));
+        return { ok: false, code: "cwd_destination_conflict", preparedCwd: to, warnings,
+          message: "Destination resource files conflict with the saved startup context; no startup files were written and the cwd was not committed.",
+          guidance: "Use a clean destination, or inspect and move/merge the reported files before retrying." };
+      }
+      const projection = await adapter.project(preparation.plan, binding);
+      warnings.push(...(projection.warnings ?? []));
+      if (projection.failed.length) throw new Error(projection.failed.map(f => `${f.effectiveId}: ${f.error}`).join("; "));
+      const delivery = await adapter.deliverStartup(preparation.files, binding, async () => { throw new Error("Interactive startup is deferred until launch."); });
+      warnings.push(...(delivery.warnings ?? []));
+      if (delivery.failed.length) throw new Error(delivery.failed.map(f => `${f.path}: ${f.error}`).join("; "));
+      warnings.push(...this.db.transaction(() => recordCwdPreparation(preparation, manifest))());
+    } catch (error) {
+      return { ok: false, code: "cwd_preparation_failed", message: `Working directory selection was not committed: ${(error as Error).message}`,
+        guidance: preparationGuidance, preparedCwd: to, warnings };
+    }
+
+    let persisted: PersistedEvent | null = null;
+    const changed = from !== to;
+    try {
+      const refusal = this.db.transaction((): SeatRefusal | null => {
+        // The shared guard serializes normal writers. Check persisted configuration
+        // as well: an import or another connection must not be silently overwritten.
+        const current = this.resolveSeat(input.seatRef);
+        const currentStartup = this.readStartupContext(node.id, to);
+        if ("code" in current || current.nodeId !== node.id || current.entry.cwd !== from
+          || current.entry.runtime !== node.runtime || !currentStartup.ok || currentStartup.context.hash !== startup.context.hash) {
+          return { ok: false, code: "cwd_configuration_changed", message: "Seat configuration changed while preparing its directory; the new cwd was not committed.", guidance: inspect };
+        }
+        if (changed) {
+          if (!this.rigRepo.setNodeCwd(node.id, to, from)) throw new Error("The seat's saved working directory changed.");
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.cwd_changed", rigId: seat.rigId,
+            nodeId: node.id, logicalId: seat.logicalId, from, to, reason: input.reason.trim(), operator: input.operator ?? null });
+        }
+        return null;
+      })();
+      if (refusal) return { ...refusal, preparedCwd: to, warnings };
+    } catch (error) {
+      return { ok: false, code: "cwd_persistence_failed", message: `Working directory was not committed: ${(error as Error).message}`,
+        guidance: preparationGuidance, preparedCwd: to, warnings };
+    }
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return { ok: true, seat, from, to, changed, effect: "next_launch", warnings };
   }
 
   async setPermissions(input: { seatRef: string; mode: string; reason: string; actor: string }): Promise<

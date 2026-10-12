@@ -38,6 +38,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  launch_cwd?: string | null;
   session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
@@ -159,6 +160,7 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Rig: ${status.rig_name}`);
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
+  if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   if (status.typingGuard) {
     const g = status.typingGuard;
     console.log(`Typing guard: ${g.effective ? "on" : "off"}${g.pending ? ` (activation pending; requested ${g.desired ? "on" : "off"})` : ""}; ${g.heldCount} retained`);
@@ -506,7 +508,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "continue" | "stop" | "clean",
+    path: "set-model" | "set-cwd" | "set-permissions" | "launch" | "continue" | "stop" | "clean",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -519,7 +521,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch" || path === "continue"
+      res = path === "launch" || path === "continue" || path === "set-cwd"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
@@ -527,12 +529,12 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
+      if ((path !== "launch" && path !== "continue" && path !== "set-cwd") || !(err instanceof DaemonTimeoutError)) throw err;
       const error = {
         ok: false as const,
-        code: `${path}_outcome_unknown`,
+        code: `${path.replaceAll("-", "_")}_outcome_unknown`,
         status: "unknown",
-        message: `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
+        message: `The CLI timed out waiting for the daemon; the ${path === "set-cwd" ? "directory preparation" : path === "continue" ? "continuation" : "launch"} may still be in progress.`,
         guidance: `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
@@ -545,7 +547,7 @@ identity remains unverified; a version number alone cannot clear it.
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
-    if (path === "launch" || path === "continue") {
+    if (path === "launch" || path === "continue" || path === "set-cwd") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
@@ -602,6 +604,32 @@ resume/successor launch reads it at call time. Examples:
         }
         console.log(`Model for ${s?.logicalId}@${s?.rigName}: ${String(data["from"] ?? "none")} -> ${String(data["to"])} (audited).`);
         console.log("The next managed resume/successor launch composes the new model.");
+      });
+    });
+
+  cmd
+    .command("set-cwd")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--cwd <directory>", "Absolute working directory on the daemon's host; created if missing")
+    .requiredOption("--reason <text>", "Audit reason for the future launch directory")
+    .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
+    .option("--json", "JSON output for agents")
+    .description("Prepare startup files and save an existing seat's working directory for future launches")
+    .addHelpText("after", `
+Prepares filesystem startup material before saving the directory. Interactive
+startup messages and actions run at launch. An existing process keeps its cwd
+until you relaunch it. The seat's identity, queue and session history are retained.
+Conflicting copied destination files are refused before startup writes; inspect
+the reported paths or choose a clean destination before retrying.
+Files in the old directory are left for explicit cleanup after checking other users.
+Example:
+  rig seat set-cwd planning-lead@project --cwd /work/project/seats/planning-lead --reason "isolate planning"`)
+    .action(async (seat: string, opts: { cwd: string; reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("set-cwd", seat, { cwd: opts.cwd, reason: opts.reason, operator: opts.operator }, opts, data => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        console.log(`Launch directory for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])}${data["changed"] === false ? " (already selected)" : " (audited)"}.`);
+        console.log("Startup files prepared. An existing process keeps its current directory until a normal relaunch.");
+        console.log("Review shared use before cleaning up files in the previous directory.");
       });
     });
 
