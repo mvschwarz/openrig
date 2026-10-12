@@ -254,7 +254,7 @@ function agentDetailLines(
   const pendingRows = session ? rowsForAgent(snap, session, [snap.pending]) : [];
   const recentRows = session ? rowsForAgent(snap, session, [snap.recentlyFinished]) : [];
   const needs = session ? snap.needs.filter((item) => item.target === session) : [];
-  const visibleAssigned = currentRows.length + pendingRows.length;
+  const visibleAssigned = new Set([...currentRows, ...pendingRows].map(row => row.qitemId)).size;
   const assigned = agent.assignedWorkCount ?? visibleAssigned;
   const pending = agent.pendingWorkCount ?? pendingRows.length;
   const inProgress = agent.inProgressWorkCount ?? currentRows.filter((row) => row.state === "in-progress").length;

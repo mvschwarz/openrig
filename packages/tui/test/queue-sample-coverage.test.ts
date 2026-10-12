@@ -17,14 +17,14 @@ import type { FleetSnapshot, ViewState } from "../src/types.js";
 const databases: ReturnType<typeof createDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function fixture() {
+function fixture(rig = "selected", seat = "dev.worker") {
   const db = createDb(); databases.push(db); migrate(db, ALL_MIGRATIONS);
   const repo = new QueueRepository(db, new EventBus(db));
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("queueRepo" as never, repo); await next(); });
   app.route("/api/queue", queueRoutes());
   let sequence = 0;
-  const seed = (destination = "dev.worker@selected", state = "blocked", blocker = "fold:test") => {
+  const seed = (destination = `${seat}@${rig}`, state = "blocked", blocker = "fold:test") => {
     const id = `coverage-${sequence++}`;
     const at = new Date(sequence * 1000).toISOString();
     db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body,blocked_on) VALUES(?,?,?,?,?,?,?,?)")
@@ -32,24 +32,24 @@ function fixture() {
     return id;
   };
   const calls: string[] = [];
-  const node = { logicalId: "dev.worker", podNamespace: "dev", nodeKind: "agent", runtime: "codex", lifecycleState: "running", sessionStatus: "running", canonicalSessionName: "dev.worker@selected", resolvedSpecName: null };
+  const node = { logicalId: seat, podNamespace: "dev", nodeKind: "agent", runtime: "codex", lifecycleState: "running", sessionStatus: "running", canonicalSessionName: `${seat}@${rig}`, resolvedSpecName: null };
   const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async input => {
     const u = new URL(String(input)); calls.push(u.pathname + u.search);
     if (u.pathname === "/api/queue/list") return app.request(u.pathname + u.search);
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
-    if (u.pathname === "/api/rigs/summary") return Response.json([{ id: "selected-id", name: "selected", lifecycleState: "running" }]);
-    if (u.pathname === "/api/rigs/selected-id/nodes") return Response.json([node]);
+    if (u.pathname === "/api/rigs/summary") return Response.json([{ id: `${rig}-id`, name: rig, lifecycleState: "running" }]);
+    if (u.pathname === `/api/rigs/${rig}-id/nodes`) return Response.json([node]);
     if (u.pathname === "/api/queue/recent-transitions" || u.pathname === "/api/specs/library") return Response.json([]);
     if (u.pathname === "/api/health") return Response.json({ schema: "openrig.health-list/v0alpha1", total: 0, limit: 200, records: [], truncated: false, evaluatedAt: null });
     throw Error(`Unexpected fixture route ${u.pathname}`);
   }) as typeof fetch });
   const context = (scope: "host" | "rig" | "pod" | "agent") => ({ section: "topology", viewTab: "table", drill: [
     { kind: "host", name: "fixture" },
-    ...(scope !== "host" ? [{ kind: "rig", name: "selected" }] : []),
+    ...(scope !== "host" ? [{ kind: "rig", name: rig }] : []),
     ...(scope === "pod" || scope === "agent" ? [{ kind: "pod", name: "dev" }] : []),
-    ...(scope === "agent" ? [{ kind: "agent", name: "dev.worker" }] : []),
+    ...(scope === "agent" ? [{ kind: "agent", name: seat }] : []),
   ] }) as ViewState;
-  const read = (scope: "host" | "rig" | "pod" | "agent") => hydrateSnapshot(client, undefined, null, null, "selected", context(scope));
+  const read = (scope: "host" | "rig" | "pod" | "agent") => hydrateSnapshot(client, undefined, null, null, rig, context(scope));
   const render = (snap: FleetSnapshot, scope: "host" | "rig" | "pod" | "agent") => {
     const state = { ...createViewState({ instanceId: "fixture", getSnapshot: () => snap }).get(), ...context(scope) };
     return renderScreen(state, snap, { cols: 160, rows: 100 }).lines.join("\n");
@@ -106,6 +106,13 @@ describe("bounded queue route to topology/Pulse render", () => {
     expect(f.render(snap, "agent")).toContain("CURRENT WORK · 1");
     expect(f.render(snap, "agent")).toContain("1 assigned");
     const model = buildPulseModel(snap); expect(model.exceptions.flatMap(section => section.rows)).toHaveLength(1);
+  });
+
+  it("pending attention overlap counts once in assigned depth", async () => {
+    const f = fixture("kernel", "human-person"); f.seed(undefined, "pending", "");
+    const snap = await f.read("agent"); expect(snap.attention).toHaveLength(1); expect(snap.pending).toHaveLength(1);
+    expect(f.render(snap, "agent")).toContain("1 assigned");
+    expect(f.render(snap, "agent")).not.toContain("2 assigned");
   });
 
   it("a failed list is unavailable, while tabs without queues still make no queue-list read", async () => {
