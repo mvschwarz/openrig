@@ -138,8 +138,8 @@ function scanHeaders(lines: string[]): HeaderScan {
         blankAfterList = false;
       }
     }
-    const containerIndent = fence?.listIndent ?? listIndent;
-    const fenceLine = containerIndent > 0 && columns >= containerIndent
+    const containerIndent: number = fence?.listIndent ?? listIndent;
+    const fenceLine: string = containerIndent > 0 && columns >= containerIndent
       ? " ".repeat(columns - containerIndent) + boundaryLine.slice(leading.length)
       : boundaryLine;
     const fenceMatch = fenceLine.match(/^ {0,3}(`{3,}|~{3,})/);
