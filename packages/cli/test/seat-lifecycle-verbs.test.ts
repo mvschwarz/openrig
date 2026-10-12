@@ -363,4 +363,13 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     expect(output.logs.join("\n")).toContain("moved: Moved.");
     expect(output.exitCode).toBeUndefined();
   });
+
+  it("verify exits 1 unless the outcome is moved, with and without --json", async () => {
+    const data = { ok: true, outcome: "restarted_account_unverified", message: "Account unverified.", toolTurn: { state: "observed", completed: 1, errors: 0 }, accountEvidence: { detail: "Not matched." } };
+    for (const json of [[], ["--json"]]) {
+      const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+        "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--verify", "--expect-account", "me@example.com", ...json]).then(() => undefined));
+      expect(output.exitCode).toBe(1);
+    }
+  });
 });

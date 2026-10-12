@@ -546,8 +546,11 @@ identity remains unverified; a version number alone cannot clear it.
       process.exitCode = 1;
       return;
     }
-    // A restart that ran answers 200 with its outcome; only a verified replacement exits 0.
-    const restartFailed = path === "restart" && res.status < 400 && res.data["outcome"] !== "restarted_account_unverified";
+    // A restart that ran answers 200 with its outcome; only a verified replacement exits 0. Likewise
+    // --verify answers 200 with its outcome, and only `moved` exits 0.
+    const restartFailed = res.status < 400 && (
+      (path === "restart" && res.data["outcome"] !== "restarted_account_unverified")
+      || (path === "restart-verify" && res.data["outcome"] !== "moved"));
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;

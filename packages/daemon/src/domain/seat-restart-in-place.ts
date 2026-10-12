@@ -634,7 +634,7 @@ export class CodexInPlaceRestart {
     const lines = screen.split("\n").map((line) => line.replace(/^[\s│|]+|[\s│|]+$/g, "")).filter((line) => /^Account:\s*\S/i.test(line));
     const line = lines.at(-1);
     if (!line) return { state: "not_observed", detail: "No Codex status Account line since the restart; show /status in the seat first." };
-    return line.toLowerCase().includes(expectAccount.trim().toLowerCase())
+    return accountLineNames(line, expectAccount)
       ? { state: "matched", detail: "Codex's status Account line names the expected account." }
       : { state: "not_matched", detail: "Codex's status Account line does not name the expected account (it may show only a plan)." };
   }
@@ -798,6 +798,15 @@ function envAssignment(command: string, name: string): string | null {
     if (/^codex$|\/codex$/.test(word)) break;
   }
   return null;
+}
+
+/** Whether a status `Account:` line names `expected` as a whole value: `bob@corp.com` doesn't match
+ *  `jimbob@corp.com` or `bob@corp.com.au`. Case-insensitive, as account names are. */
+export function accountLineNames(line: string, expected: string): boolean {
+  const want = expected.trim();
+  if (!want) return false;
+  const escaped = want.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9._%+@-])${escaped}($|[^A-Za-z0-9._%+@-])`, "i").test(line.replace(/^Account:\s*/i, " "));
 }
 
 export function defaultInPlaceRestartIo(): InPlaceRestartIo {

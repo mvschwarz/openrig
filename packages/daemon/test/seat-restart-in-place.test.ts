@@ -12,7 +12,7 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
-import { parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { accountLineNames, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
 
 const LSTART = "Mon Oct 12 21:00:00 2026";
 const LATER = "Mon Oct 12 21:05:00 2026";
@@ -469,5 +469,16 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
       .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_matched" } });
     w.print("  Account:  me@example.com (Pro)");
     expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" })).toMatchObject({ outcome: "moved" });
+  });
+});
+
+describe("--expect-account matches the account as a whole value (CodeRabbit on #1196)", () => {
+  it("names the account exactly, not as part of a longer one", () => {
+    expect(accountLineNames("Account: bob@corp.com (Plus)", "bob@corp.com")).toBe(true);
+    expect(accountLineNames("Account: BOB@corp.com", "bob@corp.com")).toBe(true);
+    expect(accountLineNames("Account: jimbob@corp.com", "bob@corp.com")).toBe(false);
+    expect(accountLineNames("Account: bob@corp.com.au", "bob@corp.com")).toBe(false);
+    expect(accountLineNames("Account: bob@corpXcom", "bob@corp.com")).toBe(false);
+    expect(accountLineNames("Account: bob@corp.com", "  ")).toBe(false);
   });
 });
