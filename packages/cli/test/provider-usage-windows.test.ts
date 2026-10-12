@@ -106,9 +106,36 @@ describe("rig provider status — usage windows", () => {
     ] };
     const { out } = await run(["status"], port);
     expect(out).toContain("  codex  unavailable: no reading since the daemon started at T; refresh with rig provider status --refresh");
-    expect(out).toContain("  codex  workspace ws-a (from account/read; no usage account id) · bucket codex · dev@example.test · plus · seats unknown  [last seen; a later read answered for another account]");
+    expect(out).toContain("  codex  workspace ws-a (from account/read; no usage account id) · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read; the latest read didn't match this row]");
     expect(out).toContain("  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown\n    not matched to, merged with or replacing any other row; kept from the 3 most recent unresolved reads (2 older dropped)");
     expect(out).not.toContain("last reading kept, marked old");
+  });
+
+  it("an older unresolved row says only that it's from an earlier read, never 'another account'", async () => {
+    const unresolved = { note: "identity unresolved: not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 };
+    const id = { ...READING.identity, accountId: null, source: "unresolved" };
+    model = { ...MODEL, usage: [
+      { ...READING, identity: id, latestFromSource: false, unresolved },
+      { ...READING, identity: id, latestFromSource: true, unresolved },
+    ] };
+    const { out } = await run(["status"], port);
+    const heads = out.split("\n").filter((l) => l.startsWith("  codex  identity unresolved"));
+    expect(heads).toEqual([
+      "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read]",
+      "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown",
+    ]);
+    expect(out).not.toContain("another account");
+  });
+
+  it("a resolved row followed by an unresolved read is labelled by the read, not as another account", async () => {
+    model = { ...MODEL, usage: [
+      { ...READING, latestFromSource: false },
+      { ...READING, identity: { ...READING.identity, accountId: null, source: "unresolved" }, latestFromSource: true,
+        unresolved: { note: "identity unresolved: not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  codex  account acct-1 · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read; the latest read didn't match this row]");
+    expect(out).not.toContain("another account");
   });
 
   it("saved rig auth profiles: one line when the daemon says they weren't read; nothing otherwise", async () => {

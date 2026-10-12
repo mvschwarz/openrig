@@ -193,7 +193,7 @@ export interface ProviderUsageAllowance {
   windows: UsageWindowRow[];
   /** The bucket's provider-reported limit evidence (Codex `rateLimitReachedType`), shown once. */
   limitEvidence: string | null;
-  /** False when a later read of this source answered for another allowance: last seen, kept. */
+  /** False when this row came from an earlier read than the latest one (kept; the latest read didn't match it). */
   latestFromSource: boolean;
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";

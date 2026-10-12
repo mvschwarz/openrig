@@ -134,7 +134,12 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
           : "identity unresolved";
       const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], "seats unknown"]
         .filter((x) => x !== null && x !== undefined);
-      console.log(`  ${r["provider"]}  ${labels.join(" · ")}${r["latestFromSource"] ? "" : "  [last seen; a later read answered for another account]"}`);
+      // Not from the latest read: say only that. A later read proves no other account (an unresolved read
+      // may be this same login), so the label names the read, not an account.
+      const earlier = r["latestFromSource"] ? ""
+        : id["source"] === "unresolved" ? "  [from an earlier read]"
+          : "  [from an earlier read; the latest read didn't match this row]";
+      console.log(`  ${r["provider"]}  ${labels.join(" · ")}${earlier}`);
       const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
       if (unresolved) {
         const dropped = Number(unresolved["droppedReads"] ?? 0);
