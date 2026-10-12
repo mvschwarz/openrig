@@ -379,7 +379,7 @@ describe("rig seat status", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])("launch reports an unknown outcome without retrying on timeout (json=%s)", async json => {
+  it.each([false, true].flatMap(json => [false, true].map(plan => ({ json, plan }))))("launch reports an unknown outcome without retrying on timeout (%j)", async ({ json, plan }) => {
     vi.useFakeTimers();
     const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
@@ -388,7 +388,7 @@ describe("rig seat status", () => {
     deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
     const result = captureLogs(() => makeCommand(deps).parseAsync([
       "node", "rig", "seat", "launch", "dev-impl@seat-rig",
-      "--fresh", "--stop", "--reason", "deliberate blank restart", ...(json ? ["--json"] : []),
+      "--fresh", "--stop", "--reason", "deliberate blank restart", ...(json ? ["--json"] : []), ...(plan ? ["--plan"] : []),
     ]).then(() => undefined)).catch(error => ({ error }));
 
     await vi.advanceTimersByTimeAsync(120_000);
@@ -400,13 +400,13 @@ describe("rig seat status", () => {
       expect(output.errors).toEqual([]);
       expect(JSON.parse(output.logs.join("\n"))).toMatchObject({
         status: "unknown",
-        code: "launch_outcome_unknown",
-        guidance: expect.stringContaining("rig seat status dev-impl@seat-rig"),
+        code: plan ? "launch_plan_timeout" : "launch_outcome_unknown",
+        guidance: expect.stringContaining(plan ? "Retry the preview" : "rig seat status dev-impl@seat-rig"),
       });
     } else {
       expect(output.logs).toEqual([]);
-      expect(output.errors.join("\n")).toContain("may still be in progress");
-      expect(output.errors.join("\n")).toContain("rig seat status dev-impl@seat-rig");
+      expect(output.errors.join("\n")).toContain(plan ? "no launch was requested" : "may still be in progress");
+      expect(output.errors.join("\n")).toContain(plan ? "Retry the preview" : "rig seat status dev-impl@seat-rig");
     }
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });

@@ -16,6 +16,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Hono } from "hono";
+import { progressRoutes } from "../src/routes/progress.js";
 import { ProgressIndexer, readProgressRootsFromEnv } from "../src/domain/progress/progress-indexer.js";
 
 describe("UI Enhancement Pack v0 — readProgressRootsFromEnv", () => {
@@ -134,6 +136,24 @@ describe("UI Enhancement Pack v0 — ProgressIndexer", () => {
       maxDepth: 2,
     });
     expect(indexer.scan().files).toHaveLength(0);
+  });
+
+  it.each(["````markdown\n```\n- [~] hidden\n~~~\n```` trailing text\n- [ ] hidden too\n````", "~~~example\n```\n~~~ trailing text\n- [~] hidden\n~~~~", "```unterminated"])("HTTP progress totals exclude fenced examples: %s", async (fence) => {
+    const closed = !fence.includes("unterminated");
+    const content = `# Actual progress\n- [x] shipped\n${fence.split("\n")[0]}\n## Example heading\n- [x] example\n${fence.split("\n").slice(1).join("\n")}\n${closed ? "- [ ] actual remaining\n" : ""}`;
+    writeFileSync(join(tempDir, "PROGRESS.md"), content);
+    const indexer = new ProgressIndexer({ roots: [{ name: "fixture", canonicalPath: tempDir }] });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("progressIndexer" as never, indexer as never); await next(); });
+    app.route("/api/progress", progressRoutes());
+    const response = await app.request("/api/progress/tree");
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.aggregate).toEqual({ totalFiles: 1, totalRows: closed ? 2 : 1, totalDone: 1, totalBlocked: 0, totalActive: closed ? 1 : 0 });
+    expect(result.files[0].rows).toEqual([
+      { line: 2, depth: 0, status: "done", text: "shipped", kind: "checkbox" },
+      ...(closed ? [{ line: content.split("\n").length - 1, depth: 0, status: "active", text: "actual remaining", kind: "checkbox" }] : []),
+    ]);
   });
 
   it("aggregate counts sum across files", () => {
