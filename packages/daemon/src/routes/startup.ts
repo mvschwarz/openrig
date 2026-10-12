@@ -132,7 +132,7 @@ startupRoutes.get("/:rigId", async (c) => {
     const observed = await observeSeat(c, rig, node);
     seats.push({ ...forecast, hasHistory, nodeId: node.id, runtime: node.runtime, model: node.model,
       revision: startupRevision(repo(c).db, node), observed,
-      contextPending: history.some((session) => session.nodeId === node.id && dep<import("../domain/startup-orchestrator.js").StartupOrchestrator>(c, "startupOrchestrator")?.canContinueFresh(node.id, session.id)),
+      contextPending: history.some((session) => session.nodeId === node.id && dep<import("../domain/startup-orchestrator.js").StartupOrchestrator>(c, "startupOrchestrator")?.canContinueStartup(node.id, session.id)),
       freshAllowed: available && observed.state === "stopped",
       ...(!available ? { prerequisite: `${node.runtime} is unavailable or unauthenticated. Repair it and retry; fresh history cannot repair this prerequisite.` } : {}) });
   }
@@ -149,7 +149,7 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
     if (body.revision !== startupRevision(repo(c).db, node)) return c.json({ ok: false, code: "selection_changed", message: "The seat changed since this choice was displayed. Refresh and make a new decision." }, 409);
     const observed = await observeSeat(c, rig, node);
     if (body.action === "continue") {
-      const result = await seatLifecycleService(c).continueFreshStartup(observed.sessionName);
+      const result = await seatLifecycleService(c).continueStartup(observed.sessionName);
       await refreshNativeMetadata(c, rig.rig.id);
       return c.json(result, result.ok ? 200 : 409);
     }

@@ -552,7 +552,7 @@ identity remains unverified; a version number alone cannot clear it.
       const error = path === "continue" && res.data["code"] === "continuation_unavailable"
         ? {
           ...res.data,
-          message: "No verified pending fresh-context delivery exists for this occupant. It is unknown whether context was already delivered or was never pending.",
+          message: "No verified pending startup-context delivery exists for this occupant. It is unknown whether context was already delivered or was never pending.",
           guidance: `Inspect its current state: rig seat status ${shellQuote(seat)}`,
         }
         : res.data;
@@ -640,8 +640,8 @@ Examples:
     .command("continue")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .option("--json", "JSON output for agents")
-    .description("Deliver pending startup context after clearing a native prompt, in the same fresh conversation")
-    .addHelpText("after", "\nReview and answer the native prompt yourself first. This reuses the existing occupant and does not relaunch or replay an attempted delivery.")
+    .description("Deliver pending startup context to the same fresh or forked conversation")
+    .addHelpText("after", "\nResolve any native prompt first. A pending Codex fork must have a verified child identity. This reuses the existing occupant and does not relaunch or replay an attempted delivery.")
     .action(async (seat: string, opts: { json?: boolean }) => {
       await runLifecycleVerb("continue", seat, {}, opts, data => {
         console.log(String(data["message"]));

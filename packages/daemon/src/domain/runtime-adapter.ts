@@ -103,6 +103,8 @@ export type HarnessLaunchResult =
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.
   | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string;
+    /** The native fork command was sent, but its child identity is not yet available. */
+    forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
 
 // -- Shared concrete-hint resolver --
@@ -175,6 +177,11 @@ export interface RuntimeAdapter {
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
   ): Promise<HarnessLaunchResult>;
+
+  /** Observe an already launched fork without sending input or starting another process. */
+  captureForkIdentity?(
+    binding: NodeBinding, parentToken: string,
+  ): Promise<{ resumeToken: string; resumeType: string } | null>;
 
   /** Check if the runtime harness is responsive and ready. */
   checkReady(binding: NodeBinding): Promise<ReadinessResult>;

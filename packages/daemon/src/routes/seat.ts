@@ -291,7 +291,7 @@ seatRoutes.post("/launch/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/continue/:seatRef", async (c) => {
-  const result = await seatLifecycleService(c).continueFreshStartup(c.req.param("seatRef"));
+  const result = await seatLifecycleService(c).continueStartup(c.req.param("seatRef"));
   return c.json(result, result.ok ? 200 : 409);
 });
 

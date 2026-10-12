@@ -8,7 +8,7 @@ import {
 } from "./runtime-adapter.js";
 import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-samples-store.js";
 import type { ContextUsage } from "./types.js";
-import { hasPendingFreshStartup } from "./startup-orchestrator.js";
+import { readPendingStartupContext } from "./startup-orchestrator.js";
 
 /** Default polling interval: 30 seconds. */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -280,7 +280,7 @@ export class ContextMonitor {
       if (readiness.ready) {
         // A live prompt does not deliver saved context. Check after the await:
         // startup may have reached an attention gate while we were observing.
-        if (hasPendingFreshStartup(this.db, session.node_id, session.session_id)) return;
+        if (readPendingStartupContext(this.db, session.node_id, session.session_id)) return;
         this.db.prepare(`
           UPDATE sessions
           SET startup_status = 'ready',

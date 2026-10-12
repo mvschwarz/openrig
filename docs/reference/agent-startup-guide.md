@@ -38,6 +38,27 @@ The attention codes that stop startup this way are `trust_gate`,
 `bypass_consent_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
 They are recognized from each harness's English prompt text.
 
+## Continue a Codex fork whose child ID arrived late
+
+For a member with `session_source.mode: fork`, OpenRig waits for Codex's new
+child thread ID before sending its role and other startup prompts. This capture
+uses `runtime.readiness_timeout_seconds` (30 seconds by default, configurable
+from 1 to 600 seconds), as does the later readiness check. The two waits have
+separate budgets.
+
+If the ID is still unavailable, the seat reports `attention_required` and keeps
+its startup context pending. Wait for the child to finish starting, resolve any
+native prompt, then run `rig seat continue <seat>`. The continuation verifies
+that the bound pane is running a fork of the requested parent and reads the
+child's own native identity before delivering the saved context. It does not
+launch another fork or resume the parent. The parent ID is never saved as the
+child's resume token.
+
+An unavailable or conflicting identity leaves the context pending. Once prompt
+delivery has been attempted, it cannot be replayed by `continue`, including
+after a daemon restart: inspect `rig seat status <seat>` and the native pane
+before deciding how to recover an uncertain delivery.
+
 ## Two Categories of Startup
 
 Everything an agent receives at boot time falls into one of two categories:

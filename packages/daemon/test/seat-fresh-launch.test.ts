@@ -198,7 +198,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     const binding = sessionRegistry.getBindingForNode(seat.node.id);
     const nativeIds = db.prepare("SELECT id, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(seat.node.id);
     const launch = vi.spyOn(adapter, "launchHarness");
-    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: false, code: "attention_required" });
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: false, code: "attention_required" });
     expect(tmux.sendText).not.toHaveBeenCalled();
     // The person has accepted in the same pane; no new process or session.
     screen = "Claude Code v2.1.282\n❯ ";
@@ -208,14 +208,14 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(last).toEqual({ type: "node.startup_pending" });
       return { ok: true };
     });
-    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: true });
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: true });
     expect(launch).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
     expect(db.prepare("SELECT id, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(seat.node.id)).toEqual(nativeIds);
     expect(send.mock.calls[0]?.[1]).toContain("Configured startup instructions");
     expect(sessionRegistry.getSessionsForRig(seat.rig.id).map(s => s.id)).toEqual(sessions.map(s => s.id));
     expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe(binding?.tmuxPane);
-    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: false, code: "continuation_unavailable" });
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: false, code: "continuation_unavailable" });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
@@ -231,13 +231,13 @@ describe("SeatLifecycleService.launchFresh", () => {
     const rows = sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.id);
     const launch = vi.spyOn(adapter, "launchHarness");
     const delivery = vi.spyOn(adapter, "deliverStartup");
-    const continued = await service.continueFreshStartup(seat.sessionName);
+    const continued = await service.continueStartup(seat.sessionName);
     expect(continued.ok).toBe(true);
     expect(launch).not.toHaveBeenCalled();
     expect(delivery).toHaveBeenCalled();
     expect(sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.id)).toEqual(rows);
     delivery.mockClear();
-    expect((await service.continueFreshStartup(seat.sessionName)).ok).toBe(false);
+    expect((await service.continueStartup(seat.sessionName)).ok).toBe(false);
     expect(delivery).not.toHaveBeenCalled();
   });
 

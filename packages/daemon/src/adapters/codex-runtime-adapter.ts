@@ -21,6 +21,8 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import {
   defaultResolveHomeDirByPid,
+  CodexThreadIdResolver,
+  lstartToMinTs,
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
@@ -33,8 +35,10 @@ import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
+import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 
-import { listNativeProcesses, observeCodexPaneProcess, type NativeProcessRow } from "../domain/native-process-lineage.js";
+import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, type NativeProcessRow } from "../domain/native-process-lineage.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -68,7 +72,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
-  private readThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
+  private readThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+  private readinessSettings?: Pick<SettingsStore, "resolveOne">;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
@@ -101,7 +106,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     seatLaunchEnvironment?: SeatLaunchEnvironment;
     fsOps: CodexAdapterFsOps;
     listProcesses?: () => CodexProcess[] | Promise<CodexProcess[]>;
-    readThreadIdByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
+    readThreadIdByPid?: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+    readinessSettings?: Pick<SettingsStore, "resolveOne">;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
@@ -126,8 +132,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
-    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+    const threadIdResolver = new CodexThreadIdResolver({
+      defaultHome: this.fs.homedir ?? os.homedir(), codexHome: this.codexHome,
+      resolveHomeDirByPid: this.resolveHomeDirByPid,
+    });
+    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity) => identity === undefined
+      ? this.readThreadIdFromLogs(pid) : threadIdResolver.resolve(pid, identity));
+    this.readinessSettings = deps.readinessSettings;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight
       ?? ((profile, cwd) => defaultProfilePreflight(profile, this.codexHome ? { cwd, codexHome: this.codexHome, launchPath: this.launchPath } : undefined));
@@ -417,12 +429,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 8);
       if (updatePrompt.failure) return updatePrompt.failure;
-      const threadId = await this.captureFreshThreadId(binding, updatePrompt);
+      const threadId = await this.captureFreshThreadId(binding, updatePrompt, {
+        timeoutMs: resolveReadinessTimeoutMs(undefined, this.readinessSettings), excludeThreadId: parentId,
+      });
       if (updatePrompt.failure) return updatePrompt.failure;
       if (!threadId) {
         return {
           ok: false,
           error: "codex fork: could not capture new post-fork thread id",
+          recovery: "attention_required",
+          forkIdentityPending: true,
         };
       }
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
@@ -499,6 +515,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
+  }
+
+  async captureForkIdentity(binding: NodeBinding, parentToken: string): Promise<{ resumeToken: string; resumeType: string } | null> {
+    const target = binding.tmuxPane ?? binding.tmuxSession;
+    if (!target || !this.tmux.getPanePid) return null;
+    const input = { target, tmux: this.tmux, listProcesses: this.listProcesses, parentToken };
+    const before = await observeCodexForkProcess(input);
+    if (!before || lstartToMinTs(before.process.startedAt) === undefined) return null;
+    // Gate PID logs by process start time, then re-observe the whole foreground
+    // chain. Neither a reused PID nor a replacement pane proves this child.
+    const child = (await this.readThreadIdByPid(before.process.pid, before.process.startedAt))?.trim();
+    if (!child || child === parentToken) return null;
+    const after = await observeCodexForkProcess(input);
+    return after?.fingerprint === before.fingerprint ? { resumeToken: child, resumeType: "codex_id" } : null;
   }
 
   private async dismissSkippableCodexUpdatePrompt(
@@ -775,24 +805,30 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return Array.from(keys);
   }
 
-  private async captureFreshThreadId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt): Promise<string | undefined> {
+  private async captureFreshThreadId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt,
+    opts?: { timeoutMs: number; excludeThreadId: string }): Promise<string | undefined> {
     const target = binding.tmuxPane ?? binding.tmuxSession;
     if (!target || !this.tmux.getPanePid) return undefined;
 
-    for (let attempt = 0; attempt < 20; attempt++) {
+    const deadline = opts ? Date.now() + opts.timeoutMs : undefined;
+    const attempts = opts ? Math.max(1, Math.ceil(opts.timeoutMs / 250)) : 20;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0 && deadline !== undefined && Date.now() >= deadline) break;
       const shellPid = await this.tmux.getPanePid(target);
       if (shellPid) {
         const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
-          const threadId = await this.readThreadIdByPid(codexPid);
-          if (threadId) return threadId;
+          const threadId = (await this.readThreadIdByPid(codexPid))?.trim();
+          if (threadId && threadId !== opts?.excludeThreadId) return threadId;
         }
       }
       if (binding.tmuxSession) {
         await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 1);
         if (updatePrompt.failure) return undefined;
       }
-      await this.sleep(250);
+      const remaining = deadline === undefined ? 250 : Math.min(250, deadline - Date.now());
+      if (remaining <= 0) break;
+      await this.sleep(remaining);
     }
 
     return undefined;

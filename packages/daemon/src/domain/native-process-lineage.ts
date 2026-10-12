@@ -125,11 +125,11 @@ function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expec
     return false;
   }
 
-  return codexResumeToken(args) === expectedToken;
+  return codexConversationToken(args, "resume") === expectedToken;
 }
 
-// undefined is a fresh command; null is a resume command without an exact token.
-function codexResumeToken(args: string[]): string | null | undefined {
+// undefined is another command; null is the requested command without an exact token.
+function codexConversationToken(args: string[], subcommand: "resume" | "fork"): string | null | undefined {
   const topLevelOptionsWithValues = new Set([
     "-a", "--ask-for-approval", "-c", "--config", "-m", "--model",
     "-p", "--profile", "-s", "--sandbox",
@@ -139,7 +139,7 @@ function codexResumeToken(args: string[]): string | null | undefined {
     const arg = args[index]!;
     if (topLevelOptionsWithValues.has(arg)) { index += 1; continue; }
     if (arg.startsWith("-")) continue;
-    if (arg === "resume") resumeIndex = index;
+    if (arg === subcommand) resumeIndex = index;
     break;
   }
   if (resumeIndex < 0) return undefined;
@@ -444,7 +444,7 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
     // links naming different conversations stay refused. Exact resume proof
     // needs the deepest process's own argv: a launcher's token is never
     // inherited by a child that names nothing, which stays deliverable but unproved.
-    const identities = chain.map((link) => codexResumeToken(tokens(link.process.command).slice(1)));
+    const identities = chain.map((link) => codexConversationToken(tokens(link.process.command).slice(1), "resume"));
     if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return null;
     if (requireResume && (!expectedToken || identities[0] !== expectedToken)) return null;
     if (expectedToken !== undefined && identities.some((value) => value !== undefined
@@ -476,6 +476,29 @@ async function observeNativePaneProcess(input: {
 
 export async function observeCodexPaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<CodexProcessObservation | null> {
   return observeNativePaneProcess(input, "codex");
+}
+
+/** A single foreground Codex chain that explicitly forks the requested parent.
+ * The child's PID-owned native record must still supply its own identity. */
+export async function observeCodexForkProcess(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+  parentToken: string;
+}): Promise<CodexProcessObservation | null> {
+  try {
+    const pid = await input.tmux.getPanePid(input.target);
+    if (!pid || !input.parentToken) return null;
+    const rows = await (input.listProcesses ?? listNativeProcesses)();
+    const chain = launcherChain(nativeProcessCandidates(rows, pid, "codex"), rows);
+    if (!chain?.length) return null;
+    const args = chain.map(link => tokens(link.process.command).slice(1));
+    const parents = args.map(argv => codexConversationToken(argv, "fork"));
+    if (!parents.includes(input.parentToken)
+      || parents.some(parent => parent !== undefined && parent !== input.parentToken)
+      || args.some(argv => codexConversationToken(argv, "resume") !== undefined)) return null;
+    return chain[0]!;
+  } catch { return null; }
 }
 
 export async function verifyCodexPaneProcess(input: Parameters<typeof observeCodexPaneProcess>[0]): Promise<CodexProcessObservation | null> {

@@ -32,12 +32,24 @@ const STARTUP_SUBMIT_CAPTURE_LINES = 200;
 // times: about 5 s of waiting per send, plus capture time. Nothing is typed meanwhile.
 const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
 
+type PendingForkContext = { parentToken: string; isRestore: boolean };
+export type PendingStartupContext = { eventSeq: number } & (
+  | { mode: "fresh" }
+  | ({ mode: "fork" } & PendingForkContext)
+);
+
 /** Pending context belongs to this occupant and is consumed before delivery starts. */
-export function hasPendingFreshStartup(db: Database.Database, nodeId: string, sessionId: string): boolean {
-  const row = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1").get(nodeId) as { payload: string } | undefined;
-  if (!row) return false;
+export function readPendingStartupContext(db: Database.Database, nodeId: string, sessionId: string): PendingStartupContext | null {
+  const row = db.prepare("SELECT seq, payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1").get(nodeId) as { seq: number; payload: string } | undefined;
+  if (!row) return null;
   const event = JSON.parse(row.payload);
-  return event.type === "node.startup_failed" && event.sessionId === sessionId && event.freshContextPending === true;
+  if (event.type !== "node.startup_failed" || event.sessionId !== sessionId) return null;
+  if (event.freshContextPending === true) return { eventSeq: row.seq, mode: "fresh" };
+  const fork = event.forkContextPending;
+  if (typeof fork?.parentToken === "string" && fork.parentToken.trim() && typeof fork.isRestore === "boolean") {
+    return { eventSeq: row.seq, mode: "fork", parentToken: fork.parentToken, isRestore: fork.isRestore };
+  }
+  return null;
 }
 
 // -- Types --
@@ -224,6 +236,9 @@ export class StartupOrchestrator {
           ? "rebuilt"
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
+    const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
+      && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
+      ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid;
 
     // 1. Mark pending
@@ -386,9 +401,10 @@ export class StartupOrchestrator {
               await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, normalizedResumeToken, launchResult.launchedProcess);
             }
             errors.push(`Harness launch requires attention: ${launchResult.error}`);
-            // isRestore selects context, not native continuity: pod-aware exact
-            // resume also uses false. Only an actual fresh launch may re-prime.
-            return this.fail(input, "attention_required", errors, launchResult.evidence, continuityOutcome === "fresh");
+            // isRestore selects context, not native continuity. Exact resume
+            // cannot replay context; an unverified fork can retain unsent context.
+            return this.fail(input, "attention_required", errors, launchResult.evidence,
+              launchResult.forkIdentityPending ? forkContext : continuityOutcome === "fresh" ? "fresh" : undefined);
           }
 
           errors.push(`Harness launch failed: ${launchResult.error}`);
@@ -419,14 +435,50 @@ export class StartupOrchestrator {
       if (!readiness.ready) {
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
-          return this.fail(input, "attention_required", errors, undefined, isFreshLaunch);
+          return this.fail(input, "attention_required", errors, undefined, isFreshLaunch ? "fresh" : forkContext);
         }
         errors.push(`Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
-        return this.fail(input, "failed", errors);
+        return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext);
       }
     } catch (err) {
       errors.push(`Readiness check error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors);
+    }
+
+    if (input.skipHarnessLaunch && forkContext) {
+      // Continuing a fork is a read-only identity check, never another fork or
+      // a resume of its parent. Do this after readiness, before any prompt.
+      let identity: { resumeToken: string; resumeType: string } | null | undefined;
+      let captureError: string | undefined;
+      try {
+        identity = await input.adapter.captureForkIdentity?.(input.binding, forkContext.parentToken);
+      } catch (error) { captureError = String(error); }
+      // Check even a missing/failed observation before publishing a failure.
+      const current = this.db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(input.nodeId) as { id: string } | undefined;
+      const binding = this.sessionRegistry.getBindingForNode(input.nodeId);
+      if (current?.id !== input.sessionId) {
+        // The newer occupant owns the node's startup event stream. Update only
+        // the previous session: a late event here could hide the new pending context.
+        this.sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");
+        return { ok: false, startupStatus: "attention_required", errors: ["The occupant changed during fork verification; no startup context was sent."] };
+      }
+      if (binding?.tmuxPane !== input.binding.tmuxPane || binding?.tmuxSession !== input.binding.tmuxSession) {
+        return this.fail(input, "attention_required", ["The terminal binding changed during fork verification; no startup context was sent."]);
+      }
+      if (captureError !== undefined) {
+        return this.fail(input, "attention_required", [`Fork identity verification failed: ${captureError}; no startup context was sent.`], undefined, forkContext);
+      }
+      if (!identity?.resumeToken || identity.resumeToken === forkContext.parentToken || identity.resumeType !== "codex_id") {
+        return this.fail(input, "attention_required", ["The fork's child identity is not verified yet; no startup context was sent."], undefined, forkContext);
+      }
+      try {
+        this.sessionRegistry.updateResumeToken(input.sessionId, identity.resumeType, identity.resumeToken, "scrape");
+        if (!this.sessionRegistry.resumeTokenMatches(input.sessionId, identity.resumeType, identity.resumeToken)) {
+          return this.fail(input, "attention_required", ["The verified fork child conflicts with protected session metadata; no startup context was sent."], undefined, forkContext);
+        }
+      } catch (error) {
+        return this.fail(input, "attention_required", [`Fork identity verification failed: ${String(error)}; no startup context was sent.`], undefined, forkContext);
+      }
     }
 
     // The adapter returned the exact enforcing value it inserted, and readiness
@@ -587,8 +639,12 @@ export class StartupOrchestrator {
    * Any newer pending/ready/failure event consumes that permission, including a
    * daemon loss during delivery: uncertain delivery is never blindly replayed.
    */
-  canContinueFresh(nodeId: string, sessionId: string): boolean {
-    return hasPendingFreshStartup(this.db, nodeId, sessionId);
+  canContinueStartup(nodeId: string, sessionId: string): boolean {
+    return this.pendingStartupContext(nodeId, sessionId) !== null;
+  }
+
+  pendingStartupContext(nodeId: string, sessionId: string): PendingStartupContext | null {
+    return readPendingStartupContext(this.db, nodeId, sessionId);
   }
 
   /**
@@ -630,9 +686,9 @@ export class StartupOrchestrator {
     status: "attention_required" | "failed",
     errors: string[],
     evidence?: string,
-    freshContextPending = false,
+    pendingContext?: "fresh" | PendingForkContext,
   ): StartupResult {
-    if (status === "attention_required" && freshContextPending && input.binding.tmuxSession) {
+    if (status === "attention_required" && pendingContext && input.binding.tmuxSession) {
       errors.push(`After resolving it in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);
     }
     this.sessionRegistry.updateStartupStatus(input.sessionId, status);
@@ -642,7 +698,8 @@ export class StartupOrchestrator {
       nodeId: input.nodeId,
       error: errors.join("; "),
       sessionId: input.sessionId,
-      ...(freshContextPending ? { freshContextPending: true } : {}),
+      ...(pendingContext === "fresh" ? { freshContextPending: true }
+        : pendingContext ? { forkContextPending: pendingContext } : {}),
       ...(input.submissionDiagnostics?.length ? { submissionDiagnostics: input.submissionDiagnostics } : {}),
     });
     return { ok: false, startupStatus: status, errors, evidence };

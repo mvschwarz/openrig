@@ -389,28 +389,29 @@ export class SeatLifecycleService {
     return { ok: true, seat, actions: { sessionsExited, bindingCleared: binding !== null } };
   }
 
-  /** Finish context delivery to the same fresh occupant after its native gate.
+  /** Finish context delivery to the same fresh or forked occupant after its native gate.
    * This never launches a process or replays an uncertain/finished delivery.
    */
-  async continueFreshStartup(seatRef: string) {
+  async continueStartup(seatRef: string) {
     const resolved = this.resolveSeat(seatRef);
     if ("code" in resolved) return resolved;
     const guard = this.tmuxAdapter.deliveryGuard;
     return guard
-      ? guard.lifecycle([resolved.nodeId], () => this.continueFreshStartupUnchecked(seatRef))
-      : this.continueFreshStartupUnchecked(seatRef);
+      ? guard.lifecycle([resolved.nodeId], () => this.continueStartupUnchecked(seatRef))
+      : this.continueStartupUnchecked(seatRef);
   }
 
-  private async continueFreshStartupUnchecked(seatRef: string) {
+  private async continueStartupUnchecked(seatRef: string) {
     const resolved = this.resolveSeat(seatRef);
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
     const node = this.rigRepo.getRig(seat.rigId)?.nodes.find((n) => n.id === seat.nodeId);
     const session = this.latestSession(seat.nodeId);
     const binding = this.sessionRegistry.getBindingForNode(seat.nodeId);
+    const pending = session && this.startupOrchestrator?.pendingStartupContext(seat.nodeId, session.id);
     if (!node || !session || !binding?.tmuxSession || !this.startupOrchestrator
-      || !this.startupOrchestrator.canContinueFresh(node.id, session.id)) {
-      return { ok: false as const, code: "continuation_unavailable", message: "No verified pending fresh-context delivery exists for this occupant. Refresh to inspect its actual state." };
+      || !pending) {
+      return { ok: false as const, code: "continuation_unavailable", message: "No verified pending startup-context delivery exists for this occupant. Refresh to inspect its actual state." };
     }
     const pane = await observeSolePane(this.tmuxAdapter, binding.tmuxSession);
     if (!pane.ok || pane.pane !== binding.tmuxPane) return { ok: false as const, code: "binding_changed", message: "The managed terminal binding changed; context was not delivered." };
@@ -424,15 +425,16 @@ export class SeatLifecycleService {
     // Recheck after the asynchronous native observation; startNode immediately
     // records pending before its first await, consuming the retained permission.
     if (this.latestSession(node.id)?.id !== session.id || this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane !== pane.pane
-      || !this.startupOrchestrator.canContinueFresh(node.id, session.id)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
+      || this.startupOrchestrator.pendingStartupContext(node.id, session.id)?.eventSeq !== pending.eventSeq) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
     const result = await this.startupOrchestrator.startNode({
       rigId: seat.rigId, nodeId: node.id, sessionId: session.id,
       binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: node.effort ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
       adapter, plan: startup.context.plan, resolvedStartupFiles: startup.context.resolvedStartupFiles,
-      startupActions: startup.context.startupActions, isRestore: false,
-      sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: true, includeDurableObligations: true, allowFreshFallback: false,
+      startupActions: startup.context.startupActions, isRestore: pending.mode === "fork" && pending.isRestore,
+      sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: pending.mode === "fresh", includeDurableObligations: true, allowFreshFallback: false,
+      ...(pending.mode === "fork" ? { forkSource: { kind: "native_id" as const, value: pending.parentToken } } : {}),
     });
-    return { ...result, message: result.ok ? "Configured context delivered to the existing fresh conversation." : result.errors.join("; ") };
+    return { ...result, message: result.ok ? "Configured context delivered to the existing conversation." : result.errors.join("; ") };
   }
 
   /** Deliberately replace exactly one managed seat with a blank native occupant. */
