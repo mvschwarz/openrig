@@ -34,6 +34,8 @@ export interface Node {
   runtime: string | null;
   model: string | null;
   effort?: string | null;
+  /** Session-scoped Claude Advisor model; never written to shared Claude settings. */
+  advisor?: string | null;
   codexConfigProfile?: string | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
@@ -136,8 +138,8 @@ export type RigEvent =
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
-  | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
-  | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
+  | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; effort?: string | null; advisor?: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
+  | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; effort?: string | null; advisor?: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
   | { type: "restore.started"; rigId: string; snapshotId: string; snapshotSelection?: RestoreSnapshotSelection; intendedRoster?: Array<{ nodeId: string; logicalId: string }>; excludedNodes?: RestoreExcludedNode[] }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
@@ -928,7 +930,7 @@ export interface AgentResources {
 
 export interface ProfileSpec {
   summary?: string;
-  preferences?: { runtime?: string; model?: string; effort?: string };
+  preferences?: { runtime?: string; model?: string; effort?: string; advisor?: string };
   startup?: StartupBlock;
   lifecycle?: LifecycleDefaults;
   uses: {
@@ -959,6 +961,7 @@ export interface AgentSpec {
     runtime?: string;
     model?: string;
     effort?: string;
+    advisor?: string;
     lifecycle?: LifecycleDefaults;
   };
   startup: StartupBlock;
@@ -983,6 +986,7 @@ export interface LegacyRigSpecNode {
   role?: string;
   model?: string;
   effort?: string;
+  advisor?: string;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1090,6 +1094,7 @@ export interface RigSpecPodMember {
   codexConfigProfile?: string;
   model?: string;
   effort?: string;
+  advisor?: string;
   /**
    * OPR.0.4.6.FAC1: optional seat-side role declaration (writes the
    * existing `nodes.role` column via createMemberNode → addNode). The

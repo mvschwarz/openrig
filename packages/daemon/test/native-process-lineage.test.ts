@@ -208,6 +208,28 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
     expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
   });
+  it.each([
+    `--advisor opus --session-id ${token}`,
+    `--resume ${token} --advisor claude-opus-5-5`,
+    `--advisor=opus --session-id=${token}`,
+    `--resume=${token} --advisor=opus`,
+  ])("Advisor leaves the exact primary conversation verifiable: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: "different" })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: "different" })).state).toBe("unknown");
+  });
+  it.each([
+    `--session-id ${token} --advisor`,
+    `--advisor --session-id ${token}`,
+    `--session-id ${token} --advisor=`,
+    `--session-id ${token} --advisor=--resume`,
+    `--advisor opus --resume ${token} --fork-session`,
+  ])("malformed Advisor or a fork's parent cannot prove the current identity: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
   it("preserves an apostrophe in the native Claude executable path", async () => {
     const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
     const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,

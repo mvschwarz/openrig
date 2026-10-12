@@ -122,9 +122,9 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { rigName?: string; runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
+  function seedSeat(opts?: { rigName?: string; runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string; advisor?: string }) {
     const rig = rigRepo.createRig(opts?.rigName ?? "seat-rig");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort, advisor: opts?.advisor });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
       const session = sessionRegistry.registerSession(node.id, `dev-impl@${rig.name}`);
@@ -1278,6 +1278,20 @@ describe("SeatHandoverService", () => {
       currentOccupant: "route-successor",
       currentStatus: { handoverResult: "complete" },
     });
+  });
+
+  it("carries the persisted primary model and Advisor through handover to the successor", async () => {
+    seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
+    launchHarness.mockResolvedValue({ ok: true, resumeToken: "claude-successor", resumeType: "claude_id" });
+    const claudeService = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+      predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {} });
+    const result = await claudeService.handover({
+      seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig",
+    });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ model: "claude-sonnet-5-5", advisor: "opus" });
   });
 
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {

@@ -161,8 +161,13 @@ function claudeSessionToken(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (arg === "--settings") {
+    if (arg === "--settings" || arg === "--advisor") {
       const value = args[++index];
+      if (!value || value.startsWith("-")) return null;
+      continue;
+    }
+    if (arg.startsWith("--advisor=")) {
+      const value = arg.slice("--advisor=".length);
       if (!value || value.startsWith("-")) return null;
       continue;
     }
@@ -191,8 +196,13 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name", "--settings", "--effort"].includes(arg)) {
+    if (["--permission-mode", "--model", "--name", "--settings", "--effort", "--advisor"].includes(arg)) {
       const value = args[++index];
+      if (!value || value.startsWith("-")) return unparsed;
+      continue;
+    }
+    if (arg.startsWith("--advisor=")) {
+      const value = arg.slice("--advisor=".length);
       if (!value || value.startsWith("-")) return unparsed;
       continue;
     }

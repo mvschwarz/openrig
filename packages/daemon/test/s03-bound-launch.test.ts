@@ -226,6 +226,34 @@ if (process.argv.includes('--help')) {
 });
 
 describe("S03 bound launch across existing paths", () => {
+  it.skipIf(process.platform === "win32").each(["managed", "classic"].flatMap(mode => ["fresh", "resume", "fork", "legacy"].map(kind => ({ mode, kind }))))("executes the seat's literal Advisor argument on $mode $kind and omits it for a peer", async ({ mode, kind }) => {
+    const f = fixture();
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    writeFileSync(f.executable, `#!${process.execPath}\nconsole.log(process.argv.includes('--help') ? ${JSON.stringify(help)} : JSON.stringify(process.argv.slice(2)));\n`);
+    vi.mocked(execFile).mockImplementation(native.execFile);
+    vi.spyOn(f.adapter as any, "pollForResumeToken").mockResolvedValue("fork-id");
+    vi.spyOn(f.adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    const resume = new ClaudeResumeAdapter(f.tmux, { claudeManagedLaunch: f.managed });
+    vi.spyOn(resume as any, "verifyResume").mockResolvedValue({ ok: true });
+    const advisor = "opus'; $(exit 99)";
+    const binding = { ...f.binding, advisor: ` ${advisor} `, effort: "medium", permissionMode: mode === "managed" ? "auto" : undefined };
+    const result = kind === "legacy"
+      ? await resume.resume("seat", "claude_id", "prior-id", f.cwd, "floor", binding.model, binding.permissionMode, "node", "medium", undefined, undefined, undefined, binding.advisor)
+      : await f.adapter.launchHarness(binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "prior-id" } : {}),
+        ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "prior-id" } } : {}) });
+    expect(result).toMatchObject({ ok: true });
+    const argv = JSON.parse(native.execFileSync("/bin/sh", ["-c", f.calls[0]!], { cwd: f.cwd, env: f.env, encoding: "utf8", timeout: 3000 })) as string[];
+    expect(argv.slice(argv.indexOf("--advisor"), argv.indexOf("--advisor") + 2)).toEqual(["--advisor", advisor]);
+    expect(argv.slice(argv.indexOf("--model"), argv.indexOf("--model") + 2)).toEqual(["--model", binding.model]);
+    expect(argv.slice(argv.indexOf("--effort"), argv.indexOf("--effort") + 2)).toEqual(["--effort", "medium"]);
+    if (kind === "fresh") expect(argv).toContain("--session-id");
+    else expect(argv.slice(argv.indexOf("--resume"), argv.indexOf("--resume") + 2)).toEqual(["--resume", "prior-id"]);
+    expect(argv.includes("--fork-session")).toBe(kind === "fork");
+    await f.adapter.launchHarness({ ...f.binding, permissionMode: binding.permissionMode }, { name: "peer" });
+    const peer = JSON.parse(native.execFileSync("/bin/sh", ["-c", f.calls[1]!], { cwd: f.cwd, env: f.env, encoding: "utf8", timeout: 3000 })) as string[];
+    expect(peer).not.toContain("--advisor");
+  });
+
   it.each(["fresh", "resume", "fork", "legacy"])("uses the same context and quotes every argument on %s", async kind => {
     const f = fixture(); vi.spyOn(f.adapter as any, "pollForResumeToken").mockResolvedValue("fork-id");
     vi.spyOn(f.adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });

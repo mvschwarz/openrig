@@ -34,6 +34,7 @@ export interface ResolvedNodeConfig {
   runtime: string;
   model: string | undefined;
   effort: string | undefined;
+  advisor?: string;
   cwd: string;
   restorePolicy: string;
   /** OPR.0.5.6.20 — resolved continuity mode (canonical vocabulary; most-specific-wins). */
@@ -111,6 +112,14 @@ const RESTORE_POLICY_LEVEL: Record<string, number> = {
 
 // -- Public API --
 
+/** Resolve member > profile > agent Advisor preferences, skipping blank or non-string candidates. */
+export function resolveAdvisorModel(member: unknown, profile?: unknown, defaults?: unknown): string | undefined {
+  for (const candidate of [member, profile, defaults]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
 /**
  * Resolve effective node configuration from agent spec, profile, and rig context.
  * @param ctx - resolution context with all inputs
@@ -151,6 +160,8 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   const effort = typeof rawEffort === "string" && rawEffort.trim()
     ? rawEffort.trim()
     : undefined;
+
+  const advisor = resolveAdvisorModel(member.advisor, profile.preferences?.advisor, spec.defaults?.advisor);
 
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
@@ -365,6 +376,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       runtime,
       model,
       effort,
+      advisor,
       cwd,
       restorePolicy: restorePolicyResult.policy,
       compactionStrategy: compactionResult.strategy,

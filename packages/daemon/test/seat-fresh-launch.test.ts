@@ -566,6 +566,7 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   it("stops exactly the managed pod-aware occupant, launches fresh, and preserves sibling/work state", async () => {
     const seat = seedSeat();
+    rigRepo.setNodeAdvisor(seat.node.id, "opus");
     const retiringGeneration = sessionRegistry.currentOccupantTenure(seat.node.id)!.generationUuid;
     const sibling = rigRepo.addNode(seat.rig.id, "dev.qa", { runtime: "claude-code", cwd: "/project" });
     const siblingName = "dev-qa@fresh-rig";
@@ -589,6 +590,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     if (!result.ok) throw new Error(result.message);
     expect(result.sessionName).toBe(seat.sessionName);
     expect(result.model).toBe("claude-current");
+    expect(result.advisor).toBe("opus");
     expect(result.generation).not.toBe(retiringGeneration);
     expect(killed).toEqual([seat.sessionName]);
     expect(alive.has(seat.sessionName)).toBe(true);
@@ -596,7 +598,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(siblingSession.id) as { status: string }).status).toBe("running");
     expect((db.prepare("SELECT state FROM queue_items WHERE qitem_id = 'q-fresh'").get() as { state: string }).state).toBe("pending");
     expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe("%fresh");
-    expect(launchBinding).toMatchObject({ model: "claude-current", tmuxSession: seat.sessionName, tmuxPane: "%fresh" });
+    expect(launchBinding).toMatchObject({ model: "claude-current", advisor: "opus", tmuxSession: seat.sessionName, tmuxPane: "%fresh" });
     expect(launchOpts).toEqual({ name: seat.sessionName, resumeToken: undefined });
     expect(projectedPlan?.entries.map((entry) => entry.effectiveId)).toEqual(["live-guidance"]);
     expect(invalidations).toEqual([{ retiringSessionName: seat.sessionName, successorSessionName: seat.sessionName, retiringGeneration }]);
@@ -609,6 +611,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       newGeneration: result.generation,
       nativeSessionId: "fresh-native-uuid",
       model: "claude-current",
+      advisor: "opus",
       status: "ready",
     });
     expect(new SeatIdentityStore(db).getForNode(seat.node.id)).toMatchObject({

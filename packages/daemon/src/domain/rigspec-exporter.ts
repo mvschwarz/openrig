@@ -80,6 +80,7 @@ export class RigSpecExporter {
       if (node.role) specNode.role = node.role;
       if (node.model) specNode.model = node.model;
       if (node.effort) specNode.effort = node.effort;
+      if (node.advisor) specNode.advisor = node.advisor;
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;
@@ -160,6 +161,7 @@ export class RigSpecExporter {
         if (node.codexConfigProfile) member.codexConfigProfile = node.codexConfigProfile;
         if (node.model) member.model = node.model;
         if (node.effort) member.effort = node.effort;
+        if (node.advisor) member.advisor = node.advisor;
         // OPR.0.4.6.FAC1: a declared seat role exports with the pod
         // member (round-trip fidelity — export→import keeps the role).
         if (node.role) member.role = node.role;
