@@ -177,8 +177,10 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       }
       let refreshFailed = false;
       if (opts.refresh) {
-        // The daemon bounds the read at 35 s plus stop grace; wait a little longer than that.
-        const refreshed = await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider: "codex" }, { timeoutMs: 45_000 });
+        // The daemon's worst case is the 35 s read deadline plus stopping the reader (stdin EOF, TERM,
+        // KILL and reap, up to 2 s each: ~8 s), so ~43 s before it answers. Wait 60 s so a slow-dying
+        // child never turns the daemon's answer into a transport error here.
+        const refreshed = await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider: "codex" }, { timeoutMs: 60_000 });
         if (refreshed.status === 409) {
           const p = (refreshed.data ?? {}) as { message?: unknown };
           console.error(p.message ?? "Codex usage windows are off (provider.usage_windows)");
