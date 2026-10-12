@@ -808,6 +808,27 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
     }
   },
+  // daemon.port had no KEY_CONSTRAINTS entry, so `rig config set daemon.port
+  // 99999` stored 99999 and the next daemon start died with a raw
+  // ERR_SOCKET_BAD_PORT from serve(). The check range-validates the value
+  // the runtime actually consumes — the same parseInt the boot path runs on
+  // OPENRIG_PORT (startServer) — rather than the raw input format, so
+  // everything that resolves today keeps resolving: 7433abc, 7433.5 and
+  // +7433 resolve to 7433, 1e4 to 1, 0x1D11 to 0, and a quoted in-range
+  // port in config.json ("7434") stays "7434". Only ports that cannot be
+  // bound are refused. 0 stays legal: checkPort treats port <= 0 as
+  // "always available" and the repo's own preflight tests write
+  // daemon.port = 0 on purpose. The ui.preview.* keys are deliberately
+  // unconstrained: their consumers floor/clamp out-of-range values today
+  // (refresh 0 disables polling on purpose; max_pins floors to 1; the
+  // daemon preview route falls back to 50 lines), so tightening them here
+  // would refuse input that works.
+  "daemon.port": (raw, coerced) => {
+    const port = parseInt(String(coerced), 10);
+    if (Number.isNaN(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid value for daemon.port: must be an integer in [0, 65535], got "${raw}"`);
+    }
+  },
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();

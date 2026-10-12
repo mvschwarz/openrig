@@ -7,6 +7,7 @@ import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessio
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { chatMessagesSchema } from "../src/db/migrations/016_chat_messages.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { HistoryQuery } from "../src/domain/history-query.js";
 import { ChatRepository } from "../src/domain/chat-repository.js";
 
 describe("ChatRepository", () => {
@@ -26,6 +27,19 @@ describe("ChatRepository", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each(["config.json", "function(arg)", "C++", "array[index]"])("history questions find literal chat keyword %s", (keyword) => {
+    chatRepo.send(rigId, "alice", `We discussed ${keyword}`);
+    chatRepo.send(rigId, "bob", "unrelated subject");
+    const history = new HistoryQuery({
+      transcriptsRoot: "/unused-chat-only-fixture",
+      exec: async () => { throw new Error("chat search must not invoke a process"); },
+      chatSearchFn: (id, pattern) => chatRepo.searchChat(id, pattern),
+    });
+    expect(history.searchChat(rigId, `What about ${keyword}?`).map((row) => row.body)).toEqual([`We discussed ${keyword}`]);
+    expect(history.searchChat(rigId, "What is the")).toEqual([]);
+    expect(history.searchChat(rigId, `unrelated ${keyword}`).length).toBe(2);
   });
 
   it("same-day ISO since uses UTC chronology including offsets and fractions", () => {
