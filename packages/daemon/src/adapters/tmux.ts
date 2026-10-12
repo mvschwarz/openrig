@@ -920,8 +920,9 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "show-options", "-p", "-v", "-t", exact, option],
         `tmux show-options -p -v -t ${shellQuote(exact)} ${shellQuote(option)}`);
-      const value = output.trim();
-      return value.length > 0 ? value : null;
+      // tmux prints nothing for an unset option and the value plus a newline when set (an empty value prints
+      // a bare newline), so only the line ending is removed: the value comes back exactly as it was set.
+      return output.length === 0 ? null : output.replace(/\r?\n$/, "");
     } catch {
       return undefined;
     }

@@ -1389,3 +1389,26 @@ describe("TmuxAdapter", () => {
     });
   });
 });
+
+describe("TmuxAdapter pane-local options (in-place restart)", () => {
+  it("reads a pane's own option exactly: unset is null, an empty value stays empty, spaces are kept", async () => {
+    const outputs: Record<string, string> = { "remain-on-exit": "", "@empty": "\n", "@spaced": "  on \n" };
+    const adapter = new TmuxAdapter(async (cmd) => outputs[cmd.split(" ").at(-1)!.replace(/'/g, "")] ?? "");
+    expect(await adapter.getPaneLocalOption("%1", "remain-on-exit")).toBeNull();
+    expect(await adapter.getPaneLocalOption("%1", "@empty")).toBe("");
+    expect(await adapter.getPaneLocalOption("%1", "@spaced")).toBe("  on ");
+  });
+
+  it("an unreadable option is undefined, and restoring null unsets the pane's own value", async () => {
+    const calls: string[] = [];
+    const failing = new TmuxAdapter(async () => { throw new Error("no server"); });
+    expect(await failing.getPaneLocalOption("%1", "remain-on-exit")).toBeUndefined();
+    const adapter = new TmuxAdapter(async (cmd) => { calls.push(cmd); return ""; });
+    expect(await adapter.restorePaneOption("%1", "remain-on-exit", null)).toEqual({ ok: true });
+    expect(await adapter.restorePaneOption("%1", "remain-on-exit", "on")).toEqual({ ok: true });
+    expect(calls.map((cmd) => cmd.replace(/'/g, ""))).toEqual([
+      "tmux set-option -p -u -t %1 remain-on-exit",
+      "tmux set-option -p -t %1 remain-on-exit on",
+    ]);
+  });
+});
