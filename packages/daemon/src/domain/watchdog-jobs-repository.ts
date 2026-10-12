@@ -137,6 +137,26 @@ export class WatchdogJobsError extends Error {
   }
 }
 
+/** Preserve optional cadence conversion while rejecting an uncomputable scan. */
+function validateCadences(input: RegisterWatchdogJobInput): void {
+  if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {
+    throw new WatchdogJobsError("interval_invalid", `interval_seconds must be a positive integer (got ${String(input.intervalSeconds)})`,
+      { field: "interval_seconds", intervalSeconds: input.intervalSeconds });
+  }
+  const scan: unknown = input.scanIntervalSeconds;
+  // better-sqlite3 flattens one array level in positional arguments. Preserve
+  // successful single-value arrays, but refuse values that cannot bind one cell.
+  const boundScan = Array.isArray(scan) ? (scan.length === 1 ? scan[0] : undefined) : scan;
+  const bindableBigint = typeof boundScan === "bigint"
+    && boundScan >= -(2n ** 63n) && boundScan <= 2n ** 63n - 1n;
+  const bindable = boundScan === null || typeof boundScan === "number" || typeof boundScan === "string"
+    || bindableBigint || Buffer.isBuffer(boundScan);
+  if (scan != null && (!bindable || !Number.isFinite(Number(scan)))) {
+    throw new WatchdogJobsError("interval_invalid", `scan_interval_seconds cannot be turned into a cadence (got ${String(scan)})`,
+      { field: "scan_interval_seconds", intervalSeconds: scan });
+  }
+}
+
 /** Defensive additive-column detect (mirrors queue-repository's detectQueueColumn): a harness whose
  *  db predates migration 063 lacks the generation columns, so writers degrade instead of throwing. */
 function detectWatchdogColumn(db: Database.Database, columnName: string): boolean {
@@ -175,13 +195,7 @@ export class WatchdogJobsRepository {
         { policy: input.policy, supported: [...PHASE_D_POLICIES] },
       );
     }
-    if (!Number.isInteger(input.intervalSeconds) || input.intervalSeconds <= 0) {
-      throw new WatchdogJobsError(
-        "interval_invalid",
-        `interval_seconds must be a positive integer (got ${input.intervalSeconds})`,
-        { intervalSeconds: input.intervalSeconds },
-      );
-    }
+    validateCadences(input);
     if (!input.targetSession || !input.targetSession.includes("@")) {
       throw new WatchdogJobsError(
         "target_session_invalid",
@@ -350,6 +364,7 @@ export class WatchdogJobsRepository {
     input: EnsureAutoRegistrationInput,
     historicalTargetSessions: string[] = [input.targetSession],
   ): WatchdogJob {
+    validateCadences(input);
     const existing = this.findAutoRegistration(
       input.policy,
       input.targetSession,

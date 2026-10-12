@@ -4,16 +4,17 @@ export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
+import type { GuardTarget, SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -784,6 +785,15 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal #1084 seam: a lease-free idle wait already completed in send()
+   *  before the serial lease; sendUnguarded consumes this evidence instead of
+   *  waiting again, then re-checks readiness just before typing. Never
+   *  client-supplied. */
+  preWaitedIdle?: { activity: AgentActivity; waitedMs: number; attempts: number; deadlineAt: number };
+  /** Internal #1084 seam: the delivery-guard target bound before the
+   *  lease-free wait; the leased send refuses with guard_target_changed when
+   *  the seat changed hands meanwhile. Never client-supplied. */
+  preWaitBound?: GuardTarget;
   /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
    *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
    *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
@@ -906,7 +916,8 @@ interface SessionTransportDeps {
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null; }
+interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
+  resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
@@ -978,6 +989,7 @@ export class SessionTransport {
 
   private getSessionMeta(sessionName: string): {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
+    rotation: ClaudeResumeRotation | null;
   } {
     // One existing statement; P2 reads the binding columns it already joins plus the
     // same current-occupant subselect the delivery guard uses. No extra query.
@@ -989,6 +1001,10 @@ export class SessionTransport {
         b.tmux_session AS binding_session,
         b.tmux_pane AS pane,
         s.resume_token AS resume_token,
+        s.resume_provenance AS resume_provenance,
+        s.resume_rotated_from AS resume_rotated_from,
+        s.resume_rotated_process AS resume_rotated_process,
+        s.resume_launch_process AS resume_launch_process,
         (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
       FROM sessions s
       JOIN nodes n ON s.node_id = n.id
@@ -1007,6 +1023,7 @@ export class SessionTransport {
       pane: row?.binding_session === sessionName ? row?.pane ?? null : null,
       occupant: row?.binding_session === sessionName ? row?.occupant ?? null : null,
       resumeToken: row?.resume_token ?? null,
+      rotation: claudeResumeRotation(row),
     };
   }
 
@@ -1265,7 +1282,42 @@ export class SessionTransport {
           if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
         }
       }
-      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, opts), async target => {
+      // #1084 — the idle wait must not occupy the seat's serial lease: a long
+      // --wait-for-idle inside guard.operation holds up other sends and queue
+      // creates to this seat for the whole wait. The lease-free wait, main's
+      // quick refusals ahead of it, and the occupant binding all live in
+      // preWaitForIdle; the lease is entered only for the idle re-check +
+      // write. A null return means go through guard.operation exactly as on
+      // main (guard held, target unresolvable, or a quick refusal).
+      let sendOpts = opts;
+      if (opts?.waitForIdleMs !== undefined && !opts.submitOnly && !opts.preWaitedIdle) {
+        const pre = await this.preWaitForIdle(sessionName, opts, guard);
+        if (pre === null) {
+          // Fall through with today's path (in-lease wait / retain / throw).
+        } else if (!pre.ok) {
+          return pre.failure;
+        } else {
+          // Occupant check (review round 3): the lease starts only after the
+          // pre-wait, so refuse here when the seat changed hands meanwhile —
+          // exactly as main refuses with guard_target_changed. Retention must
+          // not adopt the new occupant either, so this runs before operation.
+          const current = guard.target(sessionName);
+          if (JSON.stringify(pre.bound) !== JSON.stringify(current)) {
+            return {
+              ok: false,
+              sessionName,
+              sent: false,
+              reason: "guard_target_changed",
+              error: "Input target/occupant changed; no input written.",
+              activity: pre.evidence.activity,
+              waitedMs: pre.evidence.waitedMs,
+              attempts: pre.evidence.attempts,
+            };
+          }
+          sendOpts = { ...opts, preWaitedIdle: pre.evidence, preWaitBound: pre.bound };
+        }
+      }
+      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, sendOpts), async target => {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         this.db.transaction(() => {
           for (const id of ids) {
@@ -1298,6 +1350,138 @@ export class SessionTransport {
     }
   }
 
+  /**
+   * #1084/#1103: lease-free idle wait before the serial lease, so a long
+   * --wait-for-idle holds up no other send or queue create to this seat.
+   * Returns the wait evidence plus the occupant bound before the wait (both
+   * threaded into the leased send), a failure result using main's exact
+   * reasons, or null when the send must go through guard.operation exactly
+   * as on main. Order matters: typing-guard decision first, then main's
+   * quick refusals (runtime identity, wait validations, session probe),
+   * then the wait. Only the lookups sit inside try: a late throw surfaces
+   * instead of silently running a second full wait inside the lease.
+   */
+  private async preWaitForIdle(
+    sessionName: string,
+    opts: SendOpts,
+    guard: SeatDeliveryGuard,
+  ): Promise<
+    | { ok: true; evidence: NonNullable<SendOpts["preWaitedIdle"]>; bound: GuardTarget }
+    | { ok: false; failure: SendResult }
+    | null
+  > {
+    const timeoutMs = opts.waitForIdleMs;
+    if (timeoutMs === undefined) return null;
+    let meta: {
+      runtime: string | null; attachmentType: string | null; nodeId: string | null;
+      pane: string | null; occupant: string | null; resumeToken: string | null;
+    };
+    let bound: GuardTarget;
+    try {
+      const preTarget = guard.maybeTarget(sessionName);
+      if (!preTarget) return null;
+      const prePref = guard.preference(preTarget.nodeId);
+      if (prePref.effective || prePref.desired) return null;
+      meta = this.getSessionMeta(sessionName);
+      bound = guard.target(sessionName);
+    } catch {
+      return null;
+    }
+    // External CLI seats never wait: main refuses them before anything else,
+    // and a probe or wait would only delay that refusal (or mistake it for
+    // an absent session).
+    if (meta.attachmentType === "external_cli") {
+      return { ok: false, failure: {
+        ok: false,
+        sessionName,
+        reason: "transport_unavailable",
+        error: `Session '${sessionName}' is attached as an external CLI node. Inbound tmux transport is unavailable for this target.`,
+      } };
+    }
+    const runtime = meta.runtime;
+    if (runtime && runtime !== "terminal" && runtime !== "claude-code") {
+      const unverified = await this.unverifiedShellForeground(sessionName, runtime, meta.pane, meta.resumeToken);
+      if (unverified) {
+        return { ok: false, failure: {
+          ok: false,
+          sessionName,
+          sent: false,
+          reason: "target_runtime_unverified",
+          error: `Refused: '${sessionName}' reports ${unverified} as the foreground command, but OpenRig could not verify its expected ${runtime} agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`,
+        } };
+      }
+    }
+    if (opts.force) {
+      return { ok: false, failure: {
+        ok: false,
+        sessionName,
+        reason: "invalid_wait_for_idle",
+        error: "--wait-for-idle cannot be combined with force. No text was sent.",
+        sent: false,
+      } };
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return { ok: false, failure: {
+        ok: false,
+        sessionName,
+        reason: "invalid_wait_for_idle",
+        error: "waitForIdleMs must be a positive number. No text was sent.",
+        sent: false,
+      } };
+    }
+    try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
+      const probe = await this.tmuxAdapter.probeSession(sessionName);
+      if (probe.state === "absent") {
+        this.recordSessionMissingVerdict(target, observedAt);
+        return { ok: false, failure: {
+          ok: false,
+          sessionName,
+          reason: "session_missing",
+          error: `Session '${sessionName}' not found: tmux reports no session with this name. No text was sent. Check available sessions with: rig ps --nodes`,
+        } };
+      }
+      if (probe.state === "transport_unavailable") {
+        return { ok: false, failure: {
+          ok: false,
+          sessionName,
+          reason: "tmux_unavailable",
+          error: `The tmux server could not be reached (${probe.cause}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+        } };
+      }
+    } catch (err) {
+      return { ok: false, failure: {
+        ok: false,
+        sessionName,
+        reason: "tmux_unavailable",
+        error: `The tmux session probe failed unexpectedly (${err instanceof Error ? err.message : String(err)}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+      } };
+    }
+    const deadlineAt = Date.now() + timeoutMs;
+    const preWait = await this.waitForIdle({
+      sessionName,
+      runtime: meta.runtime,
+      attachmentType: meta.attachmentType,
+      timeoutMs,
+      binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
+      readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+    });
+    if (!preWait.ok) {
+      return { ok: false, failure: {
+        ok: false,
+        sessionName,
+        reason: preWait.reason,
+        error: preWait.error,
+        sent: false,
+        activity: preWait.activity,
+        waitedMs: preWait.waitedMs,
+        attempts: preWait.attempts,
+      } };
+    }
+    return { ok: true, evidence: { activity: preWait.activity, waitedMs: preWait.waitedMs, attempts: preWait.attempts, deadlineAt }, bound };
+  }
+
   private async sendUnguarded(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
@@ -1309,7 +1493,7 @@ export class SessionTransport {
     const checkClaudeTarget = async (): Promise<SendResult | null> => {
       if (runtime !== "claude-code") return null;
       if (bindingChanged()) return changedRecipient();
-      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken);
+      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken, sessionMeta.rotation);
       if (bindingChanged()) return changedRecipient();
       if (observation.state === "idle_shell" || observation.state === "conflict") {
         return { ok: false, sessionName, sent: false, reason: observation.state === "idle_shell" ? "target_runtime_not_running" : "target_runtime_conflict",
@@ -1478,7 +1662,10 @@ export class SessionTransport {
       return observe({ ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true });
     }
 
-    if (waitForIdleMs !== undefined) {
+    // #1084: when send() already waited lease-free (preWaitedIdle), the wait
+    // below is skipped; otherwise wait here, exactly as before
+    // (typing-guard flip and unresolvable-target races keep today's behavior).
+    if (waitForIdleMs !== undefined && !opts?.preWaitedIdle) {
       const waitResult = await this.waitForIdle({
         sessionName,
         runtime,
@@ -1500,6 +1687,100 @@ export class SessionTransport {
           error: waitResult.error,
           sent: false,
           ...waitEvidence,
+        };
+      }
+    } else if (opts?.preWaitedIdle && waitForIdleMs !== undefined) {
+      // Occupant check (review round 3): the lease started only after the
+      // pre-wait, so refuse when the seat changed hands meanwhile, exactly
+      // as main refuses with guard_target_changed. No new refusal.
+      const preGuard = this.tmuxAdapter.deliveryGuard;
+      if (preGuard && opts.preWaitBound) {
+        const current = preGuard.target(sessionName);
+        if (JSON.stringify(opts.preWaitBound) !== JSON.stringify(current)) {
+          return {
+            ok: false,
+            sessionName,
+            sent: false,
+            reason: "guard_target_changed",
+            error: "Input target/occupant changed; no input written.",
+            activity: opts.preWaitedIdle.activity,
+            waitedMs: opts.preWaitedIdle.waitedMs,
+            attempts: opts.preWaitedIdle.attempts,
+          };
+        }
+      }
+      // Idle re-check (review round 1 + bot round 2): the wait-mode contract
+      // holds at type time too — only idle types. The budget is measured
+      // from the ORIGINAL deadline (lease-queue time counts too), so the
+      // total wait never exceeds what the caller asked for. Below one poll
+      // interval, waiting buys nothing: one unraced observation decides, so
+      // an idle seat at a dead budget still sends instead of losing a race
+      // against a zero timer.
+      const preEvidence = opts.preWaitedIdle;
+      const deadlineRemainingMs = preEvidence.deadlineAt - Date.now();
+      if (deadlineRemainingMs > this.waitForIdlePollMs) {
+        const rewait = await this.waitForIdle({
+          sessionName,
+          runtime,
+          attachmentType: sessionMeta.attachmentType,
+          timeoutMs: deadlineRemainingMs,
+          binding: observed?.binding,
+          readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+        });
+        waitEvidence = {
+          activity: rewait.activity,
+          waitedMs: preEvidence.waitedMs + rewait.waitedMs,
+          attempts: preEvidence.attempts + rewait.attempts,
+        };
+        if (!rewait.ok) {
+          return {
+            ok: false,
+            sessionName,
+            reason: rewait.reason,
+            error: rewait.error,
+            sent: false,
+            ...waitEvidence,
+          };
+        }
+      } else {
+        const recheck = await this.classifySendReadiness({
+          sessionName,
+          runtime,
+          attachmentType: sessionMeta.attachmentType,
+          binding: observed?.binding,
+          readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+        });
+        if (recheck.state !== "idle") {
+          const late: { reason: string; error: string } =
+            recheck.state === "needs_input"
+              ? {
+                  reason: "target_needs_input",
+                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+                }
+              : recheck.state === "unknown"
+                ? {
+                    reason: "target_activity_unknown",
+                    error: `Target activity could not be determined (${recheck.reason}) when the ${waitForIdleMs}ms wait ended. No text was sent.`,
+                  }
+                : {
+                    reason: "wait_for_idle_timeout",
+                    error: `Target was still busy (${recheck.reason}) when the ${waitForIdleMs}ms wait ended. No text was sent.`,
+                  };
+          return {
+            ok: false,
+            sessionName,
+            sent: false,
+            reason: late.reason,
+            error: late.error,
+            activity: recheck,
+            waitedMs: preEvidence.waitedMs,
+            attempts: preEvidence.attempts + 1,
+          };
+        }
+        waitEvidence = {
+          activity: recheck,
+          waitedMs: preEvidence.waitedMs,
+          attempts: preEvidence.attempts + 1,
         };
       }
     }
@@ -1824,7 +2105,7 @@ export class SessionTransport {
     }
   }
 
-  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null): Promise<ClaudeDeliveryObservation> {
+  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null, rotation: ClaudeResumeRotation | null = null): Promise<ClaudeDeliveryObservation> {
     const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
     try {
       const panes = await this.tmuxAdapter.listPanes(sessionName);
@@ -1834,7 +2115,7 @@ export class SessionTransport {
       if (!pane || panes.length === 0) return unknown;
       const [sessionPid, panePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
       if (sessionPid && panePid && sessionPid !== panePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
-      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken });
+      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken, rotation });
       // Refusal already has positive evidence; a later failed read cannot erase it.
       if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
       const after = await this.tmuxAdapter.listPanes(sessionName);
