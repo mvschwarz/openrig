@@ -31,6 +31,7 @@ import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
@@ -270,6 +271,91 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.createSession).not.toHaveBeenCalled();
     expect(tmux.sendText).not.toHaveBeenCalled();
     expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  // Backlog finding 5: a seat with no occupant at capture (stopped, or nothing running at a reboot)
+  // whose earlier occupant left a resume token is not silently fresh-primed.
+  describe("a seat with no occupant at capture", () => {
+    /** Capture an absent seat while retaining configurable resume-token history and policy. */
+    function absentSeat(opts: { resumeToken?: string | null; restorePolicy?: string } = {}) {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [],
+        resumeType: opts.resumeToken === null ? undefined : "claude_id",
+        resumeToken: opts.resumeToken === null ? undefined : (opts.resumeToken ?? "earlier-thread"),
+      });
+      const node = snap.data.nodes[0]!;
+      return updateSnapshotData(snap, (data) => {
+        data.sessions = data.sessions.map((session) => ({
+          ...session, status: "exited", ...(opts.restorePolicy ? { restorePolicy: opts.restorePolicy } : {}),
+        }));
+        data.activeOccupantsByNode = { [node.id]: { kind: "absent" } };
+      });
+    }
+
+    it("stops for a decision when an earlier occupant left a resume token", async () => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat().id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes).toEqual([
+        expect.objectContaining({ logicalId: "worker", status: "awaiting-decision", error: expect.stringContaining("rig seat launch 'worker@r99' --fresh --reason") }),
+      ]);
+      expect(result.result.nodes[0]!.error).toContain("no running occupant when this snapshot was taken");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["recorded history", {}, undefined, "awaiting-decision"],
+      ["explicit fresh", {}, ["worker"], "fresh"],
+      ["no token", { resumeToken: null }, undefined, "fresh"],
+      ["non-resume policy", { restorePolicy: "relaunch_fresh" }, undefined, "fresh"],
+    ] as const)("restoring continuity with %s preserves the absent-seat decision", async (_label, history, freshLogicalIds, status) => {
+      const original = absentSeat(history);
+      const node = original.data.nodes[0]!;
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("restoring-pod", original.rigId, "Dev");
+      db.prepare("UPDATE nodes SET pod_id = ? WHERE id = ?").run("restoring-pod", node.id);
+      const snap = updateSnapshotData(original, (data) => { data.nodes[0].podId = "restoring-pod"; });
+      db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES (?, ?, ?)").run("restoring-pod", node.id, "restoring");
+      db.prepare("UPDATE sessions SET status = ? WHERE node_id = ?").run("exited", node.id);
+      const sessionsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+      const continuityBefore = db.prepare("SELECT * FROM continuity_state").all();
+      const tmux = mockTmux();
+      if (status === "awaiting-decision") {
+        const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions);
+        expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+      }
+      const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: freshLogicalIds ? [...freshLogicalIds] : undefined });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).toBe(status);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
+      expect(db.prepare("SELECT * FROM continuity_state").all()).toEqual(continuityBefore);
+    });
+
+    it("--fresh still starts it fresh", async () => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat().id, { freshLogicalIds: ["worker"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("awaiting-decision");
+      expect(tmux.createSession).toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no earlier row carries a token", { resumeToken: null }],
+      ["the earlier occupant's policy is not to resume", { restorePolicy: "relaunch_fresh" }],
+    ] as const)("starts it fresh as before when %s", async (_label, opts) => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat(opts).id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("awaiting-decision");
+      expect(tmux.createSession).toHaveBeenCalled();
+    });
   });
 
   it("constructor throws on mismatched db handles", () => {

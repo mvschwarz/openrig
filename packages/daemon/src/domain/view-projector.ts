@@ -309,7 +309,7 @@ export class ViewProjector {
               q.source_session NOT LIKE '%@fixture-%'
             )`;
         const rigClauseQI = rig
-          ? `AND (q.destination_session LIKE ? OR q.source_session LIKE ?)`
+          ? `AND (q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')`
           : "";
         sql = `
           SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session, t.transition_note,

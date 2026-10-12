@@ -1,4 +1,34 @@
 import nodePath from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+
+const ENV_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
+/** Expands a leading `~` and `$VAR` / `${VAR}` references. A reference to an unset variable is
+ *  left as written so preflight reports the path instead of launching in a silently shortened one. */
+export function expandCwd(
+  authored: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  const tilded = authored === "~" || authored.startsWith("~/") ? home + authored.slice(1) : authored;
+  return tilded.replace(ENV_REF, (ref, braced?: string, bare?: string) => env[braced ?? bare!] ?? ref);
+}
+
+/** Picks the directory an authored cwd means. The literal path wins when it exists, so a directory
+ *  named with `~` or `$NAME` keeps its destination; otherwise the expanded path is used. A relative
+ *  path resolves under `specRoot`; with no `specRoot` it stays relative, as the caller selected before. */
+export function resolveAuthoredCwd(
+  authored: string,
+  specRoot: string | null,
+  exists: (path: string) => boolean = existsSync,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  const place = (p: string) => (specRoot === null || nodePath.isAbsolute(p) ? p : nodePath.resolve(specRoot, p));
+  const literal = place(authored);
+  return exists(literal) ? literal : place(expandCwd(authored, env, home));
+}
 
 export function resolveLaunchCwd(
   authoredCwd: string | null | undefined,
@@ -11,9 +41,7 @@ export function resolveLaunchCwd(
   if (!authoredCwd || authoredCwd.trim().length === 0) {
     return nodePath.resolve(specRoot);
   }
-  return nodePath.isAbsolute(authoredCwd)
-    ? authoredCwd
-    : nodePath.resolve(specRoot, authoredCwd);
+  return resolveAuthoredCwd(authoredCwd, specRoot);
 }
 
 export function getOpenRigInstallRoot(): string {
