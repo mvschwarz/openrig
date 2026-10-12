@@ -165,7 +165,11 @@ configurations, as below; do not take the pin from a cached page summary.
      copy in `workspace.specs_root` or `~/.openrig/specs` would shadow the
      shipped team by name. Copying the folder carries every file the spec
      names relative to itself: its culture file, docs, startup files at rig,
-     pod and member level, services and policy files. Then, in the copy's
+     pod and member level, services and policy files. In Claude Code, make the
+     copy with your Read and Write tools, one file at a time (Write creates the
+     folders), not with `cp -R`: Claude Code asks for approval before `cp` or
+     `mv` with any flag, even though your launch allows them, and that prompt
+     stops the person on their first team. Then, in the copy's
      `rig.yaml`, keep `name:`, change each member's `runtime` to one they have
      and drop that member's `model:` pin. Any reference that climbs out of the
      folder (`local:../…` agent refs, any `../` path) still points at the old
@@ -184,6 +188,13 @@ configurations, as below; do not take the pin from a cached page summary.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
    what will start: how many agents, which providers, in which folder.
+   Say too what launching into their folder changes for their own agent
+   there. A Claude Code team usually adds files such as a `CLAUDE.md`, its
+   skills, `.mcp.json` and `.openrig/`, and its `.claude/settings.local.json`
+   makes their own Claude Code in that folder start in accept-edits mode, with
+   the `exa` and `context7` MCP servers and OpenRig's activity hooks; what a
+   given team writes depends on its configuration. If they'd rather keep
+   their folder as it is, offer a separate copy, such as a git worktree.
    If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
    Use `applying-a-permission-policy`; for an unset policy, recommend the team
    default rather than `none`. Launch without `--plan` after team-launch
@@ -234,6 +245,14 @@ configurations, as below; do not take the pin from a cached page summary.
    their goal, and identify its pane in the new space or repeat its exact
    attach command from step 8 so they can talk to it. It won't ask the opening
    question again.
+10. **Tell them when a seat waits on them.** A team seat waiting at a prompt
+    shows `needs_input` as its `agentActivity.state` in
+    `rig ps --nodes --rig <team> --json --fields canonicalSessionName,agentActivity,tmuxAttachCommand`,
+    and nothing else tells the person.
+    When you see one, tell them where they already are: which seat, what its
+    prompt asks (`rig capture <session>` with the seat's
+    `canonicalSessionName` shows it) and the seat's `tmuxAttachCommand`, or
+    just its name if it has none. Don't answer another seat's prompt yourself.
 
 Avoid these:
 - launching a team without the person's yes;

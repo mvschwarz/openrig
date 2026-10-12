@@ -20,6 +20,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -979,6 +980,19 @@ describe("queue routes", () => {
     expect(data[0]!.body).toBe("fyi");
   });
 
+  it("queue, inbox and outbox list refuse only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    await expectLimitParsing(app, "/api/queue/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/inbox/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
@@ -1669,6 +1683,34 @@ describe("queue routes", () => {
       expect(body.workCandidates.next).toEqual([expect.objectContaining({ missions: ["m"] })]);
       expect(body.workCandidates.candidates).toEqual([]);
       expect(counts()).toEqual(before);
+    });
+
+    // A set-aside row must stay in "held" however many newer pending rows the seat has: the two
+    // lists are bounded separately, so a full next list can't push it out.
+    it("GET /api/queue/whoami?candidates=1 keeps an older blocked row in held past 50 newer pending rows", async () => {
+      const create = async (body: string) => {
+        const res = await app.request("/api/queue/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+          body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body }),
+        });
+        return ((await res.json()) as { qitemId: string }).qitemId;
+      };
+      const parked = await create("parked");
+      db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = 'external:gate', ts_created = ? WHERE qitem_id = ?")
+        .run("2020-01-01T00:00:00.000Z", parked);
+      for (let i = 0; i < 51; i++) await create(`pending ${i}`);
+
+      const res = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      expect(res.status).toBe(200);
+      const { workCandidates } = (await res.json()) as { workCandidates: {
+        held: Array<{ qitemId: string; blockedOn: string }>; next: unknown[];
+        heldTruncated: boolean; nextTruncated: boolean; heldAndNextTruncated: boolean } };
+      expect(workCandidates.held).toEqual([expect.objectContaining({ qitemId: parked, blockedOn: "external:gate" })]);
+      expect(workCandidates.next).toHaveLength(50);
+      expect(workCandidates.heldTruncated).toBe(false);
+      expect(workCandidates.nextTruncated).toBe(true);
+      expect(workCandidates.heldAndNextTruncated).toBe(true);
     });
 
     it("GET /api/queue/whoami returns 400 without session query param", async () => {

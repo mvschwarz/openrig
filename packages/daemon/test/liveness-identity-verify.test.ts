@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { getNodeInventory, getNodeDetail, deriveNodeLifecycleState } from "../src/domain/node-inventory.js";
+import { getNodeInventory, getNodeInventoryForAllRigs, getNodeInventoryForRigs, getNodeDetail, deriveNodeLifecycleState, attachAgentActivity, attachTerminalActivityAndWork } from "../src/domain/node-inventory.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { projectRigToGraph, type InventoryOverlay } from "../src/domain/graph-projection.js";
 import type { SeatIdentityVerdict, SeatIdentityVerdictKind } from "../src/domain/types.js";
@@ -126,12 +126,27 @@ describe("getNodeInventory identity gating", () => {
     db.close();
   });
 
-  it("PANE_MISSING verdict → NOT clean running; evidence names it missing", () => {
+  it("confirmed missing session projects detached without rewriting history or stored occupant state", () => {
     const db = createFullTestDb();
     seedRunningSeat(db);
+    db.prepare("UPDATE nodes SET occupant_lifecycle = 'active' WHERE id = 'n1'").run();
+    const stored = db.prepare("SELECT * FROM sessions WHERE id = 'sess1'").get();
     new SeatIdentityStore(db).upsert(verdict("pane_missing", "session_missing"));
     const [n] = getNodeInventory(db, "rig-1");
-    expect(n.lifecycleState).toBe("attention_required");
+    expect(n.lifecycleState).toBe("detached");
+    expect(n.sessionStatus).toBe("detached");
+    expect(n.storedSessionStatus).toBe("running");
+    expect(n.startupStatus).toBe("ready");
+    expect(n.storedStartupStatus).toBe("ready");
+    expect(getNodeDetail(db, "rig-1", "dev.impl")).toMatchObject({
+      sessionStatus: "detached", storedSessionStatus: "running",
+      lifecycleState: "detached", occupantLifecycle: "unknown",
+      identityVerdict: n.identityVerdict,
+    });
+    expect(getNodeInventoryForAllRigs(db).get("rig-1")).toEqual([n]);
+    expect(getNodeInventoryForRigs(db, new Set(["rig-1"])).get("rig-1")).toEqual([n]);
+    expect(db.prepare("SELECT * FROM sessions WHERE id = 'sess1'").get()).toEqual(stored);
+    expect(db.prepare("SELECT occupant_lifecycle FROM nodes WHERE id = 'n1'").get()).toEqual({ occupant_lifecycle: "active" });
     expect(n.occupantLifecycle).toBe("unknown");
     expect(n.identityVerdict?.reason).toBe("session_missing");
     db.close();
@@ -153,7 +168,7 @@ describe("getNodeInventory identity gating", () => {
     db.close();
   });
 
-  it("matching NULL-pane session_missing verdict down-ranks to attention_required", () => {
+  it("matching NULL-pane session_missing verdict projects detached", () => {
     const db = createFullTestDb();
     seedRunningSeat(db);
     db.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = 'n1'").run();
@@ -164,7 +179,8 @@ describe("getNodeInventory identity gating", () => {
     });
     const [n] = getNodeInventory(db, "rig-1");
     expect(n.identityVerdict?.verdict).toBe("pane_missing");
-    expect(n.lifecycleState).toBe("attention_required");
+    expect(n.lifecycleState).toBe("detached");
+    expect(n.sessionStatus).toBe("detached");
     expect(n.occupantLifecycle).toBe("unknown");
     db.close();
   });
@@ -182,9 +198,68 @@ describe("getNodeInventory identity gating", () => {
     expect(n.lifecycleState).toBe("attention_required");
     db.close();
   });
+
+  it.each([
+    ["tmux_unavailable", "tmux_unavailable"],
+    ["pane_missing", "pane_pid_gone"],
+    ["mismatch", "process_identity_mismatch"],
+  ] as const)("%s/%s does not prove the session missing", (kind, reason) => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      new SeatIdentityStore(db).upsert(verdict(kind, reason));
+      const [entry] = getNodeInventory(db, "rig-1");
+      expect(entry.sessionStatus).toBe("running");
+      expect(entry.storedSessionStatus).toBe("running");
+      if (kind === "tmux_unavailable") expect(entry.lifecycleState).toBe("running");
+    } finally { db.close(); }
+  });
+
+  it("confirmed absence outranks fresh hook, structural, motion and taxonomy caches but retains assigned work", async () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      new SeatIdentityStore(db).upsert(verdict("pane_missing", "session_missing"));
+      db.prepare("INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body) VALUES ('q1', '2026-07-02', '2026-07-02', 'op@rig', 'dev-impl@rig', 'pending', 'work')").run();
+      const seatActivity = {
+        getSeatActivity: () => ({ isActiveWithinWindow: true, lastActivityAt: "2026-07-02T12:00:00.000Z", silenceWindowSeconds: 60 }),
+        getSeatStateBySession: () => ({ activity: "working", needsInput: { count: 0, reason: null } }),
+      };
+      const entries = await attachAgentActivity(getNodeInventory(db, "rig-1"), {
+        tmuxAdapter: { capturePaneContent: () => { throw new Error("missing session must not be captured"); } } as never,
+        activityStore: { getLatestForNode: () => ({ state: "running", reason: "hook" }) } as never,
+        structuralActivity: { getStructuralActivity: () => ({ state: "mid_work" }) } as never,
+        seatActivity: seatActivity as never,
+        captureFallback: true,
+        now: new Date("2026-07-02T12:00:01.000Z"),
+      });
+      const [entry] = attachTerminalActivityAndWork(entries, { db, seatActivity: seatActivity as never });
+      expect(entry).toMatchObject({
+        sessionStatus: "detached", terminalActive: false, activityState: null, lastActivityAt: null,
+        hasAssignedWork: true, pendingWorkCount: 1,
+        agentActivity: { state: "unknown", reason: "session_missing", evidenceSource: "tmux_session" },
+      });
+    } finally { db.close(); }
+  });
 });
 
 describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale false-green)", () => {
+  it.each(["session", "pane", "registration", "handover", "ulid"])("stale missing verdict cannot detach a current occupant after %s changes", changed => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      new SeatIdentityStore(db).upsert(verdict("pane_missing", "session_missing"));
+      if (changed === "session") db.prepare("UPDATE sessions SET session_name = 'new-seat@rig' WHERE id = 'sess1'").run();
+      if (changed === "pane") db.prepare("UPDATE bindings SET tmux_pane = '%2' WHERE node_id = 'n1'").run();
+      if (changed === "registration") db.prepare("UPDATE sessions SET created_at = '2026-07-02 12:00:01' WHERE id = 'sess1'").run();
+      if (changed === "handover") db.prepare("UPDATE nodes SET handover_at = '2026-07-02T12:00:00.000Z' WHERE id = 'n1'").run();
+      if (changed === "ulid") db.prepare("UPDATE sessions SET id = ? WHERE id = 'sess1'").run(ulid(Date.parse("2026-07-02T12:00:00.000Z")));
+      expect(getNodeInventory(db, "rig-1")[0]).toMatchObject({
+        identityVerdict: null, sessionStatus: "running", lifecycleState: "running", occupantLifecycle: "active",
+      });
+    } finally { db.close(); }
+  });
+
   it.each(["retained", "finishes after cutover"])("same-pane successor rejects predecessor evidence: %s", timing => {
     const db = createFullTestDb();
     try {
@@ -241,7 +316,7 @@ describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale f
       store.upsert(verdict("mismatch"));
       expect(getNodeInventory(db, "rig-1")[0].identityVerdict).toBeNull();
       store.upsert({ ...verdict("pane_missing", "session_missing"), observedAt: "2026-07-02T12:00:00.001Z" });
-      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("attention_required");
+      expect(getNodeInventory(db, "rig-1")[0].sessionStatus).toBe("detached");
     } finally { db.close(); }
   });
 
@@ -334,7 +409,7 @@ describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale f
     new SeatIdentityStore(db).upsert(verdict("pane_missing", "session_missing"));
     const [n] = getNodeInventory(db, "rig-1");
     expect(n.identityVerdict?.reason).toBe("session_missing");
-    expect(n.lifecycleState).toBe("attention_required");
+    expect(n.lifecycleState).toBe("detached");
     db.close();
   });
 });

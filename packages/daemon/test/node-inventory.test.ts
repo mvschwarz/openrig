@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../src/domain/node-inventory.js";
+import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ContextUsage } from "../src/domain/types.js";
 import type { ContextUsageStore } from "../src/domain/context-usage-store.js";
@@ -136,6 +137,18 @@ describe("Node Inventory Projection", () => {
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
     expect(entry?.tmuxAttachCommand).toBe("tmux attach -t dev-impl@test-rig");
+  });
+
+  it("tmuxAttachCommand names the daemon's tmux server when it isn't the default one", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig");
+    setDaemonTmuxServer(["-L", "person"]);
+    try {
+      const entry = getNodeInventory(db, "rig-1").find((e) => e.logicalId === "dev.impl");
+      expect(entry?.tmuxAttachCommand).toBe("tmux -L person attach -t dev-impl@test-rig");
+    } finally {
+      setDaemonTmuxServer([]);
+    }
   });
 
   // Test 5: resumeCommand uses correct runtime syntax

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
-import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
+import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, parseSetupProviders, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
 
 function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
@@ -882,5 +882,63 @@ describe("codex_auth — provider-aware Codex readiness (#194)", () => {
     const result = await runSetup(deps, {});
     expect(result.steps.find((s) => s.id === "codex_install")?.status).toBe("fail");
     expect(codexAuthStep(result)?.status).toBe("skipped");
+  });
+});
+
+describe("--providers: a provider the person didn't choose reads not selected, never failed (0.6.9 F3)", () => {
+  const base = makeDeps().exec;
+  /** A machine with Claude Code signed in and Codex neither installed nor installable. */
+  function claudeOnlyMachine(execs: string[], claudeAuth = true): SetupDeps {
+    return makeDeps({
+      exec: (cmd: string) => {
+        execs.push(cmd);
+        if (cmd.startsWith("codex") || cmd.includes("@openai/codex")) throw new Error("codex unavailable");
+        if (cmd === "claude auth status" && !claudeAuth) throw new Error("not logged in");
+        return base(cmd);
+      },
+    });
+  }
+
+  it("leaves Codex out when the person chose Claude: not installed, not checked, and setup is ready", async () => {
+    const execs: string[] = [];
+    const result = await runSetup(claudeOnlyMachine(execs), { providers: ["claude"] });
+    expect(result.steps.find((s) => s.id === "codex_install")).toMatchObject({ status: "skipped", message: expect.stringContaining("Not selected") });
+    expect(result.steps.find((s) => s.id === "codex_auth")).toMatchObject({ status: "skipped", message: expect.stringContaining("Not selected") });
+    expect(execs.filter((cmd) => cmd.includes("codex"))).toEqual([]);
+    expect(result.ready).toBe(true);
+  });
+
+  it("without --providers still installs and checks both, so the same machine reads failed for Codex", async () => {
+    const result = await runSetup(claudeOnlyMachine([]), {});
+    expect(result.steps.find((s) => s.id === "codex_install")?.status).toBe("fail");
+    expect(result.ready).toBe(false);
+  });
+
+  it("still reads failed for a provider the person chose", async () => {
+    const result = await runSetup(claudeOnlyMachine([], false), { providers: ["claude"] });
+    expect(result.steps.find((s) => s.id === "claude_auth")?.status).toBe("fail");
+    expect(result.ready).toBe(false);
+  });
+
+  it("names a provider left out in the dry-run plan", async () => {
+    const result = await runSetup(makeDeps(), { dryRun: true, providers: ["codex"] });
+    expect(result.steps.find((s) => s.id === "claude_install")?.message).toContain("Not selected");
+    expect(result.steps.find((s) => s.id === "codex_install")?.message).toContain("would be attempted");
+  });
+
+  it("parses the person's choice and rejects an unknown provider", async () => {
+    expect(parseSetupProviders("claude")).toEqual(["claude"]);
+    expect(parseSetupProviders("both")).toEqual(["claude", "codex"]);
+    expect(parseSetupProviders(" Codex , claude ")).toEqual(["codex", "claude"]);
+    expect(parseSetupProviders("gemini")).toEqual({ error: expect.stringContaining("Unknown provider 'gemini'") });
+    expect(parseSetupProviders(",")).toEqual({ error: expect.stringContaining("needs claude, codex, or both") });
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.map(String).join(" ")); });
+    process.exitCode = undefined;
+    await new Command().addCommand(setupCommand(makeDeps())).parseAsync(["node", "rig", "setup", "--providers", "gemini"]);
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("Unknown provider 'gemini'");
+    process.exitCode = undefined;
+    vi.restoreAllMocks();
   });
 });

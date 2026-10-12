@@ -33,10 +33,9 @@ export function findBlockedDocsPaths(paths) {
 }
 
 export function listTrackedDocsPaths(exec = execFileSync) {
-  const output = exec("git", ["ls-files", "docs/**"], { encoding: "utf8" });
+  const output = exec("git", ["ls-files", "-z", "docs/**"], { encoding: "utf8" });
   return output
-    .split("\n")
-    .map((line) => line.trim())
+    .split("\0")
     .filter(Boolean);
 }
 

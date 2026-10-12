@@ -80,7 +80,6 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     const f = fixture(); await f.serve();
     const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch, sleep: async () => {} });
     vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
-    vi.spyOn(adapter as any, "pollForResumeToken").mockResolvedValue("new-native-id");
     const result = await adapter.launchHarness(f.binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "old-id" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-id" } } : {}) });
     expect(result.ok).toBe(true); expect(f.commands).toHaveLength(1);
     await f.execute(f.commands[0]!);

@@ -1,7 +1,7 @@
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
-import type { NodeInventoryEntry } from "./types.js";
+import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 
@@ -17,6 +17,7 @@ export interface SeatStatus {
   runtime: string | null;
   current_occupant: string | null;
   session_status: string | null;
+  session_reason: SeatIdentityVerdict["reason"];
   startup_status: NodeInventoryEntry["startupStatus"];
   occupant_lifecycle: NodeInventoryEntry["occupantLifecycle"];
   continuity_outcome: NodeInventoryEntry["continuityOutcome"];
@@ -113,6 +114,7 @@ export class SeatStatusService {
       runtime: entry.runtime,
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
+      session_reason: entry.identityVerdict?.reason ?? null,
       startup_status: entry.startupStatus,
       occupant_lifecycle: entry.occupantLifecycle,
       continuity_outcome: entry.continuityOutcome,

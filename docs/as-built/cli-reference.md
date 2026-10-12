@@ -749,7 +749,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig add <rig-id> <pod-namespace> <member-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
+| `rig add <rig> <pod-namespace> <member-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
 
 ### create
 
@@ -818,7 +818,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--policy <name>`<br>`--spec <path>` |
+| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--providers <list>`<br>`--policy <name>`<br>`--spec <path>` |
 
 ### restore-check
 

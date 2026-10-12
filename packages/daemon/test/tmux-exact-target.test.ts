@@ -30,6 +30,7 @@ function resolve(target: string, sessions: Sessions): string | null {
 }
 
 function runTmux(argv: string[], sessions: Sessions): string {
+  if (argv[1] === "show-environment" && argv[2] === "-g") return ""; // the server's global environment: clean here
   const flag = argv[1] === "detach-client" ? "-s" : "-t";
   const target = argv[argv.indexOf(flag) + 1]!;
   // Even session-scoped options use a target-pane. An unqualified =name is not a session target here.
@@ -161,7 +162,9 @@ describe("exact session targets for capture, session environment and pipe-pane",
         expect(await a.switchClient("client", target)).toEqual({ ok: true });
         expect(sessions[GONE]).toMatchObject({ respawned: true, viewed: true, options: { "@probe": "own", "remain-on-exit": "on" } });
         expect(sessions[SIBLING]!.options).toBeUndefined();
-        if (target !== GONE) expect(calls.every((c) => c[c.indexOf("-t") + 1] === target)).toBe(true);
+        // The respawn's server-wide read of inherited parent-session identity addresses no session.
+        expect(calls.filter((c) => !c.includes("-t")).map((c) => c.join(" "))).toEqual(["tmux show-environment -g"]);
+        if (target !== GONE) expect(calls.filter((c) => c.includes("-t")).every((c) => c[c.indexOf("-t") + 1] === target)).toBe(true);
       });
     }
 

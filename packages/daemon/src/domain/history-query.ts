@@ -91,7 +91,7 @@ function truncateExcerpt(line: string, max = 240): string {
   return line.length > max ? `${line.slice(0, max)}…` : line;
 }
 
-export function extractKeywords(question: string): string[] {
+function extractLiteralKeywords(question: string): string[] {
   const words = question.split(/\s+/).filter(Boolean);
   const seen = new Set<string>();
   const result: string[] = [];
@@ -102,13 +102,16 @@ export function extractKeywords(question: string): string[] {
     if (stripped.length < 3) continue;
     if (STOP_WORDS.has(stripped.toLowerCase())) continue;
 
-    const escaped = escapeRegex(word.replace(/[?.!,;:]+$/, ""));
-    if (seen.has(escaped)) continue;
-    seen.add(escaped);
-    result.push(escaped);
+    if (seen.has(stripped)) continue;
+    seen.add(stripped);
+    result.push(stripped);
   }
 
   return result;
+}
+
+export function extractKeywords(question: string): string[] {
+  return extractLiteralKeywords(question).map(escapeRegex);
 }
 
 function stripAnsi(text: string): string {
@@ -378,7 +381,7 @@ export class HistoryQuery {
 
   searchChat(rigId: string, question: string): ChatSearchResult[] {
     if (!this.chatSearchFn) return [];
-    const keywords = extractKeywords(question);
+    const keywords = extractLiteralKeywords(question);
     if (keywords.length === 0) return [];
     const pattern = keywords.join("|");
     return this.chatSearchFn(rigId, pattern);

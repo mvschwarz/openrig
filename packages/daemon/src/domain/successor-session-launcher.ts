@@ -285,6 +285,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
     };
   }
 

@@ -38,6 +38,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
   continuity_outcome: string | null;
@@ -149,6 +150,10 @@ function display(value: string | null | undefined, empty = "none"): string {
   return value ?? empty;
 }
 
+function sessionReason(reason: string | null | undefined): string | null {
+  return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
+}
+
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
   console.log(`Rig: ${status.rig_name}`);
@@ -160,6 +165,8 @@ function printHuman(status: SeatStatusResponse): void {
     console.log("Automatic input pauses while on, including writing lifecycle. Disabling does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  const reason = sessionReason(status.session_reason);
+  if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions) {
     const p = status.permissions;
     const formatSource = (source: string): string => {
@@ -499,7 +506,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "continue" | "stop" | "clean",
+    path: "set-model" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -520,13 +527,13 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
       const error = {
         ok: false as const,
-        code: `${path}_outcome_unknown`,
+        code: path === "launch-plan" ? "launch_plan_timeout" : `${path}_outcome_unknown`,
         status: "unknown",
-        message: `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
-        guidance: `Check the outcome before retrying: rig seat status ${seat}`,
+        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
+        guidance: path === "launch-plan" ? "Retry the preview when the daemon responds." : `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
       else printSeatError(error, error.message);
@@ -538,7 +545,7 @@ identity remains unverified; a version number alone cannot clear it.
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
-    if (path === "launch" || path === "continue") {
+    if (path === "launch" || path === "launch-plan" || path === "continue") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
@@ -602,7 +609,8 @@ resume/successor launch reads it at call time. Examples:
     .command("launch")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--fresh", "Explicitly create a blank native occupant; no continuity source is used")
-    .requiredOption("--reason <text>", "Audit reason recorded on the seat.fresh_launched event")
+    .option("--reason <text>", "Audit reason (required when executing, optional with --plan)")
+    .option("--plan", "Preview this fresh launch without changing any seat or starting tmux")
     .option("--stop", "Stop the current live managed occupant before launching fresh")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--json", "JSON output for agents")
@@ -610,16 +618,43 @@ resume/successor launch reads it at call time. Examples:
     .addHelpText("after", `
 No resume, fork, rebuild, snapshot, checkpoint, or restore packet is used.
 A live managed seat requires --stop; adopted and unmanaged sessions are refused.
+Sibling seats stay attached and untouched. The runtime adapter composes a new
+command from current settings; launch does not replay a stored wrapper command.
+The seat launch environment and managed executable selection still apply.
+Preview is a read-only snapshot, not a reservation or a native readiness check.
+A successful preview exits 0; inspect launchable to decide whether launch is allowed.
+Unreadable tmux produces complete:false and unknown eligibility unless already blocked.
 Examples:
+  rig seat launch dev.impl --fresh --plan --json
   rig seat launch dev-impl@my-rig --fresh --reason "deliberate blank restart"
   rig seat launch dev.impl --fresh --stop --reason "replace managed occupant" --json`)
-    .action(async (seat: string, opts: { fresh: boolean; reason: string; stop?: boolean; operator?: string; json?: boolean }) => {
-      await runLifecycleVerb("launch", seat, {
+    .action(async (seat: string, opts: { fresh: boolean; reason?: string; plan?: boolean; stop?: boolean; operator?: string; json?: boolean }) => {
+      if (!opts.plan && !opts.reason?.trim()) {
+        const error = { ok: false, code: "missing_reason", message: "Execution requires --reason; use --plan for a read-only preview." };
+        if (opts.json) console.log(JSON.stringify(error, null, 2));
+        else console.error(error.message);
+        process.exitCode = 1;
+        return;
+      }
+      await runLifecycleVerb(opts.plan ? "launch-plan" : "launch", seat, {
         fresh: opts.fresh === true,
         reason: opts.reason,
         stop: opts.stop === true,
         operator: opts.operator,
       }, opts, (data) => {
+        if (opts.plan) {
+          console.log(`Fresh launch preview: ${String(data["sessionName"])} (no changes made).`);
+          console.log(`Current occupant: ${String(data["currentOccupant"])}.`);
+          console.log(`Complete: ${String(data["complete"])}; launchable: ${data["launchable"] == null ? "unknown" : String(data["launchable"])}; stop required: ${data["stopRequired"] == null ? "unknown" : String(data["stopRequired"])}; would stop: ${data["wouldStop"] == null ? "unknown" : String(data["wouldStop"])}.`);
+          for (const blocker of data["blockers"] as Array<{ message: string; guidance?: string }>) {
+            console.log(`Blocked: ${blocker.message}`);
+            if (blocker.guidance) console.log(blocker.guidance);
+          }
+          const startup = data["startup"] as { projectionCount: number; fileCount: number; actionCount: number };
+          console.log(`Startup: ${startup.projectionCount} projections, ${startup.fileCount} files, ${startup.actionCount} actions.`);
+          for (const sibling of data["siblings"] as Array<{ logicalId: string }>) console.log(`Sibling ${sibling.logicalId}: unchanged.`);
+          return;
+        }
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const superseded = data["supersededSessionIds"] as string[] | undefined;
         console.log(`Fresh occupant ready: ${s?.logicalId}@${s?.rigName} (${String(data["sessionName"])}).`);
