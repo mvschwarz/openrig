@@ -1,6 +1,7 @@
 // Slice 01 (OPR.0.7.0.1) — one bounded read of the Claude login's usage windows. It runs only on an
 // explicit refresh: ordinary provider reads never call it.
 //
+//   0. The `claude` executable is resolved on the reader's PATH; both steps run it by absolute path.
 //   1. `claude auth status --json`: identity (only loggedIn, authMethod, email, orgId are read). A login
 //      that isn't a claude.ai subscription, or none, is refused here: the screen never starts.
 //   2. `claude --safe-mode --strict-mcp-config --tools "" --model <none> /usage` in a PRIVATE tmux server
@@ -70,6 +71,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const stringOrNull = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The `claude` executable on the reader's own PATH, as an absolute path, or null. Both steps run this one
+ *  binary, so a tmux (or pane shell) with another PATH can never start a different Claude. */
+export function resolveClaudeExecutable(env: NodeJS.ProcessEnv): string | null {
+  for (const dir of (env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, "claude");
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return path.resolve(candidate);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 /** The child environment: the seat's HOME/CLAUDE_CONFIG_DIR/PATH, never TMUX, TMUX_PANE or seat variables. */
 export function claudeUsageReaderEnv(options: ClaudeUsageReaderOptions, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -114,9 +131,11 @@ export function claudeUsageReader(options: ClaudeUsageReaderOptions = {}): Claud
     const deadline = performance.now() + deadlineMs;
     const left = () => deadline - performance.now();
     const fail = (reason: ClaudeUsageFailureReason, detail: string) => ({ ok: false as const, at: now(), reason, detail });
+    const claude = resolveClaudeExecutable(env);
+    if (claude === null) return fail("binary_not_found", "no claude executable on the daemon's PATH");
 
     const authStatus = async (): Promise<{ facts: ClaudeAuthFacts } | { reason: ClaudeUsageFailureReason; detail: string }> => {
-      const r = await run("claude", ["auth", "status", "--json"], env, cwd, Math.min(AUTH_STATUS_MS, left()));
+      const r = await run(claude, ["auth", "status", "--json"], env, cwd, Math.min(AUTH_STATUS_MS, left()));
       if (r.error?.code === "ENOENT") return { reason: "binary_not_found", detail: "no claude executable on the daemon's PATH" };
       if (r.timedOut) return { reason: "auth_status_failed", detail: "claude auth status did not answer in time" };
       let parsed: unknown;
@@ -132,7 +151,7 @@ export function claudeUsageReader(options: ClaudeUsageReaderOptions = {}): Claud
       return fail("not_subscription_login", `the login is not a claude.ai subscription (${before.facts.authMethod ?? "unknown method"})`);
     }
 
-    const screen = await readScreen(env, cwd, left, pollMs, now);
+    const screen = await readScreen(claude, env, cwd, left, pollMs, now);
     if (!screen.ok) return fail(screen.reason, screen.detail);
 
     const after = await authStatus();
@@ -146,6 +165,7 @@ export function claudeUsageReader(options: ClaudeUsageReaderOptions = {}): Claud
 }
 
 async function readScreen(
+  claude: string,
   env: NodeJS.ProcessEnv,
   cwd: string | undefined,
   left: () => number,
@@ -156,7 +176,8 @@ async function readScreen(
   const socket = path.join(dir, "s");
   const tmux = (args: string[]) => run("tmux", ["-S", socket, "-f", "/dev/null", ...args], env, cwd, Math.max(1, Math.min(5_000, left())));
   // tmux sets TMUX/TMUX_PANE inside its panes; unset them so Claude never thinks it's nested or in a seat.
-  const command = `exec env -u TMUX -u TMUX_PANE claude ${CLAUDE_USAGE_SCREEN_ARGS.map(shellQuote).join(" ")}`;
+  // By absolute path: the same binary auth status ran, whatever PATH tmux gives the pane.
+  const command = `exec env -u TMUX -u TMUX_PANE ${shellQuote(claude)} ${CLAUDE_USAGE_SCREEN_ARGS.map(shellQuote).join(" ")}`;
   try {
     const started = await tmux(["new-session", "-d", "-s", "usage", "-x", "120", "-y", "50", ...(cwd ? ["-c", cwd] : []), command]);
     if (started.error?.code === "ENOENT") return { ok: false, reason: "tmux_unavailable", detail: "no tmux on the daemon's PATH" };
@@ -166,7 +187,6 @@ async function readScreen(
     while (left() > 0) {
       const captured = await tmux(["capture-pane", "-p", "-t", "usage"]);
       if (captured.code !== 0) {
-        if (/command not found|No such file/.test(last)) return { ok: false, reason: "binary_not_found", detail: "no claude executable on the daemon's PATH" };
         return { ok: false, reason: "child_exited", detail: "claude exited before the usage screen rendered" };
       }
       last = captured.stdout;

@@ -4,6 +4,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { claudeResetUtc, parseClaudeUsageScreen } from "../src/domain/provider/claude-usage-screen.js";
 import {
   CLAUDE_USAGE_NO_MODEL,
@@ -129,6 +130,31 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
     // Esc, Ctrl-C, Ctrl-C and nothing else.
     expect(fake.keys()).toBe("1b0303");
     expect(ownDirs()).toEqual(before); // private server's temp dir removed
+  });
+
+  it("a tmux that rewrites the pane's PATH still starts the resolved claude, never another one", async () => {
+    const fake = makeFakeClaude();
+    fake.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen() });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-wrapper-"));
+    const trip = path.join(root, "trip");
+    const wrap = path.join(root, "wrap");
+    fs.mkdirSync(trip);
+    fs.mkdirSync(wrap);
+    const tripped = path.join(root, "TRIPPED");
+    fs.writeFileSync(path.join(trip, "claude"), `#!/bin/sh\necho reached > ${tripped}\nexit 99\n`, { mode: 0o755 });
+    const realTmux = execFileSync("sh", ["-c", "command -v tmux"]).toString().trim();
+    // Like the repo scaffold's wrapper: real tmux, with PATH reset to one where another claude comes first.
+    fs.writeFileSync(path.join(wrap, "tmux"), `#!/bin/sh\nPATH=${trip}:$PATH exec ${realTmux} "$@"\n`, { mode: 0o755 });
+    const r = await claudeUsageReader({ launchPath: [wrap, fake.binDir, process.env.PATH].join(path.delimiter), home: home(), claudeConfigDir: fake.configDir, deadlineMs: 8_000, pollMs: 100 })();
+    expect(r).toMatchObject({ ok: true });
+    expect(fs.existsSync(tripped)).toBe(false);
+    expect(fake.screenStarts()).toHaveLength(1);
+  });
+
+  it("no claude on the reader's PATH fails before anything starts", async () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-nobin-"));
+    const r = await claudeUsageReader({ launchPath: empty, home: home(), deadlineMs: 2_000 })();
+    expect(r).toMatchObject({ ok: false, reason: "binary_not_found", detail: "no claude executable on the daemon's PATH" });
   });
 
   it("a logged-out or API-key login is refused before the screen starts", async () => {
