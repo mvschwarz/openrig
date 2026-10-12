@@ -43,19 +43,51 @@ export function parseAddress(address) {
   return { ref, headerPath };
 }
 
+/** Tabs advance to four-column stops, including in a list continuation. */
+function indentationColumns(prefix) {
+  let columns = 0;
+  for (const character of prefix) columns += character === "\t" ? 4 - columns % 4 : 1;
+  return columns;
+}
+
 function scanHeaders(lines) {
   const hits = [];
   let fence = null;
+  let listIndent = 0;
+  let blankAfterList = false;
 
   for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
     const line = lines[lineNumber];
-    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    // A leading lone CR is a line boundary, rather than fence indentation.
+    const boundaryLine = line.replace(/^\r+/, "");
+    const leading = boundaryLine.match(/^[ \t]*/)[0];
+    const columns = indentationColumns(leading);
+    if (!fence) {
+      const list = boundaryLine.match(/^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+(?=\S)/);
+      if (list) {
+        listIndent = indentationColumns(list[0]);
+        blankAfterList = false;
+      } else if (!boundaryLine.trim()) {
+        blankAfterList = true;
+      } else {
+        // Preserve lazy paragraph continuations; a dedented block or a
+        // paragraph after a blank line ends this simple list context.
+        if (columns < listIndent && (blankAfterList
+          || /^ {0,3}(?:#{1,6}(?:\s|$)|`{3,}|~{3,}|>)/.test(boundaryLine))) listIndent = 0;
+        blankAfterList = false;
+      }
+    }
+    const containerIndent = fence?.listIndent ?? listIndent;
+    const fenceLine = containerIndent > 0 && columns >= containerIndent
+      ? " ".repeat(columns - containerIndent) + boundaryLine.slice(leading.length)
+      : boundaryLine;
+    const fenceMatch = fenceLine.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fenceMatch) {
       const marker = fenceMatch[1][0];
       const length = fenceMatch[1].length;
-      if (!fence) fence = { marker, length };
+      if (!fence) fence = { marker, length, listIndent };
       else if (fence.marker === marker && length >= fence.length
-        && /^[ \t\r]*$/.test(line.slice(fenceMatch[0].length))) fence = null;
+        && /^[ \t\r]*$/.test(fenceLine.slice(fenceMatch[0].length))) fence = null;
       continue;
     }
     if (fence) continue;

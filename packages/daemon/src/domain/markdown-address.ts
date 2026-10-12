@@ -103,24 +103,56 @@ interface HeaderScan {
   unterminatedFenceLine: number | null;
 }
 
+/** Tabs advance to four-column stops, including in a list continuation. */
+function indentationColumns(prefix: string): number {
+  let columns = 0;
+  for (const character of prefix) columns += character === "\t" ? 4 - columns % 4 : 1;
+  return columns;
+}
+
 /** Scan for real headers, skipping fenced code blocks (``` or ~~~, any info string;
  *  a fence closes only on the same marker at the same or greater length). */
 function scanHeaders(lines: string[]): HeaderScan {
   const hits: HeaderHit[] = [];
-  let fence: { marker: string; length: number; line: number } | null = null;
+  let fence: { marker: string; length: number; line: number; listIndent: number } | null = null;
+  let listIndent = 0;
+  let blankAfterList = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    // A leading lone CR is a line boundary, rather than fence indentation.
+    const boundaryLine = line.replace(/^\r+/, "");
+    const leading = boundaryLine.match(/^[ \t]*/)![0]!;
+    const columns = indentationColumns(leading);
+    if (!fence) {
+      const list = boundaryLine.match(/^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+(?=\S)/);
+      if (list) {
+        listIndent = indentationColumns(list[0]);
+        blankAfterList = false;
+      } else if (!boundaryLine.trim()) {
+        blankAfterList = true;
+      } else {
+        // Preserve lazy paragraph continuations; a dedented block or a
+        // paragraph after a blank line ends this simple list context.
+        if (columns < listIndent && (blankAfterList
+          || /^ {0,3}(?:#{1,6}(?:\s|$)|`{3,}|~{3,}|>)/.test(boundaryLine))) listIndent = 0;
+        blankAfterList = false;
+      }
+    }
+    const containerIndent = fence?.listIndent ?? listIndent;
+    const fenceLine = containerIndent > 0 && columns >= containerIndent
+      ? " ".repeat(columns - containerIndent) + boundaryLine.slice(leading.length)
+      : boundaryLine;
+    const fenceMatch = fenceLine.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fenceMatch) {
       const marker = fenceMatch[1]![0]!;
       const length = fenceMatch[1]!.length;
       if (!fence) {
         // Backticks in an opener's info string prevent a fenced block.
         // Do not let inline code spans hide the following real headings.
-        if (marker === "`" && line.slice(fenceMatch[0].length).includes("`")) continue;
-        fence = { marker, length, line: i };
+        if (marker === "`" && fenceLine.slice(fenceMatch[0].length).includes("`")) continue;
+        fence = { marker, length, line: i, listIndent };
       } else if (fence.marker === marker && length >= fence.length
-        && /^[ \t\r]*$/.test(line.slice(fenceMatch[0].length))) {
+        && /^[ \t\r]*$/.test(fenceLine.slice(fenceMatch[0].length))) {
         fence = null;
       }
       continue;
