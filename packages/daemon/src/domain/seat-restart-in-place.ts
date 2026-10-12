@@ -16,6 +16,8 @@ import { CodexThreadIdResolver, resolveCodexDbPaths } from "./codex-thread-id.js
 import { isShellForeground } from "./shell-classifier.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
+import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
+import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -32,12 +34,12 @@ import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
-  | "capturePaneContent">;
+  | "getPaneLinePosition" | "capturePaneFrom">;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
   launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string }): Promise<HarnessLaunchResult>;
-  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string }):
+  buildResumeCommand(binding: NodeBinding, opts: { name: string; resumeToken: string; running?: RunningCodexLaunch }):
     Promise<{ ok: true; command: string; core: string } | { ok: false; error: string }>;
   verifyResumeInPane(tmuxSession: string, resumeToken: string): Promise<HarnessLaunchResult>;
 }
@@ -74,6 +76,8 @@ export interface InPlaceRestartDeps {
   io?: Partial<InPlaceRestartIo>;
   timing?: Partial<PaneCutoverTiming>;
   now?: () => Date;
+  /** When this daemon process started. A started restart older than this can't still be running. */
+  daemonStartedAt?: Date;
 }
 
 /** The seat as the caller resolved it, under its lifecycle lease. */
@@ -122,6 +126,10 @@ export interface InPlaceRestartReport {
   oldProcess: { pid: number; startedAt: string | null };
   newProcess?: { pid: number; startedAt: string | null; sameExecutable: boolean | null };
   paneHeld?: { option: "remain-on-exit"; value: "on"; previous: string | null; detail: string };
+  /** A restart of this seat that started under an earlier daemon run and never recorded a result. */
+  staleRestart?: { startedAt: string; oldPid: number | null; pane: string | null; detail: string };
+  /** The seat's latest recorded in-place restart result, if any. */
+  lastRestart?: { outcome: string; finishedAt: string };
   remainingStep?: string;
   recoveryCommand?: string;
   couldNotSee?: string[];
@@ -162,11 +170,20 @@ const NOT_VERIFIED = [
   "Whether Codex saved the conversation before it exited (TERM, then KILL after the timeout).",
 ];
 
+interface Observed {
+  ok: true; report: InPlaceRestartReport; codexPid: number; codexStartedAt: string | null; panePid: number;
+  relaunch: { command: string; core: string }; relaunchBinding: NodeBinding; priorRemainOnExit: string | null;
+  cwd: string; oldExe: string | null;
+}
+
+interface RestartProgress { stage: string; paneHeld: InPlaceRestartReport["paneHeld"] }
+
 export class CodexInPlaceRestart {
   private readonly io: InPlaceRestartIo;
   private readonly timing: PaneCutoverTiming;
   private readonly listProcesses: NativeProcessLister;
   private readonly now: () => Date;
+  private readonly daemonStartedAt: Date;
 
   constructor(private readonly deps: InPlaceRestartDeps) {
     this.io = { ...defaultInPlaceRestartIo(), ...deps.io };
@@ -177,6 +194,7 @@ export class CodexInPlaceRestart {
     };
     this.listProcesses = deps.listProcesses ?? listNativeProcesses;
     this.now = deps.now ?? (() => new Date());
+    this.daemonStartedAt = deps.daemonStartedAt ?? new Date(Date.now() - process.uptime() * 1000);
   }
 
   /** The newest started-event seq for a node; a request records it before waiting for the lifecycle lease. */
@@ -196,67 +214,95 @@ export class CodexInPlaceRestart {
   async execute(target: InPlaceRestartTarget, input: { reason: string; operator: string | null; seenStartedSeq: number }): Promise<InPlaceRestartReport | InPlaceRestartRefusal> {
     const observed = await this.observe(target, input.seenStartedSeq);
     if (!observed.ok) return observed;
-    const { report, codexPid, codexStartedAt, panePid, relaunch, relaunchBinding, priorRemainOnExit, cwd, oldExe } = observed;
+    const { report } = observed;
     const { sessionName, seat } = target;
-    const pane = report.pane;
     this.persist({
       type: RESTART_STARTED, rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId, sessionName,
-      pane, paneShape: report.paneShape, oldPid: codexPid, oldStartedAt: codexStartedAt, codexHome: report.codexHome,
-      reason: input.reason.trim(), operator: input.operator,
+      pane: report.pane, paneShape: report.paneShape, oldPid: observed.codexPid, oldStartedAt: observed.codexStartedAt,
+      codexHome: report.codexHome, reason: input.reason.trim(), operator: input.operator,
     });
-    const finish = (r: InPlaceRestartReport): InPlaceRestartReport => {
-      this.persist({
-        type: RESTART_FINISHED, rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId, sessionName,
-        outcome: r.outcome!, newPid: r.newProcess?.pid ?? null, newStartedAt: r.newProcess?.startedAt ?? null,
-        codexHome: r.codexHome, paneHeld: r.paneHeld ? true : false, finishedAt: this.now().toISOString(),
-      });
-      return r;
-    };
+    // From here every exit records a result, including a throw: a started restart with no result would
+    // otherwise refuse every later restart and preview of this seat.
+    const progress: RestartProgress = { stage: "stop", paneHeld: undefined };
+    let result: InPlaceRestartReport;
+    try {
+      result = await this.restart(target, observed, progress);
+    } catch (error) {
+      result = {
+        ...report, outcome: "native_unknown", recoveryCommand: observed.relaunch.core,
+        ...(progress.paneHeld ? { paneHeld: progress.paneHeld } : {}),
+        couldNotSee: [`what happened after an error during ${progress.stage}: ${error instanceof Error ? error.message : String(error)}`],
+        message: `The restart stopped with an error during ${progress.stage}; the seat's state was not observed afterwards.`,
+      };
+    }
+    const paneLine = result.outcome === "restarted_account_unverified"
+      ? await this.deps.tmux.getPaneLinePosition(result.pane).catch(() => null)
+      : null;
+    this.persist({
+      type: RESTART_FINISHED, rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId, sessionName,
+      outcome: result.outcome!, newPid: result.newProcess?.pid ?? null, newStartedAt: result.newProcess?.startedAt ?? null,
+      codexHome: result.codexHome, paneHeld: result.paneHeld ? true : false, paneLine, finishedAt: this.now().toISOString(),
+    });
+    return result;
+  }
+
+  /** The restart after its started event. Updates `progress` so a throw is reported at its stage. */
+  private async restart(target: InPlaceRestartTarget, observed: Observed, progress: RestartProgress): Promise<InPlaceRestartReport> {
+    const { report, codexPid, codexStartedAt, panePid, relaunch, relaunchBinding, priorRemainOnExit, cwd, oldExe } = observed;
+    const { sessionName } = target;
+    const pane = report.pane;
     // What resumes the original by hand: the exact relaunch command, without the seat environment wrapper.
     const recoveryCommand = relaunch.core;
 
-    // 1. Stop the running Codex in place.
     let launch: HarnessLaunchResult;
     if (report.paneShape === "shell_backed") {
       const stopped = await this.stopUnderShell(pane, panePid, codexPid, codexStartedAt);
       if (stopped === "running") {
-        return finish({ ...report, outcome: "not_started", recoveryCommand, message: "Codex did not exit after TERM and KILL; nothing was restarted and the original process is still running." });
+        return { ...report, outcome: "not_started", recoveryCommand, message: "Codex did not exit after TERM and KILL; nothing was restarted and the original process is still running." };
       }
       if (stopped === "unknown") {
-        return finish({ ...report, outcome: "native_unknown", recoveryCommand, couldNotSee: ["whether the original Codex exited and the pane's shell is back in the foreground"],
-          message: "Signals were sent, but the pane could not be observed afterwards; no resume was attempted." });
+        return { ...report, outcome: "native_unknown", recoveryCommand, couldNotSee: ["whether the original Codex exited and the pane's shell is back in the foreground"],
+          message: "Signals were sent, but the pane could not be observed afterwards; no resume was attempted." };
       }
-      // 2a. The shell is back: the adapter's existing resume launch types the command and proves the resume.
+      // The shell is back: the adapter's existing resume launch types the command and proves the resume.
+      progress.stage = "resume";
       launch = await this.deps.codex.launchHarness(relaunchBinding, { name: sessionName, resumeToken: report.conversationId });
-    } else {
-      const terminated = await terminatePaneInPlace(this.deps.tmux, pane, this.timing, "Codex");
-      const held = { option: "remain-on-exit" as const, value: "on" as const, previous: priorRemainOnExit,
-        detail: "Left on so the pane survives for recovery; restored only after a verified live replacement." };
-      if (!terminated.ok) {
-        const alive = !(await this.deps.tmux.isPaneDead(pane));
-        return finish({ ...report, paneHeld: held, recoveryCommand, ...(alive
-          ? { outcome: "not_started", message: `The original Codex is still running: ${terminated.message}` }
-          : { outcome: "native_unknown", couldNotSee: ["whether the pane's process exited"], message: terminated.message }) });
-      }
-      // 2b. Respawn the dead pane WITHOUT -k (history above stays) with the resume command as its own command.
-      const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command, { cwd });
-      if (!respawned.ok) {
-        return finish({ ...report, outcome: "incomplete", paneHeld: held, recoveryCommand,
-          message: `The original Codex exited, but the pane could not be respawned: ${respawned.message}` });
-      }
-      if (respawned.warnings) report.warnings.push(...respawned.warnings);
-      launch = await this.deps.codex.verifyResumeInPane(sessionName, report.conversationId);
-      if (!launch.ok) return finish(this.incomplete(report, launch, recoveryCommand, held));
-      const verified = await this.verifyReplacement(target, report, oldExe);
-      if (verified.outcome !== "restarted_account_unverified") return finish({ ...verified, paneHeld: held });
-      const restored = await this.deps.tmux.restorePaneOption(pane, "remain-on-exit", priorRemainOnExit);
-      if (!restored.ok) {
-        verified.paneHeld = { ...held, detail: `The replacement is verified, but remain-on-exit could not be restored: ${restored.message}` };
-      }
-      return finish(verified);
+      if (!launch.ok) return this.incomplete(report, launch, recoveryCommand);
+      progress.stage = "identity check";
+      return this.verifyReplacement(target, report, oldExe);
     }
-    if (!launch.ok) return finish(this.incomplete(report, launch, recoveryCommand));
-    return finish(await this.verifyReplacement(target, report, oldExe));
+
+    const held = { option: "remain-on-exit" as const, value: "on" as const, previous: priorRemainOnExit,
+      detail: "Left on so the pane survives for recovery; restored only after a verified live replacement." };
+    progress.paneHeld = held;
+    const terminated = await terminatePaneInPlace(this.deps.tmux, pane, this.timing, "Codex");
+    if (!terminated.ok) {
+      const alive = !(await this.deps.tmux.isPaneDead(pane));
+      return { ...report, paneHeld: held, recoveryCommand, ...(alive
+        ? { outcome: "not_started" as const, message: `The original Codex is still running: ${terminated.message}` }
+        : { outcome: "native_unknown" as const, couldNotSee: ["whether the pane's process exited"], message: terminated.message }) };
+    }
+    // Respawn the dead pane WITHOUT -k (scrollback stays) with the resume command as its own command.
+    progress.stage = "respawn";
+    const respawned = await this.deps.tmux.respawnPane(pane, relaunch.command, { cwd });
+    if (!respawned.ok) {
+      return { ...report, outcome: "incomplete", paneHeld: held, recoveryCommand,
+        message: `The original Codex exited, but the pane could not be respawned: ${respawned.message}` };
+    }
+    if (respawned.warnings) report.warnings.push(...respawned.warnings);
+    progress.stage = "resume";
+    launch = await this.deps.codex.verifyResumeInPane(sessionName, report.conversationId);
+    if (!launch.ok) return this.incomplete(report, launch, recoveryCommand, held);
+    progress.stage = "identity check";
+    const verified = await this.verifyReplacement(target, report, oldExe);
+    if (verified.outcome !== "restarted_account_unverified") return { ...verified, paneHeld: held };
+    progress.stage = "restoring remain-on-exit";
+    const restored = await this.deps.tmux.restorePaneOption(pane, "remain-on-exit", priorRemainOnExit);
+    if (!restored.ok) {
+      return { ...verified, paneHeld: { ...held, detail: `The replacement is verified, but remain-on-exit could not be restored: ${restored.message}` } };
+    }
+    progress.paneHeld = undefined;
+    return verified;
   }
 
   /**
@@ -271,7 +317,7 @@ export class CodexInPlaceRestart {
     const latest = rows[0];
     if (!latest) return { ok: false, code: "no_restart_recorded", message: "This seat has no recorded in-place restart to verify." };
     if (latest.type === RESTART_STARTED) return { ok: false, code: "restart_not_completed", message: "The latest in-place restart of this seat has not finished." };
-    const finished = JSON.parse(latest.payload) as { outcome: string; newPid: number | null; newStartedAt: string | null; codexHome: string; finishedAt: string };
+    const finished = JSON.parse(latest.payload) as { outcome: string; newPid: number | null; newStartedAt: string | null; codexHome: string; finishedAt: string; paneLine?: number | null };
     if (finished.outcome !== "restarted_account_unverified") {
       return { ok: false, code: "restart_not_completed", message: `The latest in-place restart ended ${finished.outcome}; there is nothing to verify.` };
     }
@@ -281,7 +327,7 @@ export class CodexInPlaceRestart {
     }
     const conversationId = readResumeToken(this.deps.db, target.sessionId);
     const toolTurn = this.readToolTurn(finished.codexHome, conversationId, finished.finishedAt);
-    const accountEvidence = await this.readAccountLine(target.binding.tmuxPane!, input.expectAccount ?? null);
+    const accountEvidence = await this.readAccountLine(target.binding.tmuxPane!, finished.paneLine ?? null, input.expectAccount ?? null);
     const moved = toolTurn.state === "observed" && toolTurn.completed > 0 && toolTurn.errors === 0 && accountEvidence.state === "matched";
     return {
       ok: true, seat: target.seat, outcome: moved ? "moved" : "restarted_account_unverified", toolTurn, accountEvidence,
@@ -293,14 +339,10 @@ export class CodexInPlaceRestart {
 
   // -- observation (shared by plan and execute) --
 
-  private async observe(target: InPlaceRestartTarget, seenStartedSeq: number | null): Promise<
-    | { ok: true; report: InPlaceRestartReport; codexPid: number; codexStartedAt: string | null; panePid: number;
-        relaunch: { command: string; core: string }; relaunchBinding: NodeBinding; priorRemainOnExit: string | null;
-        cwd: string; oldExe: string | null }
-    | InPlaceRestartRefusal> {
+  private async observe(target: InPlaceRestartTarget, seenStartedSeq: number | null): Promise<Observed | InPlaceRestartRefusal> {
     const { binding, sessionName, seat } = target;
-    const pending = this.pendingRestart(seat.nodeId, seenStartedSeq);
-    if (pending) return pending;
+    const history = this.restartHistory(seat.nodeId, seenStartedSeq);
+    if ("code" in history) return history;
 
     const pane = binding.tmuxPane;
     let panes: Awaited<ReturnType<InPlaceRestartTmux["listPanes"]>>;
@@ -355,14 +397,17 @@ export class CodexInPlaceRestart {
       cwd = facts.cwd;
     }
     const relaunchBinding: NodeBinding = { ...binding, cwd };
-    const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, { name: sessionName, resumeToken: token });
+    // The probed and prepared launch choices come from the running Codex, so the relaunch keeps them and no
+    // Codex process is started to decide them again.
+    const runningArgv = processArgv(process.command);
+    const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, { name: sessionName, resumeToken: token, running: runningLaunch(runningArgv) });
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")
       ?? (paneShape === "shell_backed"
         ? shellFacts!.env.CODEX_HOME ?? (shellFacts!.env.HOME ? nodePath.join(shellFacts!.env.HOME, ".codex") : null)
         : (await this.deps.tmux.getSessionEnv(sessionName, "CODEX_HOME")) ?? null);
 
-    const effective = parseEffectiveSettings(processArgv(process.command));
+    const effective = parseEffectiveSettings(runningArgv);
     const relaunched = parseEffectiveSettings(shellWords(relaunch.core));
     const drift = [
       ...settingsDrift(effective, relaunched),
@@ -395,21 +440,37 @@ export class CodexInPlaceRestart {
       account: this.accountEvidence(codexHome, startedAt, null),
       peers: await this.peers(seat.nodeId, codexHome),
       oldProcess: { pid: process.pid, startedAt },
+      ...history,
       warnings: [],
     };
     return { ok: true, report, codexPid: top.pid, codexStartedAt: top.startedAt ?? null, panePid, relaunch, relaunchBinding, priorRemainOnExit, cwd, oldExe: facts.exe };
   }
 
-  private pendingRestart(nodeId: string, seenStartedSeq: number | null): InPlaceRestartRefusal | null {
-    const latest = this.deps.db.prepare("SELECT seq, type FROM events WHERE node_id = ? AND type IN (?, ?) ORDER BY seq DESC LIMIT 1")
-      .get(nodeId, RESTART_STARTED, RESTART_FINISHED) as { seq: number; type: string } | undefined;
-    if (latest?.type === RESTART_STARTED) {
-      return { ok: false, code: "restart_in_progress", message: "An in-place restart of this seat started and has not recorded a result; inspect the seat (rig seat status) before restarting again." };
-    }
+  /** Refuses while a restart of this seat is in flight under THIS daemon, or ran while the request waited.
+   *  A started restart from before this daemon started can't still be running: it is reported, not refused. */
+  private restartHistory(nodeId: string, seenStartedSeq: number | null):
+    | Pick<InPlaceRestartReport, "staleRestart" | "lastRestart"> | InPlaceRestartRefusal {
+    const rows = this.deps.db.prepare("SELECT seq, type, payload, created_at FROM events WHERE node_id = ? AND type IN (?, ?) ORDER BY seq DESC LIMIT 2")
+      .all(nodeId, RESTART_STARTED, RESTART_FINISHED) as Array<{ seq: number; type: string; payload: string; created_at: string }>;
+    const latest = rows[0];
+    const lastFinished = rows.find((row) => row.type === RESTART_FINISHED);
+    const lastRestart = lastFinished ? (() => {
+      const payload = JSON.parse(lastFinished.payload) as { outcome: string; finishedAt: string };
+      return { lastRestart: { outcome: payload.outcome, finishedAt: payload.finishedAt } };
+    })() : {};
     if (seenStartedSeq !== null && this.latestStartedSeq(nodeId) > seenStartedSeq) {
-      return { ok: false, code: "restart_in_progress", message: "Another in-place restart of this seat ran while this request waited; not restarting again. Inspect its result first." };
+      return { ok: false, code: "restart_in_progress", message: "Another in-place restart of this seat ran while this request waited; not restarting again. Inspect its result first (--plan shows it as lastRestart)." };
     }
-    return null;
+    if (latest?.type !== RESTART_STARTED) return lastRestart;
+    const startedAt = new Date(`${latest.created_at.replace(" ", "T")}Z`);
+    const started = JSON.parse(latest.payload) as { oldPid?: number; pane?: string };
+    if (!(startedAt.getTime() < this.daemonStartedAt.getTime())) {
+      return { ok: false, code: "restart_in_progress", message: `An in-place restart of this seat started at ${startedAt.toISOString()} under this daemon and has not recorded a result yet; it is still running. --plan shows its result once it finishes.` };
+    }
+    return { ...lastRestart, staleRestart: {
+      startedAt: startedAt.toISOString(), oldPid: started.oldPid ?? null, pane: started.pane ?? null,
+      detail: `Started before this daemon did (${this.daemonStartedAt.toISOString()}) and never recorded a result, so it is not running. The seat's state above is observed now.`,
+    } };
   }
 
   private async observeCodex(pane: string, token: string | null) {
@@ -564,12 +625,15 @@ export class CodexInPlaceRestart {
     return { completed, errors, since, state: completed > 0 ? "observed" as const : "not_observed" as const };
   }
 
-  private async readAccountLine(pane: string, expectAccount: string | null): Promise<{ state: "matched" | "not_matched" | "not_requested" | "not_observed"; detail: string }> {
+  /** Only what the pane printed after the restart finished counts: an older Account line is not evidence. */
+  private async readAccountLine(pane: string, paneLine: number | null, expectAccount: string | null): Promise<{ state: "matched" | "not_matched" | "not_requested" | "not_observed"; detail: string }> {
     if (!expectAccount?.trim()) return { state: "not_requested", detail: "No --expect-account given, so no account-specific evidence was checked." };
-    const screen = (await this.deps.tmux.capturePaneContent(pane, 200)) ?? "";
+    if (paneLine === null) return { state: "not_observed", detail: "The pane's position at the restart was not recorded, so its output since can't be told apart from earlier output." };
+    const screen = await this.deps.tmux.capturePaneFrom(pane, paneLine);
+    if (screen === null) return { state: "not_observed", detail: "The pane's output since the restart could not be read (or its history filled and shifted)." };
     const lines = screen.split("\n").map((line) => line.replace(/^[\s│|]+|[\s│|]+$/g, "")).filter((line) => /^Account:\s*\S/i.test(line));
     const line = lines.at(-1);
-    if (!line) return { state: "not_observed", detail: "No Codex status Account line is on the pane; show /status in the seat first." };
+    if (!line) return { state: "not_observed", detail: "No Codex status Account line since the restart; show /status in the seat first." };
     return line.toLowerCase().includes(expectAccount.trim().toLowerCase())
       ? { state: "matched", detail: "Codex's status Account line names the expected account." }
       : { state: "not_matched", detail: "Codex's status Account line does not name the expected account (it may show only a plan)." };
@@ -642,6 +706,19 @@ const VALUE_OPTIONS: Record<string, keyof Omit<EffectiveSettings, "bypass" | "co
   "-a": "approval", "--ask-for-approval": "approval", "-c": "config", "--config": "config",
   "-C": null, "--cd": null, "--add-dir": null, "-i": null, "--image": null,
 };
+
+/** The launch choices a running Codex's argv records, reused so the relaunch keeps them without probing. */
+function runningLaunch(argv: string[]): RunningCodexLaunch {
+  const addDirs: string[] = [];
+  const configs: string[] = [];
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === "--add-dir" && argv[index + 1] !== undefined) addDirs.push(argv[++index]!);
+    else if ((arg === "-c" || arg === "--config") && argv[index + 1] !== undefined) configs.push(argv[++index]!);
+    else if (arg.startsWith("--config=")) configs.push(arg.slice("--config=".length));
+  }
+  return { networkOverride: configs.includes(CODEX_NETWORK_DEFAULT_OVERRIDE), daemonOptOut: argv.includes("--no-daemon"), addDirs };
+}
 
 /** The settings a Codex command line runs with. cwd, add-dirs, images and the resume target are not settings. */
 export function parseEffectiveSettings(argv: string[]): EffectiveSettings {

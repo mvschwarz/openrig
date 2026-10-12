@@ -35,7 +35,12 @@ interface WorldOptions {
   facts?: Partial<Record<number, ProcessFacts | null>>;
   identityFails?: boolean;
   rollout?: string | null;
+  /** Printed in the pane after the restart (the operator's /status). */
   screen?: string;
+  /** Already in the pane before the restart. */
+  screenBefore?: string;
+  throwAt?: "signalPid" | "launchHarness" | "readProcessAfter" | "signalPaneProcess" | "respawnPane" | "verifyResumeInPane" | "restorePaneOption";
+  daemonStartedAt?: Date;
 }
 
 const dbs: Database.Database[] = [];
@@ -73,12 +78,19 @@ function world(options: WorldOptions = {}) {
   let dead = false;
   let remainOnExit: string | null = options.remainOnExit === "unreadable" ? null : options.remainOnExit ?? null;
   const calls: string[] = [];
+  const paneLines: string[] = (options.screenBefore ?? "").split("\n").filter(Boolean);
+  let relaunched = false;
+  let thrown = false;
+  const maybeThrow = (at: WorldOptions["throwAt"]) => {
+    if (options.throwAt === at && !thrown) { thrown = true; throw new Error(`injected failure at ${at}`); }
+  };
 
   const relaunch = (startedAt = LATER) => {
     const replacement = shape === "shell_backed"
       ? codexRow(300, 100, runningArgs, startedAt)
       : codexRow(300, 1, runningArgs, startedAt, 300);
     rows = shape === "shell_backed" ? [shellRow(100, 300), replacement] : [replacement];
+    relaunched = true;
     paneCommand = "codex";
     dead = false;
   };
@@ -91,43 +103,55 @@ function world(options: WorldOptions = {}) {
     getSessionEnv: async (_s: string, key: string) => (key === "CODEX_HOME" ? HOME : undefined),
     signalPid: async (pid: number, signal: string): Promise<TmuxResult> => {
       calls.push(`signalPid ${pid} ${signal}`);
+      maybeThrow("signalPid");
       if (!options.codexIgnoresSignals) { rows = rows.filter((row) => row.executableName !== "codex"); paneCommand = "bash"; }
       return { ok: true };
     },
     signalPaneProcess: async (_pane: string, signal: string): Promise<TmuxResult> => {
       calls.push(`signalPaneProcess ${signal}`);
+      maybeThrow("signalPaneProcess");
       if (!options.codexIgnoresSignals) { rows = []; dead = true; }
       return { ok: true };
     },
     isPaneDead: async () => dead,
     setRemainOnExit: async (_pane: string, on: boolean): Promise<TmuxResult> => { calls.push(`remain-on-exit ${on ? "on" : "off"}`); remainOnExit = on ? "on" : "off"; return { ok: true }; },
     getPaneLocalOption: async () => (options.remainOnExit === "unreadable" ? undefined : remainOnExit),
-    restorePaneOption: async (_pane: string, _option: string, value: string | null): Promise<TmuxResult> => { calls.push(`restore remain-on-exit ${value}`); remainOnExit = value; return { ok: true }; },
-    respawnPane: async (_pane: string, command?: string): Promise<TmuxResult> => { calls.push(`respawn ${command}`); relaunch(); return { ok: true }; },
-    capturePaneContent: async () => options.screen ?? "",
+    restorePaneOption: async (_pane: string, _option: string, value: string | null): Promise<TmuxResult> => {
+      calls.push(`restore remain-on-exit ${value}`); maybeThrow("restorePaneOption"); remainOnExit = value; return { ok: true };
+    },
+    respawnPane: async (_pane: string, command?: string): Promise<TmuxResult> => { calls.push(`respawn ${command}`); maybeThrow("respawnPane"); relaunch(); return { ok: true }; },
+    getPaneLinePosition: async () => paneLines.length,
+    capturePaneFrom: async (_pane: string, position: number) => paneLines.slice(position).join("\n"),
   } as unknown as TmuxAdapter;
 
   const launches: Array<{ binding: NodeBinding; resumeToken?: string }> = [];
+  const builds: Array<{ running?: unknown }> = [];
   const codex = {
     runtime: "codex",
-    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string }) {
+    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: unknown }) {
+      builds.push({ running: opts.running });
       const core = `codex${binding.model ? ` -m '${binding.model}'` : ""} -s workspace-write resume '${opts.resumeToken}'`;
       return { ok: true as const, core, command: core };
     },
     async launchHarness(binding: NodeBinding, opts: { resumeToken?: string }): Promise<HarnessLaunchResult> {
       launches.push({ binding, ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {}) });
+      maybeThrow("launchHarness");
       const result = options.launch ?? { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id" };
       if (result.ok && !options.identityFails) relaunch();
       return result;
     },
     async verifyResumeInPane(): Promise<HarnessLaunchResult> {
       calls.push("verifyResumeInPane");
+      maybeThrow("verifyResumeInPane");
       return options.launch ?? { ok: true };
     },
   };
 
   const io: Partial<InPlaceRestartIo> = {
-    readProcess: async (pid) => (options.facts && pid in options.facts ? options.facts[pid] ?? null : facts()),
+    readProcess: async (pid) => {
+      if (relaunched) maybeThrow("readProcessAfter");
+      return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts();
+    },
     readThreadId: async (pid) => (pid === 200 ? options.threadId : undefined),
     readCredentialStore: () => "file",
     statAuthFile: () => null,
@@ -142,10 +166,13 @@ function world(options: WorldOptions = {}) {
     activityOracle: { declareOccupantSwap: () => {}, getSeatState: () => options.activity ?? null },
     inPlaceRestartIo: io,
     inPlaceRestartTiming: { pollMs: 1, timeoutMs: 2, sleep: async () => {} },
+    inPlaceRestartDaemonStartedAt: options.daemonStartedAt ?? new Date("2000-01-01T00:00:00Z"),
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, events, sessionRegistry, setRows: (next: NativeProcessRow[]) => { rows = next; } };
+  return { db, service, node, session, calls, launches, builds, events, sessionRegistry,
+    setRows: (next: NativeProcessRow[]) => { rows = next; },
+    print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); } };
 }
 
 function state(activity: string, needs = 0): ArbitratedSeatState {
@@ -307,8 +334,9 @@ describe("rig seat restart --keep-conversation --verify", () => {
   const turn = (type: string, payload: string, at = "2099-01-01T00:00:00Z") => JSON.stringify({ timestamp: at, type, payload: { type: payload } });
 
   async function restarted(options: WorldOptions) {
-    const w = world(options);
+    const w = world({ ...options, screen: undefined });
     expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "restarted_account_unverified" });
+    if (options.screen) w.print(options.screen);
     return w;
   }
 
@@ -349,5 +377,97 @@ describe("effective settings parsing", () => {
     expect(parseEffectiveSettings(["codex", "--model=x", "-p", "prof", "-a", "never", "--sandbox", "read-only", "-C", "/w", "--add-dir", "/d", "-c", "b=2", "-c", "a=1", "resume", "t"]))
       .toEqual({ model: "x", profile: "prof", sandbox: "read-only", approval: "never", bypass: false, config: ["a=1", "b=2"] });
     expect(parseEffectiveSettings(["codex", "--dangerously-bypass-approvals-and-sandbox", "constructor", "toString"]).bypass).toBe(true);
+  });
+});
+
+describe("#1196 round 1: every exit after started records a result; stale starts don't lock the seat", () => {
+  it.each([
+    ["shell_backed", "signalPid", "stop", false],
+    ["shell_backed", "launchHarness", "resume", false],
+    ["shell_backed", "readProcessAfter", "identity check", false],
+    ["direct_native", "signalPaneProcess", "stop", true],
+    ["direct_native", "respawnPane", "respawn", true],
+    ["direct_native", "verifyResumeInPane", "resume", true],
+    ["direct_native", "readProcessAfter", "identity check", true],
+    ["direct_native", "restorePaneOption", "restoring remain-on-exit", true],
+  ] as const)("%s: a throw at %s finishes as native_unknown (stage %s), and the seat can be previewed again", async (shape, throwAt, stage, held) => {
+    const w = world({ shape, throwAt, remainOnExit: null });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "native_unknown", couldNotSee: [expect.stringContaining(`during ${stage}: injected failure at ${throwAt}`)] });
+    expect((result as { paneHeld?: unknown }).paneHeld !== undefined).toBe(held);
+    expect(w.events().map((event) => [event.type, event.outcome, event.paneHeld])).toEqual([
+      ["seat.restart_in_place_started", undefined, undefined], ["seat.restart_in_place_finished", "native_unknown", held]]);
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).not.toMatchObject({ code: "restart_in_progress" });
+  });
+
+  function startedAt(w: ReturnType<typeof world>, createdAt: string) {
+    w.db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'seat.restart_in_place_started', ?, ?)")
+      .run("r", w.node.id, JSON.stringify({ oldPid: 77, pane: "%1" }), createdAt);
+  }
+
+  it("a started restart from before this daemon started is reported as stale, in --plan and execute, not refused", async () => {
+    const w = world({ daemonStartedAt: new Date("2026-10-12T21:00:00Z") });
+    startedAt(w, "2026-10-12 20:59:59");
+    const plan = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true, staleRestart: { startedAt: "2026-10-12T20:59:59.000Z", oldPid: 77, pane: "%1" } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", staleRestart: { oldPid: 77 } });
+  });
+
+  it("a started restart under this daemon is still in flight: --plan and execute refuse", async () => {
+    const w = world({ daemonStartedAt: new Date("2026-10-12T21:00:00Z") });
+    startedAt(w, "2026-10-12 21:00:05");
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "restart_in_progress" });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ ok: false, code: "restart_in_progress" });
+    expect(w.calls).toEqual([]);
+  });
+
+  it("--plan shows the last recorded result", async () => {
+    const w = world();
+    await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, lastRestart: { outcome: "restarted_account_unverified" } });
+  });
+});
+
+describe("#1196 round 1: launch choices come from the running Codex (LOW-1); verify reads only post-restart output (LOW-2)", () => {
+  it("passes the running argv's network override, --no-daemon and add-dirs to the relaunch", async () => {
+    const w = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write -c sandbox_workspace_write.network_access=true resume --add-dir /shared/state ${TOKEN}` });
+    await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/state"] } }]);
+  });
+
+  it("the production adapter builds from the running choices without starting any probe", async () => {
+    const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+    const probes: string[] = [];
+    const adapter = new CodexRuntimeAdapter({
+      tmux: { getPaneCommand: async () => "codex" } as never,
+      fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {} },
+      detectDaemonSupport: async () => { probes.push("daemon-support"); return { kind: "supported" } as never; },
+      readNetworkDefault: async () => { probes.push("network"); return { apply: true, elapsedMs: 1 } as never; },
+      verifyProfilePreflight: async () => { probes.push("profile"); return { ok: true } as never; },
+      prepareTeamWorkspace: () => { probes.push("team-workspace"); return []; },
+    });
+    const binding = { id: "", nodeId: "n", attachmentType: "tmux", tmuxSession: SEAT, tmuxWindow: null, tmuxPane: "%1",
+      cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/work", codexConfigProfile: "prof", teamPermissionDefault: true } as NodeBinding;
+    const built = await adapter.buildResumeCommand(binding, { name: SEAT, resumeToken: TOKEN, running: { networkOverride: false, daemonOptOut: true, addDirs: ["/a b"] } });
+    expect(probes).toEqual([]);
+    expect(built).toMatchObject({ ok: true, core: expect.stringContaining("--no-daemon") });
+    if (built.ok) {
+      expect(built.core).toContain("--add-dir '/a b'");
+      expect(built.core).not.toContain("network_access");
+    }
+  });
+
+  it("an Account line from before the restart is not evidence", async () => {
+    const w = world({ screenBefore: "  Account:  me@example.com (Pro)", rollout: JSON.stringify({ timestamp: "2099-01-01T00:00:00Z", type: "response_item", payload: { type: "function_call_output" } }) });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "restarted_account_unverified" });
+    expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" }))
+      .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+    w.print("  Account:  Pro plan");
+    expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" }))
+      .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_matched" } });
+    w.print("  Account:  me@example.com (Pro)");
+    expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" })).toMatchObject({ outcome: "moved" });
   });
 });

@@ -533,7 +533,7 @@ identity remains unverified; a version number alone cannot clear it.
         code: "restart_outcome_unknown",
         status: "unknown",
         message: "The CLI timed out waiting for the daemon; the in-place restart may still be in progress.",
-        guidance: `Check the outcome before running it again (a restart that is still recorded as started refuses a second one): rig seat restart ${seat} --keep-conversation --plan`,
+        guidance: `Check the outcome before running it again: rig seat restart ${seat} --keep-conversation --plan refuses with restart_in_progress while it is still running, then shows its result as lastRestart.`,
       } : {
         ok: false as const,
         code: path === "launch-plan" ? "launch_plan_timeout" : `${path}_outcome_unknown`,
@@ -679,7 +679,7 @@ Examples:
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--keep-conversation", "Resume the seat's own conversation in its own pane; never a fresh launch or fork")
     .option("--reason <text>", "Audit reason (required when executing)")
-    .option("--plan", "Run every check read-only and show what a restart would keep; nothing is stopped")
+    .option("--plan", "Run every check and show what a restart would keep; nothing is stopped or restarted")
     .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
     .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
     .option("--operator <address>", "Operator recorded on the audit event")
@@ -694,6 +694,11 @@ never launches fresh, forks or retries. Peers sharing the Codex home are reporte
 not restarted.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
+--plan starts no Codex process: the network override, --no-daemon and add-dirs are
+taken from the running Codex's own command line, not probed again. Building the
+command can create OpenRig's own seat-bin link, as every managed launch does.
+A restart that started under an earlier daemon run and never recorded a result is
+shown as staleRestart; it does not block a new restart.
 Results: restarted_account_unverified, not_started (the original is still running),
 incomplete (it exited; the resume was not proven; the pane may be held for recovery),
 native_unknown (what happened could not be observed). Only --verify reports moved,
@@ -975,6 +980,10 @@ function printRestartReport(data: Record<string, unknown>): void {
   const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };
   console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
   if (account.startupGate) console.log(`Codex startup gate: ${account.startupGate}`);
+  const stale = data["staleRestart"] as { startedAt: string; detail: string } | undefined;
+  if (stale) console.log(`Stale restart from ${stale.startedAt}: ${stale.detail}`);
+  const last = data["lastRestart"] as { outcome: string; finishedAt: string } | undefined;
+  if (last) console.log(`Last restart: ${last.outcome} at ${last.finishedAt}.`);
   const held = data["paneHeld"] as { detail: string } | undefined;
   if (held) console.log(`Pane held (remain-on-exit on): ${held.detail}`);
   if (data["remainingStep"]) console.log(`Remaining step: ${String(data["remainingStep"])}`);

@@ -333,6 +333,27 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     else expect(output.logs[0]).toContain(`${outcome}: dev.codex@r`);
   });
 
+  it("prints a stale restart and the last recorded result", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const data = { ...report(), staleRestart: { startedAt: "2026-10-12T20:59:59.000Z", detail: "Started before this daemon did." },
+      lastRestart: { outcome: "native_unknown", finishedAt: "2026-10-12T21:00:00.000Z" } };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--plan"]).then(() => undefined));
+    expect(output.logs.join("\n")).toContain("Stale restart from 2026-10-12T20:59:59.000Z: Started before this daemon did.");
+    expect(output.logs.join("\n")).toContain("Last restart: native_unknown at 2026-10-12T21:00:00.000Z.");
+  });
+
+  it("a timed-out restart says the outcome is unknown and how --plan reports it", async () => {
+    const { DaemonTimeoutError } = await import("../src/client.js");
+    const deps = makeDeps({ status: 200, data: {} }, []);
+    deps.clientFactory = () => ({ post: vi.fn(async () => { throw new DaemonTimeoutError("slow"); }) }) as never;
+    const output = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x", "--json"]).then(() => undefined));
+    expect(output.exitCode).toBe(1);
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ code: "restart_outcome_unknown",
+      guidance: expect.stringContaining("refuses with restart_in_progress while it is still running, then shows its result as lastRestart") });
+  });
+
   it("verify posts the expected account and prints the outcome", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const data = { ok: true, outcome: "moved", message: "Moved.", toolTurn: { state: "observed", completed: 1, errors: 0 }, accountEvidence: { detail: "Matched." } };

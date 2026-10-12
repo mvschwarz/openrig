@@ -62,6 +62,7 @@ export interface SeatLifecycleDeps {
   /** Test seams for the in-place restart's OS reads and stop timing; production uses the defaults. */
   inPlaceRestartIo?: Partial<InPlaceRestartIo>;
   inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
+  inPlaceRestartDaemonStartedAt?: Date;
 }
 
 interface ResolvedSeat {
@@ -182,6 +183,7 @@ export class SeatLifecycleService {
   private readonly activityOracle: SeatLifecycleDeps["activityOracle"] | null;
   private readonly inPlaceRestartIo?: Partial<InPlaceRestartIo>;
   private readonly inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
+  private readonly inPlaceRestartDaemonStartedAt?: Date;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -200,6 +202,7 @@ export class SeatLifecycleService {
     this.activityOracle = deps.activityOracle ?? null;
     this.inPlaceRestartIo = deps.inPlaceRestartIo;
     this.inPlaceRestartTiming = deps.inPlaceRestartTiming;
+    this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
   }
 
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -987,7 +990,7 @@ export class SeatLifecycleService {
     return new CodexInPlaceRestart({
       db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmux: this.tmuxAdapter,
       codex: adapter as InPlaceCodexLauncher, activity, listProcesses: this.listProcesses,
-      io: this.inPlaceRestartIo, timing: this.inPlaceRestartTiming,
+      io: this.inPlaceRestartIo, timing: this.inPlaceRestartTiming, daemonStartedAt: this.inPlaceRestartDaemonStartedAt,
     });
   }
 
