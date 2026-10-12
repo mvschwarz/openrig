@@ -68,8 +68,10 @@ describe("bounded queue route to topology/Pulse render", () => {
       const snap = await f.read(scope);
       expect(snap.blocked).toHaveLength(100);
       expect(snap.blocked.some(row => row.qitemId === omitted)).toBe(false);
-      expect(snap.queueCoverage).toBe("partial");
       const text = f.render(snap, scope);
+      if (scope === "agent") expect(text).toContain("not in sample; work unknown");
+      else expect(text.split("\n").some(line => line.includes("dev.worker") && /\?[\s│]+unknown/.test(line))).toBe(true);
+      expect(snap.queueCoverage).toBe("partial");
       expect(text).toContain("may be incomplete");
       expect(text).toContain("unlisted work is unknown");
       expect(text).not.toContain("none in the served bounded lists");
