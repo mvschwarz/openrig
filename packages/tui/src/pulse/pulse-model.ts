@@ -57,6 +57,7 @@ export interface PulseLane {
 }
 
 export interface PulseModel {
+  queueSampleNote?: string;
   exceptions: PulseExceptionSection[]; // EMPTY section omitted entirely (empty-strip-is-silence)
   lanes: [PulseLane, PulseLane, PulseLane]; // NOW, JUST FINISHED, UP NEXT
   footer: { active: number; parked: number; waitingYou: number; updatedAgo: string };
@@ -369,10 +370,11 @@ export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now())
   // idle-duration derived at the renderer. Zero parked = silence (OMITTED), like
   // the other live joins — the incr-2 "read pending" placeholder is retired.
   const seatBySession = new Map(snap.seatActivity.map((s) => [s.session, s]));
-  const parked = parkedRows(snap.inProgress, seatBySession, nowMs);
+  const attentionIds = new Set(snap.attention.map(row => row.qitemId));
+  const parked = parkedRows(snap.inProgress.filter(row => !attentionIds.has(row.qitemId)), seatBySession, nowMs);
   if (parked.length > 0) exceptions.push({ glyph: "◌", token: "warn", label: "PARKED WITH BATON", rows: parked });
 
-  const blocked = blockedRows(snap.blocked, nowMs);
+  const blocked = blockedRows(snap.blocked.filter(row => !attentionIds.has(row.qitemId)), nowMs);
   if (blocked.length > 0) exceptions.push({ glyph: "⧗", token: PULSE_INFO_TOKEN, label: "BLOCKED ON AGENTS", rows: blocked });
 
   const now = nowRows(snap.seatActivity, snap.inProgress, snap);
@@ -391,5 +393,8 @@ export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now())
   const ago = ageLabel(snap.hydratedAt, nowMs);
   const footer = { active: now.length, parked: parkedCount, waitingYou, updatedAgo: ago ? `${ago} ago` : "—" };
 
-  return { exceptions, lanes, footer };
+  return { exceptions, lanes, footer,
+    ...(snap.queueCoverage === "partial" || snap.queueCoverage === "unavailable"
+      ? { queueSampleNote: "Queue counts are samples; unlisted work is unknown." } : {}),
+  };
 }

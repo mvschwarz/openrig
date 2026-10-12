@@ -645,6 +645,97 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/**
+ * Claude indents continuation lines in submitted prompts. Compare the same
+ * line content in the sent text and both captures, retaining line breaks and
+ * within-line spacing rather than allowing unrelated words to match.
+ */
+function normalizeVerificationText(text: string): string {
+  return text.replace(/\r?\n[ \t]*/g, "\n");
+}
+
+/** Match the full envelope with whitespace collapsed, including body and recipient.
+ * Raw sends retain their normalized 40-character prefix and spacing. */
+function verificationSnippet(text: string): { snippet: string; envelope: boolean } {
+  const normalized = normalizeVerificationText(text);
+  const header = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.exec(normalized);
+  return { snippet: header ? normalized.replace(/\s+/g, " ").trim() : normalized.slice(0, 40), envelope: !!header };
+}
+
+/** Count whole visible envelope blocks, not prefixes of longer messages.
+ * A new envelope, prompt or same-column output ends an indented user block.
+ * Whitespace is compared only after retaining boundaries and quote indentation. */
+function countEnvelopeOccurrences(transcript: string, expected: string): number {
+  const lines = transcript.split("\n");
+  let count = 0;
+  let block: string[] | null = null;
+  let blockIndent = 0;
+  let blockPrompted = false;
+  let inAgentOutput = false;
+  const finish = () => {
+    if (block?.join("\n").replace(/\s+/g, " ").trim() === expected) count++;
+    block = null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const indent = /^[ \t]*/.exec(line)![0].length;
+    const prompted = /^[❯›]\s+/.test(line.slice(indent));
+    const header = line.slice(indent).replace(/^[❯›]\s+/, "");
+    const atBoundary = (!block && !inAgentOutput) || indent <= blockIndent;
+    const candidate = normalizeVerificationText([header, ...lines.slice(i + 1, i + 5)].join("\n"));
+    const envelopeHeader = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.test(candidate);
+    if (atBoundary && envelopeHeader && (!inAgentOutput || prompted)) {
+      finish();
+      block = [header];
+      blockIndent = indent;
+      // Flat historical captures have no role columns; retain whole-block
+      // equality there instead of treating their own header/body as output.
+      blockPrompted = prompted && /^[ \t]*/.exec(lines[i + 1] ?? "")![0].length > indent;
+      inAgentOutput = false;
+    } else if (atBoundary && blockPrompted && line.trim().length > 0) {
+      // Any nonblank boundary line is outside an indented user block. Deeper
+      // quotes stay in the body, and blank separators do not change its text.
+      finish();
+      inAgentOutput = true;
+    } else if (atBoundary && /^[❯›](?:\s|$)/.test(line.slice(indent))) {
+      finish();
+    } else if (block) {
+      block.push(line);
+    }
+  }
+  finish();
+  return count;
+}
+
+/** The last prompt marker owns the current input region. Never count it or its
+ * continuation lines as submitted transcript, in either capture. If a capture
+ * ends at a historical prompt with no later input marker, leave it unconfirmed. */
+function verificationTranscript(content: string | null): string {
+  const lines = (content ?? "").replace(/\r\n/g, "\n").split("\n");
+  let inputAt = lastPromptLine(lines);
+  if (inputAt >= 0) {
+    let indent = /^[ \t]*/.exec(lines[inputAt]!)![0].length;
+    // Claude indents draft continuation lines. A quoted prompt on one of them
+    // belongs to the enclosing input, not a new transcript/composer boundary.
+    for (let i = inputAt - 1; i >= 0; i--) {
+      const prompt = /^([ \t]*)[❯›]/.exec(lines[i]!);
+      if (prompt && prompt[1]!.length < indent) {
+        inputAt = i;
+        indent = prompt[1]!.length;
+      }
+    }
+  }
+  // A visible framed composer starts at its upper rule, not its prompt.
+  // Keep quoted/indented rules in the message; require a matching lower frame.
+  if (inputAt > 0) {
+    const indent = /^[ \t]*/.exec(lines[inputAt]!)![0];
+    const frame = (line: string) => line.startsWith(indent) &&
+      /^─{3,}(?: .+ ─+)?$/.test(line.slice(indent.length).trimEnd());
+    if (frame(lines[inputAt - 1]!) && lines.slice(inputAt + 1).some(frame)) inputAt--;
+  }
+  return (inputAt < 0 ? lines : lines.slice(0, inputAt)).join("\n");
+}
+
 /** Map a resolved fan-out target + its recipient list → the EnvelopeScope (ruling 03c35295). The
  *  transport knows the target shape + resolved seats, so it builds the honest scale daemon-side:
  *  DM / multi (full list) / rig- or pod-scoped broadcast (with seat count) / topology. */
@@ -1253,6 +1344,9 @@ export class SessionTransport {
     return pref.desired || pref.effective ? target : null;
   }
 
+  /** Deliver text and Enter to the resolved recipient under the send guards.
+   * With verification requested, compare rendered message counts, excluding
+   * agent input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return this.sendUnguarded(sessionName, text, opts);
@@ -1876,7 +1970,8 @@ export class SessionTransport {
       try {
         preVerifyContent = await this.runStage(
           "session_transport.pre_capture",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
+            : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.pre = captureSlot(preVerifyContent, this.now().toISOString(), captureSeq);
       } catch {
@@ -1964,12 +2059,19 @@ export class SessionTransport {
       try {
         const content = await this.runStage(
           "session_transport.post_capture",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
+            : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
-        const snippet = text.substring(0, Math.min(text.length, 40));
-        const preCount = countOccurrences(preVerifyContent ?? "", snippet);
-        const postCount = countOccurrences(content ?? "", snippet);
+        // A terminal prompt is command history, not an agent composer. Preserve
+        // its original prefix-count verification even while a command is running.
+        const terminal = runtime === "terminal";
+        const { snippet, envelope } = terminal ? { snippet: text.slice(0, 40), envelope: false } : verificationSnippet(text);
+        const transcript = terminal ? (pane: string | null) => pane ?? ""
+          : envelope ? verificationTranscript : (pane: string | null) => normalizeVerificationText(verificationTranscript(pane));
+        const count = envelope ? countEnvelopeOccurrences : countOccurrences;
+        const preCount = count(transcript(preVerifyContent), snippet);
+        const postCount = count(transcript(content), snippet);
         const verified = postCount > preCount;
         return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {

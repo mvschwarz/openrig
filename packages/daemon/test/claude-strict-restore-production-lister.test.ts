@@ -178,4 +178,11 @@ describe("strict restore reads full process rows from the production lister", ()
       { pid: 101, ppid: 100, pgid: 100, tpgid: 100, ucomm: "claude", command: "claude --session-id different" },
     ])).toMatchObject({ ok: false });
   });
+  // A seat started as a fork stores the fork's own id; its launch names that id beside the parent.
+  it("verifies a fork that names its own session id, and refuses one that names only its parent", async () => {
+    const fork = (identity: string) => ({ pid: 100, ppid: 90, pgid: 100, tpgid: 100, ucomm: "claude",
+      command: `claude --permission-mode auto --resume parent-token --fork-session ${identity}--name worker@prod1091` });
+    expect(await strictRestore([shellPane, fork("--session-id review-token ")], 90)).toMatchObject({ ok: true, observedPid: 100 });
+    expect(await strictRestore([shellPane, fork("")], 90)).toMatchObject({ ok: false });
+  });
 });

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -50,14 +51,19 @@ describe("stub CLI journeys", () => {
     }
   }, 60_000);
 
-  it("verified send renders in the addressed pane and not its sibling", async () => {
-    const marker = `verified-send-${randomUUID()}`;
+  it.each(["normal", "narrow soft-wrap"])("verified send renders in the addressed pane and not its sibling: %s", async (mode) => {
+    if (mode === "narrow soft-wrap") {
+      execFileSync("tmux", ["-S", scaffold!.tmuxSocketPath, "resize-window", "-t", `=${recipient}:`, "-x", "42", "-y", "40"], { env: scaffold!.env });
+    }
+    // A long token forces real mid-word terminal wrapping, not just modeled newlines.
+    const marker = `verified-send-${randomUUID()}` + (mode === "narrow soft-wrap" ? "-" + "x".repeat(100) + " tail" : "");
     const receipt = await cli(["send", recipient, marker, "--verify", "--json"]);
     expect(receipt.verified).toBe(true);
     const target = await cli(["capture", recipient, "--json"]);
     const sibling = await cli(["capture", sender, "--json"]);
-    expect(JSON.stringify(target)).toContain(marker);
-    expect(JSON.stringify(sibling)).not.toContain(marker);
+    if (mode === "narrow soft-wrap") expect(JSON.stringify(target)).not.toContain(marker);
+    expect(JSON.stringify(target).replace(/\\n/g, "")).toContain(marker);
+    expect(JSON.stringify(sibling).replace(/\\n/g, "")).not.toContain(marker);
     // Pane rendering is the contract here. The stub has no consuming input loop.
   }, 60_000);
 

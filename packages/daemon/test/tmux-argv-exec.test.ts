@@ -79,6 +79,13 @@ describe("tmux argv exec path", () => {
     }
   });
 
+  it("joins wrapped capture lines on the argv path without changing exact targeting", async () => {
+    const seen: string[][] = [];
+    const { adapter } = argvAdapter(seen, () => "output");
+    await adapter.capturePaneContent("%1", 30, { joinWrappedLines: true });
+    expect(seen).toEqual([["tmux", "capture-pane", "-p", "-J", "-t", "%1", "-S", "-30"]]);
+  });
+
   it("sendText still stages through buffer files on the argv path", async () => {
     const seen: string[][] = [];
     const fs = memFs();

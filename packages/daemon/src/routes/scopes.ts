@@ -42,12 +42,14 @@ export function scopesRoutes(): Hono {
     if (selected && mission) projectMission(selected, mission);
     const wantDetail = c.req.query("detail") === "1";
     const readPolicy = createProofPolicyRead();
+    // A selected catalog project's own root bounds readiness, as in `rig proof` (never an ancestor's project.yaml).
+    const bound = selected?.root;
     const detailFor = (missionName: string, dirName: string): (SliceScopeDetail & { narrative: string | null; error?: string }) | null => {
       let sourcePath: string | undefined;
       try {
         if (selected) sourcePath = workSource(selected.root, path.join(r.root, missionName, "slices", dirName), false);
         if (selected) workSource(selected.root, path.join(r.root, missionName, "slices", dirName));
-        const d = projectSliceScope(realFs, path.join(r.root, missionName, "slices", dirName), readPolicy);
+        const d = projectSliceScope(realFs, path.join(r.root, missionName, "slices", dirName), readPolicy, bound);
         if (!d) return null;
         // The TUI one-read hydrate: narrative CONTENT rides inline for the `n` DISPLAY —
         // still never a data source (the projection never reads it for counts).
@@ -65,7 +67,7 @@ export function scopesRoutes(): Hono {
       const slices = realFs.listDir(path.join(dir, "slices"))
         .filter(s => realFs.isDirectory(path.join(dir, "slices", s)))
         .map(s => detailFor(name, s)).filter((s): s is NonNullable<typeof s> => s !== null);
-      return { mission: name, slices: wantDetail ? slices : slices.map(({ intent, miniRequirements, proofContract, progressPath, specShaShort, prdExists, narrative, ...summary }) => summary), readiness: readMissionReadiness(dir, readPolicy) };
+      return { mission: name, slices: wantDetail ? slices : slices.map(({ intent, miniRequirements, proofContract, progressPath, specShaShort, prdExists, narrative, ...summary }) => summary), readiness: readMissionReadiness(dir, readPolicy, bound) };
     };
     if (mission) {
       if (!realFs.isDirectory(path.join(r.root, mission))) return c.json({ error: "mission_not_found", mission }, 404);
@@ -94,7 +96,7 @@ export function scopesRoutes(): Hono {
     if (selected && slice && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(slice)) return c.json({ error: "invalid_slice" }, 400);
     if (!mission || !slice) return c.json({ error: "missing_params", hint: "?mission=&slice=" }, 400);
     if (selected && slice) workSource(selected.root, path.join(r.root, mission!, "slices", slice));
-    const detail = projectSliceScope(realFs, path.join(r.root, mission, "slices", slice));
+    const detail = projectSliceScope(realFs, path.join(r.root, mission, "slices", slice), undefined, selected?.root);
     return detail ? c.json(detail) : c.json({ error: "slice_not_found", mission, slice }, 404);
   });
 

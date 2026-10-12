@@ -56,10 +56,10 @@ export interface GatewayDeliveryResult extends DeliveryResultBase {
 /** A terminal wake: the row's lastNudgeResult is the receipt, and a claim is the pickup. */
 export interface TerminalDeliveryResult extends DeliveryResultBase {
   receiptSource: "terminal";
-  /** The class of wakeResult: verified; delivered-ack-pending; retained:*; failed:* or unroutable:*
-   *  (failed); indeterminate:* or an unrecognised value (indeterminate); none yet (still-pending);
-   *  or no wake requested by --no-nudge (not-requested). */
-  outcome: "verified" | "delivered-ack-pending" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
+  /** The class of wakeResult: verified; delivered-ack-pending; claimed (a claimed row whose wake wasn't confirmed);
+   *  retained:*; failed:* or unroutable:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
+   *  (still-pending); or no wake requested by --no-nudge (not-requested). */
+  outcome: "verified" | "delivered-ack-pending" | "claimed" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
   /** The row's lastNudgeResult as recorded; null before any wake result. */
   wakeResult: string | null;
   /** A claim shows the seat took the item; it does not prove the body was read.
@@ -99,7 +99,7 @@ function destinationKindOf(destination: string | null, source: "gateway" | "term
 
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
   if (wakeResult === null) return "still-pending";
-  if (wakeResult === "verified" || wakeResult === "delivered-ack-pending") return wakeResult;
+  if (wakeResult === "verified" || wakeResult === "delivered-ack-pending" || wakeResult === "claimed") return wakeResult;
   if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:")) return "failed";
   if (wakeResult.startsWith("retained:")) return "retained";
   return "indeterminate";
@@ -126,6 +126,7 @@ function terminalDeliveryResult(
   const receipt: Record<TerminalDeliveryResult["outcome"], string> = {
     "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
     "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
+    "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
     "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
     "failed": `The wake failed (${wakeResult}).`,
     "indeterminate": `Terminal receipt unconfirmed (${wakeResult}).`,

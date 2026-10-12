@@ -188,7 +188,8 @@ The routes mount at `/api/agent-images` and expose list/sync, snapshot/fork,
 entry/preview, pin/unpin, delete and prune.
 `packages/cli/src/commands/agent-image.ts` owns the image library commands. The top-level
 `rig fork` verb (`packages/cli/src/commands/fork.ts`) drives `POST /fork`; `--keep-image`
-also captures a pinned image.
+also captures a pinned image. Forking a Claude Code seat needs Claude Code 2.0.73 or later,
+because the fork is launched with its own `--session-id`.
 
 ## Plugins
 

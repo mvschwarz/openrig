@@ -528,6 +528,14 @@ describe("rig queue CLI", () => {
       expect(reads).toBe(1);
     });
 
+    it("a claimed row's unconfirmed wake reads claimed, not indeterminate, and is never verified", async () => {
+      const { result, reads } = await verify([{ lastNudgeResult: "claimed", state: "in-progress", claimedAt: "2026-10-11T20:00:00.000Z", pickup: { state: "working" } }]);
+      expect(reads).toBe(1);
+      expect(result).toMatchObject({ outcome: "claimed", wakeResult: "claimed", claim: { observed: true, claimedAt: "2026-10-11T20:00:00.000Z", pickup: "working" }, nextAction: null });
+      expect(result.detail).toContain("Terminal receipt unconfirmed, but the seat has claimed the item (claimed).");
+      expect(result.detail).toContain("it does not prove the body was read");
+    });
+
     it("an unrecognised wake result is indeterminate and never labelled not-failed", async () => {
       const { result } = await verify([{ lastNudgeResult: "refused:new-prefix" }]);
       expect(result).toMatchObject({ outcome: "indeterminate", wakeResult: "refused:new-prefix" });
