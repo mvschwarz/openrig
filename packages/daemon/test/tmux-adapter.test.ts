@@ -779,6 +779,13 @@ describe("TmuxAdapter", () => {
       expect(await adapter.capturePaneContent("%0")).toBeNull();
     });
 
+    it("joins soft-wrapped lines only when requested, retaining the capture bound", async () => {
+      const exec: ExecFn = vi.fn(async () => "logical line\n") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.capturePaneContent("%5", 30, { joinWrappedLines: true })).toBe("logical line\n");
+      expect(exec).toHaveBeenCalledWith("tmux capture-pane -p -J -t '%5' -S -30");
+    });
+
     it("uses custom line count", async () => {
       const exec: ExecFn = vi.fn(async () => "output") as unknown as ExecFn;
       const adapter = new TmuxAdapter(exec);

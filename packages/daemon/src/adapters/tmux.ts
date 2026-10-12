@@ -1133,13 +1133,15 @@ export class TmuxAdapter {
     return out;
   }
 
-  async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean }): Promise<string | null> {
+  async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> {
     const target = exactTarget(paneId, "pane");
     // `-e` keeps text styling, such as the faint rendering of a suggestion.
     const styled = opts?.escapeSequences === true;
+    // Verification can recover mid-word soft wraps without erasing logical newlines.
+    const joined = opts?.joinWrappedLines === true;
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", ...(styled ? ["-e"] : []), "-t", target, "-S", `-${lines}`],
-        `tmux capture-pane -p${styled ? " -e" : ""} -t ${shellQuote(target)} -S -${lines}`);
+      const output = await this.run(["tmux", "capture-pane", "-p", ...(styled ? ["-e"] : []), ...(joined ? ["-J"] : []), "-t", target, "-S", `-${lines}`],
+        `tmux capture-pane -p${styled ? " -e" : ""}${joined ? " -J" : ""} -t ${shellQuote(target)} -S -${lines}`);
       return output || null;
     } catch {
       return null;

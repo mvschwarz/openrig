@@ -473,6 +473,37 @@ describe("SessionTransport", () => {
     expect(result.outcome).toBe("delivered");
   });
 
+  it.each(["new render", "unchanged render", "additional render", "indentation-only redraw", "different message"])(
+    "send with verify compares indented multiline envelopes: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 2026-10-11T05:00:00Z\n---\nPlease check this task.";
+      // Claude renders submitted multiline messages with two-space continuation indentation.
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      let submitted = false;
+      const prior = mode === "new render" || mode === "different message" ? "prior output"
+        : mode === "indentation-only redraw" ? "❯ " + message : rendered;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => {
+          if (submitted && mode === "indentation-only redraw") return rendered + "\n❯ ";
+          const added = submitted && mode !== "unchanged render" ? "\n" + (
+            mode === "different message" ? rendered.replace("To: dev-impl", "To: other-seat") : rendered
+          ) : "";
+          return prior + added + "\n❯ ";
+        },
+      });
+      const transport = createTransport(tmux, { sleep: async () => undefined });
+
+      const result = await transport.send("dev-impl@my-rig", message, { verify: true });
+
+      expect(result.ok).toBe(true);
+      const expectedVerified = mode === "new render" || mode === "additional render";
+      expect(result.verified).toBe(expectedVerified);
+      expect(result.outcome).toBe(expectedVerified ? "delivered" : "rendered-unconfirmed");
+    },
+  );
+
   it("send with verify does not false-positive on pre-existing pane content", async () => {
     seedCanonicalRig();
     const tmux = mockTmux({
@@ -487,6 +518,189 @@ describe("SessionTransport", () => {
     // OPR.99.0.6.3: text + Enter both succeeded, only the render re-confirm
     // missed — the honest middle, NOT a failure.
     expect(result.outcome).toBe("rendered-unconfirmed");
+  });
+
+  it.each(["same envelope, different body", "unsent composer", "old transcript plus unsent copy", "quoted prompt in composer"])(
+    "send with verify rejects false confirmation: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\nPlease check this task.";
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      const composer = "────────────────────\n" + rendered +
+        (mode === "quoted prompt in composer" ? "\n  ❯ quoted prompt" : "") + "\n────────────────────\n? for shortcuts";
+      const prior = mode === "old transcript plus unsent copy" ? rendered + "\n" : "";
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => prior + (submitted
+          ? mode === "same envelope, different body"
+            ? rendered.replace("Please check this task.", "Please check a different task.") + "\n❯ "
+            : composer
+          : "❯ "),
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
+    },
+  );
+
+  it.each(["different tail", "full message", "truncated message"])(
+    "send with verify compares the full envelope after a long shared opening: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\n" +
+        "A shared opening longer than forty characters belongs to both messages.\nRequested tail.";
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " :
+          (mode === "different tail" ? rendered.replace("Requested tail.", "Other tail.")
+            : mode === "truncated message" ? rendered.split("\n").slice(0, -1).join("\n") : rendered) + "\n❯ ",
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified: mode === "full message",
+        outcome: mode === "full message" ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
+  it.each(["wrapped full", "wrapped wrong tail", "wrapped staged", "wrapped redraw"])(
+    "send with verify compares full envelopes across wrapping: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\n" +
+        "This long shared opening exceeds forty characters and wraps at a word boundary. Requested tail.";
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      const wrapped = rendered.replace("and wraps", "and\n  wraps");
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted
+          ? (mode === "wrapped redraw" ? rendered + "\n❯ " : "❯ ")
+          : (mode === "wrapped wrong tail" ? wrapped.replace("Requested tail.", "Other tail.") : wrapped) +
+            (mode === "wrapped staged" ? "\n────────────────────\n? for shortcuts" : "\n❯ "),
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified: mode === "wrapped full",
+        outcome: mode === "wrapped full" ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
+  it.each(["same-line suffix", "next-line suffix", "exact block", "canonical suffix", "canonical exact", "footer suffix"])(
+    "send with verify counts complete envelope blocks: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const header = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\n";
+      const footer = "\n---\n↩ Reply: rig send sender-agent@demo \"...\"";
+      const canonical = mode.startsWith("canonical") || mode === "footer suffix";
+      const message = header + "Requested body." + (canonical ? footer : "");
+      let rendered = message;
+      if (mode === "same-line suffix") rendered += " Extra body.";
+      if (mode === "next-line suffix") rendered += "\nExtra body.";
+      if (mode === "canonical suffix") rendered = rendered.replace("Requested body.", "Requested body. Extra body.");
+      if (mode === "footer suffix") rendered += " Extra footer text.";
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " : "❯ " + rendered.split("\n").join("\n  ") + "\n❯ ",
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      const verified = mode === "exact block" || mode === "canonical exact";
+      expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
+  it.each(["From suffix", "Claude quote suffix", "Codex quote suffix", "empty framed input", "quoted framed draft"])(
+    "send with verify retains columns at envelope and composer boundaries: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nRequested body.\n---\n↩ Reply: rig send sender-agent@demo \"...\"";
+      const suffix = mode === "From suffix" ? "\nFrom: extra body text"
+        : mode === "Claude quote suffix" ? "\n❯ extra quoted body"
+        : mode === "Codex quote suffix" ? "\n› extra quoted body" : "";
+      const rendered = "❯ " + (message + suffix).split("\n").join("\n  ");
+      const framed = "\n────────────────────\n❯ " + (mode === "quoted framed draft" ? "draft\n  ❯ quoted prompt" : "") +
+        "\n────────────────────\n? for shortcuts";
+      const verified = mode === "empty framed input" || mode === "quoted framed draft";
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " : rendered + (verified ? framed : "\n❯ "),
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
+  it.each(["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Claude thinking", "Codex plain output", "blank-separated reply", "Codex reply", "Codex status", "quoted reply suffix", "quoted status suffix", "plain suffix", "assistant quotes envelope", "assistant quotes prompt then envelope", "next incoming after reply"])(
+    "send with verify separates user envelopes from agent output: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nRequested body.\n---\n↩ Reply: rig send sender-agent@demo \"...\"";
+      const render = (text: string) => "❯ " + text.split("\n").join("\n  ");
+      const marker = mode === "Claude status" ? "✻ Working… (2s · thinking)"
+        : mode === "Claude spinner" ? "⠋ Processing"
+        : mode === "Claude dotted status" ? "· Working… (2s · thinking)"
+        : mode === "Claude thinking" ? "✻ Thinking… (esc to interrupt)"
+        : mode === "Codex plain output" ? "Assistant output without a role glyph"
+        : mode === "Codex reply" ? "• Agent reply"
+        : mode === "Codex status" ? "◦ Working (2s • esc to interrupt)" : "⏺ Agent reply";
+      let output = render(message) + "\n" + marker;
+      if (mode === "Codex plain output") output = output.replace(/^❯/, "›");
+      if (mode === "Claude thinking" || mode === "blank-separated reply") output = render(message) + "\n\n" + marker + "\n";
+      if (mode === "quoted reply suffix") output = render(message + "\n⏺ quoted reply");
+      if (mode === "quoted status suffix") output = render(message + "\n◦ Working (2s • esc to interrupt)");
+      if (mode === "plain suffix") output = message + "\n⏺ extra plain body";
+      if (mode === "assistant quotes envelope") output = render(message.replace("Requested body.", "Other body.")) + "\n⏺ Agent reply\n" + message;
+      if (mode === "assistant quotes prompt then envelope") output = render(message.replace("Requested body.", "Other body.")) + "\n⏺ Agent reply\n❯ example command\n" + message;
+      if (mode === "next incoming after reply") output = render(message.replace("Requested body.", "Other body.")) + "\n⏺ Agent reply\n" + render(message);
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " : output + "\n────────────────────\n❯ \n────────────────────\n? for shortcuts",
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      const verified = ["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Claude thinking", "Codex plain output", "blank-separated reply", "Codex reply", "Codex status", "next incoming after reply"].includes(mode);
+      expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
+  it("send with verify keeps raw multiline captures free of joined-line padding", async () => {
+    seedCanonicalRig();
+    const message = "First logical line.\nSecond logical line crosses forty characters.";
+    let submitted = false;
+    const captures: unknown[] = [];
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async (_session, _lines, options) => {
+        captures.push(options);
+        const first = options?.joinWrappedLines ? "First logical line.          " : "First logical line.";
+        return !submitted ? "❯ " : "❯ " + first + "\n  Second logical line crosses forty characters.\n❯ ";
+      },
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified: true, outcome: "delivered" });
+    expect(captures.every(options => options === undefined)).toBe(true);
+  });
+
+  it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
+    seedCanonicalRig();
+    const message = mode === "raw" ? "Please check this task."
+      : "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nPlease check this task.";
+    let submitted = false;
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async () => submitted ? "❯ " + message.split("\n").join("\n  ") : "❯ ",
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
   });
 
   // OPR.99.0.6.3 — honest delivery-outcome vocabulary
