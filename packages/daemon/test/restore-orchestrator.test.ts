@@ -1935,16 +1935,23 @@ describe("RestoreOrchestrator", () => {
         expect(outcome.error).toContain("session metadata");
         if (mode !== "hook-join") expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
         else expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
+      } else if (mode === "error") {
+        expect(outcome.status).toBe("awaiting-decision");
+        expect(outcome.error).toContain("Original session unresumable");
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
         else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
         else expect(latest.resumeToken).toBeNull();
       }
-      expect(tmux.killSession).not.toHaveBeenCalled();
+      if (mode === "error") {
+        expect(tmux.killSession).toHaveBeenCalledTimes(1);
+      } else {
+        expect(tmux.killSession).not.toHaveBeenCalled();
+      }
       if (mode !== "missing-token") {
         expect(tmux.createSession).toHaveBeenCalledTimes(1);
-        if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
+        if (!lostOwnership && mode !== "error") expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
         expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
         expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
         expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
@@ -2245,7 +2252,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Claude restore fails when resume launch proves the saved session is gone", async () => {
+  it("pod-aware Claude restore returns awaiting-decision when resume launch proves the saved session is gone", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
@@ -2275,10 +2282,20 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
+      expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
+
+      // Rollback assertions: launched session superseded, prior binding restored, no running session
+      const launchedSessions = db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC").all(node.id) as Array<{ id: string; status: string }>;
+      const runningSessions = launchedSessions.filter((s) => s.status === "running");
+      expect(runningSessions).toHaveLength(0);
+      const superseded = launchedSessions.filter((s) => s.status === "superseded");
+      expect(superseded.length).toBeGreaterThan(0);
+      const binding = sessionRegistry.getBindingForNode(node.id);
+      expect(binding?.tmuxSession).toBeUndefined();
     }
   });
 
@@ -2315,7 +2332,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Codex restore fails when resume launch proves the saved session is gone", async () => {
+  it("pod-aware Codex restore returns awaiting-decision when resume launch proves the saved session is gone", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-retry" });
@@ -2345,8 +2362,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-codex-token");
     }
@@ -2382,15 +2399,15 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
       expect(result.result.warnings).not.toContain("Node dev.impl: resume was unavailable; launched fresh instead.");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stable-codex-token");
     }
   });
 
-  it("pod-aware Codex restore fails requested resume even when a checkpoint exists", async () => {
+  it("pod-aware Codex restore returns awaiting-decision for requested resume even when a checkpoint exists", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-codex-restore-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2426,8 +2443,8 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("failed");
-        expect(nodeResult!.error).toContain("Harness launch failed");
+        expect(nodeResult!.status).toBe("awaiting-decision");
+        expect(nodeResult!.error).toContain("Original session unresumable");
         expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
