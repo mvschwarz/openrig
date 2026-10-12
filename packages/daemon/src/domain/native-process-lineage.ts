@@ -154,6 +154,17 @@ function codexResumeToken(args: string[]): string | null | undefined {
   return null;
 }
 
+/** A `ps` command line split the way identity proof splits it. */
+export function processArgv(command: string): string[] {
+  return tokens(command);
+}
+
+/** The conversation a Codex command line resumes: its token, null for a resume naming none, undefined
+ *  when the command is not a resume at all (a fresh `codex -C …`). */
+export function codexCommandResumeToken(command: string): string | null | undefined {
+  return codexResumeToken(tokens(command).slice(1));
+}
+
 type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
 
 /** The conversation a parsed Claude argv names. A fork's --resume names its parent, so with

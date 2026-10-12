@@ -912,6 +912,47 @@ export class TmuxAdapter {
     }
   }
 
+  /** The pane's OWN value for an option, without inherited window/global values: the string, null when the
+   *  pane sets none, undefined when tmux could not be read. A caller that changes the option for a while
+   *  restores exactly this with restorePaneOption. */
+  async getPaneLocalOption(paneTarget: string, option: string): Promise<string | null | undefined> {
+    const exact = exactTarget(paneTarget, "pane");
+    try {
+      const output = await this.run(["tmux", "show-options", "-p", "-v", "-t", exact, option],
+        `tmux show-options -p -v -t ${shellQuote(exact)} ${shellQuote(option)}`);
+      const value = output.trim();
+      return value.length > 0 ? value : null;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Put back what getPaneLocalOption read: set the value, or unset the pane's own value when it had none. */
+  async restorePaneOption(paneTarget: string, option: string, value: string | null): Promise<TmuxResult> {
+    const exact = exactTarget(paneTarget, "pane");
+    const argv = value === null
+      ? ["tmux", "set-option", "-p", "-u", "-t", exact, option]
+      : ["tmux", "set-option", "-p", "-t", exact, option, value];
+    try {
+      await this.run(argv, argv.map((part, index) => index < 2 ? part : shellQuote(part)).join(" "));
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
+   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
+  async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+    if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
+    try {
+      await this.exec(`kill -${signal} ${pid}`);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
   /** Seat-handover cutover: is the pane's process dead (the retiree exited; the pane held by
    *  remain-on-exit)? A known-missing pane also proves physical cutover; unknown probe errors stay false. */
   async isPaneDead(paneId: string): Promise<boolean> {
