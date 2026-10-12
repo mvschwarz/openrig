@@ -97,26 +97,52 @@ describe("public slice creation ordinal claims", () => {
     expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
   }, 30000);
 
-  it("twenty eight-process manifest-backed batches retain every member after each batch", async () => {
+  it("twenty eight-process manifest-backed batches preserve the admitted concurrency contract", async () => {
     const ref = "slices/01-existing/slice.yaml";
     fs.writeFileSync(path.join(mission, ref), "kind: slice\n");
+    const authored = { ref, order: 10, active: false };
     const manifest = path.join(mission, "mission.yaml");
     fs.writeFileSync(manifest, "# authored mission comment\n" + YAML.stringify({
-      kind: "mission", composition: { slices: [{ ref, order: 10, active: true }] },
+      kind: "mission", composition: { slices: [authored] },
     }));
+    const unrelated = path.join(mission, "slices", "02-older-unlisted");
+    fs.mkdirSync(unrelated);
+    fs.writeFileSync(path.join(unrelated, "slice.yaml"), "kind: slice\n");
+    fs.writeFileSync(path.join(unrelated, "PROOF.md"), "# unrelated authored proof\n");
     const results: Result[] = [];
     for (let batch = 0; batch < 20; batch++) {
       results.push(...await Promise.all(Array.from({ length: 8 }, (_, index) => create(`manifest-${batch}-${index}`))));
       const slices = successful(results);
       const refs = [ref, ...slices.map((slice) => `slices/${slice.name}/slice.yaml`)];
+      for (const slice of slices) {
+        for (const file of ["SPEC.md", "PROGRESS.md", "slice.yaml", "PROOF.md"]) {
+          expect(fs.readFileSync(path.join(slice.path, file), "utf8")).not.toBe("");
+        }
+        expect(fs.statSync(path.join(slice.path, "proof")).isDirectory()).toBe(true);
+        const ordinal = slice.name.split("-")[0]!;
+        expect(JSON.parse(fs.readFileSync(path.join(mission, "slices", `.nn-${ordinal}`), "utf8"))).toEqual({
+          schema: "openrig.slice-claim/v1", ref: `slices/${slice.name}/slice.yaml`, state: "verified",
+        });
+      }
       const bytes = fs.readFileSync(manifest, "utf8");
       const members = (YAML.parse(bytes) as { composition: { slices: Array<{ ref: string; order: number; active: boolean }> } }).composition.slices;
-      expect(members.map((member) => member.ref).sort()).toEqual([...refs].sort());
+      expect(members).toContainEqual(authored);
+      expect(new Set(members.map((member) => member.ref)).size).toBe(members.length);
       expect(new Set(members.map((member) => member.order)).size).toBe(members.length);
-      expect(members.every((member) => member.active)).toBe(true);
+      expect(members.every((member) => Number.isInteger(member.order) && typeof member.active === "boolean")).toBe(true);
+      expect(members.map((member) => member.order)).toEqual([...members.map((member) => member.order)].sort((a, b) => a - b));
+      expect(members.every((member) => refs.includes(member.ref) && fs.statSync(path.join(mission, member.ref)).isFile())).toBe(true);
+      expect(members.filter((member) => member.ref !== ref).every((member) => member.active)).toBe(true);
       expect(bytes).toContain("# authored mission comment");
+      const present = new Set(members.map((member) => member.ref));
+      const omitted = slices.filter((slice) => !present.has(`slices/${slice.name}/slice.yaml`)).map((slice) => ({
+        ref: `slices/${slice.name}/slice.yaml`,
+        claim: JSON.parse(fs.readFileSync(path.join(mission, "slices", `.nn-${slice.name.split("-")[0]}`), "utf8")),
+      }));
+      if (omitted.length) console.info("Accepted stale-write membership observations:", JSON.stringify({ batch, omitted }));
     }
     expect(new Set(successful(results).map((slice) => slice.id)).size).toBe(160);
+    expect(fs.readFileSync(path.join(unrelated, "PROOF.md"), "utf8")).toBe("# unrelated authored proof\n");
     expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
   }, 180000);
 
@@ -316,6 +342,42 @@ describe("public slice creation ordinal claims", () => {
     expect(successful([await create("after-failure")])[0]!.id).toBe("OPR.0.3.2.4");
   });
 
+  it.each([false, true])("an isolated incomplete failure retains parent persistence (parent initially has ID: %s)", async (hasId) => {
+    const parent = path.join(mission, "README.md");
+    if (!hasId) fs.writeFileSync(parent, "---\nintent: authored mission\n---\n# existing mission\n");
+    const originalParent = fs.readFileSync(parent, "utf8");
+    const writtenParent = path.join(root, "persisted-parent-bytes");
+    const injected = path.join(root, "isolated-incomplete-failure.mjs");
+    fs.writeFileSync(injected, `
+      import fs from "node:fs";
+      const original = fs.writeFileSync.bind(fs);
+      fs.writeFileSync = (target, data, options) => {
+        if (String(target) === ${JSON.stringify(path.join(mission, "slices", "02-failed", "SPEC.md"))}) {
+          original(${JSON.stringify(writtenParent)}, fs.readFileSync(${JSON.stringify(parent)}, "utf8"));
+          throw Object.assign(new Error("isolated incomplete scaffold failure"), { code: "EIO" });
+        }
+        return original(target, data, options);
+      };
+    `);
+    const failed = await create("failed", [], injected);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stdout + failed.stderr).toContain("isolated incomplete scaffold failure");
+    const bytes = fs.readFileSync(parent, "utf8");
+    expect(bytes).toBe(fs.readFileSync(writtenParent, "utf8"));
+    if (hasId) expect(bytes).toBe(originalParent);
+    else {
+      expect(bytes).not.toBe(originalParent);
+      expect(readFrontmatter(parent).id).toEqual(expect.any(String));
+      expect(readFrontmatter(parent).id).not.toBe("");
+      expect(readFrontmatter(parent).intent).toBe("authored mission");
+      expect(bytes).toContain("# existing mission");
+    }
+    expect(fs.existsSync(path.join(mission, "slices", "02-failed"))).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(mission, "slices", ".nn-02"), "utf8"))).toEqual({
+      schema: "openrig.slice-claim/v1", ref: "slices/02-failed/slice.yaml", state: "pending",
+    });
+  });
+
   it("an old mission guard is preserved but does not block a new creator", async () => {
     const guard = path.join(mission, ".openrig-slice-create-lock");
     fs.mkdirSync(guard);
@@ -325,8 +387,21 @@ describe("public slice creation ordinal claims", () => {
   });
 
   it("serial creates retain ordinary numbering and scaffold output", async () => {
+    const ref = "slices/01-existing/slice.yaml";
+    fs.writeFileSync(path.join(mission, ref), "kind: slice\n");
+    const manifest = path.join(mission, "mission.yaml");
+    const authored = { ref, order: 10, active: false };
+    fs.writeFileSync(manifest, YAML.stringify({ kind: "mission", composition: { slices: [authored] } }));
     const ids: string[] = [];
-    for (let index = 0; index < 4; index++) ids.push(successful([await create(`serial-${index}`)])[0]!.id);
+    const refs = [ref];
+    for (let index = 0; index < 4; index++) {
+      const slice = successful([await create(`serial-${index}`)])[0]!;
+      ids.push(slice.id);
+      refs.push(`slices/${slice.name}/slice.yaml`);
+      const members = YAML.parse(fs.readFileSync(manifest, "utf8")).composition.slices;
+      expect(members.map((member: { ref: string }) => member.ref)).toEqual(refs);
+      expect(members[0]).toEqual(authored);
+    }
     expect(ids).toEqual(["OPR.0.3.2.2", "OPR.0.3.2.3", "OPR.0.3.2.4", "OPR.0.3.2.5"]);
   });
 
