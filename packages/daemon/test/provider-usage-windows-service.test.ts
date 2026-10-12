@@ -116,3 +116,74 @@ describe("usage windows: switch on", () => {
     expect((await bare.request("/api/provider/usage/refresh", { method: "POST" })).status).toBe(503);
   });
 });
+
+describe("usage windows with the Claude reader alongside Codex", () => {
+  async function both(enabled = true) {
+    const { ClaudeUsageWindows } = await import("../src/domain/provider/claude-usage-windows.js");
+    const { claudeUsageReader } = await import("../src/domain/provider/claude-usage-screen-reader.js");
+    const { makeFakeClaude, CLAUDE_AUTH, usageScreen } = await import("./helpers/fake-claude-usage.js");
+    const base = setup({ enabled });
+    const fakeClaude = makeFakeClaude();
+    fakeClaude.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen({ week: 85 }) });
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "usage-svc-home-"));
+    const claude = new ClaudeUsageWindows({
+      now: () => ASOF,
+      read: claudeUsageReader({ launchPath: `${fakeClaude.binDir}${path.delimiter}${process.env.PATH}`, home, claudeConfigDir: fakeClaude.configDir, deadlineMs: 8_000, pollMs: 100, now: () => ASOF }),
+    });
+    const codex = new CodexUsageWindows({
+      now: () => ASOF,
+      read: codexUsageReader({ launchPath: `${base.fake.binDir}${path.delimiter}${process.env.PATH}`, home, codexHome: base.fake.codexHome, deadlineMs: 5_000, graceMs: 200, now: () => ASOF }),
+    });
+    const svc = new ProviderServiceImpl({ db: createFullTestDb(), listRigs: () => [], env: { CODEX_HOME: base.fake.codexHome } as NodeJS.ProcessEnv, now: () => ASOF,
+      usageWindows: { enabled: () => enabled, windows: codex, claude } });
+    return { ...base, svc, fakeClaude };
+  }
+  const post = (app: Hono, provider: string) => app.request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider }) });
+
+  it("reads start nothing; rows are Codex's then Claude's, each unavailable until refreshed", async () => {
+    const { svc, fake, fakeClaude } = await both();
+    const usage = (await svc.getReadModel()).usage!;
+    expect(usage.map((r) => [r.provider, r.identity, r.source.kind])).toEqual([["codex", null, "codex_app_server"], ["claude", null, "claude_usage_screen"]]);
+    expect([fake.spawns(), fakeClaude.authCalls(), fakeClaude.screenStarts().length]).toEqual([0, 0, 0]);
+  });
+
+  it("a Claude refresh reads only Claude, answers with Claude's rows only, and the status carries them", async () => {
+    const { svc, app, fake } = await both();
+    const res = await post(app(svc), "claude");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { refresh: { outcome: string }; usage: Array<{ provider: string; identity: { orgId: string }; windows: Array<{ window: string; level: string }> }> };
+    expect(body.refresh).toMatchObject({ outcome: "ok", coalesced: false });
+    expect(body.usage.map((r) => [r.provider, r.identity.orgId, r.windows.map((w) => `${w.window}:${w.level}`)])).toEqual([
+      ["claude", "org-1", ["current_session:ok", "current_week:nearing"]],
+    ]);
+    expect(fake.spawns()).toBe(0);
+    const status = (await svc.getReadModel()).usage!;
+    expect(status.map((r) => r.provider)).toEqual(["codex", "claude"]);
+  }, 30_000);
+
+  it("a Codex refresh answers with Codex rows only, as before", async () => {
+    const { svc, app, fakeClaude } = await both();
+    const body = await (await post(app(svc), "codex")).json() as { usage: Array<{ provider: string }> };
+    expect(body.usage.map((r) => r.provider)).toEqual(["codex"]);
+    expect(fakeClaude.authCalls()).toBe(0);
+  });
+
+  it("switch off: the Claude refresh is 409 naming the key; saved Codex profiles are noted on Codex rows only", async () => {
+    const off = await both(false);
+    const res = await post(off.app(off.svc), "claude");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "usage_windows_disabled", message: "Claude usage windows are off. Turn them on with: rig config set provider.usage_windows true" });
+    const on = await both();
+    fs.mkdirSync(path.join(on.fake.codexHome, "auth-profiles"));
+    fs.writeFileSync(path.join(on.fake.codexHome, "auth-profiles", "work.json"), "{}");
+    const usage = (await on.svc.getReadModel()).usage!;
+    expect(usage.map((r) => [r.provider, r.savedProfiles?.names ?? null])).toEqual([["codex", ["work"]], ["claude", null]]);
+  });
+
+  it("an unknown provider is a 400; Claude on a service without its reader is a 400", async () => {
+    const { svc, app } = await both();
+    expect((await post(app(svc), "gemini")).status).toBe(400);
+    const { svc: codexOnly, app: appOf } = setup({ enabled: true });
+    expect((await post(appOf(codexOnly), "claude")).status).toBe(400);
+  });
+});

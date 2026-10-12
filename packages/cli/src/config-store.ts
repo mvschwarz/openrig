@@ -169,7 +169,7 @@ export interface RiggedConfig {
   output: {
     compact: boolean;
   };
-  // Slice 01 (OPR.0.7.0.1) — Codex usage windows in the provider view (default
+  // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view (default
   // off). Read by the daemon; the CLI key is the lockstep twin.
   provider: {
     usageWindows: boolean;
@@ -446,7 +446,7 @@ export const VALID_KEYS = [
   "terminal.status_bar",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
-  // Slice 01 — Codex usage windows in the provider view; lockstep with the daemon twin.
+  // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.

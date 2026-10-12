@@ -128,16 +128,18 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         console.log(`  ${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
         continue;
       }
-      // Identity first (account, else the workspace account/read reported, else unresolved); email is a label.
+      // Identity first (Codex: account, else the workspace account/read reported; Claude: the organisation
+      // auth status reported; else unresolved); email is a label.
       const identity = id["accountId"] ? `account ${id["accountId"]}`
         : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
-          : "identity unresolved";
+          : id["orgId"] ? `organisation ${id["orgId"]}`
+            : "identity unresolved";
       const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], "seats unknown"]
         .filter((x) => x !== null && x !== undefined);
       // Not from the latest read: say only that. A later read proves no other account (an unresolved read
       // may be this same login), so the label names the read, not an account.
       const earlier = r["latestFromSource"] ? ""
-        : id["source"] === "unresolved" ? "  [from an earlier read]"
+        : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
           : "  [from an earlier read; the latest read didn't match this row]";
       console.log(`  ${r["provider"]}  ${labels.join(" · ")}${earlier}`);
       const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
@@ -179,8 +181,14 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .option("--refresh", "First read the Codex login's usage windows natively (up to 35 s; needs provider.usage_windows on)")
-    .action(async (opts: { json?: boolean; refresh?: boolean }) => {
+    .option("--refresh", "First read the Codex and Claude logins' usage windows natively (up to 45 s; needs provider.usage_windows on)")
+    .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
+    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string }) => {
+      if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
+        console.error(`--provider must be codex or claude (got ${opts.provider})`);
+        process.exitCode = 1;
+        return;
+      }
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
@@ -188,18 +196,24 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       }
       let refreshFailed = false;
       if (opts.refresh) {
-        // The daemon's worst case is the 35 s read deadline plus stopping the reader (stdin EOF, TERM,
-        // KILL and reap, up to 2 s each: ~8 s), so ~43 s before it answers. Wait 60 s so a slow-dying
-        // child never turns the daemon's answer into a transport error here.
-        const refreshed = await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider: "codex" }, { timeoutMs: 60_000 });
-        if (refreshed.status === 409) {
-          const p = (refreshed.data ?? {}) as { message?: unknown };
+        // The daemon's worst case is a read's deadline (Codex 35 s, Claude 45 s) plus stopping the reader
+        // (Codex: stdin EOF, TERM, KILL and reap, up to 2 s each: ~8 s), so ~45 s before it answers. Wait
+        // 60 s so a slow-dying child never turns the daemon's answer into a transport error here. Both
+        // providers are read in parallel unless --provider names one.
+        const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
+        const answers = await Promise.all(providers.map((provider) =>
+          client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider }, { timeoutMs: 60_000 })));
+        if (answers.every((a) => a.status === 409)) {
+          // The switch is off: one line naming it (the first provider's message).
+          const p = (answers[0]!.data ?? {}) as { message?: unknown };
           console.error(p.message ?? "Codex usage windows are off (provider.usage_windows)");
           process.exitCode = 1;
           return;
         }
-        if (handleHttpError(refreshed, "refresh usage windows")) return;
-        refreshFailed = (refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed";
+        for (const refreshed of answers) {
+          if (handleHttpError(refreshed, "refresh usage windows")) return;
+          if ((refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed") refreshFailed = true;
+        }
       }
       const res = await client.get<Record<string, unknown>>("/api/provider/status");
       if (refreshFailed) process.exitCode = 1;

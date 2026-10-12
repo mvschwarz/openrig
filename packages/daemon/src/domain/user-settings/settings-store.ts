@@ -184,7 +184,7 @@ export const SETTINGS_VALID_KEYS = [
   "terminal.status_bar",
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
-  // Slice 01 (OPR.0.7.0.1) — Codex usage windows in the provider view; daemon-read, twin of the CLI key.
+  // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view; daemon-read, twin of the CLI key.
   "provider.usage_windows",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
   // arch-safe defaults BAKED in getDefaultValue, bounded validation in

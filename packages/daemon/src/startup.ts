@@ -42,6 +42,8 @@ import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
+import { claudeUsageReader } from "./domain/provider/claude-usage-screen-reader.js";
+import { ClaudeUsageWindows } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
 import { PiResumeAdapter } from "./adapters/pi-resume.js";
 import { OmpResumeAdapter } from "./adapters/omp-resume.js";
@@ -1237,11 +1239,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
-      // Slice 01: Codex usage windows, off unless provider.usage_windows is on (read per call). The reader
-      // runs only on an explicit refresh, with the PATH, HOME and CODEX_HOME a seat session gets.
+      // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The readers
+      // run only on an explicit refresh, with the PATH, HOME, CODEX_HOME and CLAUDE_CONFIG_DIR a seat session gets.
       usageWindows: {
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
         windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }) }),
+        claude: new ClaudeUsageWindows({ read: claudeUsageReader({ launchPath: process.env.PATH, home: daemonHome, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }) }),
       },
     }),
     restoreOrchestrator,

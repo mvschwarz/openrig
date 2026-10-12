@@ -29,6 +29,7 @@ const READING = {
 
 let model: Record<string, unknown> = MODEL;
 let refreshReply: { status: number; body: unknown } = { status: 200, body: {} };
+let refreshByProvider: Record<string, { status: number; body: unknown }> = {};
 const posts: unknown[] = [];
 
 function deps(port: number): StatusDeps {
@@ -68,7 +69,12 @@ describe("rig provider status — usage windows", () => {
       req.on("end", () => {
         const send = (status: number, data: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
         if (req.method === "GET" && req.url === "/api/provider/status") return send(200, model);
-        if (req.method === "POST" && req.url === "/api/provider/usage/refresh") { posts.push(JSON.parse(body || "{}")); return send(refreshReply.status, refreshReply.body); }
+        if (req.method === "POST" && req.url === "/api/provider/usage/refresh") {
+          const parsed = JSON.parse(body || "{}") as { provider: string };
+          posts.push(parsed);
+          const reply = refreshByProvider[parsed.provider] ?? refreshReply;
+          return send(reply.status, reply.body);
+        }
         send(404, { error: "not found" });
       });
     });
@@ -76,7 +82,7 @@ describe("rig provider status — usage windows", () => {
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
-  beforeEach(() => { model = MODEL; posts.length = 0; });
+  beforeEach(() => { model = MODEL; posts.length = 0; refreshByProvider = {}; });
 
   it("switch off (no usage key): no USAGE section", async () => {
     const { out } = await run(["status"], port);
@@ -121,7 +127,7 @@ describe("rig provider status — usage windows", () => {
     const { out } = await run(["status"], port);
     const heads = out.split("\n").filter((l) => l.startsWith("  codex  identity unresolved"));
     expect(heads).toEqual([
-      "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read]",
+      "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read; possibly this same login]",
       "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown",
     ]);
     expect(out).not.toContain("another account");
@@ -150,6 +156,44 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status"], port)).out).not.toContain("saved rig auth profiles");
   });
 
+  it("a Claude row: organisation identity, bucket, email label, its windows", async () => {
+    model = { ...MODEL, usage: [{
+      provider: "claude",
+      identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", source: "claude auth status orgId" },
+      source: { kind: "claude_usage_screen", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown",
+      windows: [{ window: "current_week", durationMins: 10080, usedPercent: 85, remainingPercent: 15, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z", level: "nearing", levelReason: "80% or more used", freshness: "fresh" }],
+      limitEvidence: null, latestFromSource: true, lastRefresh: { at: "2026-10-12T20:00:00.000Z", outcome: "ok" }, currentAvailability: "known",
+    }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "  claude  organisation org-1 · bucket all models · d***@example.test · seats unknown",
+      "    weekly (current_week)  15% left  nearing (80% or more used)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z (fresh)",
+      "    current availability: known",
+    ].join("\n"));
+  });
+
+  it("--refresh reads both providers in parallel; one failure exits 1 and the status still prints", async () => {
+    model = { ...MODEL, usage: [READING] };
+    refreshByProvider = {
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } },
+      claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "interaction_required", coalesced: false }, usage: [] } },
+    };
+    const r = await run(["status", "--refresh"], port);
+    expect(posts).toEqual([{ provider: "codex" }, { provider: "claude" }]);
+    expect(r.exitCode).toBe(1);
+    expect(r.out).toContain("USAGE");
+    posts.length = 0;
+    const one = await run(["status", "--refresh", "--provider", "claude"], port);
+    expect(posts).toEqual([{ provider: "claude" }]);
+    expect(one.exitCode).toBe(1);
+  });
+
+  it("--provider takes codex or claude only", async () => {
+    const r = await run(["status", "--refresh", "--provider", "gemini"], port);
+    expect([r.err, r.exitCode]).toEqual(["--provider must be codex or claude (got gemini)", 1]);
+    expect(posts).toEqual([]);
+  });
+
   it("--json stays verbatim", async () => {
     model = { ...MODEL, usage: [READING] };
     expect(JSON.parse((await run(["status", "--json"], port)).out)).toEqual(model);
@@ -161,6 +205,11 @@ describe("rig provider status — usage windows", () => {
     expect(r.err).toBe("Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true");
     expect(r.out).toBe("");
     expect(r.exitCode).toBe(1);
+    // Without --provider both are read; the switch-off line is printed once.
+    expect(posts).toEqual([{ provider: "codex" }, { provider: "claude" }]);
+    posts.length = 0;
+    const codexOnly = await run(["status", "--refresh", "--provider", "codex"], port);
+    expect([codexOnly.err, codexOnly.out, codexOnly.exitCode]).toEqual([r.err, r.out, r.exitCode]);
     expect(posts).toEqual([{ provider: "codex" }]);
   });
 

@@ -58,18 +58,20 @@ export function providerRoutes(): Hono {
     const provider = raw !== null && typeof raw === "object" && !Array.isArray(raw)
       ? (raw as Record<string, unknown>)["provider"] ?? "codex"
       : "codex";
-    if (provider !== "codex") {
-      return c.json({ error: `usage windows can be refreshed for codex only in this version (got ${String(provider)})` }, 400);
+    if (provider !== "codex" && provider !== "claude") {
+      return c.json({ error: `usage windows can be refreshed for codex or claude (got ${String(provider)})` }, 400);
     }
-    const result = await svc.refreshUsage("codex");
+    const result = await svc.refreshUsage(provider);
     if ("disabled" in result) {
       return c.json({
         error: "usage_windows_disabled",
-        message: "Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true",
+        message: `${provider === "codex" ? "Codex" : "Claude"} usage windows are off. Turn them on with: rig config set provider.usage_windows true`,
       }, 409);
     }
+    if ("unavailable" in result) return c.json({ error: `${provider} usage windows are not available on this daemon` }, 400);
+    // The refreshed provider's rows only, so one provider's answer never carries another's.
     const model = await svc.getReadModel();
-    return c.json({ ...result, usage: model.usage ?? [] }, 200);
+    return c.json({ ...result, usage: (model.usage ?? []).filter((row) => row.provider === provider) }, 200);
   });
 
   router.get("/accounts", async (c) => {

@@ -187,7 +187,9 @@ describe("CodexUsageWindows: rows, failed refresh, identity, coalescing", () => 
     await s.windows.refresh();
     const rows = s.windows.project(at(2));
     expect(ids(rows)).toEqual([["unresolved", null, 100, false], ["unresolved", null, 20, true]]);
-    expect(rows[0]!.unresolved).toEqual({ note: "identity unresolved: not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 });
+    // LOW-4: the earlier unresolved row says it may be this same login; the latest keeps the plain note.
+    expect(rows[0]!.unresolved).toEqual({ note: "identity unresolved: from an earlier read, possibly this same login; not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 });
+    expect(rows[1]!.unresolved!.note).toBe("identity unresolved: not matched to, merged with or replacing any other row");
   });
 
   it("F1: a re-read of one workspace replaces only its own row", async () => {
