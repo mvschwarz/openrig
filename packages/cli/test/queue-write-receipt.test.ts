@@ -361,6 +361,43 @@ describe("queue write receipt (output.compact)", () => {
       expect(json).not.toHaveProperty("body");
     });
 
+    it("--verify to an agent (terminal receipt and claim): off and --full print today's body, the receipt keeps delivery whole", async () => {
+      const id = "qitem-20261010180000-aaaa";
+      const claimedRow = row({ state: "in-progress", claimedAt: "2026-10-10T18:01:00.000Z", lastNudgeResult: "claimed", pickup: { state: "working" } });
+      const verifyRun = async (extra: string[]) => {
+        logs = [];
+        const program = createProgram({ queueDeps: {
+          ...makeDeps({
+            "POST /api/queue/create": { status: 201, data: row() },
+            [`GET /api/queue/${id}`]: { status: 200, data: claimedRow },
+          }),
+          deliveryVerify: { timeoutMs: 50, intervalMs: 0, sleep: async () => {} },
+        } });
+        program.exitOverride();
+        await program.parseAsync(["node", "rig", "queue", "create", "--destination", "worker@r", "--body", "b", "--summary", "s", "--verify", ...extra]);
+        return logs.join("\n");
+      };
+      for (const json of [false, true]) {
+        const flag = json ? ["--json"] : [];
+        vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "0");
+        const off = await verifyRun(flag);
+        const full = JSON.parse(off) as Row;
+        expect(full.delivery).toMatchObject({ receiptSource: "terminal", destinationKind: "agent", outcome: "claimed", claim: { observed: true, pickup: "working" } });
+        expect(off).toBe(today({ ...row(), qitemId: id, persisted: true, delivery: full.delivery }, json));
+        vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+        expect(await verifyRun([...flag, "--full"])).toBe(off);
+        const on = await verifyRun(flag);
+        if (json) {
+          const receipt = JSON.parse(on) as Row;
+          expect(receipt).toMatchObject({ qitemId: id, persisted: true });
+          expect(receipt.delivery).toEqual(full.delivery);
+        } else {
+          expect(on).toContain(`  delivery: ${JSON.stringify(full.delivery)}`);
+        }
+        expect(on).not.toContain("Do the thing.");
+      }
+    });
+
     it("claim, unclaim, update and block start no wake: no wake line, and the row's earlier wake fields stay as data", async () => {
       for (const verb of ["claim", "unclaim", "update", "block"]) {
         const w = VERBS.find((x) => x.verb === verb)!;
