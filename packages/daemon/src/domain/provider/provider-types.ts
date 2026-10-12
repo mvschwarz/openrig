@@ -148,14 +148,15 @@ export interface FourBlockReadModel {
   usage?: ProviderUsageAllowance[];
 }
 
-/** Slice 01 — allowance identity: (provider, accountId, limitId). Email and plan are labels. */
+/** Slice 01 — allowance identity: the usage answer's accountId, else the workspace account/read
+ *  reports, else unresolved; with the bucket (limitId). Email and plan are labels, never identity. */
 export interface UsageAllowanceIdentity {
   accountId: string | null;
+  workspaceId: string | null;
   limitId: string;
   email: string | null;
   planType: string | null;
-  /** Set when the backend supplied no account id: the row is never merged with another. */
-  partial?: string;
+  source: "account/rateLimits/read accountId" | "account/read workspace routing" | "unresolved";
 }
 
 export interface UsageWindowRow {
@@ -197,4 +198,8 @@ export interface ProviderUsageAllowance {
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";
   unavailableReason?: string;
+  /** Present on an unresolved observation: never matched, merged or replaced; kept from the most recent reads. */
+  unresolved?: { note: string; keptReads: number; droppedReads: number };
+  /** Present when rig auth profiles exist: this read covers only the login active in the daemon's CODEX_HOME. */
+  savedProfiles?: { names: string[]; note: string };
 }

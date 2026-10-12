@@ -75,7 +75,14 @@ export class ProviderServiceImpl implements ProviderService {
     });
     // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
     const usage = this.usageWindowsEnabled() ? this.deps.usageWindows!.windows.project(asOf) : null;
-    return usage ? { ...model, usage } : model;
+    if (!usage) return model;
+    // The read covers only the login active in the daemon's CODEX_HOME: say so whenever saved rig auth
+    // profiles exist, so a profile without a row never reads as fine.
+    const profiles = model.accounts.filter((a) => a.provider === "codex").map((a) => a.accountId);
+    const savedProfiles = profiles.length > 0
+      ? { names: profiles, note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" }
+      : null;
+    return { ...model, usage: savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage };
   }
 
   async refreshUsage(_provider: "codex"): Promise<UsageRefreshResult | { disabled: true }> {

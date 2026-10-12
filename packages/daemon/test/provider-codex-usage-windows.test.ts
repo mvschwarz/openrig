@@ -42,7 +42,7 @@ describe("normalizeCodexUsage (Codex 0.153.4 shapes)", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.readings).toHaveLength(1);
-    expect(r.readings[0]!.identity).toEqual({ accountId: "acct-1", limitId: "codex", email: "dev@example.test", planType: "plus" });
+    expect(r.readings[0]!.identity).toEqual({ accountId: "acct-1", workspaceId: null, limitId: "codex", email: "dev@example.test", planType: "plus", source: "account/rateLimits/read accountId" });
     expect(r.readings[0]!.windows[0]).toEqual({ window: "primary", durationMins: 300, usedPercent: 41, resetsAt: at(120) });
   });
 
@@ -51,9 +51,16 @@ describe("normalizeCodexUsage (Codex 0.153.4 shapes)", () => {
     expect(r.ok && r.readings.map((x) => x.identity.limitId)).toEqual(["codex"]);
   });
 
-  it("marks a reading with no backend account id as partial", () => {
+  it("with no usage account id: the workspace account/read reports (0.162.1's top-level workspaceRouting), else unresolved; never email", () => {
+    const routed = { ...ACCOUNT_ANSWER, workspaceRouting: { chatgptAccountId: "ws-1", backendOrigin: "https://x", accountRoutingOverride: "us" } };
+    expect(normalizeCodexUsage(routed, rateLimitsAnswer({ accountId: null }), T0).ok && (normalizeCodexUsage(routed, rateLimitsAnswer({ accountId: null }), T0) as { readings: Array<{ identity: unknown }> }).readings[0]!.identity)
+      .toMatchObject({ accountId: null, workspaceId: "ws-1", source: "account/read workspace routing" });
     const r = normalizeCodexUsage(ACCOUNT_ANSWER, rateLimitsAnswer({ accountId: null }), T0);
-    expect(r.ok && r.readings[0]!.identity).toMatchObject({ accountId: null, partial: "no backend account id" });
+    expect(r.ok && r.readings[0]!.identity).toMatchObject({ accountId: null, workspaceId: null, email: "dev@example.test", source: "unresolved" });
+    // A usage account id wins over the workspace routing; workspaceRouting null and account null don't fail.
+    expect((normalizeCodexUsage(routed, rateLimitsAnswer({}), T0) as { readings: Array<{ identity: unknown }> }).readings[0]!.identity).toMatchObject({ accountId: "acct-1", workspaceId: null });
+    const bare = normalizeCodexUsage({ account: null, requiresOpenaiAuth: true, workspaceRouting: null }, rateLimitsAnswer({ accountId: null }), T0);
+    expect(bare.ok && bare.readings[0]!.identity).toMatchObject({ email: null, planType: "plus", source: "unresolved" });
   });
 
   it("refuses shapes it doesn't recognize instead of guessing", () => {
@@ -160,6 +167,60 @@ describe("CodexUsageWindows: rows, failed refresh, identity, coalescing", () => 
     expect(s.windows.project(at(1))).toHaveLength(2);
   });
 
+  const routed = (ws: string) => ({ ...ACCOUNT_ANSWER, workspaceRouting: { chatgptAccountId: ws, backendOrigin: "https://x", accountRoutingOverride: "NO_CONSTRAINT" } });
+  const ids = (rows: ReturnType<CodexUsageWindows["project"]>) =>
+    rows.map((r) => [r.identity!.source, r.identity!.accountId ?? r.identity!.workspaceId, r.windows[1]!.usedPercent, r.latestFromSource]);
+
+  it("F1: two workspaces under one email (workspace ids, no usage account id) are both kept", async () => {
+    const s = scripted([okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 100 }), T0, routed("ws-a")), okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 20 }), at(1), routed("ws-b"))]);
+    await s.windows.refresh();
+    await s.windows.refresh();
+    expect(ids(s.windows.project(at(2)))).toEqual([
+      ["account/read workspace routing", "ws-a", 100, false],
+      ["account/read workspace routing", "ws-b", 20, true],
+    ]);
+  });
+
+  it("F1: two fully unresolved reads under one email are both kept, labelled, never merged", async () => {
+    const s = scripted([okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 100 })), okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 20 }), at(1))]);
+    await s.windows.refresh();
+    await s.windows.refresh();
+    const rows = s.windows.project(at(2));
+    expect(ids(rows)).toEqual([["unresolved", null, 100, false], ["unresolved", null, 20, true]]);
+    expect(rows[0]!.unresolved).toEqual({ note: "identity unresolved: not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 0 });
+  });
+
+  it("F1: a re-read of one workspace replaces only its own row", async () => {
+    const s = scripted([
+      okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 100 }), T0, routed("ws-a")),
+      okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 20 }), at(1), routed("ws-b")),
+      okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 30 }), at(2), routed("ws-a")),
+    ]);
+    for (let i = 0; i < 3; i++) await s.windows.refresh();
+    expect(ids(s.windows.project(at(3)))).toEqual([
+      ["account/read workspace routing", "ws-a", 30, true],
+      ["account/read workspace routing", "ws-b", 20, false],
+    ]);
+  });
+
+  it("F1: an unresolved read never replaces a resolved row", async () => {
+    const s = scripted([okRead(rateLimitsAnswer({ secondaryUsed: 100 })), okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: 20 }), at(1))]);
+    await s.windows.refresh();
+    await s.windows.refresh();
+    expect(ids(s.windows.project(at(2)))).toEqual([
+      ["account/rateLimits/read accountId", "acct-1", 100, false],
+      ["unresolved", null, 20, true],
+    ]);
+  });
+
+  it("F1: unresolved rows are kept from the 3 most recent unresolved reads, and the drop is counted", async () => {
+    const s = scripted([1, 2, 3, 4, 5].map((n) => okRead(rateLimitsAnswer({ accountId: null, secondaryUsed: n }), at(n))));
+    for (let i = 0; i < 5; i++) await s.windows.refresh();
+    const rows = s.windows.project(at(6));
+    expect(rows.map((r) => r.windows[1]!.usedPercent)).toEqual([3, 4, 5]);
+    expect(rows.every((r) => r.unresolved?.keptReads === 3 && r.unresolved.droppedReads === 2)).toBe(true);
+  });
+
   it("overlapping refreshes share one read; a refresh after it ends reads again (no stale join)", async () => {
     let release!: (o: CodexUsageReadOutcome) => void;
     const s = scripted([() => new Promise((resolve) => { release = resolve; }), okRead(rateLimitsAnswer({}), at(1))]);
@@ -188,6 +249,8 @@ describe("codexUsageReader against a fake codex app-server", () => {
     const r = await reader(fake)();
     expect(r).toMatchObject({ ok: true, account: ACCOUNT_ANSWER, rateLimits: rateLimitsAnswer({}) });
     expect(fake.spawns()).toBe(1);
+    // Plugins and apps off for this read, as the #275 network reader starts the app-server.
+    expect(fs.readFileSync(path.join(fake.codexHome, "spawns.log"), "utf8")).toBe("-c features.plugins=false -c features.apps=false app-server\n");
   });
 
   it("U3 failure reasons: rpc error, timeout, child exit", async () => {

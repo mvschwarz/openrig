@@ -49,9 +49,22 @@ function readWindow(window: "primary" | "secondary", raw: unknown): ReadWindow |
 }
 
 /**
+ * The workspace `account/read` reports, when it reports one: `workspaceRouting.chatgptAccountId` at the top
+ * level of the result (a sibling of `account`). Path and types from Codex 0.162.1's generated schema
+ * (GetAccountResponse.json), relayed by Build's reviewer: `workspaceRouting` is optional and nullable, and
+ * when present `chatgptAccountId` is a non-null string. Its siblings (backendOrigin, accountRoutingOverride)
+ * are not identity. Codex 0.153.4's answer has no `workspaceRouting`, so it yields null there.
+ */
+export function accountReadWorkspaceId(account: unknown): string | null {
+  if (!isRecord(account) || !isRecord(account.workspaceRouting)) return null;
+  return stringOrNull(account.workspaceRouting.chatgptAccountId);
+}
+
+/**
  * Normalize the two app-server answers (shapes from Codex 0.153.4's protocol: `GetAccountResponse`,
  * `GetAccountRateLimitsResponse`). One reading per metered bucket (`rateLimitsByLimitId`, else the
- * single-bucket `rateLimits`). Identity is (provider, accountId, limitId); email and plan are labels.
+ * single-bucket `rateLimits`). Identity is the usage answer's `accountId`, else the workspace
+ * `account/read` reports, else unresolved; email and plan are labels and never part of identity.
  */
 export function normalizeCodexUsage(account: unknown, rateLimits: unknown, observedAt: string):
   { ok: true; readings: Reading[] } | { ok: false; detail: string } {
@@ -60,6 +73,10 @@ export function normalizeCodexUsage(account: unknown, rateLimits: unknown, obser
   const email = accountInfo ? stringOrNull(accountInfo.email) : null;
   const accountPlan = accountInfo ? stringOrNull(accountInfo.planType) : null;
   const accountId = stringOrNull(rateLimits.accountId);
+  const workspaceId = accountId === null ? accountReadWorkspaceId(account) : null;
+  const source: UsageAllowanceIdentity["source"] = accountId !== null
+    ? "account/rateLimits/read accountId"
+    : workspaceId !== null ? "account/read workspace routing" : "unresolved";
   const buckets: Array<[string, unknown]> = isRecord(rateLimits.rateLimitsByLimitId)
     ? Object.entries(rateLimits.rateLimitsByLimitId)
     : isRecord(rateLimits.rateLimits)
@@ -78,10 +95,11 @@ export function normalizeCodexUsage(account: unknown, rateLimits: unknown, obser
     readings.push({
       identity: {
         accountId,
+        workspaceId,
         limitId,
         email,
         planType: stringOrNull(snapshot.planType) ?? accountPlan,
-        ...(accountId === null ? { partial: "no backend account id" } : {}),
+        source,
       },
       windows,
       limitEvidence: stringOrNull(snapshot.rateLimitReachedType),
@@ -124,8 +142,16 @@ export function usageLevel(window: ReadWindow, limitEvidence: string | null, now
   return { level: "ok" };
 }
 
-const identityKey = (i: UsageAllowanceIdentity): string =>
-  i.accountId !== null ? `codex:${i.accountId}:${i.limitId}` : `codex:local-login:${i.email ?? "?"}:${i.limitId}`;
+/** The replacement key of a resolved identity. Email is never part of it; an unresolved identity has none. */
+const identityKey = (i: UsageAllowanceIdentity): string | null =>
+  i.accountId !== null ? `codex:account:${i.accountId}:${i.limitId}`
+    : i.workspaceId !== null ? `codex:workspace:${i.workspaceId}:${i.limitId}`
+      : null;
+
+/** Unresolved observations can't be matched to earlier ones, so each read adds its own rows. Keep those
+ *  from the most recent few reads: enough to compare the latest with the two before it, and bounded
+ *  because nothing else ever removes them. */
+export const UNRESOLVED_READS_KEPT = 3;
 
 export interface CodexUsageWindowsDeps {
   read: CodexUsageReader;
@@ -140,6 +166,9 @@ export class CodexUsageWindows {
   private readonly now: () => string;
   private readonly startedAt: string;
   private readonly readings = new Map<string, Reading & { latest: boolean }>();
+  /** Unresolved observations, grouped by read, newest last; at most UNRESOLVED_READS_KEPT reads. */
+  private unresolved: Array<Array<Reading & { latest: boolean }>> = [];
+  private unresolvedDropped = 0;
   private lastRefresh: UsageRefreshOutcome | null = null;
   private inflight: Promise<UsageRefreshOutcome> | null = null;
 
@@ -170,8 +199,20 @@ export class CodexUsageWindows {
     if (!outcome.ok) return this.recordFailure(outcome.at, outcome.reason, outcome.detail);
     const normalized = normalizeCodexUsage(outcome.account, outcome.rateLimits, outcome.observedAt);
     if (!normalized.ok) return this.recordFailure(outcome.observedAt, "unrecognized_shape", normalized.detail);
-    for (const reading of this.readings.values()) reading.latest = false;
-    for (const reading of normalized.readings) this.readings.set(identityKey(reading.identity), { ...reading, latest: true });
+    for (const reading of [...this.readings.values(), ...this.unresolved.flat()]) reading.latest = false;
+    const unresolvedNow: Array<Reading & { latest: boolean }> = [];
+    for (const reading of normalized.readings) {
+      const key = identityKey(reading.identity);
+      if (key === null) unresolvedNow.push({ ...reading, latest: true });
+      else this.readings.set(key, { ...reading, latest: true });
+    }
+    if (unresolvedNow.length > 0) {
+      this.unresolved.push(unresolvedNow);
+      while (this.unresolved.length > UNRESOLVED_READS_KEPT) {
+        this.unresolved.shift();
+        this.unresolvedDropped += 1;
+      }
+    }
     this.lastRefresh = { at: outcome.observedAt, outcome: "ok" };
     return this.lastRefresh;
   }
@@ -185,7 +226,7 @@ export class CodexUsageWindows {
   project(now: string): ProviderUsageAllowance[] {
     const source = { kind: "codex_app_server", host: "local" } as const;
     const failure = this.lastRefresh?.outcome === "failed" ? this.lastRefresh : null;
-    if (this.readings.size === 0) {
+    if (this.readings.size === 0 && this.unresolved.length === 0) {
       return [{
         provider: "codex",
         identity: null,
@@ -203,7 +244,9 @@ export class CodexUsageWindows {
       }];
     }
     const rows: ProviderUsageAllowance[] = [];
-    for (const reading of [...this.readings.values()].sort((a, b) => identityKey(a.identity).localeCompare(identityKey(b.identity)))) {
+    const resolved = [...this.readings.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, reading]) => reading);
+    const unresolvedRows = this.unresolved.flat();
+    for (const reading of [...resolved, ...unresolvedRows]) {
       const failedAfter = failure && Date.parse(failure.at) >= Date.parse(reading.observedAt) ? failure : null;
       const windows: UsageWindowRow[] = reading.windows.map((w) => ({
         window: w.window,
@@ -228,6 +271,13 @@ export class CodexUsageWindows {
         latestFromSource: reading.latest,
         lastRefresh: this.lastRefresh,
         currentAvailability: known ? "known" : "unknown",
+        ...(reading.identity.source === "unresolved" ? {
+          unresolved: {
+            note: "identity unresolved: not matched to, merged with or replacing any other row",
+            keptReads: UNRESOLVED_READS_KEPT,
+            droppedReads: this.unresolvedDropped,
+          },
+        } : {}),
       });
     }
     return rows;

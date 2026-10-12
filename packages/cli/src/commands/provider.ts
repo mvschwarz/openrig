@@ -128,14 +128,18 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         console.log(`  ${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
         continue;
       }
-      const labels = [
-        id["email"] ?? "email not reported",
-        id["planType"],
-        id["accountId"] ? `account ${id["accountId"]}` : `account id not reported (${id["partial"] ?? "partial"})`,
-        `bucket ${id["limitId"]}`,
-        "seats unknown",
-      ].filter((x) => x !== null && x !== undefined);
+      // Identity first (account, else the workspace account/read reported, else unresolved); email is a label.
+      const identity = id["accountId"] ? `account ${id["accountId"]}`
+        : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
+          : "identity unresolved";
+      const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], "seats unknown"]
+        .filter((x) => x !== null && x !== undefined);
       console.log(`  ${r["provider"]}  ${labels.join(" · ")}${r["latestFromSource"] ? "" : "  [last seen; a later read answered for another account]"}`);
+      const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
+      if (unresolved) {
+        const dropped = Number(unresolved["droppedReads"] ?? 0);
+        console.log(`    not matched to, merged with or replacing any other row; kept from the ${unresolved["keptReads"]} most recent unresolved reads${dropped > 0 ? ` (${dropped} older dropped)` : ""}`);
+      }
       for (const w of (r["windows"] as Array<Record<string, unknown>>) ?? []) {
         const left = w["remainingPercent"] === null ? "?% left" : `${w["remainingPercent"]}% left`;
         const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
@@ -149,6 +153,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       }
       console.log(`    current availability: ${r["currentAvailability"]}`);
     }
+    const saved = rows.find((r) => r["savedProfiles"])?.["savedProfiles"] as Record<string, unknown> | undefined;
+    if (saved) console.log(`  ${saved["note"]}: ${((saved["names"] as string[]) ?? []).join(", ")}`);
   }
 
   // Shared daemon-backed read for the FILTERED blocks: --json verbatim, human = pretty JSON (§3

@@ -95,6 +95,18 @@ describe("usage windows: switch on", () => {
     expect(JSON.stringify(rest)).toBe(JSON.stringify(await mainSvc.getReadModel()));
   });
 
+  it("saved rig auth profiles: the rows say they weren't read, only when profiles exist", async () => {
+    const { svc, fake } = setup({ enabled: true });
+    expect((await svc.getReadModel()).usage![0]).not.toHaveProperty("savedProfiles");
+    fs.mkdirSync(path.join(fake.codexHome, "auth-profiles"));
+    for (const name of ["work", "personal"]) fs.writeFileSync(path.join(fake.codexHome, "auth-profiles", `${name}.json`), "{}");
+    const usage = (await svc.getReadModel()).usage!;
+    expect(usage.every((row) => JSON.stringify(row.savedProfiles) === JSON.stringify({
+      names: ["personal", "work"],
+      note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME",
+    }))).toBe(true);
+  });
+
   it("refresh refuses a provider other than codex, and an unwired service is a 503", async () => {
     const { svc, app } = setup({ enabled: true });
     const res = await app(svc).request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider: "claude" }) });

@@ -13,7 +13,7 @@ const MODEL = { accounts: [], bindings: [], signals: [], hostUsage: [], asOf: "2
 const WINDOW = { window: "secondary", durationMins: 10080, usedPercent: 100, remainingPercent: 0, resetsAt: "2026-10-14T00:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z" };
 const READING = {
   provider: "codex",
-  identity: { accountId: "acct-1", limitId: "codex", email: "dev@example.test", planType: "plus" },
+  identity: { accountId: "acct-1", workspaceId: null, limitId: "codex", email: "dev@example.test", planType: "plus", source: "account/rateLimits/read accountId" },
   source: { kind: "codex_app_server", host: "local" },
   observedAt: "2026-10-12T20:00:00.000Z",
   seats: "unknown",
@@ -88,7 +88,7 @@ describe("rig provider status — usage windows", () => {
     const { out } = await run(["status"], port);
     expect(out).toContain([
       "USAGE (read on request: rig provider status --refresh)",
-      "  codex  dev@example.test · plus · account acct-1 · bucket codex · seats unknown",
+      "  codex  account acct-1 · bucket codex · dev@example.test · plus · seats unknown",
       "    5h (primary)  59% left  ok  resets 2026-10-14T00:00:00.000Z  observed 2026-10-12T20:00:00.000Z (stale: refresh failed at 2026-10-12T20:05:00.000Z; this reading is older)",
       "    weekly (secondary)  0% left  exhausted (at the limit)  resets 2026-10-14T00:00:00.000Z  observed 2026-10-12T20:00:00.000Z (stale: refresh failed at 2026-10-12T20:05:00.000Z; this reading is older)",
       "    limit evidence: rate_limit_reached",
@@ -100,12 +100,27 @@ describe("rig provider status — usage windows", () => {
   it("an unavailable row and a last-seen row say so", async () => {
     model = { ...MODEL, usage: [
       { provider: "codex", identity: null, windows: [], unavailableReason: "no reading since the daemon started at T; refresh with rig provider status --refresh" },
-      { ...READING, identity: { ...READING.identity, accountId: null, partial: "no backend account id" }, latestFromSource: false, lastRefresh: { at: "x", outcome: "ok" } },
+      { ...READING, identity: { ...READING.identity, accountId: null, workspaceId: "ws-a", source: "account/read workspace routing" }, latestFromSource: false, lastRefresh: { at: "x", outcome: "ok" } },
+      { ...READING, identity: { ...READING.identity, accountId: null, source: "unresolved" }, lastRefresh: { at: "x", outcome: "ok" },
+        unresolved: { note: "identity unresolved: not matched to, merged with or replacing any other row", keptReads: 3, droppedReads: 2 } },
     ] };
     const { out } = await run(["status"], port);
     expect(out).toContain("  codex  unavailable: no reading since the daemon started at T; refresh with rig provider status --refresh");
-    expect(out).toContain("account id not reported (no backend account id) · bucket codex · seats unknown  [last seen; a later read answered for another account]");
+    expect(out).toContain("  codex  workspace ws-a (from account/read; no usage account id) · bucket codex · dev@example.test · plus · seats unknown  [last seen; a later read answered for another account]");
+    expect(out).toContain("  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown\n    not matched to, merged with or replacing any other row; kept from the 3 most recent unresolved reads (2 older dropped)");
     expect(out).not.toContain("last reading kept, marked old");
+  });
+
+  it("saved rig auth profiles: one line when the daemon says they weren't read; nothing otherwise", async () => {
+    const savedProfiles = { names: ["personal", "work"], note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" };
+    model = { ...MODEL, usage: [{ ...READING, savedProfiles }] };
+    const { out } = await run(["status"], port);
+    expect(out.split("\n").filter((l) => l.includes("saved rig auth profiles"))).toEqual([
+      "  saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME: personal, work",
+    ]);
+    expect(JSON.parse((await run(["status", "--json"], port)).out).usage[0].savedProfiles).toEqual(savedProfiles);
+    model = { ...MODEL, usage: [READING] };
+    expect((await run(["status"], port)).out).not.toContain("saved rig auth profiles");
   });
 
   it("--json stays verbatim", async () => {

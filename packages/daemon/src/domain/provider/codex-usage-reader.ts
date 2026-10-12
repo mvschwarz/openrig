@@ -5,8 +5,9 @@
 // explicit refresh: ordinary provider reads never call it.
 //
 // Identity comes only from the two RPC answers. The reader never opens auth.json or any token.
-// Side effects: Codex startup may write its own state files in the shared CODEX_HOME, and a backend
-// read may refresh the login's token in auth.json, as any Codex start can.
+// Side effects: Codex startup may write its own state files in the shared CODEX_HOME (its databases,
+// installation id, bundled skills), and a backend read may refresh the login's token in auth.json, as
+// any Codex start can. Plugins and apps are off for this read, so no plugin sync runs.
 
 import { spawn } from "node:child_process";
 import { stopGroup } from "../codex-network-default.js";
@@ -39,6 +40,9 @@ export interface CodexUsageReaderOptions {
   now?: () => string;
 }
 
+/** The app-server, with plugins and apps switched off for this read only (as `codex-network-default.ts`). */
+export const CODEX_USAGE_READER_ARGS = ["-c", "features.plugins=false", "-c", "features.apps=false", "app-server"];
+
 /** Native reads take 25–35 s (Ops' readers); the refresh is bounded by the upper end. */
 export const CODEX_USAGE_READ_DEADLINE_MS = 35_000;
 
@@ -61,7 +65,8 @@ export function codexUsageReader(options: CodexUsageReaderOptions = {}): CodexUs
     let child: ReturnType<typeof spawn>;
     try {
       // Its own process group, so cleanup reaches the reader's descendants and nothing else.
-      child = spawn("codex", ["app-server"], { cwd: options.home, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
+      // Plugins and apps off, as the #275 network reader starts it: no plugin sync during a usage read.
+      child = spawn("codex", CODEX_USAGE_READER_ARGS, { cwd: options.home, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
     } catch (error) {
       return { ok: false, at: now(), reason: "spawn_failed", detail: `codex app-server could not start: ${firstLine(error)}` };
     }
