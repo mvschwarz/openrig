@@ -449,6 +449,8 @@ export async function hydrateSnapshot(
   const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
+  // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
+  const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
   const healthRequested = broadReads || viewContext?.viewTab === "health";
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
   // A pending pod/agent address needs every rig's seats to resolve.
@@ -463,11 +465,11 @@ export async function hydrateSnapshot(
     !broadReads ? Promise.resolve(null) : safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     !broadReads ? Promise.resolve(null) : safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
     // PULSE ▲ NEEDS YOU + ⧗ BLOCKED + ◌ PARKED — the shipped queue reads (increments 2/2b)
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
     !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     !broadReads ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
     !broadReads ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),

@@ -129,6 +129,23 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect((await again.json() as { code: string }).code).toBe("nothing_to_clean");
   });
 
+  it("routes --plan to read-only planning without requiring a reason or entering execution", async () => {
+    const result = { ok: true, planOnly: true, complete: false, launchable: null };
+    const plan = vi.spyOn(SeatLifecycleService.prototype, "planFresh").mockResolvedValue(result as never);
+    const launch = vi.spyOn(SeatLifecycleService.prototype, "launchFresh");
+    const res = await post("launch-plan", "dev@fixture", { fresh: true, stop: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(plan).toHaveBeenCalledExactlyOnceWith({ seatRef: "dev@fixture", fresh: true, stop: true });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("still requires --fresh for a plan", async () => {
+    const res = await post("launch-plan", "dev@fixture", {});
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, planOnly: true, code: "fresh_required" });
+  });
+
   it("launch requires explicit fresh=true", async () => {
     const { sessionName } = seedSeat();
     const res = await post("launch", sessionName, { reason: "deliberate blank restart" });
