@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-seven top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.8`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.6.10`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -28,8 +28,9 @@ one command away. Your memory of the fleet is a claim about the past.
 - **`rig ps`** — what rigs exist. **`rig ps --nodes -A`** — the state of every seat everywhere,
   *including the broken ones*. **The bare form is the question you usually want:** `--active`
   filters to running and **hides detached, exited and attention states** — which are exactly the
-  cells you were scanning for. **`rig ps --resources`** shows this host's load and transcript
-  capture cost.
+  cells you were scanning for. A seat whose tmux session is confirmed gone reads `detached`
+  (activity reason `session_missing`), and `rig ps --nodes` says to restore or relaunch it.
+  **`rig ps --resources`** shows this host's load and transcript capture cost.
 - **`rig ps --all-hosts --nodes -A`** — the same across every registered machine. Rollup-only
   unless you ask for nodes.
 - **`rig discover`** — what is running on this box that OpenRig is *not* managing.
@@ -89,6 +90,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
   can't be read: read it with `rig capture` and get the question answered instead of retrying.
+  Over `--host` to an http-registered host, a send that may have reached the remote reads
+  `remote-outcome-unknown` ("Delivery UNCONFIRMED"): check the target with `rig capture <session>
+  --host <id>` before any resend. Only a host that was never reached reads as unreachable.
 - **`rig send --raw`** — send exact text or keystrokes without the From/To envelope;
   the interactive-prompt guard still applies. To deliberately drive an interactive prompt,
   **`--dangerously-interact --reason "<why>"`** is the explicit override and implies raw text.
@@ -97,7 +101,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   the wording wrong on the fourth. **Blast radius is real** — on a large rig this lands in every
   seat's turn.
 - **`rig capture <seat>`** — read what is on their screen right now. **`--rig` / `--pod`** captures
-  every seat in one call.
+  every seat in one call. `--lines N` is the last N lines (stderr says how many earlier lines were
+  cut); `--history-plus-pane` gives the older N history lines plus the whole pane. A short capture
+  doesn't prove a seat is idle.
 - **`rig transcript <seat>`** — what has been *said* in a seat, and **seat-scoped rather than
   session-scoped**: one file spanning every agent generation that has occupied it, so it reaches
   back through handovers. Capped (`transcripts.lines`, default 1000 — raise it for depth), and
@@ -110,7 +116,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   runtime tokens.
 - **`rig chatroom wait`** — block until a peer actually says something, instead of polling
   `capture` in a loop. Also `history`, `watch`, `topic` for a named thread that stays retrievable.
-  Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds.
+  Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds. Poll timeouts,
+  connection refusals, and reset or closed connections are retried until that deadline; other errors,
+  including an error answer from the daemon such as a removed rig, still end the wait.
 - **`rig stream emit` / `list` / `watch` / `archive`** — drop an observation somewhere the *next*
   agent will find it. Emitting costs nothing and does not interrupt anyone; the value appears when
   someone lists the stream before starting.
@@ -126,7 +134,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   window, and only then say that clicking macOS's Allow is fine. Herdr is visible only in a
   terminal the person can see; switching the shared TUI to `:terminals` does not open one. Over
   SSH, in CI or with no display, the command returns a definite no-window result with the reason
-  and an attach command: relay that command exactly. Inspect the result and visible content, or
+  and an attach command: relay that command exactly. When the daemon runs on a non-default tmux
+  server, attach commands carry `-L <name>` or `-S <path>`; from inside tmux run them as
+  `env -u TMUX <tmuxAttachCommand>`. Inspect the result and visible content, or
   say what cannot be verified. On a desktop, do not finish by printing a command for the person to
   type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
   the failure. `--provider herdr` or `--provider cmux` adds tiles inside a workspace that is
@@ -148,7 +158,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   readiness for the delivery decision and `queue create --verify` for its receipt; connector
   setup or verification is not an outbound human message. After a connection gap the daemon
   catches up on missed channel messages and marks them late; `rig slack status` shows the
-  connection and the catch-up state. **`rig slack channel-map list` / `set <match> <channel>` /
+  connection, the catch-up state, and the count of retained retry records for inbound messages,
+  reactions and click answers (kept across restarts, not a distinct-message count). A retained alert whose row closed before its retry isn't
+  posted; the row says why. Its `Delivery:` line says whether events are confirmed arriving;
+  "connected" alone is not delivery, and a connection that stops delivering is replaced. **`rig slack channel-map list` / `set <match> <channel>` /
   `remove <match>`** sends a rig's or seat's human-bound posts to its own channel (a seat match
   beats a rig match; the rest use the default channel). After a change, invite the app to each
   channel, run `rig slack verify`, and rewire the connector (`rig slack disable` then `enable`, or
@@ -169,7 +182,11 @@ your context, your compaction and your replacement — and it is the only thing 
 
 - **`rig queue create`** — a row with an owner, a body and a transition history. Its reply, like
   `handoff`'s, confirms the row was saved; the owner is woken after that. Before you say they were
-  told, read the row's transitions (or use `--verify` for a person's request).
+  told, read the row's transitions, or use `--verify`. For a seat it reports the wake's terminal
+  receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
+  pickup, not proof the body was read. For a row the seat already claimed, `outcome` can read
+  `indeterminate` while `claim` is accurate: read `claim`. It isn't a failed handoff, so don't
+  re-run the create.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.
@@ -191,6 +208,11 @@ your context, your compaction and your replacement — and it is the only thing 
   delivery, the row's transitions are the receipt ledger; `undelivered` does not answer whether a
   person received the escalation. **`overdue` and `undelivered` are the two halves of "is anything
   silently stuck", and a rig can be clean on one and rotten on the other.**
+- **`queue.wake_human_rung`** — when a seat can't be woken, the last escalation step posts to a
+  person. `rig config set queue.wake_human_rung explicit-only` (default `always`) keeps that post
+  for rows addressed to a person (an `@external` address or a registered human); the rest stop at
+  `rig view show escalations`. A seat stuck at a prompt only a person can clear still reaches one,
+  and an unreadable human registry posts everything.
 - **`rig queue inbox-drop` / `inbox-pending` / `inbox-absorb` / `inbox-deny`** — put something in
   front of a seat that it can *refuse*. Mail, not assignment.
 - **`rig queue outbox-record` / `outbox-list`** — what you dispatched, in a record that survives
@@ -335,19 +357,25 @@ not have to tear one down to change it, and you rarely have to start from nothin
   by name, a bundle someone handed you, a GitHub folder link (pinned to one commit), or a stopped
   rig. `rig up` with a pod-aware spec on a stopped team's name replaces that team (the earlier one
   is archived), so check `rig ps --nodes` first. Launch-created `AGENTS.md` or `CLAUDE` files now show in `git status`.
+  `rig up <rig> --existing` puts back the OpenRig guidance blocks `rig down` removed before a
+  resumed seat starts. A seat still missing one makes the rig `partially_restored` (its node lists
+  `guidanceGaps`) and `rig up` exits 1.
 - **`rig down`** — stop a rig's seats and take it out of the running set. It ends the agents'
   sessions and any work in progress; don't run it on a live team unless the person asked. In
   human mode it first prints one line with each agent's last known activity, or “unknown”: a
   best-effort snapshot, not a record of what was interrupted. With `--host`, a remote teardown
   that reports errors exits 2.
-- **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
-  rest. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
-  daemon older than 0.5.9, which would ignore it and launch.
+- **`rig launch <rigId> [seat]`** — one seat is down; start just that one, without disturbing the
+  rest. It takes the rig ID from `rig ps --json`; a rig name gives `rig_not_found`. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
+  daemon older than 0.5.9, which would ignore it and launch. A seat whose agent exited to a shell in
+  its kept pane reads `attention_required` (exit 1), not already running: resume it, or
+  `rig seat launch <session> --fresh --stop`.
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
   siblings and durable work stay put, and unmanaged ambiguity refuses.
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
-  already running. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
+  already running. `rig add` takes the rig's name or ID; a name two active rigs share is refused
+  with `rig_ambiguous` and the candidates. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
 - **`rig remove`** / **`rig shrink`** — take a seat, or an entire pod, out of a running topology.
   If it holds active work, pass `--fallback <live-seat>` to reroute before mutation; without a
   valid fallback the command refuses rather than strand the rows.
@@ -519,7 +547,8 @@ scheme, and nothing downstream can see it.
 - **`rig scope slice progress` / `mission progress`** — record that a step moved, in a form the
   progress view can parse.
 - **`rig scope slice approve`** — freeze a decision — *this is the plan* or *this is delivered* —
-  so the freeze is recorded rather than asserted in chat.
+  so the freeze is recorded rather than asserted in chat. With `--workspace`, approve stamps the
+  tree you named, and refuses one with no `missions/` folder.
 - **`rig scope slice close` / `ship` / `move`** — retire it with the reason attached, move it into
   the release it belongs to preserving git history, or re-file it under a different mission.
 - **`rig scope slice stage` / `verified`** — how mature is this, and *when was it last checked and
@@ -679,7 +708,8 @@ reaching them is ordinary work rather than an escalation.
   request, then boundedly inspect its transport receipt. Posted means posted, not read;
   pending, failed, or indeterminate delivery leaves the row intact. Inspect the same row's
   transitions before retrying. `rig send` remains agent-terminal delivery only.
-  `--human-questions-file` adds clickable decision questions.
+  `--human-questions-file` adds clickable decision questions. A typed Slack reply to one is kept
+  in `humanAnswers`, placed under the first unanswered question; closing isn't approval.
 - **When project policy calls for human judgment or an update, load `messaging-the-human`.**
   Use `rig context get skills/core/messaging-the-human/SKILL.md` for a complete decision brief,
   related supplemental detail and explicit quiet-update intent. An FYI creates no approval
@@ -764,7 +794,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig provider accounts` / `bindings` / `signals` / `switch`** — which seats are bound to which
   accounts, what the usage signals say, and whether a seat can be moved without stranding the
   conversation it is in the middle of. **`provider signals` reports anomalies rather than a
-  listing** — unbound seats, accounts shared across several seats.
+  listing** — unbound seats, accounts shared across several seats. A Codex seat showing its
+  usage-limit banner reads activity `unknown` with reason `usage_limit`, and `provider signals` can
+  show a provider-event signal for that seat's account that allows a switch decision.
 - **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you
@@ -772,7 +804,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
   It installs herdr by default on macOS and Linux (`--no-herdr` declines; if the install fails,
   views fall back to plain tmux) and on a Mac offers Ghostty once (`--ghostty` / `--no-ghostty`).
-  It no longer installs cmux; an existing cmux still works.
+  It no longer installs cmux; an existing cmux still works. `--providers claude`, `codex` or
+  `both` sets which harnesses it installs and checks; one not chosen reads `skipped`, never failed.
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. `rig` and `rig tui` open
@@ -858,6 +891,8 @@ database. It is one more set of primitives on a machine full of them.
 - **"Did that actually land?"** — `rig queue show <qitemId>` gives a bounded preview,
   original byte size and the exact expansion command. Read the complete original record with
   `rig queue show <qitemId> --full --json`; a preview or a compact list is not the whole body.
+  Compact `rig queue list` rows carry `summary`; the fields they leave out are absent, not empty,
+  and `fieldsElided` names them.
   Delivery status is separate from content: inspect its receipt before claiming it was consumed.
 - **"What am I waiting on?"** — the queue row's `waiting` view derives its owner, exact blocker
   and blocker owner, last meaningful change, activity confidence and next backstop from live

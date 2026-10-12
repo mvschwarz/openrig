@@ -182,6 +182,7 @@ export interface RiggedConfig {
     wakeRetryCap: number;
     wakeUnconfirmedWindowMinutes: number;
     wakeSwapGraceSeconds: number;
+    wakeHumanRung: string;
   };
 }
 
@@ -328,6 +329,7 @@ const DEFAULTS = {
     wakeRetryCap: 3,
     wakeUnconfirmedWindowMinutes: 30,
     wakeSwapGraceSeconds: 180,
+    wakeHumanRung: "always",
   },
 } as const;
 
@@ -440,6 +442,10 @@ export const VALID_KEYS = [
   "queue.wake_retry_cap",
   "queue.wake_unconfirmed_window_minutes",
   "queue.wake_swap_grace_seconds",
+  // #811 — whether the operator rung posts agent-to-agent escalations to a person.
+  // Under explicit-only, an ask that needs a person must be addressed to the person;
+  // without a human registry, explicit-only posts everything, as always does.
+  "queue.wake_human_rung",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -528,6 +534,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "queue.wake_retry_cap": { primary: "OPENRIG_QUEUE_WAKE_RETRY_CAP" },
   "queue.wake_unconfirmed_window_minutes": { primary: "OPENRIG_QUEUE_WAKE_UNCONFIRMED_WINDOW_MINUTES" },
   "queue.wake_swap_grace_seconds": { primary: "OPENRIG_QUEUE_WAKE_SWAP_GRACE_SECONDS" },
+  "queue.wake_human_rung": { primary: "OPENRIG_QUEUE_WAKE_HUMAN_RUNG" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -605,6 +612,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "queue.wake_retry_cap": ["queue", "wakeRetryCap"],
   "queue.wake_unconfirmed_window_minutes": ["queue", "wakeUnconfirmedWindowMinutes"],
   "queue.wake_swap_grace_seconds": ["queue", "wakeSwapGraceSeconds"],
+  "queue.wake_human_rung": ["queue", "wakeHumanRung"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -766,6 +774,12 @@ function positiveIntegerConstraint(key: string) {
   };
 }
 
+function wakeHumanRungConstraint(raw: string): void {
+  if (raw !== "always" && raw !== "explicit-only") {
+    throw new Error(`Invalid value for queue.wake_human_rung: must be "always" or "explicit-only", got "${raw}"`);
+  }
+}
+
 function percentageConstraint(key: string) {
   return (raw: string, coerced: string | number | boolean): void => {
     if (!/^\d+$/.test((raw ?? "").trim())
@@ -792,6 +806,27 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "runtime.readiness_timeout_seconds": (raw, coerced) => {
     if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
+    }
+  },
+  // daemon.port had no KEY_CONSTRAINTS entry, so `rig config set daemon.port
+  // 99999` stored 99999 and the next daemon start died with a raw
+  // ERR_SOCKET_BAD_PORT from serve(). The check range-validates the value
+  // the runtime actually consumes — the same parseInt the boot path runs on
+  // OPENRIG_PORT (startServer) — rather than the raw input format, so
+  // everything that resolves today keeps resolving: 7433abc, 7433.5 and
+  // +7433 resolve to 7433, 1e4 to 1, 0x1D11 to 0, and a quoted in-range
+  // port in config.json ("7434") stays "7434". Only ports that cannot be
+  // bound are refused. 0 stays legal: checkPort treats port <= 0 as
+  // "always available" and the repo's own preflight tests write
+  // daemon.port = 0 on purpose. The ui.preview.* keys are deliberately
+  // unconstrained: their consumers floor/clamp out-of-range values today
+  // (refresh 0 disables polling on purpose; max_pins floors to 1; the
+  // daemon preview route falls back to 50 lines), so tightening them here
+  // would refuse input that works.
+  "daemon.port": (raw, coerced) => {
+    const port = parseInt(String(coerced), 10);
+    if (Number.isNaN(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid value for daemon.port: must be an integer in [0, 65535], got "${raw}"`);
     }
   },
   "ui.timezone": (_raw, value) => {
@@ -888,6 +923,7 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "queue.wake_retry_cap": positiveIntegerConstraint("queue.wake_retry_cap"),
   "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
   "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
+  "queue.wake_human_rung": wakeHumanRungConstraint,
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -1108,6 +1144,7 @@ export class ConfigStore {
         wakeRetryCap: v("queue.wake_retry_cap") as number,
         wakeUnconfirmedWindowMinutes: v("queue.wake_unconfirmed_window_minutes") as number,
         wakeSwapGraceSeconds: v("queue.wake_swap_grace_seconds") as number,
+        wakeHumanRung: v("queue.wake_human_rung") as string,
       },
     };
   }

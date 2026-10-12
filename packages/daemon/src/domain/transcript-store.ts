@@ -358,7 +358,7 @@ export class TranscriptStore {
       .filter((line) => !isUiChromeLine(line))
       .filter((line) => !isSpinnerOnlyLine(line))
       .filter((line) => !isLikelyTuiFragment(line))
-      .filter((line, index) => !isPromptRedrawDuplicate(line, filtered[index + 1]));
+      .filter((line, index, lines) => !isPromptRedrawDuplicate(line, lines[index + 1]));
   }
 
   /**

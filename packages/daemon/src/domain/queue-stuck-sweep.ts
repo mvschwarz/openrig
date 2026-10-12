@@ -580,8 +580,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       liveDedupTags.add(dedupTag);
       const existing = deps.db
         .prepare(
+          // The first term is implied by the second (its pattern starts with that literal); it lets
+          // the planner use idx_queue_items_recovery_tags (migration 099) instead of a full scan.
           `SELECT qitem_id, source_session, state, ts_updated FROM queue_items
-            WHERE tags LIKE ?
+            WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ?
             ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
                      ts_updated DESC, ts_created DESC, qitem_id DESC
             LIMIT 1`,

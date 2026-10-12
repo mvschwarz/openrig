@@ -20,6 +20,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -979,6 +980,19 @@ describe("queue routes", () => {
     expect(data[0]!.body).toBe("fyi");
   });
 
+  it("queue, inbox and outbox list refuse only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    await expectLimitParsing(app, "/api/queue/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/inbox/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
@@ -1646,6 +1660,29 @@ describe("queue routes", () => {
       expect(body.asDestination.inProgress).toBe(1);
       expect(body.asDestination.recent).toHaveLength(2);
       expect(body.asSource.total).toBe(0);
+    });
+
+    // OPR.0.7.0.12 — work candidates ride only an explicit request, and the read writes nothing.
+    it("GET /api/queue/whoami adds workCandidates only with candidates=1, read-only", async () => {
+      const created = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "x", tags: ["mission:m"] }),
+      });
+      expect(created.status).toBe(201);
+      const counts = () => ({
+        items: (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n,
+        transitions: (db.prepare("SELECT COUNT(*) AS n FROM queue_transitions").get() as { n: number }).n,
+      });
+      const before = counts();
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as Record<string, unknown>;
+      expect(plain).not.toHaveProperty("workCandidates");
+      const asked = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      expect(asked.status).toBe(200);
+      const body = (await asked.json()) as { workCandidates: { next: Array<{ missions: string[] }>; candidates: unknown[]; held: unknown[] } };
+      expect(body.workCandidates.next).toEqual([expect.objectContaining({ missions: ["m"] })]);
+      expect(body.workCandidates.candidates).toEqual([]);
+      expect(counts()).toEqual(before);
     });
 
     it("GET /api/queue/whoami returns 400 without session query param", async () => {

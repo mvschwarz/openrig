@@ -55,6 +55,7 @@ const LABELS: Record<string, string> = {
   "ui.timezone": "Timezone", "workflow.exception_routing": "Exception routing",
   "queue.wake_retry_interval_seconds": "Retry interval", "queue.wake_retry_cap": "Retry limit",
   "queue.wake_unconfirmed_window_minutes": "Unconfirmed window", "queue.wake_swap_grace_seconds": "Post-swap grace",
+  "queue.wake_human_rung": "Human escalation",
   "queue.pickup_stall_threshold_minutes": "Stall threshold", "queue.stuck_sweep_interval_seconds": "Stuck sweep cadence",
   "queue.stuck_sweep_unclaimed_age_minutes": "Unclaimed age", "policies.idle_gate_qitem.auto_register": "Auto-registration",
   "snapshots.periodic.enabled": "Periodic snapshots", "snapshots.periodic.interval_seconds": "Snapshot interval",

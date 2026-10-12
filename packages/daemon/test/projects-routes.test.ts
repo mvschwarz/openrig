@@ -15,6 +15,7 @@ import { ClassifierLeaseManager } from "../src/domain/classifier-lease-manager.j
 import { ProjectClassifier } from "../src/domain/project-classifier.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { projectsRoutes } from "../src/routes/projects.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -182,6 +183,10 @@ describe("projects routes (PL-004 Phase B)", () => {
     const lease = (await res.json()) as { state: string; reclaimedBySession: string };
     expect(lease.state).toBe("reclaimed");
     expect(lease.reclaimedBySession).toBe("operator@rig");
+  });
+
+  it("GET /api/projects/list refuses only a non-numeric or unbindable limit (#586)", async () => {
+    await expectLimitParsing(app, "/api/projects/list");
   });
 
   it("GET /api/projects/lease returns active lease (or 404 if none)", async () => {

@@ -183,6 +183,35 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     expect(fs._store[`${target}/${skill}`]).toContain("The daemon publishes");
   });
 
+  // #1077 — the relay forwards SessionStart's source, the occupant generation and the resume launch
+  // marker. An install at the previous version must receive it rather than keep the old relay.
+  it("the shipped core upgrades 0.1.8 installs to the relay that forwards resume launch evidence", async () => {
+    const source = "/asset-root/openrig-core";
+    const target = "/home/test/.openrig/plugins/openrig-core";
+    const relay = "hooks/scripts/activity-relay.cjs";
+    const files = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", relay];
+    const bundled = Object.fromEntries(files.map(rel => [
+      `${source}/${rel}`,
+      readFileSync(new URL(`../assets/plugins/openrig-core/${rel}`, import.meta.url), "utf8"),
+    ]));
+    for (const manifest of files.slice(0, 2)) {
+      expect(JSON.parse(bundled[`${source}/${manifest}`]!).version).not.toBe("0.1.8");
+    }
+    const fs = mockFs({
+      ...bundled,
+      [`${target}/.claude-plugin/plugin.json`]: '{"name":"openrig-core","version":"0.1.8"}',
+      [`${target}/.codex-plugin/plugin.json`]: '{"name":"openrig-core","version":"0.1.8"}',
+      [`${target}/${relay}`]: "// 0.1.8 relay: session id only",
+    });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root", userPluginsDir: "/home/test/.openrig/plugins",
+      fs, httpClient: vi.fn(),
+    });
+    await svc.ensureVendored("openrig-core");
+    for (const rel of files) expect(fs._store[`${target}/${rel}`]).toBe(bundled[`${source}/${rel}`]);
+    expect(fs._store[`${target}/${relay}`]).toContain("OPENRIG_RESUME_LAUNCH");
+  });
+
   it("ensureVendored skips silently when vendored asset doesn't exist (no source to copy)", async () => {
     const fs = mockFs({});
     const svc = new PluginVendorService({

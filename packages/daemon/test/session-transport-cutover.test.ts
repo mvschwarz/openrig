@@ -59,7 +59,10 @@ describe.each(["capture", "send"] as const)("%s absence observation", verb => {
         const stored = new SeatIdentityStore(db).getForNode("n");
         if (change === "current occupant") {
           expect(stored).toMatchObject({ reason: "session_missing", observedAt: new Date(start + 100).toISOString(), evidence: { registeredPane: "%1" } });
-          expect(getNodeInventory(db, "r")[0]!.startupStatus).toBe("attention_required");
+          expect(getNodeInventory(db, "r")[0]!).toMatchObject({
+            sessionStatus: "detached", storedSessionStatus: "running",
+            startupStatus: "ready", lifecycleState: "detached",
+          });
         } else {
           expect(stored).toMatchObject({ verdict: "verified", observedAt: new Date(start + 250).toISOString() });
           expect(getNodeInventory(db, "r")[0]!.startupStatus).toBe("ready");

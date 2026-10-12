@@ -15,7 +15,11 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, classifyStyledFrame, probeSessionActivity, promptTextIsFaint, SessionTransport } from "../src/domain/session-transport.js";
+import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -1833,5 +1837,380 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:12Z") });
     await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
     expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
+  });
+
+  // ── #1084: --wait-for-idle must not hold the seat's serial lease ──
+  function attachGuard(tmux: TmuxAdapter): SeatDeliveryGuard {
+    db.exec(outboxEntriesSchema.sql);
+    db.exec(seatDeliveryGuardSchema.sql);
+    const guard = new SeatDeliveryGuard(db, (name) => resolveGuardTarget(db, name));
+    (tmux as unknown as { deliveryGuard?: SeatDeliveryGuard }).deliveryGuard = guard;
+    return guard;
+  }
+
+  function transportWithGuard(tmux: TmuxAdapter, overrides?: {
+    sleep?: (ms: number) => Promise<void>;
+    waitForIdlePollMs?: number;
+  }) {
+    // createFullTestDb predates the guard/outbox migrations; the guard's own
+    // tests exec these schemas the same way.
+    attachGuard(tmux);
+    return createTransport(tmux, { sleep: async () => undefined, waitForIdlePollMs: 1, ...overrides });
+  }
+
+  it("#1084: a wait-for-idle send does not hold the delivery lease while waiting", async () => {
+    seedCanonicalRig();
+    let bSent = false;
+    let waitPolling = false;
+    const order: string[] = [];
+    const tmux = mockTmux({
+      // Running until B's write lands, idle after: the wait can only resolve
+      // once B has gone through, which requires the lease to be free.
+      capturePaneContent: async () => {
+        waitPolling = true;
+        return bSent ? IDLE_PANE : BUSY_PANE;
+      },
+      sendText: async (_t, text) => {
+        order.push(text);
+        if (text === "B") bSent = true;
+        return { ok: true as const };
+      },
+    });
+    const transport = createTransport(tmux, {
+      sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.min(ms, 5))),
+      waitForIdlePollMs: 1,
+    });
+    attachGuard(tmux);
+
+    const a = transport.send("dev-impl@my-rig", "A", { waitForIdleMs: 500 });
+    while (!waitPolling) await new Promise((resolve) => setTimeout(resolve, 1));
+    const b = await transport.send("dev-impl@my-rig", "B");
+    const aResult = await a;
+
+    expect(b.ok).toBe(true);
+    expect(aResult.ok).toBe(true);
+    expect(aResult.sent).toBe(true);
+    expect(aResult.activity?.state).toBe("idle");
+    // B's write landed while A was still waiting — the lease was free.
+    expect(order).toEqual(["B", "A"]);
+  });
+
+  it("#1084: a pre-waited send re-checks readiness just before typing and refuses a new prompt", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    // The wait sees busy then idle (resolves); the in-lease re-check sees a
+    // freshly posted picker and must refuse with the existing reason.
+    const tmux = mockTmux({
+      capturePaneContent: scriptedPanes([BUSY_PANE, IDLE_PANE, MENU_PANE]),
+      sendText: sendTextSpy,
+    });
+    const transport = transportWithGuard(tmux);
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("target_needs_input");
+    expect(result.sent).toBe(false);
+    expect(result.activity?.state).toBe("needs_input");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("#1084: a wait-mode send with the typing guard enabled retains immediately without waiting", async () => {
+    const { node } = seedCanonicalRig();
+    let captures = 0;
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: async () => { captures++; return IDLE_PANE; },
+      sendText: sendTextSpy,
+    });
+    const guard = attachGuard(tmux);
+    await guard.set(node.id, true, "test", "test holds the seat");
+    const transport = createTransport(tmux, { sleep: async () => undefined, waitForIdlePollMs: 1 });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("retained");
+    expect(result.reason).toBe("typing_guard_enabled");
+    expect(captures).toBe(0);
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("#1084: a late wait failure surfaces instead of silently waiting twice", async () => {
+    seedCanonicalRig();
+    let sleeps = 0;
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const localTmux = mockTmux({
+      capturePaneContent: async () => BUSY_PANE,
+      sendText: sendTextSpy,
+    });
+    attachGuard(localTmux);
+    const localTransport = createTransport(localTmux, {
+      // Second poll sleep throws: a late failure inside the lease-free wait.
+      sleep: async () => { sleeps++; if (sleeps === 2) throw new Error("timer fault"); },
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await localTransport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1000 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("guard_unavailable");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
+  it("#1084: idle at a dead budget still sends via one unraced observation", async () => {
+    seedCanonicalRig();
+    const started = Date.now();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const localTmux = mockTmux({
+      // Busy until the budget is nearly spent, then idle — but slow to read,
+      // so a raced observation against the leftover budget would lose it.
+      // Flip early enough that the slow read still resolves in-budget.
+      capturePaneContent: async () =>
+        Date.now() - started >= 2700
+          ? new Promise<string>((resolve) => setTimeout(() => resolve(IDLE_PANE), 200))
+          : BUSY_PANE,
+      sendText: sendTextSpy,
+    });
+    attachGuard(localTmux);
+    const localTransport = createTransport(localTmux, {
+      sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.min(ms, 5))),
+      waitForIdlePollMs: 300,
+    });
+
+    const result = await localTransport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 3000 });
+
+    expect(result.ok).toBe(true);
+    expect(result.sent).toBe(true);
+    expect(result.activity?.state).toBe("idle");
+    expect(sendTextSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// #1084/#1103 edge cases, contributed by z4cc in review (taken verbatim,
+// credit theirs): a real SeatDeliveryGuard, a stub pane whose busy/idle
+// state the test flips, and writes that call guard.checkInput() the way the
+// real adapter does.
+const LEASE_SEAT = "dev-impl@my-rig";
+const LEASE_BUSY = "Working on task...\n⠋ Processing files\nesc to interrupt";
+const LEASE_IDLE = "› Use /skills to list available skills\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig";
+
+function leaseGate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { opened, open };
+}
+
+async function leaseUntil(check: () => boolean, ms = 2000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error("condition not reached in time");
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
+describe("wait-for-idle outside the seat delivery lease (review cases)", () => {
+  let db: Database.Database;
+  let busy: boolean;
+  let writes: string[];
+  let blockWrite: Map<string, Promise<void>>;
+  let transport: SessionTransport;
+  let sessionRegistry: SessionRegistry;
+  let target: GuardTarget;
+  let guard: SeatDeliveryGuard;
+  let tmux: Record<string, unknown>;
+
+  beforeEach(() => {
+    db = createDb(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "codex" });
+    const session = sessionRegistry.registerSession(node.id, LEASE_SEAT);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: LEASE_SEAT });
+
+    target = { nodeId: node.id, session: LEASE_SEAT, occupant: "g1", pane: "%1" };
+    guard = new SeatDeliveryGuard(db, (name) => (name === LEASE_SEAT || name === node.id ? { ...target } : null));
+    busy = true;
+    writes = [];
+    blockWrite = new Map();
+    tmux = {
+      deliveryGuard: guard,
+      hasSession: async () => true,
+      probeSession: async () => ({ state: "present" as const }),
+      capturePaneContent: async () => (busy ? LEASE_BUSY : LEASE_IDLE),
+      sendText: async (_target: string, text: string) => {
+        guard.checkInput(LEASE_SEAT);
+        writes.push(`start ${text}`);
+        await (blockWrite.get(text) ?? Promise.resolve());
+        writes.push(`end ${text}`);
+        return { ok: true as const };
+      },
+      sendKeys: async () => ({ ok: true as const }),
+      getPaneCommand: async () => null,
+      getPanePid: async () => null,
+      listPanes: async () => [],
+    };
+    transport = new SessionTransport({
+      db, rigRepo, sessionRegistry, tmuxAdapter: tmux as unknown as TmuxAdapter,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      waitForIdlePollMs: 5,
+    });
+  });
+
+  afterEach(() => { db.close(); });
+
+  it("re-checks a seat that turned busy again between the wait and the write", async () => {
+    const blocker = leaseGate();
+    blockWrite.set("blocker", blocker.opened);
+    const holding = transport.send(LEASE_SEAT, "blocker");
+    await leaseUntil(() => writes.includes("start blocker"));
+    busy = false;
+    const waiter = transport.send(LEASE_SEAT, "after idle", { waitForIdleMs: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    busy = true;
+    blocker.open();
+    await holding;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(writes).toEqual(["start blocker", "end blocker"]);
+    busy = false;
+    const result = await waiter;
+    expect(result).toMatchObject({ ok: true, sent: true });
+    expect(writes).toEqual(["start blocker", "end blocker", "start after idle", "end after idle"]);
+  });
+
+  it("refuses with guard_target_changed when the occupant is replaced during the wait", async () => {
+    const pending = transport.send(LEASE_SEAT, "for the old occupant", { waitForIdleMs: 3000 });
+    await new Promise((r) => setTimeout(r, 40));
+    target = { ...target, occupant: "g2", pane: "%9" };
+    busy = false;
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "guard_target_changed" });
+    expect(writes).toEqual([]);
+  });
+
+  it("refuses with guard_target_changed when the typing guard goes on and the occupant changes during the wait", async () => {
+    const pending = transport.send(LEASE_SEAT, "for the old occupant", { waitForIdleMs: 3000 });
+    await new Promise((r) => setTimeout(r, 40));
+    await guard.set(target.nodeId, true, "person", "protect a draft");
+    target = { ...target, occupant: "g2", pane: "%9" };
+    busy = false;
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "guard_target_changed" });
+    expect(writes).toEqual([]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM outbox_entries WHERE delivery_state = 'retained'").get()).toEqual({ n: 0 });
+  });
+
+  it("refuses a missing session at once with session_missing", async () => {
+    (tmux as unknown as { probeSession: unknown }).probeSession = async () => ({ state: "absent" as const });
+    (tmux as unknown as { hasSession: unknown }).hasSession = async () => false;
+    const started = Date.now();
+    const result = await transport.send(LEASE_SEAT, "hi", { waitForIdleMs: 1500 });
+    expect(result).toMatchObject({ ok: false, reason: "session_missing" });
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("retains a wait send to a guarded external_cli seat, as main does", async () => {
+    sessionRegistry.updateBinding(target.nodeId, { attachmentType: "external_cli", externalSessionName: "ext-1" });
+    await guard.set(target.nodeId, true, "person", "protect a draft");
+    const result = await transport.send(LEASE_SEAT, "hi", { waitForIdleMs: 1500 });
+    expect(result).toMatchObject({ ok: true, outcome: "retained" });
+  });
+
+  it("retains a forced wait send to a guarded seat, as main does", async () => {
+    await guard.set(target.nodeId, true, "person", "protect a draft");
+    const result = await transport.send(LEASE_SEAT, "hi", { waitForIdleMs: 1500, force: true });
+    expect(result).toMatchObject({ ok: true, outcome: "retained" });
+  });
+});
+
+// Claude renders its prompt suggestion faint (SGR 2) in the composer. The shape follows a real Claude
+// 2.1.282 capture: `❯` and a no-break space, then the faint text. A plain capture drops the styling.
+describe("a Claude prompt suggestion is not a person's draft", () => {
+  const BORDER = "─".repeat(60);
+  const SUGGESTION = "yes run the tests and open the PR";
+  const plainPrompt = `❯\u00a0${SUGGESTION}`;
+  const faintPrompt = `\x1b[39m❯\u00a0\x1b[2m${SUGGESTION}\x1b[0m`;
+  const PASTE = "❯\u00a0[Pasted text #2 +29 lines]";
+  // The observed layout: a framed composer, a blank row, then the mode bar.
+  const framedLayout = (prompt: string, history = "● Done.") => [history, "", "✻ Baked for 1m 18s", "", `${"─".repeat(40)} dev-build@starter ─`, prompt, BORDER, "",
+    "  ⏵⏵ accept edits on (shift+tab to cycle)", ""].join("\n");
+  // A warning row under the mode bar, as when Claude can't auto-update into a read-only npm prefix.
+  const warningLayout = (prompt: string, status = "✻ Crunched for 2s", history = "● Ready.") => [history, "", status, "", BORDER, prompt, BORDER,
+    "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents", "  ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor", ""].join("\n");
+  // An unframed prompt directly above the mode bar.
+  const unframedLayout = (prompt: string) => ["● Ready.", "", prompt, "  ⏵⏵ accept edits on (shift+tab to cycle)", ""].join("\n");
+  const probe = (plain: string, styled: string, runtime = "claude-code") => probeSessionActivity({
+    sessionName: "dev-build@starter", runtime, attachmentType: "tmux",
+    tmuxAdapter: mockTmux({ capturePaneContent: async (_pane: string, _lines?: number, opts?: { escapeSequences?: boolean }) =>
+      opts?.escapeSequences ? styled : plain }),
+  });
+
+  it("from a plain capture: the framed layout reads idle; the warning-row and unframed layouts read a suggestion as a draft", () => {
+    expect(classifyPaneActivity(framedLayout(plainPrompt))).toMatchObject({ state: "agent_idle" });
+    expect(classifyPaneActivity(warningLayout(plainPrompt))).toMatchObject({ state: "attention", reason: "prompt_draft" });
+    expect(classifyPaneActivity(unframedLayout(plainPrompt))).toMatchObject({ state: "attention", reason: "prompt_draft" });
+  });
+
+  it("promptTextIsFaint is true only when the last prompt line has text and all of it is faint", () => {
+    expect(promptTextIsFaint(framedLayout(faintPrompt))).toBe(true);
+    expect(promptTextIsFaint(framedLayout(plainPrompt))).toBe(false); // no styling never proves faint
+    expect(promptTextIsFaint(framedLayout(PASTE))).toBe(false); // a pasted placeholder
+    expect(promptTextIsFaint(framedLayout("❯\u00a0owned\x1b[2m ghost suffix\x1b[22m"))).toBe(false); // typed text, then a suggestion
+    expect(promptTextIsFaint(framedLayout("❯\u00a0\x1b[2mghost\x1b[22m typed"))).toBe(false); // a reset mid-line
+    expect(promptTextIsFaint(framedLayout(`❯\u00a0\x1b[38;5;2m${SUGGESTION}\x1b[39m`))).toBe(false); // a 256-colour value of 2
+    expect(promptTextIsFaint(framedLayout(`❯\u00a0\x1b[38;2;2;2;2m${SUGGESTION}\x1b[39m`))).toBe(false); // an RGB colour of 2;2;2
+    expect(promptTextIsFaint(framedLayout("❯\u00a0"))).toBe(false); // an empty composer
+    expect(promptTextIsFaint(framedLayout("❯\u00a0", faintPrompt))).toBe(false); // an empty composer below an older faint prompt
+  });
+
+  it("classifyStyledFrame finds a suggestion only in its own frame's current composer", () => {
+    expect(classifyStyledFrame(warningLayout(faintPrompt)).suggestion).toMatchObject({ state: "agent_idle" });
+    // A faint prompt in scrollback above a typed composer proves nothing about the composer.
+    expect(classifyStyledFrame(warningLayout("❯\u00a0typed by hand", undefined, faintPrompt)).suggestion).toBeNull();
+    expect(classifyStyledFrame(warningLayout("❯\u00a0typed by hand")).suggestion).toBeNull();
+    // An empty composer below an older faint prompt: the composer decides, not the scrollback line.
+    expect(classifyStyledFrame(warningLayout("❯\u00a0", undefined, faintPrompt)).suggestion).toBeNull();
+    expect(classifyStyledFrame(warningLayout(PASTE)).suggestion).toBeNull();
+  });
+
+  it.each([["warning-row", warningLayout], ["unframed", unframedLayout]] as const)(
+    "the %s layout: a faint suggestion reads idle; typed text and a pasted placeholder still need input", async (_label, layout) => {
+      expect(await probe(layout(plainPrompt), layout(faintPrompt))).toMatchObject({ state: "idle" });
+      expect(await probe(layout(plainPrompt), layout(plainPrompt))).toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+      expect(await probe(layout(PASTE), layout(PASTE))).toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    });
+
+  it("between the two captures: a stable suggestion reads idle, a changed one stays a draft, newer attention or work is kept", async () => {
+    expect(await probe(warningLayout(plainPrompt), warningLayout(faintPrompt))).toMatchObject({ state: "idle" });
+    // The suggestion changed: the first capture's draft text isn't what the styled frame shows.
+    expect(await probe(warningLayout(plainPrompt), warningLayout("\x1b[39m❯\u00a0\x1b[2mshow me the diff\x1b[0m")))
+      .toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    // Evidence is compacted and truncated, so the full composer text is what must match: drafts that
+    // differ only in internal spacing, or share their first 240 characters, are different text.
+    expect(await probe(warningLayout("❯\u00a0yes run  the tests and open the PR"), warningLayout(faintPrompt)))
+      .toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    const long = "word ".repeat(60);
+    expect(await probe(warningLayout(`❯\u00a0${long}first`), warningLayout(`\x1b[39m❯\u00a0\x1b[2m${long}second\x1b[0m`)))
+      .toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    // Typed text in the styled frame.
+    expect(await probe(warningLayout(plainPrompt), warningLayout(plainPrompt))).toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    // The seat started work: its live status row in the styled frame is kept.
+    expect(await probe(warningLayout(plainPrompt), warningLayout(faintPrompt, "✻ Onioning… (2m 38s · ↓ 10.9k tokens · thought for 8s)")))
+      .toMatchObject({ state: "running" });
+    // A permission prompt appeared: the styled frame's attention is kept.
+    expect(await probe(warningLayout(plainPrompt), warningLayout(faintPrompt, "Do you want to proceed?")))
+      .toMatchObject({ state: "needs_input", reason: "permission_prompt" });
+  });
+
+  it("only a Claude seat gets the styled check", async () => {
+    const captures: Array<boolean> = [];
+    await probeSessionActivity({
+      sessionName: "dev-build@starter", runtime: "codex", attachmentType: "tmux",
+      tmuxAdapter: mockTmux({ capturePaneContent: async (_pane: string, _lines?: number, opts?: { escapeSequences?: boolean }) => {
+        captures.push(opts?.escapeSequences === true); return unframedLayout(plainPrompt); } }),
+    });
+    expect(captures).toEqual([false]);
   });
 });
