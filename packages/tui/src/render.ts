@@ -325,7 +325,7 @@ function agentDetailLines(
         ],
       },
       { title: `UP NEXT · ${pending}${queueIncomplete(snap) ? " · sampled rows" : ""}`, lines: workRows(pendingRows, contentWidth, queueIncomplete(snap)) },
-      { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}${queueIncomplete(snap) ? " served" : ""}`, lines: needsRows },
+      { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
       ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
       {
         title: "SEAT",

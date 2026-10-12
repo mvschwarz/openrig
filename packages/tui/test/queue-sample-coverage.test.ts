@@ -24,8 +24,8 @@ function fixture(rig = "selected", seat = "dev.worker") {
   app.use("*", async (c, next) => { c.set("queueRepo" as never, repo); await next(); });
   app.route("/api/queue", queueRoutes());
   let sequence = 0;
-  const seed = (destination = `${seat}@${rig}`, state = "blocked", blocker = "fold:test") => {
-    const id = `coverage-${sequence++}`;
+  const seed = (destination = `${seat}@${rig}`, state = "blocked", blocker = "fold:test", qitemId?: string) => {
+    const id = qitemId ?? `coverage-${sequence}`; sequence++;
     const at = new Date(sequence * 1000).toISOString();
     db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,body,blocked_on) VALUES(?,?,?,?,?,?,?,?)")
       .run(id, at, at, "source@selected", destination, state, `Work ${id}`, blocker);
@@ -35,7 +35,7 @@ function fixture(rig = "selected", seat = "dev.worker") {
   const node = { logicalId: seat, podNamespace: "dev", nodeKind: "agent", runtime: "codex", lifecycleState: "running", sessionStatus: "running", canonicalSessionName: `${seat}@${rig}`, resolvedSpecName: null };
   const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async input => {
     const u = new URL(String(input)); calls.push(u.pathname + u.search);
-    if (u.pathname === "/api/queue/list") return app.request(u.pathname + u.search);
+    if (u.pathname === "/api/queue/list" || u.pathname === "/api/queue/qitem-coverage-blocker") return app.request(u.pathname + u.search);
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
     if (u.pathname === "/api/rigs/summary") return Response.json([{ id: `${rig}-id`, name: rig, lifecycleState: "running" }]);
     if (u.pathname === `/api/rigs/${rig}-id/nodes`) return Response.json([node]);
@@ -106,6 +106,22 @@ describe("bounded queue route to topology/Pulse render", () => {
     expect(f.render(snap, "agent")).toContain("CURRENT WORK · 1");
     expect(f.render(snap, "agent")).toContain("1 assigned");
     const model = buildPulseModel(snap); expect(model.exceptions.flatMap(section => section.rows)).toHaveLength(1);
+  });
+
+  it("Pulse does not count human-destined qitem-blocked work again as BLOCKED", async () => {
+    const f = fixture("kernel", "human-person");
+    const blocker = f.seed("dev.helper@kernel", "in-progress", "", "qitem-coverage-blocker");
+    f.seed(undefined, "blocked", blocker);
+    const snap = await f.read("agent");
+    expect(snap.attention).toHaveLength(1); expect(snap.blocked).toHaveLength(1);
+    expect(snap.blocked[0]?.blockerSession).toBe("dev.helper@kernel");
+    const model = buildPulseModel(snap);
+    expect(model.exceptions.find(section => section.label === "NEEDS YOU")?.rows).toHaveLength(1);
+    expect(model.exceptions.find(section => section.label === "BLOCKED ON AGENTS")).toBeUndefined();
+    expect(model.exceptions.flatMap(section => section.rows)).toHaveLength(1);
+    const text = f.render({ ...snap, queueCoverage: "partial" }, "agent");
+    expect(text).not.toMatch(/NEEDS YOU · \d+ served/);
+    expect(text).toContain("Queue sample may be incomplete");
   });
 
   it("pending attention overlap counts once in assigned depth", async () => {
