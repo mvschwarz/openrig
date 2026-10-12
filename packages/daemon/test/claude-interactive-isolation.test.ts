@@ -22,10 +22,10 @@ it.each(['return','exit','errexit'])('keeps pane environment, lifetime and histo
  const writes:Array<{path:string,content:string,mode:number,uid:number}>=[];
  const ops:TmuxFileOps={tmpName:()=>path.join(root,'stage-'+randomUUID()),bufferName:()=>('fixture_'+randomUUID().replaceAll('-','')),writeFile:async(p,c,o)=>{await fs.promises.writeFile(p,c,{encoding:'utf8',...o});const st=fs.statSync(p);writes.push({path:p,content:c,mode:st.mode&0o777,uid:st.uid});},unlink:p=>fs.promises.unlink(p)};
  const transport=new TmuxAdapter(async cmd=>{if(!cmd.startsWith('tmux '))throw Error('unexpected fixture command');return(await run('/bin/sh',['-c',cmd.replace(/^tmux /,`tmux -S ${q(socket)} -f /dev/null `)],{env,timeout:8000})).stdout;},ops);
- let panePid=0;
+ let shellPid=0;
  try {
-  await tm(['new-session','-d','-s','pane','/bin/bash --noprofile --rcfile '+q(rc)+' -i']);panePid=Number((await tm(['display-message','-p','-t','pane','#{pane_pid}'])).trim());await until(()=>fs.existsSync(status)&&fs.existsSync(before));fs.unlinkSync(status);
-  const rcInitial=fs.readFileSync(before,'utf8');fs.unlinkSync(before);
+  await tm(['new-session','-d','-s','pane','/bin/bash --noprofile --rcfile '+q(rc)+' -i']);await until(()=>fs.existsSync(status)&&fs.existsSync(before));fs.unlinkSync(status);
+  const rcInitial=fs.readFileSync(before,'utf8');fs.unlinkSync(before);shellPid=Number(rcInitial.split('|')[0]);
   // Capture the real comparison after Bash has finished rc processing. The
   // ordinary-input control allows only Bash's version-dependent stdin flag
   // transition here. The post-launch comparison below is exact, including flags.
@@ -63,8 +63,11 @@ it.each(['return','exit','errexit'])('keeps pane environment, lifetime and histo
  } finally {
   await tm(['kill-server']).catch(()=>{});
   // The pane's Bash writes its history file into root as it exits on the server's hangup, and can recreate it after
-  // rmSync unlinked it (ENOTEMPTY). Wait, bounded, for that shell to exit before removing the directory.
-  for(let i=0;panePid>0&&i<200;i++){try{process.kill(panePid,0);}catch{break;}await new Promise(r=>setTimeout(r,25));}
+  // rmSync unlinked it (ENOTEMPTY). Wait, bounded, for that shell to exit before removing the directory. The pid is
+  // the one the rc recorded ($$), not #{pane_pid}, which can be a wrapper shell that exits first.
+  const alive=()=>{try{process.kill(shellPid,0);return true;}catch{return false;}};
+  for(let i=0;shellPid>0&&alive()&&i<200;i++)await new Promise(r=>setTimeout(r,25));
+  if(shellPid>0&&alive())throw new Error('pane shell did not exit within 5 s');
   fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:50});
  }
 },30000);
