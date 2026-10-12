@@ -1818,6 +1818,9 @@ export class SessionTransport {
           runtime,
           attachmentType: sessionMeta.attachmentType,
           timeoutMs: deadlineRemainingMs,
+          // Message-only: the re-wait runs on the leftover budget, but the
+          // timeout names the configured --wait-for-idle value.
+          timeoutLabelMs: waitForIdleMs,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
         });
@@ -2110,6 +2113,10 @@ export class SessionTransport {
     signal?: AbortSignal;
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
+    // Optional display value for timeout messages. The deadline always comes
+    // from timeoutMs; when set, expiry reports this value instead, so a
+    // re-wait running on a leftover budget still names the configured wait.
+    timeoutLabelMs?: number;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -2122,6 +2129,7 @@ export class SessionTransport {
     const deadline = Date.now() + input.timeoutMs;
     let attempts = 0;
     let last: AgentActivity | null = null;
+    const labelMs = input.timeoutLabelMs ?? input.timeoutMs;
     const expire = () => {
       const count = `${attempts} observation${attempts === 1 ? "" : "s"}`;
       const activity: AgentActivity = last ?? {
@@ -2133,14 +2141,14 @@ export class SessionTransport {
           ok: false as const,
           reason: "target_activity_unknown",
           error: last
-            ? `Target activity could not be determined (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`
-            : `Target activity could not be determined: no observation completed within the ${input.timeoutMs}ms wait. No text was sent.`,
+            ? `Target activity could not be determined (${activity.reason}) when the ${labelMs}ms wait ended (${count}). No text was sent.`
+            : `Target activity could not be determined: no observation completed within the ${labelMs}ms wait. No text was sent.`,
           activity, waitedMs: input.timeoutMs, attempts,
         }
         : {
           ok: false as const,
           reason: "wait_for_idle_timeout",
-          error: `Target was still busy (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`,
+          error: `Target was still busy (${activity.reason}) when the ${labelMs}ms wait ended (${count}). No text was sent.`,
           activity, waitedMs: input.timeoutMs, attempts,
         };
     };

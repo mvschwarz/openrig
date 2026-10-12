@@ -2198,6 +2198,30 @@ describe("SessionTransport", () => {
     expect(result.activity?.state).toBe("idle");
     expect(sendTextSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("#1103 follow-up: a rewait timeout names the original --wait-for-idle value, not the remaining budget", async () => {
+    seedCanonicalRig();
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      // The pre-wait burns 20ms (two busy polls) then sees idle and resolves;
+      // the seat is busy again at the re-check, so the remaining 80ms is
+      // rewaited to expiry inside the lease. The timeout message must name the
+      // configured 100ms, not the 80ms the second wait actually ran.
+      const tmux = mockTmux({
+        capturePaneContent: scriptedPanes([BUSY_PANE, BUSY_PANE, IDLE_PANE, BUSY_PANE]),
+        sendText: sendTextSpy,
+      });
+      const transport = transportWithGuard(tmux, { sleep: clock.sleep, waitForIdlePollMs: 10 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 100 });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("wait_for_idle_timeout");
+      expect(result.error).toContain("when the 100ms wait ended");
+      expect(result.waitedMs).toBe(100);
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally { clock.restore(); }
+  });
 });
 
 // #1084/#1103 edge cases, contributed by z4cc in review (taken verbatim,
