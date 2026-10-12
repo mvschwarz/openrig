@@ -62,11 +62,22 @@ const PROMPT_DRAFT_PATTERNS = [
   /^[❯›]\s+\S/,
 ];
 
+// Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
+// vim-mode marker such as "-- INSERT --" (#808). A suffix such as "· 1 shell" can follow the mode.
+const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts\b)/;
+
+// Sibling pattern identical to CLAUDE_MODE_FOOTER except that it ends in \? for shortcuts$,
+// keeping unframed-composer and selectionLines checks anchored on the default footer (#808).
+const CLAUDE_ANCHORED_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts$)/;
+
+// Permission mode status footers specifically (excluding shortcuts hint that appears in Codex footers).
+const CLAUDE_PERMISSION_MODE_FOOTER = /(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b)/;
+
 // Footer hints, not proof of inactivity: Claude also renders its mode bar
 // during a turn. Current live-status evidence must take precedence below.
 const IDLE_STATUS_BAR_PATTERNS = [
   /gpt-\d[\d.]* .+ · Context \[/,  // Codex model/context footer
-  /⏵⏵ accept edits/,              // Claude Code edit-accept bar
+  CLAUDE_PERMISSION_MODE_FOOTER,   // Claude Code mode footers (#808)
 ];
 
 const IDLE_TERMINAL_COMMANDS = new Set(["zsh", "bash", "sh", "fish", "nu", "tmux"]);
@@ -143,9 +154,6 @@ const CLAUDE_STATUS_WARNINGS = [
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
 ];
-// Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
-// vim-mode marker such as "-- INSERT --" (#808). A suffix such as "· 1 shell" can follow the mode.
-const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts\b)/;
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -178,7 +186,7 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   if (indent === undefined) {
     // The unframed Claude prompt has the same current status/task block.
     // Keep Codex footers and a bare prompt with no visible block on their old path.
-    if (bar < 2 || !/^(?:⏵⏵ (?:accept edits|bypass permissions) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(lines[bar]!.trim())) return null;
+    if (bar < 2 || !CLAUDE_ANCHORED_MODE_FOOTER.test(lines[bar]!.trim())) return null;
     prompt = lines[bar - 1] ?? "";
     indent = /^([ \t]*)❯\s*$/.exec(prompt)?.[1];
     if (indent === undefined) return null;
@@ -321,7 +329,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
   const selectionLines = claudeComposer?.framed &&
-      /^(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(claudeComposer.bar) &&
+      CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) &&
       IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
       oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
     ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
@@ -379,7 +387,8 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     CLAUDE_LIVE_STATUS_PATTERN,
     ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
   ]);
-  if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
+  const isClaudeStatusBar = CLAUDE_PERMISSION_MODE_FOOTER.test(idleStatusBarLine ?? "");
+  if (idleStatusBarLine && (!isClaudeStatusBar || !midWorkEvidence)) {
     return {
       state: "agent_idle",
       reason: "idle_status_bar",

@@ -214,6 +214,82 @@ describe("agent pane activity classifier", () => {
     expect(result.evidence).toContain("still typing");
   });
 
+  it("classifies idle Claude auto mode footer (with vim prefix) as agent_idle (#808)", () => {
+    const result = classifyPaneActivity([
+      "❯ ",
+      "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_status_bar");
+  });
+
+  it("classifies idle Claude bypass permissions, plan mode, and shortcut footers as agent_idle (#808)", () => {
+    for (const footer of [
+      "  ⏵⏵ auto mode on (shift+tab to cycle)",
+      "  -- NORMAL -- ⏵⏵ auto mode on (shift+tab to cycle)",
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+      "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)",
+      "  ⏸ plan mode on (shift+tab to cycle)",
+      "  -- INSERT -- ⏸ plan mode on (shift+tab to cycle)",
+    ]) {
+      const result = classifyPaneActivity([
+        "❯ ",
+        footer,
+      ].join("\n"));
+      expect(result.state).toBe("agent_idle");
+      expect(result.reason).toBe("idle_status_bar");
+    }
+  });
+
+  it("classifies typed Claude prompt text above an auto mode footer as attention, not idle (#808)", () => {
+    const result = classifyPaneActivity([
+      "❯ I am still typing a message",
+      "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("prompt_draft");
+    expect(result.evidence).toContain("still typing");
+  });
+
+  it("does not classify working Claude seat in auto mode as idle when mid-work evidence is present (#808)", () => {
+    const result = classifyPaneActivity([
+      "✻ Thinking… (15s)",
+      "❯ ",
+      "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_active");
+    expect(result.reason).toBe("mid_work_pattern");
+  });
+
+  it("recognizes unframed idle Claude seat in auto mode with vim prefix (#808)", () => {
+    const result = classifyPaneActivity([
+      "● Ready.",
+      "",
+      "❯ ",
+      "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+  });
+
+  it("classifies an earlier selection question above an empty composer with a suffixed shortcut footer as selection_prompt (#808)", () => {
+    const result = classifyPaneActivity([
+      "❯ 1. First option",
+      "  2. Second option",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+      "────────────────────────────────────────",
+      "❯ ",
+      "────────────────────────────────────────",
+      "  ? for shortcuts · 2 shells",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("selection_prompt");
+  });
+
   it("does not treat a prior submitted Codex prompt separated from the footer by a blank as a draft", () => {
     const result = classifyPaneActivity([
       "› Summarize recent commits",
