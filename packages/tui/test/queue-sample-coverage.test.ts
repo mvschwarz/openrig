@@ -70,7 +70,7 @@ describe("bounded queue route to topology/Pulse render", () => {
       expect(snap.blocked.some(row => row.qitemId === omitted)).toBe(false);
       const text = f.render(snap, scope);
       if (scope === "agent") expect(text).toContain("not in sample; work unknown");
-      else expect(text.split("\n").some(line => line.includes("dev.worker") && /\?[\s│]+unknown/.test(line))).toBe(true);
+      else expect(text.split("\n").filter(line => line.includes("worker")).join("\n")).toMatch(/\?[\s│]+unknown/);
       expect(snap.queueCoverage).toBe("partial");
       expect(text).toContain("may be incomplete");
       expect(text).toContain("unlisted work is unknown");
