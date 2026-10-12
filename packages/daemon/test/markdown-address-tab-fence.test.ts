@@ -92,3 +92,25 @@ for (const marker of ["```", "~~~"]) {
     }
   }
 }
+
+for (const [reader, api] of [["daemon", daemon], ["shipped", shipped]] as const) {
+  test(`${reader}: invalid backtick info does not hide the next section`, () => {
+    const text = "## Actual\n```Use `x` here```\n\n## Next\nreachable";
+    assert.deepEqual(api.parseMarkdownSections(text).map(section => section.headerPath), [["actual"], ["next"]]);
+  });
+  for (const marker of ["```", "~~~"]) {
+    for (const ending of ["\n", "\r\n"]) {
+      test(`${reader}: dedented block after closed list fence ends context ${JSON.stringify([marker, ending])}`, () => {
+        const text = ["## Actual", "- item", `  ${marker}md`, "  example", `  ${marker}`,
+          "New paragraph", `\t${marker}md`, "## Next", "reachable"].join(ending);
+        assert.deepEqual(api.parseMarkdownSections(text).map(section => section.headerPath), [["actual"], ["next"]]);
+        assert.match(api.resolveAddress(text, ["next"]).text, /reachable/);
+      });
+      test(`${reader}: lazy paragraph retains mixed list fence ${JSON.stringify([marker, ending])}`, () => {
+        const text = ["## Actual", "- item", "lazy continuation", `  ${marker}md`,
+          "  ## Example", `\t${marker}`, "", "## Next", "reachable"].join(ending);
+        assert.deepEqual(api.parseMarkdownSections(text).map(section => section.headerPath), [["actual"], ["next"]]);
+      });
+    }
+  }
+}

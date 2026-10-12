@@ -55,6 +55,7 @@ function scanHeaders(lines) {
   let fence = null;
   let listIndent = 0;
   let blankAfterList = false;
+  let closedListFence = false;
 
   for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
     const line = lines[lineNumber];
@@ -67,14 +68,16 @@ function scanHeaders(lines) {
       if (list) {
         listIndent = indentationColumns(list[0]);
         blankAfterList = false;
+        closedListFence = false;
       } else if (!boundaryLine.trim()) {
         blankAfterList = true;
       } else {
         // Preserve lazy paragraph continuations; a dedented block or a
         // paragraph after a blank line ends this simple list context.
-        if (columns < listIndent && (blankAfterList
+        if (columns < listIndent && (blankAfterList || closedListFence
           || /^ {0,3}(?:#{1,6}(?:\s|$)|`{3,}|~{3,}|>)/.test(boundaryLine))) listIndent = 0;
         blankAfterList = false;
+        closedListFence = false;
       }
     }
     const containerIndent = fence?.listIndent ?? listIndent;
@@ -85,9 +88,14 @@ function scanHeaders(lines) {
     if (fenceMatch) {
       const marker = fenceMatch[1][0];
       const length = fenceMatch[1].length;
-      if (!fence) fence = { marker, length, listIndent };
-      else if (fence.marker === marker && length >= fence.length
-        && /^[ \t\r]*$/.test(fenceLine.slice(fenceMatch[0].length))) fence = null;
+      if (!fence) {
+        if (marker === "`" && fenceLine.slice(fenceMatch[0].length).includes("`")) continue;
+        fence = { marker, length, listIndent };
+      } else if (fence.marker === marker && length >= fence.length
+        && /^[ \t\r]*$/.test(fenceLine.slice(fenceMatch[0].length))) {
+        closedListFence = fence.listIndent > 0;
+        fence = null;
+      }
       continue;
     }
     if (fence) continue;
