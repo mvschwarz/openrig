@@ -347,11 +347,13 @@ describe("public slice creation ordinal claims", () => {
     if (!hasId) fs.writeFileSync(parent, "---\nintent: authored mission\n---\n# existing mission\n");
     const originalParent = fs.readFileSync(parent, "utf8");
     const writtenParent = path.join(root, "persisted-parent-bytes");
+    const parentWrites = path.join(root, "parent-write-count");
     const injected = path.join(root, "isolated-incomplete-failure.mjs");
     fs.writeFileSync(injected, `
       import fs from "node:fs";
       const original = fs.writeFileSync.bind(fs);
       fs.writeFileSync = (target, data, options) => {
+        if (String(target) === ${JSON.stringify(parent)}) fs.appendFileSync(${JSON.stringify(parentWrites)}, "write\\n");
         if (String(target) === ${JSON.stringify(path.join(mission, "slices", "02-failed", "SPEC.md"))}) {
           original(${JSON.stringify(writtenParent)}, fs.readFileSync(${JSON.stringify(parent)}, "utf8"));
           throw Object.assign(new Error("isolated incomplete scaffold failure"), { code: "EIO" });
@@ -364,6 +366,8 @@ describe("public slice creation ordinal claims", () => {
     expect(failed.stdout + failed.stderr).toContain("isolated incomplete scaffold failure");
     const bytes = fs.readFileSync(parent, "utf8");
     expect(bytes).toBe(fs.readFileSync(writtenParent, "utf8"));
+    const writes = fs.existsSync(parentWrites) ? fs.readFileSync(parentWrites, "utf8").trim().split("\n").length : 0;
+    expect(writes).toBe(hasId ? 0 : 1);
     if (hasId) expect(bytes).toBe(originalParent);
     else {
       expect(bytes).not.toBe(originalParent);
