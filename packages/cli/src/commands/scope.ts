@@ -394,7 +394,6 @@ function buildSliceCreateCommand(): Command {
           depends_on: dependsOn,
         });
         const proofBody = renderSliceProofTemplate({ id, title });
-        const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
         const readmePath = path.join(sliceAbs, "SPEC.md");
         const proofPath = path.join(sliceAbs, "PROOF.md");
         let scaffoldCompleted = false;
@@ -429,7 +428,8 @@ function buildSliceCreateCommand(): Command {
           // pending registration available for a later creator to repair.
           if (!scaffoldCompleted) {
             fs.rmSync(sliceAbs, { recursive: true, force: true });
-            if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
+            // The parent identity may already be shared by another creator.
+            // Rolling this child back must not undo it or authored parent edits.
           }
           throw error;
         }

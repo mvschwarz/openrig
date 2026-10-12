@@ -277,6 +277,45 @@ describe("public slice creation ordinal claims", () => {
     expect(successful([await create("after-partial")])[0]!.id).toBe("OPR.0.3.2.4");
   });
 
+  it.each([false, true])("an incomplete creator preserves concurrent parent edits (parent initially has ID: %s)", async (hasId) => {
+    const parent = path.join(mission, "README.md");
+    if (!hasId) fs.writeFileSync(parent, "---\nintent: existing mission\n---\n# existing mission\n");
+    const expectedParent = path.join(root, "concurrent-parent-bytes");
+    const competitorOutput = path.join(root, "competitor-output.json");
+    const competitorArgs = [fileURLToPath(new URL("../dist/index.js", import.meta.url)), "scope", "slice", "create", "release-0.3.2", "successful", "--workspace", workspace, "--json"];
+    const injected = path.join(root, "fail-scaffold-after-competitor.mjs");
+    fs.writeFileSync(injected, `
+      import fs from "node:fs";
+      import { execFileSync } from "node:child_process";
+      const original = fs.writeFileSync.bind(fs);
+      fs.writeFileSync = (target, data, options) => {
+        if (String(target) === ${JSON.stringify(path.join(mission, "slices", "02-failed", "SPEC.md"))}) {
+          const output = execFileSync(process.execPath, ${JSON.stringify(competitorArgs)}, { env: ${JSON.stringify(ownedEnv)}, encoding: "utf8", timeout: 15000 });
+          original(${JSON.stringify(competitorOutput)}, output);
+          const current = fs.readFileSync(${JSON.stringify(parent)}, "utf8") + "\\nA concurrent authored edit.\\n";
+          original(${JSON.stringify(parent)}, current);
+          original(${JSON.stringify(expectedParent)}, current);
+          throw Object.assign(new Error("injected incomplete scaffold failure"), { code: "EIO" });
+        }
+        return original(target, data, options);
+      };
+    `);
+
+    const failed = await create("failed", [], injected);
+
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stdout + failed.stderr).toContain("injected incomplete scaffold failure");
+    expect(fs.readFileSync(parent, "utf8")).toBe(fs.readFileSync(expectedParent, "utf8"));
+    expect(readFrontmatter(parent).id).toBe("OPR.0.3.2");
+    const competitor = JSON.parse(fs.readFileSync(competitorOutput, "utf8")).slice;
+    expect(competitor.id).toBe("OPR.0.3.2.3");
+    expect(readFrontmatter(competitor.readmePath).id).toBe(competitor.id);
+    expect(fs.existsSync(path.join(competitor.path, "PROOF.md"))).toBe(true);
+    expect(fs.existsSync(path.join(mission, "slices", "02-failed"))).toBe(false);
+    expect(fs.existsSync(path.join(mission, "slices", ".nn-02"))).toBe(true);
+    expect(successful([await create("after-failure")])[0]!.id).toBe("OPR.0.3.2.4");
+  });
+
   it("an old mission guard is preserved but does not block a new creator", async () => {
     const guard = path.join(mission, ".openrig-slice-create-lock");
     fs.mkdirSync(guard);
