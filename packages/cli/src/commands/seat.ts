@@ -506,7 +506,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-model" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -590,6 +590,42 @@ identity remains unverified; a version number alone cannot clear it.
         const selection = data["to"] as { mode: string } | null;
         console.log(`Permission mode: ${selection?.mode ?? "inherit"}${data["changed"] === false ? " (unchanged)" : " (audited)"}`);
         console.log(String(data["effect"]));
+      });
+    });
+
+  cmd
+    .command("set-effort")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--effort <level>", "The runtime's own effort level (for example low, medium, high)")
+    .option("--clear", "Remove this seat's explicit choice and go back to its authored or default effort")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.effort_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Save one seat's reasoning effort for its next managed continuation (audited); no restart")
+    .addHelpText("after", `
+Only this seat changes; its peers, model and account don't. The running process
+keeps its current effort until the seat's next managed continuation. Whether the
+native session then uses the level is a separate fact this command can't see.
+Examples:
+  rig seat set-effort dev-impl@my-rig --effort high --reason "long refactor"
+  rig seat set-effort dev.impl --clear --reason "back to the spec's effort" --json`)
+    .action(async (seat: string, opts: { effort?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if (Boolean(opts.clear) === (opts.effort !== undefined)) {
+        console.error("Pass exactly one of --effort <level> or --clear.");
+        process.exitCode = 1;
+        return;
+      }
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator } : { effort: opts.effort, reason: opts.reason, operator: opts.operator };
+      await runLifecycleVerb("set-effort", seat, body, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const saved = data["saved"] as { choice: string | null; authored: string | null; effective: string | null; source: string };
+        const name = `${s?.logicalId}@${s?.rigName}`;
+        const level = saved.source === "seat_choice" ? `${saved.effective} (this seat's choice)`
+          : saved.source === "authored" ? `${saved.effective} (authored)` : "no effort flag (runtime default)";
+        console.log(data["changed"] === false ? `Effort for ${name} already resolves to ${level}. No change recorded.` : `Effort for ${name}: ${level}.`);
+        console.log(String(data["effect"]));
+        const running = data["running"] === "yes" ? "running now" : data["running"] === "no" ? "not running now" : `running state unknown (${String(data["runningDetail"] ?? "probe failed")})`;
+        console.log(`Seat ${running}. Emitted at launch: not yet. Native effort: not observed.`);
       });
     });
 

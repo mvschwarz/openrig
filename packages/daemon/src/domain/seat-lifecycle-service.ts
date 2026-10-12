@@ -97,7 +97,11 @@ export interface SeatRefusal {
     | "attention_required"
     | "runtime_identity_unverified"
     | "not_codex"
-    | "typing_guard_enabled";
+    | "typing_guard_enabled"
+    | "missing_effort"
+    | "invalid_effort"
+    | "effort_unsupported_runtime"
+    | "effort_unavailable";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
@@ -115,6 +119,36 @@ export interface SeatDescriptor {
 
 export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
+  | SeatRefusal;
+
+/** OPR.0.7.0.7: what a seat launches with when no flag is chosen: its explicit choice, else the
+ *  authored/default resolution in nodes.effort, else no flag at all (the runtime's own default). */
+export interface EffortResolution {
+  choice: string | null;
+  authored: string | null;
+  effective: string | null;
+  source: "seat_choice" | "authored" | "runtime_default";
+}
+
+export type SetEffortResult =
+  | {
+      ok: true;
+      seat: SeatDescriptor;
+      runtime: string;
+      /** What was asked for: a level, or null for --clear. */
+      requested: string | null;
+      from: EffortResolution;
+      /** What is saved now, and what the next managed continuation resolves to from it. */
+      saved: EffortResolution;
+      changed: boolean;
+      /** Whether the seat's session is live in tmux now; unknown when the probe couldn't tell. */
+      running: "yes" | "no" | "unknown";
+      runningDetail?: string;
+      /** Emitted at launch and observed natively are separate facts this command can't know. */
+      emitted: "not_yet";
+      observed: "not_observed";
+      effect: string;
+    }
   | SeatRefusal;
 
 export type StopSeatResult =
@@ -240,6 +274,91 @@ export class SeatLifecycleService {
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
     return { ok: true, seat, from, to: model, changed: true };
+  }
+
+  /** OPR.0.7.0.7 — save one seat's effort for its next managed continuation. Like set-model it
+   *  validates, writes, and persists an audited event in the same transaction; it never restarts
+   *  the seat or touches its peers, model or account. `effort: null` clears the explicit choice. */
+  async setEffort(input: { seatRef: string; effort: string | null; reason: string; operator?: string | null }): Promise<SetEffortResult> {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    const requested = input.effort === null ? null : input.effort.trim();
+    if (requested !== null) {
+      if (!requested) return { ok: false, code: "missing_effort", message: "An effort level is required (--effort <level>), or pass --clear." };
+      // Levels are the runtime's own (they differ by model and client), so only the shape is checked here.
+      if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(requested)) {
+        return { ok: false, code: "invalid_effort", message: `"${requested}" isn't an effort level: use the runtime's level name, such as low, medium or high.` };
+      }
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const runtime = resolved.entry.runtime ?? "unknown";
+    if (runtime !== "claude-code" && runtime !== "codex") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${input.seatRef}" runs ${runtime}; reasoning effort applies to claude-code and codex seats only.` };
+    }
+
+    const from = this.readEffort(seat.nodeId);
+    if (!from) {
+      return { ok: false, code: "effort_unavailable", message: "This daemon's database has no per-seat effort choice (checked: nodes.effort_choice column); nothing was saved." };
+    }
+    let changed = false;
+    if (from.choice !== requested) {
+      let persisted: PersistedEvent | null = null;
+      this.db.transaction(() => {
+        if (!this.rigRepo.setNodeEffortChoice(seat.nodeId, requested)) return;
+        changed = true;
+        persisted = this.eventBus.persistWithinTransaction({
+          type: "node.effort_changed",
+          rigId: seat.rigId,
+          nodeId: seat.nodeId,
+          logicalId: seat.logicalId,
+          from: from.choice,
+          to: requested,
+          reason: input.reason.trim(),
+          operator: input.operator ?? null,
+        });
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      if (!changed) {
+        return { ok: false, code: "effort_unavailable", message: `The effort choice for seat "${input.seatRef}" was not saved (no node row was updated); nothing changed.` };
+      }
+    }
+    const saved = this.readEffort(seat.nodeId) ?? from;
+    const running = await this.runningState(seat.nodeId);
+    const fallback = saved.source === "authored" ? `the authored effort ${saved.authored}` : "no effort flag (the runtime's own default)";
+    const effect = requested === null
+      ? `Cleared: the next managed continuation uses ${fallback}. The running process is unchanged; nothing was restarted.`
+      : `Saved for the seat's next managed continuation. The running process is unchanged; nothing was restarted.`;
+    return {
+      ok: true, seat, runtime, requested, from, saved, changed,
+      running: running.state, ...(running.detail ? { runningDetail: running.detail } : {}),
+      emitted: "not_yet", observed: "not_observed", effect,
+    };
+  }
+
+  private readEffort(nodeId: string): EffortResolution | null {
+    let row: { effort: string | null; effort_choice: string | null } | undefined;
+    try {
+      row = this.db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeId) as typeof row;
+    } catch {
+      return null; // an older database without the columns
+    }
+    if (!row) return null;
+    const choice = row.effort_choice?.trim() || null;
+    const authored = row.effort?.trim() || null;
+    const effective = choice ?? authored;
+    return { choice, authored, effective, source: choice ? "seat_choice" : authored ? "authored" : "runtime_default" };
+  }
+
+  /** Whether the seat's latest session is live now. Never a guess: an indeterminate probe is unknown. */
+  private async runningState(nodeId: string): Promise<{ state: "yes" | "no" | "unknown"; detail?: string }> {
+    const session = this.latestSession(nodeId);
+    if (!session) return { state: "no", detail: "no session recorded" };
+    if (TERMINAL_SESSION_STATUSES.has(session.status)) return { state: "no", detail: `latest session ${session.status}` };
+    const probe = await this.probeLiveness(session.session_name, "running is reported as unknown");
+    if ("code" in probe) return { state: "unknown", detail: probe.message };
+    return probe.state === "present" ? { state: "yes" } : { state: "no", detail: "tmux session absent" };
   }
 
   async setPermissions(input: { seatRef: string; mode: string; reason: string; actor: string }): Promise<

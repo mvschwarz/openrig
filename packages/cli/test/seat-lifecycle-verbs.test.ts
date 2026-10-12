@@ -192,6 +192,63 @@ describe("rig seat set-model", () => {
   });
 });
 
+describe("rig seat set-effort", () => {
+  const seat = { logicalId: "dev.impl", rigName: "seat-rig" };
+
+  it("posts effort/reason to /api/seat/set-effort/<seat> and keeps saved, emitted and observed apart", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({
+      status: 200,
+      data: {
+        ok: true, seat, runtime: "claude-code", requested: "high", changed: true, running: "yes", emitted: "not_yet", observed: "not_observed",
+        saved: { choice: "high", authored: "medium", effective: "high", source: "seat_choice" },
+        effect: "Saved for the seat's next managed continuation. The running process is unchanged; nothing was restarted.",
+      },
+    }, calls);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-effort", "dev-impl@seat-rig", "--effort", "high", "--reason", "long refactor"]);
+    });
+    expect(calls[0]!.path).toBe("/api/seat/set-effort/dev-impl%40seat-rig");
+    expect(calls[0]!.body).toEqual({ effort: "high", reason: "long refactor" });
+    expect(exitCode).toBeUndefined();
+    const out = logs.join("\n");
+    expect(out).toContain("Effort for dev.impl@seat-rig: high (this seat's choice).");
+    expect(out).toContain("next managed continuation");
+    expect(out).toContain("Seat running now. Emitted at launch: not yet. Native effort: not observed.");
+  });
+
+  it("--clear posts clear and names what the seat falls back to", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({
+      status: 200,
+      data: {
+        ok: true, seat, runtime: "codex", requested: null, changed: true, running: "unknown", runningDetail: "probe failed", emitted: "not_yet", observed: "not_observed",
+        saved: { choice: null, authored: null, effective: null, source: "runtime_default" },
+        effect: "Cleared: the next managed continuation uses no effort flag (the runtime's own default). The running process is unchanged; nothing was restarted.",
+      },
+    }, calls);
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-effort", "dev.impl", "--clear", "--reason", "back"]);
+    });
+    expect(calls[0]!.body).toEqual({ clear: true, reason: "back" });
+    expect(logs.join("\n")).toContain("no effort flag (runtime default)");
+    expect(logs.join("\n")).toContain("running state unknown (probe failed)");
+  });
+
+  it("requires exactly one of --effort or --clear, before any request", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: {} }, calls);
+    for (const extra of [[], ["--effort", "high", "--clear"]]) {
+      const { errors, exitCode } = await captureLogs(async () => {
+        await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-effort", "dev.impl", "--reason", "x", ...extra]);
+      });
+      expect(exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("exactly one of --effort <level> or --clear");
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe("rig seat stop", () => {
   it("posts reason to /api/seat/stop/<seat> and prints the stopped summary", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
