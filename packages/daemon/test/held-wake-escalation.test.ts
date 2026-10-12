@@ -128,8 +128,9 @@ it.each([false, true])("a held Codex wake escalates to the orchestrator (activit
 
 // review50-r2 F2: a later, generation-valid clearing hook ends the held episode from the same evidence,
 // so the prompt alert retires and the parked owner can receive its next wake.
-it.each([["codex", "PermissionRequest", null], ["claude-code", "Notification", "permission_prompt"]] as const)(
-  "a later Stop ends the held %s episode: the alert retires and the next wake is sent", async (runtime, event, subtype) => {
+it.each([["codex", "PermissionRequest", null, "Stop"], ["claude-code", "Notification", "permission_prompt", "Stop"],
+  ["codex", "PermissionRequest", null, "PermissionPromptCleared"]] as const)(
+  "a later clearing hook ends the held %s episode: the alert retires and the next wake is sent", async (runtime, event, subtype, clearingEvent) => {
     const f = fixture(runtime);
     await f.hook(event, subtype, 600_000);
     f.reconstruct();
@@ -139,15 +140,32 @@ it.each([["codex", "PermissionRequest", null], ["claude-code", "Notification", "
       .filter((r) => r.tags?.includes("wake-prompt-refusal"));
     expect(alerts()).toHaveLength(1);
     f.clock.value = new Date(f.clock.value.getTime() + 10_000);
-    await f.hook("Stop", null, 0);
+    await f.hook(clearingEvent, null, 0);
     await f.oracle().pollAllRunningTmuxSeats(f.db);
-    expect((await f.transport.send(f.name, "synthetic follow-on after Stop")).ok).toBe(true);
+    expect((await f.transport.send(f.name, "synthetic follow-on after prompt clearance")).ok).toBe(true);
     await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value,
       resolveOrchestrator: () => "lead@r1001", readPromptState: f.readPromptState, retryIntervalSeconds: 1,
       attemptWake: async (_id, target) => { targets.push(target); return "verified"; }, log: () => {} });
     expect(alerts()).toHaveLength(0);
     expect((await policy.evaluate(job as never)).action).toBe("send");
   });
+
+it.each([0, 600_000])("a confirmed permission clear survives %sms of clock aging without claiming idle or bypassing generation", async ageMs => {
+  const f = fixture("codex");
+  const refusedAt = f.clock.value.toISOString();
+  f.clock.value = new Date(f.clock.value.getTime() + 10_000);
+  await f.hook("PermissionPromptCleared", null, 0);
+  const clearedAt = f.clock.value.toISOString();
+  f.reconstruct();
+  f.clock.value = new Date(f.clock.value.getTime() + ageMs);
+  expect(f.store.getLatestForNode({ sessionName: f.name })?.state).toBe("unknown");
+  expect(f.readPromptState(f.name, refusedAt)).toBe("clear");
+  expect(f.readPromptState(f.name, clearedAt)).toBe("unknown");
+  f.changeGeneration("successor-generation");
+  expect(f.readPromptState(f.name, refusedAt)).toBe("unknown");
+  f.changeGeneration(null);
+  expect(f.readPromptState(f.name, refusedAt)).toBe("unknown");
+});
 
 it("the reader keeps the oracle's verdicts; only a newer, generation-valid moved-on hook clears", async () => {
   const f = fixture();
