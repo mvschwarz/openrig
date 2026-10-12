@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseDocument } from "yaml";
 import { ScopeCliError } from "./types.js";
+import { pendingCompletedSliceRefs, markSliceRegistrationsVerified } from "./slice-claims.js";
 import {
   LifecycleManifestValidationError,
   validateMissionComposition,
@@ -48,7 +49,7 @@ export function planMissionMembershipAdd(
   return renderEdit(loaded, members);
 }
 
-/** Repair every completed scaffold into a fresh membership union, then verify
+/** Repair only positively unfinished registrations into a fresh union, then verify
  *  this creator's entry. Rename is not compare-and-swap: a later writer can
  *  still supersede a verified snapshot, so completed scaffolds stay on disk. */
 export async function appendMissionMembership(
@@ -59,11 +60,17 @@ export async function appendMissionMembership(
   for (let attempt = 0; attempt < attempts; attempt++) {
     const edit = planCompletedSliceMembership(missionPath, ref);
     // README-backed legacy missions do not have a composition manifest.
-    if (!edit) return;
+    if (!edit) {
+      markSliceRegistrationsVerified(missionPath, [ref]);
+      return;
+    }
     try {
       applyMissionCompositionEdits([edit]);
       const current = loadMissionComposition(missionPath);
-      if (current?.members.some((member) => path.normalize(member.ref) === path.normalize(ref))) return;
+      if (current?.members.some((member) => path.normalize(member.ref) === path.normalize(ref))) {
+        markSliceRegistrationsVerified(missionPath, current.members.map((member) => member.ref));
+        return;
+      }
     } catch (error) {
       if (!(error instanceof MissionCompositionChangedError)) throw error;
     }
@@ -74,11 +81,11 @@ export async function appendMissionMembership(
   throw new ScopeCliError({
     fact: `Could not verify membership for ${ref} after ${attempts} attempts.`,
     consequence: "The complete slice scaffold was kept on disk; this create did not report success.",
-    action: "Inspect mission.yaml, then run a later slice create to repair completed scaffold membership.",
+    action: "Inspect mission.yaml, then run a later slice create to repair unfinished registration.",
   });
 }
 
-/** Preserve authored members and add only complete slice scaffolds, plus the
+/** Preserve authored members and add only positively pending complete scaffolds, plus the
  *  caller's completed entry. Existing active flags and orders remain intact. */
 function planCompletedSliceMembership(missionPath: string, ref: string): MissionCompositionEdit | null {
   const loaded = loadMissionComposition(missionPath);
@@ -86,18 +93,7 @@ function planCompletedSliceMembership(missionPath: string, ref: string): Mission
   assertSafeRelative(ref);
   const members = [...loaded.members];
   const present = new Set(members.map((member) => path.normalize(member.ref)));
-  const completed: string[] = [];
-  const slicesPath = path.join(missionPath, "slices");
-  if (fs.existsSync(slicesPath)) {
-    for (const entry of fs.readdirSync(slicesPath, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const slicePath = path.join(slicesPath, entry.name);
-      if (fs.existsSync(path.join(slicePath, "PROOF.md")) && fs.existsSync(path.join(slicePath, "slice.yaml"))) {
-        completed.push(`slices/${entry.name}/slice.yaml`);
-      }
-    }
-  }
-  completed.sort();
+  const completed = pendingCompletedSliceRefs(missionPath);
   completed.push(ref);
   let order = Math.max(0, ...members.map((member) => member.order));
   for (const completedRef of completed) {
@@ -107,7 +103,7 @@ function planCompletedSliceMembership(missionPath: string, ref: string): Mission
     members.push({ ref: completedRef, order, active: true });
     present.add(normalized);
   }
-  return renderEdit(loaded, members.sort((a, b) => a.order - b.order));
+  return renderEdit(loaded, members);
 }
 
 class MissionCompositionChangedError extends ScopeCliError {}

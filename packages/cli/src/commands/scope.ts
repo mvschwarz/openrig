@@ -378,7 +378,7 @@ function buildSliceCreateCommand(): Command {
           planMissionMembershipAdd(
             mission.absPath, `slices/${pad2(nn)}-${slug}/slice.yaml`,
           );
-          if (tryClaimSliceNN(mission.absPath, nn)) break;
+          if (tryClaimSliceNN(mission.absPath, nn, `slices/${sliceFolder}/slice.yaml`)) break;
           nn++;
           id = sliceIdFromMission(missionId, nn);
         }
@@ -418,12 +418,15 @@ function buildSliceCreateCommand(): Command {
             fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
           }
           fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
-          fs.writeFileSync(proofPath, proofBody, "utf8");
+          // Publish the completion sentinel only after its entire contents exist.
+          const proofTemporary = `${proofPath}.openrig-${process.pid}.tmp`;
+          fs.writeFileSync(proofTemporary, proofBody, { encoding: "utf8", flag: "wx" });
+          fs.renameSync(proofTemporary, proofPath);
           scaffoldCompleted = true;
           await appendMissionMembership(mission.absPath, `slices/${sliceFolder}/slice.yaml`);
         } catch (error) {
           // PROOF.md is the final scaffold file. Once complete, leave this
-          // slice available for another creator's manifest union to repair.
+          // pending registration available for a later creator to repair.
           if (!scaffoldCompleted) {
             fs.rmSync(sliceAbs, { recursive: true, force: true });
             if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");

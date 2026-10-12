@@ -498,21 +498,7 @@ function findOwningMission(missionsRoot: string, slicePath: string): string | nu
 // Auto-numbering
 // ---------------------------------------------------------------------
 
-/** Claim one slice ordinal exclusively. Interrupted creates retain only their
- *  number, rather than blocking every later create in the mission. */
-export function tryClaimSliceNN(missionAbsPath: string, nn: number): boolean {
-  const slices = path.join(missionAbsPath, "slices");
-  fs.mkdirSync(slices, { recursive: true });
-  let claim: number;
-  try {
-    claim = fs.openSync(path.join(slices, `.nn-${pad2(nn)}`), "wx");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
-  }
-  fs.closeSync(claim);
-  return true;
-}
+export { tryClaimSliceNN } from "./slice-claims.js";
 
 /** Find the next available NN for a mission's slices/ folder. Scans
  *  BOTH slices/ AND closed/, including ordinal claims, so numbers are never reused (§3.2). */

@@ -120,7 +120,7 @@ describe("public slice creation ordinal claims", () => {
     expect(fs.existsSync(path.join(mission, ".openrig-slice-create-lock"))).toBe(false);
   }, 180000);
 
-  it("a later create repairs complete missing membership without adopting incomplete scaffolds", async () => {
+  it("a later create repairs only pending complete registrations and preserves authored membership", async () => {
     const ref = "slices/01-existing/slice.yaml";
     fs.writeFileSync(path.join(mission, ref), "kind: slice\n");
     const manifest = path.join(mission, "mission.yaml");
@@ -132,6 +132,8 @@ describe("public slice creation ordinal claims", () => {
       fs.writeFileSync(path.join(mission, "slices", name, "slice.yaml"), "kind: slice\n");
       fs.writeFileSync(path.join(mission, "slices", name, "SPEC.md"), "# scaffold\n");
     }
+    fs.writeFileSync(path.join(mission, "slices", ".nn-02"), JSON.stringify({ schema: "openrig.slice-claim/v1", ref: "slices/02-complete/slice.yaml", state: "pending" }));
+    fs.writeFileSync(path.join(mission, "slices", ".nn-03"), JSON.stringify({ schema: "openrig.slice-claim/v1", ref: "slices/03-incomplete/slice.yaml", state: "pending" }));
     const proof = path.join(mission, "slices", "02-complete", "PROOF.md");
     fs.writeFileSync(proof, "# completed evidence\n");
     const created = successful([await create("repair")])[0]!;
@@ -144,6 +146,40 @@ describe("public slice creation ordinal claims", () => {
     expect(bytes).toContain("# preserve authored comment");
     expect(fs.readFileSync(proof, "utf8")).toBe("# completed evidence\n");
     expect(fs.existsSync(path.join(mission, "slices", "03-incomplete", "SPEC.md"))).toBe(true);
+  });
+
+  it("verified and repaired registrations stay removed after manual membership removal", async () => {
+    const ref = "slices/01-existing/slice.yaml";
+    fs.writeFileSync(path.join(mission, ref), "kind: slice\n");
+    const manifest = path.join(mission, "mission.yaml");
+    const authored = { ref, order: 70, active: false };
+    fs.writeFileSync(manifest, YAML.stringify({ kind: "mission", composition: { slices: [authored] } }));
+    const first = successful([await create("registered")])[0]!;
+    fs.writeFileSync(manifest, YAML.stringify({ kind: "mission", composition: { slices: [authored] } }));
+    const next = successful([await create("after-removal")])[0]!;
+    const members = YAML.parse(fs.readFileSync(manifest, "utf8")).composition.slices;
+    expect(members).toEqual([authored, { ref: `slices/${next.name}/slice.yaml`, order: 80, active: true }]);
+    expect(JSON.parse(fs.readFileSync(path.join(mission, "slices", ".nn-02"), "utf8")).state).toBe("verified");
+    expect(fs.existsSync(path.join(first.path, "PROOF.md"))).toBe(true);
+  });
+
+  it("older complete unlisted folders without pending evidence remain unlisted", async () => {
+    const ref = "slices/01-existing/slice.yaml";
+    fs.writeFileSync(path.join(mission, ref), "kind: slice\n");
+    const manifest = path.join(mission, "mission.yaml");
+    const authored = { ref, order: 70, active: false };
+    fs.writeFileSync(manifest, YAML.stringify({ kind: "mission", composition: { slices: [authored] } }));
+    for (const name of ["02-older", "03-legacy-marker", "04-verified"]) {
+      fs.mkdirSync(path.join(mission, "slices", name));
+      fs.writeFileSync(path.join(mission, "slices", name, "slice.yaml"), "kind: slice\n");
+      fs.writeFileSync(path.join(mission, "slices", name, "PROOF.md"), "# complete\n");
+    }
+    fs.writeFileSync(path.join(mission, "slices", ".nn-03"), "");
+    fs.writeFileSync(path.join(mission, "slices", ".nn-04"), JSON.stringify({ schema: "openrig.slice-claim/v1", ref: "slices/04-verified/slice.yaml", state: "verified" }));
+    const next = successful([await create("new")])[0]!;
+    expect(YAML.parse(fs.readFileSync(manifest, "utf8")).composition.slices).toEqual([
+      authored, { ref: `slices/${next.name}/slice.yaml`, order: 80, active: true },
+    ]);
   });
 
   it("bounded verify failure reports nonzero and retains a complete scaffold for the next create", async () => {
@@ -181,6 +217,12 @@ describe("public slice creation ordinal claims", () => {
     expect(YAML.parse(fs.readFileSync(manifest, "utf8")).composition.slices.map((member: { ref: string }) => member.ref).sort()).toEqual([
       ref, "slices/02-lost/slice.yaml", `slices/${recovered.name}/slice.yaml`,
     ].sort());
+    expect(JSON.parse(fs.readFileSync(path.join(mission, "slices", ".nn-02"), "utf8")).state).toBe("verified");
+    const repairedDoc = YAML.parse(fs.readFileSync(manifest, "utf8"));
+    repairedDoc.composition.slices = repairedDoc.composition.slices.filter((member: { ref: string }) => member.ref !== "slices/02-lost/slice.yaml");
+    fs.writeFileSync(manifest, YAML.stringify(repairedDoc));
+    successful([await create("after-repaired-removal")]);
+    expect(YAML.parse(fs.readFileSync(manifest, "utf8")).composition.slices.map((member: { ref: string }) => member.ref)).not.toContain("slices/02-lost/slice.yaml");
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("an actual manifest EACCES preserves the complete slice for later repair", async () => {
@@ -202,14 +244,23 @@ describe("public slice creation ordinal claims", () => {
     expect(YAML.parse(fs.readFileSync(manifest, "utf8")).composition.slices.map((member: { ref: string }) => member.ref)).toContain("slices/02-write-denied/slice.yaml");
   });
 
-  it("a partial final PROOF write rolls back the incomplete scaffold and retains only its ordinal", async () => {
+  it("a partial final PROOF write cannot be adopted by a real competing creator", async () => {
+    const ref = "slices/01-existing/slice.yaml";
+    fs.writeFileSync(path.join(mission, ref), "kind: slice\n");
+    const manifest = path.join(mission, "mission.yaml");
+    fs.writeFileSync(manifest, YAML.stringify({ kind: "mission", composition: { slices: [{ ref, order: 10, active: true }] } }));
+    const observed = path.join(root, "competing-manifest");
+    const competitorArgs = [fileURLToPath(new URL("../dist/index.js", import.meta.url)), "scope", "slice", "create", "release-0.3.2", "competitor", "--workspace", workspace, "--json"];
     const injected = path.join(root, "partial-proof-write.mjs");
     fs.writeFileSync(injected, `
       import fs from "node:fs";
+      import { execFileSync } from "node:child_process";
       const original = fs.writeFileSync.bind(fs);
       fs.writeFileSync = (target, data, options) => {
-        if (String(target).endsWith("/PROOF.md")) {
+        if (/\\/PROOF\\.md(?:\\.openrig-.*\\.tmp)?$/.test(String(target))) {
           original(target, "# partial proof", options);
+          execFileSync(process.execPath, ${JSON.stringify(competitorArgs)}, { env: ${JSON.stringify(ownedEnv)}, timeout: 15000 });
+          original(${JSON.stringify(observed)}, fs.readFileSync(${JSON.stringify(manifest)}, "utf8"));
           throw Object.assign(new Error("injected partial PROOF write"), { code: "EIO" });
         }
         return original(target, data, options);
@@ -222,7 +273,8 @@ describe("public slice creation ordinal claims", () => {
     expect(fs.existsSync(path.join(mission, "slices", "02-partial"))).toBe(false);
     expect(fs.readFileSync(path.join(mission, "README.md"), "utf8")).toBe(before);
     expect(fs.existsSync(path.join(mission, "slices", ".nn-02"))).toBe(true);
-    expect(successful([await create("after-partial")])[0]!.id).toBe("OPR.0.3.2.3");
+    expect(YAML.parse(fs.readFileSync(observed, "utf8")).composition.slices.map((member: { ref: string }) => member.ref)).not.toContain("slices/02-partial/slice.yaml");
+    expect(successful([await create("after-partial")])[0]!.id).toBe("OPR.0.3.2.4");
   });
 
   it("an old mission guard is preserved but does not block a new creator", async () => {
