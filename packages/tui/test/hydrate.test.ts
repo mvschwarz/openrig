@@ -204,6 +204,17 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const snap = await hydrateSnapshot(fixtureClient(), undefined, undefined, undefined, undefined, context);
     expect(snap.health).toBeUndefined();
   });
+  it("hydrates the seat queue on the focused topology table so Q / WORK / NOW can fill", async () => {
+    const row = (qitemId: string, state: string, destinationSession: string) => ({ qitemId, state, destinationSession, blockedOn: null, handedOffTo: null, tier: null, tags: ["slice:OPR.1.0.2.7"], summary: `work ${qitemId}`, body: "", claimedAt: null, tsUpdated: "2026-09-12T10:00:00.000Z" });
+    const context = { section: "topology" as const, viewTab: "table" as const, drill: [{ kind: "rig" as const, name: "myrig" }] };
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/queue/list?state=in-progress": [row("qi1", "in-progress", "dev-a@rig")],
+      "/api/queue/list?state=pending&limit=50": [row("qp1", "pending", "dev-a@rig")],
+    }), undefined, undefined, undefined, undefined, context);
+    expect(snap.inProgress.map((q) => q.qitemId)).toEqual(["qi1"]);
+    expect(snap.pending.map((q) => q.qitemId)).toEqual(["qp1"]);
+    expect(snap.recentlyFinished).toEqual([]);
+  });
   it("marks health unavailable when the selected health view read fails", async () => {
     const context = { section: "topology" as const, viewTab: "health" as const, drill: [] };
     const snap = await hydrateSnapshot(fixtureClient({ "/api/health?limit=200": { status: 503 } }), undefined, undefined, undefined, undefined, context);
