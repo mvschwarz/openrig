@@ -327,6 +327,11 @@ export interface QueueCreateInput {
   identityProvenance?: string | null;
 }
 
+export type QueueCreateResult = QueueItem & {
+  /** Response-only: the retry's changed body was not written. Never stored on the row. */
+  createWarning?: { code: "qitem_body_not_saved"; message: string };
+};
+
 export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
@@ -1426,21 +1431,39 @@ export class QueueRepository {
     }
   }
 
-  async create(input: QueueCreateInput): Promise<QueueItem & {
-    /** Response-only: the retry's changed body was not written. Never stored on the row. */
-    createWarning?: { code: "qitem_body_not_saved"; message: string };
-  }> {
+  async create(input: QueueCreateInput): Promise<QueueCreateResult> {
+    return this.createWithCustodySource(input);
+  }
+
+  /** A custody finding may retain its closed source's destination during a registry
+   *  outage. Ordinary creates never receive this admission exception. */
+  async createCustodyFinding(sourceQitemId: string, input: QueueCreateInput): Promise<QueueCreateResult> {
+    return this.createWithCustodySource(input, sourceQitemId);
+  }
+
+  private async createWithCustodySource(input: QueueCreateInput, custodySourceQitemId?: string): Promise<QueueCreateResult> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
     // instance. Host identity is added only at the cross-host forwarding boundary
     // (routes/queue.ts stamp-at-FORWARD), and a genuine origin triple arriving from a
     // forward is stored verbatim (never re-stamped, never stripped).
-    if (!this.validateRig(input.destinationSession)) {
-      throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
-    }
-
     let wakeStaged = false;
     const txn = this.db.transaction(() => {
+      if (!this.validateRig(input.destinationSession)) {
+        const error = destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
+        // Re-read the durable source inside the create transaction. The exception
+        // preserves one known custody route; it cannot admit a new destination or
+        // turn a healthy registry's refusal into an accepted address.
+        const source = error.code === "human_registry_unavailable" && custodySourceQitemId
+          ? this.getById(custodySourceQitemId)
+          : null;
+        const retainsCustodyDestination = source
+          && (source.state === "done" || source.state === "canceled")
+          && (source.closureReason === "handed_off_to" || source.closureTarget?.startsWith("qitem-"))
+          && source.destinationSession === input.destinationSession
+          && source.sourceSession === input.sourceSession;
+        if (!retainsCustodyDestination) throw error;
+      }
       const created = this.createInTransactionalContext(input);
       if (this.outbox && input.nudge !== false) {
         try {
@@ -3616,6 +3639,27 @@ export class QueueRepository {
       if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
     return opts?.compact ? out.map(compactRow) : out;
+  }
+
+  /** Read the same address-admission predicate used by queue writes before choosing
+   *  a recovery owner. Admission does not require a live seat or terminal binding. */
+  acceptsDestination(destinationSession: string): boolean {
+    return this.validateRig(destinationSession);
+  }
+
+  /** Human ownership includes reserved references and registered aliases, even when
+   *  an alias has a terminal binding. Transport capability does not determine identity.
+   *  A canonical identity is unknown when the registry cannot be read: throw instead
+   *  of returning an agent classification that a caller could persist as a route. */
+  isHumanDestination(destinationSession: string): boolean {
+    if (isHumanSeatSessionRef(destinationSession)) return true;
+    if (parseSessionName(destinationSession).kind !== "canonical") return false;
+    const registry = this.loadHumanRegistryFn();
+    if (!registry.ok) {
+      throw new QueueRepositoryError("human_registry_unavailable",
+        `Cannot classify '${destinationSession}' as human or agent: human registry unavailable (${registry.error}).`);
+    }
+    return resolveRegisteredHumanAddress(destinationSession, registry.entities) !== null;
   }
 
   /** OPR.0.5.6.14 — the one destination-classification seam, as the wake path consults it.

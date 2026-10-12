@@ -38,7 +38,10 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
     bus = new EventBus(db);
-    repo = new QueueRepository(db, bus, { validateRig: () => true });
+    repo = new QueueRepository(db, bus, {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
   });
   afterEach(() => {
     db.close();
@@ -893,7 +896,10 @@ describe("#318 seat-target handoff closure without successor", () => {
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
   });
   afterEach(() => {
     db.close();
