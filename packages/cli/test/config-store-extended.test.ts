@@ -186,6 +186,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.wake_retry_cap",
       "queue.wake_unconfirmed_window_minutes",
       "queue.wake_swap_grace_seconds",
+      "queue.wake_human_rung",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });
@@ -676,6 +677,61 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("ui.preview.* keys reject non-numeric values", () => {
     const store = new ConfigStore(configPath);
     expect(() => store.set("ui.preview.refresh_interval_seconds", "soon")).toThrow(/expected a number/);
+  });
+
+  // Constraint gap (Slice 27 residue): daemon.port had no KEY_CONSTRAINTS
+  // entry, so `rig config set daemon.port 99999` stored 99999 and the next
+  // daemon start died with a raw ERR_SOCKET_BAD_PORT from serve(). The
+  // contract: refuse only ports that cannot be bound, checked on the value
+  // the runtime consumes (the same parseInt the boot path runs), never
+  // against a stricter input format than today's.
+  it("daemon.port refuses ports that cannot be bound; 0 and 65535 stay legal", () => {
+    const store = new ConfigStore(configPath);
+    for (const raw of ["-1", "65536", "99999"]) {
+      expect(() => store.set("daemon.port", raw), `daemon.port must reject ${raw}`)
+        .toThrow(/integer in \[0, 65535\]/);
+    }
+    store.set("daemon.port", "0");
+    expect(store.get("daemon.port")).toBe(0);
+    store.set("daemon.port", "65535");
+    expect(store.get("daemon.port")).toBe(65535);
+  });
+
+  it("daemon.port keeps resolving every input form that resolves today", () => {
+    const store = new ConfigStore(configPath);
+    for (const [raw, expected] of [
+      ["7433abc", 7433],
+      ["7433.5", 7433],
+      ["+7433", 7433],
+      ["1e4", 1],
+      ["0x1D11", 0],
+    ] as const) {
+      store.set("daemon.port", raw);
+      expect(store.get("daemon.port"), `${raw} must keep resolving to ${expected}`).toBe(expected);
+    }
+  });
+
+  it("unusable daemon.port in config.json falls back to the default instead of crashing the daemon at boot", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      writeFileSync(configPath, JSON.stringify({ daemon: { port: 99999 } }));
+      const store = new ConfigStore(configPath);
+      expect(store.get("daemon.port")).toBe(7433);
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for daemon.port rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a quoted in-range port in config.json keeps its port, and the CLI target and daemon bind agree", () => {
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: "7434" } }));
+    const store = new ConfigStore(configPath);
+    // Used as-is, exactly as before this constraint existed: the CLI's
+    // target stays "7434" and the daemon binds parseInt of the same value.
+    expect(store.get("daemon.port")).toBe("7434");
+    expect(Number.parseInt(String(store.get("daemon.port")), 10)).toBe(7434);
+    expect(store.resolve().daemon.port).toBe("7434");
   });
 
   it("OPENRIG_UI_PREVIEW_* env vars override file values", () => {

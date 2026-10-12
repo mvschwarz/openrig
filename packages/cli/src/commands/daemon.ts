@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import fs from "node:fs";
+import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { acquireDaemonStartLock } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
@@ -102,6 +103,26 @@ export function realDeps(): LifecycleDeps {
       // /healthz event-loop evidence. Bound to this Response instance.
       return { ok: res.ok, json: () => res.json() };
     },
+    isPortOccupied: (host, port) => new Promise((resolve) => {
+      const server = createServer();
+      server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EADDRINUSE"));
+      try {
+        server.listen({ host, port, exclusive: true }, () => server.close(() => resolve(false)));
+      } catch { resolve(false); }
+    }),
+    fileSize: (p) => { try { return fs.statSync(p).size; } catch { return 0; } },
+    readFileFrom: (p, offset) => {
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(p, "r");
+        const size = fs.fstatSync(fd).size;
+        const start = size < offset ? 0 : offset; // The log may have been truncated.
+        const buffer = Buffer.alloc(size - start);
+        const read = fs.readSync(fd, buffer, 0, buffer.length, start);
+        return buffer.toString("utf-8", 0, read);
+      } catch { return null; }
+      finally { if (fd !== undefined) fs.closeSync(fd); }
+    },
     kill: (pid, signal) => { process.kill(pid, signal as NodeJS.Signals); return true; },
     readFile: (p) => { try { return fs.readFileSync(p, "utf-8"); } catch { return null; } },
     writeFile: (p, content) => {
@@ -163,8 +184,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     .action(async (opts: { port?: string; host?: string; db?: string; kernel?: boolean; waitForKernel?: boolean; waitForKernelMs?: string }) => {
       try {
         const { ConfigStore } = await import("../config-store.js");
-        const { SystemPreflight } = await import("../system-preflight.js");
-        const { execSync } = await import("node:child_process");
+        const { SystemPreflight, quietPreflightExec } = await import("../system-preflight.js");
         const configStore = new ConfigStore();
         const config = configStore.resolve();
         const effectivePort = opts.port ? parseInt(opts.port, 10) : config.daemon.port;
@@ -189,7 +209,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
 
         // Run preflight before starting
           const preflight = new SystemPreflight({
-            exec: async (cmd) => execSync(cmd, { encoding: "utf-8" }),
+            exec: quietPreflightExec,
             configStore,
             getDaemonStatus: () => getDaemonStatus(getDeps()),
             openrigHome: OPENRIG_DIR,

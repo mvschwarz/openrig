@@ -236,3 +236,52 @@ describe("rig seat clean", () => {
     expect(logs.join("\n")).toContain("launchable again");
   });
 });
+
+describe("fresh launch preview", () => {
+  it.each([true, false, null].flatMap(launchable => [false, true].map(json => ({ launchable, json }))))("renders a read-only plan and its exit status: %j", async ({ launchable, json }) => {
+    const data = { ok: true, planOnly: true, complete: launchable !== null, launchable,
+      sessionName: "dev@fixture", currentOccupant: launchable === null ? "unknown" : "present",
+      startup: { projectionCount: 2, fileCount: 1, actionCount: 0 },
+      stopRequired: launchable === null ? null : true, wouldStop: launchable === null ? null : launchable,
+      blockers: launchable === false ? [{ code: "session_live", message: "Needs --stop" }] : [], warnings: [],
+      siblings: [{ logicalId: "qa", effect: "unchanged" }] };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data }, calls);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan", ...(json ? ["--json"] : []),
+    ]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/launch-plan/dev%40fixture", body: { fresh: true, reason: undefined, stop: false, operator: undefined } }]);
+    expect(output.exitCode).toBeUndefined();
+    if (json) expect(JSON.parse(output.logs.join("\n"))).toEqual(data);
+    else {
+      expect(output.logs.join("\n")).toContain("no changes made");
+      expect(output.logs.join("\n")).toContain("launchable:");
+      expect(output.logs.join("\n")).toContain("2 projections, 1 files, 0 actions");
+      expect(output.logs.join("\n")).toContain("Sibling qa: unchanged");
+      expect(output.logs.join("\n")).not.toContain("Fresh occupant ready");
+    }
+    expect(deps.lifecycleDeps.writeFile).not.toHaveBeenCalled();
+    expect(deps.lifecycleDeps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on an older daemon without ever posting to the launch endpoint", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 404, data: { error: "Not Found" } }, calls);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan", "--stop", "--reason", "optional preview reason", "--json",
+    ]).then(() => undefined));
+    expect(output.exitCode).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].path).toBe("/api/seat/launch-plan/dev%40fixture");
+  });
+
+  it("requires a reason for execution before contacting the daemon", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--json",
+    ]).then(() => undefined));
+    expect(output.exitCode).toBe(1);
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ code: "missing_reason" });
+    expect(calls).toEqual([]);
+  });
+});

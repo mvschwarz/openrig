@@ -610,6 +610,26 @@ describe("welcome launcher for desktop apps and an existing Herdr client", () =>
     expect(result.notes?.at(-1)).toBe("Herdr did not confirm the view's space is focused; ask the person whether they see it.");
   });
 
+  it.each([{ TERM_PROGRAM: "tmux", TMUX: "/tmp/tmux-1000/default,1,0" }, { TERM_PROGRAM: "ghostty" }])("recognises a Herdr pane by its pane markers when TERM_PROGRAM is not herdr, on Linux: %j", async extra => {
+    const f = fixture();
+    f.deps.platform = "linux";
+    f.deps.env = { HOME: "/fixture", WAYLAND_DISPLAY: "wayland-1", HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: f.preview.status.launch.socketPath, ...extra };
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: true }); expect(result.window).toBeUndefined();
+    expect(f.post).toHaveBeenCalledWith("/api/terminal/open", expect.objectContaining({ view: "saved:kernel", provider: "herdr" }), expect.anything());
+    expect(f.deps.launch).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a partial Herdr marker as a Herdr pane", async () => {
+    const f = fixture();
+    f.deps.platform = "linux";
+    f.deps.env = { HOME: "/fixture", WAYLAND_DISPLAY: "wayland-1", TERM_PROGRAM: "tmux", HERDR_ENV: "1", HERDR_SOCKET_PATH: f.preview.status.launch.socketPath };
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: false, windowAttempted: false });
+    expect(result.error).toContain("Unrecognised or unavailable hosting terminal");
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
   it("says the openrig kernel space is showing when the person's Herdr reports it focused", async () => {
     const f = fixture();
     f.deps.env = { HOME: "/fixture", TERM_PROGRAM: "herdr" };

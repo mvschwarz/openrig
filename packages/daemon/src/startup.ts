@@ -26,6 +26,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
+import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
 import { execPreflightCommand } from "./adapters/preflight-exec.js";
@@ -480,6 +481,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
+  // The real tmux runs with this process's environment, so its server is the one $TMUX names.
+  // An injected exec has no server of its own: printed attach commands stay in the default form.
+  setDaemonTmuxServer(opts?.tmuxExec ? [] : tmuxServerArgs(process.env));
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
@@ -1168,6 +1172,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     isRegisteredOccupantGeneration: (nodeId, generation) =>
       sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
   });
+  // #763 — Codex usage-limit banner detector. The reactive tap only accepts a
+  // typed at_limit hook row and no hook producer emits one for Codex, so the
+  // structural sweep reports what the seat itself shows. Attached late (rather
+  // than constructed with) so service construction order is untouched.
+  {
+    const { recordCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
+    seatStructuralActivityService.attachCodexLimitBanner((sessionName, banner) => {
+      recordCodexLimitBanner({
+        store: agentActivityStore,
+        resolveGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+        sessionName,
+        banner,
+      });
+    });
+  }
   const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
@@ -2086,7 +2105,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             listTransitions: (qitemId: string) =>
               queueRepoInstance
                 .listTransitions(qitemId)
-                .map((t) => ({ ts: t.ts, transitionNote: t.transitionNote ?? null })),
+                .map((t) => ({ ts: t.ts, transitionNote: t.transitionNote ?? null, actorSession: t.actorSession, state: t.state, transitionId: t.transitionId })),
             appendNote: (qitemId: string, note: string) => {
               const row = queueRepoInstance.getById(qitemId);
               if (!row || !isBlockerLive(row.state)) return { ok: false };
@@ -2104,6 +2123,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
                 .list({ destinationSession, state: ["pending", "in-progress", "blocked"], limit: 500 })
                 .map((r) => r.qitemId),
           },
+          occupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
         }),
         // OPR.0.5.6.1 AM-F1 — the delivery engine's two timing legs on THIS
         // substrate. The gateway dispatch binds late (the subsystem is built

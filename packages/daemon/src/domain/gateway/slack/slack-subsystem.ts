@@ -25,7 +25,7 @@ import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
-import { subsystemSlackDeliver } from "./slack-delivery.js";
+import { abortableSleep, subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
@@ -450,6 +450,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           return undefined;
         },
         onPostedRoot: (p, ts, channel) => {
+          // A healthy connection receives each post back as an event; the inbound liveness watch
+          // waits for it. Every post, root or part, registers once, here or in onPostedPart.
+          inboundHandle?.expectEcho(ts);
           const human = p.destinationSession ?? "";
           const seat = p.sourceSession ?? "";
           threadMap.open({ threadTs: ts, channel, human, seat, conversationId: p.qitemId });
@@ -471,6 +474,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // #192: a part is recorded in the channel it was posted to, so a reaction on it in a mapped
         // channel finds its ask (thread_part_map is keyed by channel and message).
         onPostedPart: (p, messageTs, threadTs, channel) => {
+          inboundHandle?.expectEcho(messageTs); // a multipart post's supplemental parts arrive only here
           const seat = p.sourceSession ?? "";
           if (!p.qitemId || !seat || (p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return;
           const human = p.destinationSession ?? "";
@@ -705,11 +709,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
       actionDeadLetter: (deadActions = new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl"))),
       ...(bot ? {
+        // A stopped run posts nothing, and its rate-limit wait ends with the run: after a restart the click's
+        // redelivery belongs to the new router, which must not race a stale retry from this one.
         acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
           const target = channel ?? cfg.channel;
-          if (!target) return;
-          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl);
+          if (!target || runCtl.signal.aborted) return false;
+          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl, undefined,
+            (ms) => abortableSleep(ms, runCtl.signal));
           if (!r.ok) log(`answer acknowledgement not posted thread=${threadTs}: ${r.error}`);
+          return r.ok;
         },
       } : {}),
       // OPR.0.5.6.2 — inbound file transfer: wired only when the bot token exists

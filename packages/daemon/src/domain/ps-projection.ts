@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { AgentActivity, NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
+import { identityVerdictConfirmsSessionMissing } from "./types.js";
 import {
   countAssignedWorkForEntry,
   getNodeInventoryForAllRigs,
@@ -175,7 +176,7 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
  */
 export function isEffectivelyRunning(node: NodeInventoryEntry): boolean {
   if (node.sessionStatus !== "running") return false;
-  if (node.identityVerdict?.reason === "session_missing") return false;
+  if (identityVerdictConfirmsSessionMissing(node.identityVerdict)) return false;
   return true;
 }
 
@@ -270,7 +271,7 @@ export class PsProjectionService {
       // so the two counts never disagree on liveness. NEVER mutates
       // `sessions.status`.
       const sessionMissingRunning = inventory.filter(
-        (n) => n.sessionStatus === "running" && !isEffectivelyRunning(n),
+        (n) => n.storedSessionStatus === "running" && !isEffectivelyRunning(n),
       ).length;
       const effectiveRunningCount = Math.max(0, r.running_count - sessionMissingRunning);
 
