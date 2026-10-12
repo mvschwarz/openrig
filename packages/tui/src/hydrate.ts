@@ -755,6 +755,11 @@ export async function hydrateSnapshot(
         }
       : {}),
     attention: (attention ?? []).map(toQueueRead),
+    queueCoverage: !seatQueueReads ? undefined
+      : [attention, blocked, inProgress, pending].some(rows => rows === null) ? "unavailable"
+      // Existing /list defaults cap the first three reads at 100; pending requests 50.
+      : [attention, blocked, inProgress].some(rows => rows!.length >= 100) || pending!.length >= 50 ? "partial"
+      : "complete",
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),
     seatActivity,
