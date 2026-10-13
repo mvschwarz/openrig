@@ -87,11 +87,41 @@ describe("readNativeEffort: what the native session recorded since this process 
     expect(readNativeEffort("codex", done, LSTART)).toMatchObject({ value: "high", outcome: "accepted" });
   });
 
+  it("calls only a request rejection naming the level REJECTED; other errored turns failed before it could be judged", () => {
+    // Real rollout shape: task_complete.error = { codex_error_info, message }.
+    const kinds: Array<[unknown, string, string]> = [
+      ["usage_limit_exceeded", "You've hit your usage limit. Try again later.", "usage limit"],
+      ["unauthorized", "Your access token could not be refreshed.", "unauthorized"],
+      ["other", "stream disconnected before completion", "other"],
+      [{ usage_limit_exceeded: { resets_in_seconds: 60 } }, "usage limit", "usage limit"],
+      // A 400 naming a different value is not this level's rejection.
+      ["other", "Invalid value: 'turbo'. Supported values are: 'low', 'high'.", "other"],
+    ];
+    for (const [info, message, kind] of kinds) {
+      const path = file(`failed-${kind}-${Math.random()}.jsonl`, [
+        { type: "turn_context", timestamp: at(4), payload: { turn_id: "t3", effort: "high" } },
+        { type: "event_msg", timestamp: at(6), payload: { type: "task_complete", turn_id: "t3", last_agent_message: null, error: { codex_error_info: info, message } } },
+      ]);
+      const observed = readNativeEffort("codex", path, LSTART);
+      expect(observed, message).toMatchObject({ state: "observed", value: "high", outcome: "failed" });
+      expect((observed as { detail: string }).detail).toBe(`The turn failed (${kind}) before this level could be judged.`);
+    }
+  });
+
+  it("reads an interrupted turn (turn_aborted for that turn id) as interrupted, not pending forever", () => {
+    const aborted = file("aborted.jsonl", [
+      { type: "turn_context", timestamp: at(4), payload: { turn_id: "t4", effort: "high" } },
+      { type: "event_msg", timestamp: at(5), payload: { type: "turn_aborted", turn_id: "other-turn", reason: "interrupted" } },
+      { type: "event_msg", timestamp: at(6), payload: { type: "turn_aborted", turn_id: "t4", reason: "interrupted" } },
+    ]);
+    expect(readNativeEffort("codex", aborted, LSTART)).toMatchObject({ value: "high", outcome: "interrupted" });
+  });
+
   it("names a level the service rejected as rejected, never as the level in effect (measured on Codex 0.153.4)", () => {
     const rejected = file("rejected.jsonl", [
       { type: "turn_context", timestamp: at(4), payload: { turn_id: "t2", effort: "turbo" } },
       { type: "event_msg", timestamp: at(6), payload: { type: "task_complete", turn_id: "t2", last_agent_message: null,
-        error: { message: "Invalid value: 'turbo'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'." } } },
+        error: { codex_error_info: "other", message: "Invalid response.create payload: Invalid value: 'turbo'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'." } } },
     ]);
     const observed = readNativeEffort("codex", rejected, LSTART);
     expect(observed).toMatchObject({ state: "observed", value: "turbo", outcome: "rejected" });

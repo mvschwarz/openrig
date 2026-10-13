@@ -1671,6 +1671,7 @@ function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"]
     : observed.value;
   const verdict = observed.outcome === "accepted" ? "accepted by the service for that turn"
     : observed.outcome === "rejected" ? `REJECTED (${observed.detail})`
+    : observed.outcome === "failed" || observed.outcome === "interrupted" ? (observed.detail ?? "not judged").replace(/\.$/, "")
     : observed.outcome === "pending" ? "its turn hasn't finished, so not yet known whether it was taken"
     : "applied level NOT VERIFIED (whether this is after any model fallback isn't shown)";
   return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} The session sent ${sent} with its latest turn (${observed.source}, ${observed.at}): ${verdict}.`;

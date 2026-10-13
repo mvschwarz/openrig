@@ -106,13 +106,15 @@ export function emittedEffortFromArgv(runtime: EffortRuntime, argv: string[]): {
  * the model ran at it (measured: Codex records an unknown level the service then rejects). `outcome`
  * says what is known about that turn:
  * - accepted: Codex's turn completed without an error, so its service took the level;
- * - rejected: the turn ended in an error (the service's message is in `detail`);
+ * - rejected: the service rejected the request because of this level (its message names the value);
+ * - failed: the turn ended in another error (usage limit, unauthorized, other) before the level could be judged;
+ * - interrupted: the turn was aborted; not known whether the level was taken;
  * - pending: the turn hasn't finished;
  * - recorded: Claude wrote the level on an answered turn; whether that is the level before or after
  *   a model fallback isn't shown, so it stays unproven as the applied level.
  */
 export type NativeEffortObservation =
-  | { state: "observed"; value: string; at: string; source: string; outcome: "accepted" | "rejected" | "pending" | "recorded"; detail?: string }
+  | { state: "observed"; value: string; at: string; source: string; outcome: "accepted" | "rejected" | "failed" | "interrupted" | "pending" | "recorded"; detail?: string }
   | { state: "not_verified"; detail: string };
 
 const TAIL_BYTES = 4_000_000;
@@ -162,26 +164,45 @@ export function readNativeEffort(runtime: EffortRuntime, transcriptPath: string 
       };
     }
     const turnId = (entry["payload"] as Record<string, unknown> | undefined)?.["turn_id"];
-    return { state: "observed", value: value.trim(), at, source: "Codex rollout (latest turn_context)", ...codexTurnOutcome(lines.slice(index + 1), turnId, parse) };
+    return { state: "observed", value: value.trim(), at, source: "Codex rollout (latest turn_context)", ...codexTurnOutcome(lines.slice(index + 1), turnId, value.trim(), parse) };
   }
   return { state: "not_verified", detail: "The session has recorded no turn with an effort since this process started; it shows once the seat takes a turn." };
 }
 
-/** How the Codex turn that sent the level ended: its task_complete event, matched by turn id. */
-function codexTurnOutcome(after: string[], turnId: unknown, parse: (line: string) => Record<string, unknown> | null):
-  { outcome: "accepted" | "rejected" | "pending"; detail?: string } {
+/** How the Codex turn that sent the level ended: its task_complete or turn_aborted event, matched by turn id. */
+function codexTurnOutcome(after: string[], turnId: unknown, level: string, parse: (line: string) => Record<string, unknown> | null):
+  { outcome: "accepted" | "rejected" | "failed" | "interrupted" | "pending"; detail?: string } {
   for (const line of after) {
-    if (!line.includes("task_complete")) continue;
+    if (!line.includes("task_complete") && !line.includes("turn_aborted")) continue;
     const payload = parse(line.trim())?.["payload"] as Record<string, unknown> | undefined;
-    if (payload?.["type"] !== "task_complete" || (typeof turnId === "string" && payload["turn_id"] !== turnId)) continue;
-    const error = payload["error"] as { message?: unknown } | null | undefined;
+    const type = payload?.["type"];
+    if ((type !== "task_complete" && type !== "turn_aborted") || (typeof turnId === "string" && payload!["turn_id"] !== turnId)) continue;
+    if (type === "turn_aborted") {
+      return { outcome: "interrupted", detail: "The turn was interrupted; it isn't known whether this level was taken." };
+    }
+    const error = payload!["error"] as { message?: unknown; codex_error_info?: unknown } | null | undefined;
     if (error) {
       const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-      return { outcome: "rejected", detail: `The turn ended in an error: ${message.slice(0, 400)}` };
+      if (namesRejectedLevel(message, level)) return { outcome: "rejected", detail: `The service rejected the request: ${message.slice(0, 400)}` };
+      return { outcome: "failed", detail: `The turn failed (${errorKind(error.codex_error_info)}) before this level could be judged.` };
     }
     return { outcome: "accepted", detail: "The turn completed without an error, so the Codex service took this level." };
   }
   return { outcome: "pending", detail: "The turn that sent this level hasn't finished." };
+}
+
+/** The request rejection Codex's service returns for an unknown effort level (measured on 0.153.4):
+ *  "Invalid value: '<level>'. Supported values are: …". Only that, naming this level, is a rejection. */
+function namesRejectedLevel(message: string, level: string): boolean {
+  const named = message.match(/Invalid value: '([^']*)'/);
+  return !!named && named[1] === level && /Supported values/.test(message);
+}
+
+function errorKind(info: unknown): string {
+  const kind = typeof info === "string" ? info
+    : info && typeof info === "object" ? Object.keys(info as Record<string, unknown>)[0]
+    : undefined;
+  return kind === "usage_limit_exceeded" ? "usage limit" : kind === "unauthorized" ? "unauthorized" : kind ? kind.replace(/_/g, " ") : "other";
 }
 
 function readTail(filePath: string, maxBytes: number): string {
