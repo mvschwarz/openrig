@@ -196,10 +196,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       }
       let refreshExit = 0;
       if (opts.refresh) {
-        // The daemon's worst case is a read's deadline (Codex 35 s, Claude 45 s) plus stopping the reader
-        // (Codex: stdin EOF, TERM, KILL and reap, up to 2 s each: ~8 s), so ~45 s before it answers. Wait
-        // 60 s so a slow-dying child never turns the daemon's answer into a transport error here. Both
-        // providers are read in parallel unless --provider names one.
+        // The daemon's worst case is a read's deadline plus stopping what it started: Codex 35 s plus ~8 s
+        // (stdin EOF, TERM, KILL and reap, up to 2 s each); Claude 45 s plus ~9 s (exit keys, the pane's
+        // process group TERM/KILL, the private server). Wait 60 s so a slow-dying child never turns the
+        // daemon's answer into a transport error here. Both providers are read in parallel unless
+        // --provider names one.
         const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
         const answered = await Promise.all(providers.map(async (provider) => ({
           provider,
