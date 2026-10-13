@@ -104,7 +104,7 @@ export type StartupResult = { warnings?: string[] } & (
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
   // not persisted on the failure event.
-  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string });
+  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string; missingConversation?: true });
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -392,7 +392,7 @@ export class StartupOrchestrator {
           }
 
           errors.push(`Harness launch failed: ${launchResult.error}`);
-          return this.fail(input, "failed", errors, undefined, false, launchResult.recovery);
+          return this.fail(input, "failed", errors, undefined, false, launchResult.recovery, launchResult.missingConversation === true);
         }
       } catch (err) {
         errors.push(`Harness launch error: ${(err as Error).message}`);
@@ -632,6 +632,7 @@ export class StartupOrchestrator {
     evidence?: string,
     freshContextPending = false,
     recovery?: string,
+    missingConversation = false,
   ): StartupResult {
     if (status === "attention_required" && freshContextPending && input.binding.tmuxSession) {
       errors.push(`After resolving it in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);
@@ -646,7 +647,8 @@ export class StartupOrchestrator {
       ...(freshContextPending ? { freshContextPending: true } : {}),
       ...(input.submissionDiagnostics?.length ? { submissionDiagnostics: input.submissionDiagnostics } : {}),
     });
-    return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}) };
+    return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}),
+      ...(missingConversation ? { missingConversation: true as const } : {}) };
   }
 
   private async executeActions(
