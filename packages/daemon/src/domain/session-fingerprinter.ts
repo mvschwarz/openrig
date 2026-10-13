@@ -120,7 +120,7 @@ export class SessionFingerprinter {
       }
 
       for (const pattern of AGY_PROCESS_PATTERNS) {
-        if (cmd.includes(pattern)) {
+        if (processNameIs(cmd, pattern) || (pattern === "antigravity" && cmd.includes(pattern))) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "agy", confidence: "high", evidence };

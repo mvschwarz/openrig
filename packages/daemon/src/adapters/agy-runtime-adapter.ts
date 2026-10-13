@@ -42,6 +42,7 @@ export interface AgyRuntimeAdapterDeps {
 export function defaultCaptureAgyConversationId(
   dbPath: string,
   cwd: string,
+  sinceEpochMs?: number,
 ): string | null {
   try {
     const db = new Database(dbPath, { readonly: true });
@@ -53,12 +54,24 @@ export function defaultCaptureAgyConversationId(
       const resolvedCwd = nodePath.resolve(cwd);
       const cwdUri = `file://${resolvedCwd}`;
       for (const row of rows) {
-        if (row.workspace_uris && row.workspace_uris.includes(cwdUri)) {
-          return row.conversation_id;
+        if (sinceEpochMs) {
+          const modTime = new Date(row.last_modified_time).getTime();
+          if (!isNaN(modTime) && modTime < sinceEpochMs - 2000) {
+            continue;
+          }
         }
-      }
-      if (rows.length > 0 && rows[0]?.conversation_id) {
-        return rows[0].conversation_id;
+        if (row.workspace_uris) {
+          try {
+            const uris = JSON.parse(row.workspace_uris);
+            if (Array.isArray(uris) && uris.includes(cwdUri)) {
+              return row.conversation_id;
+            }
+          } catch {
+            if (row.workspace_uris.includes(`"${cwdUri}"`)) {
+              return row.conversation_id;
+            }
+          }
+        }
       }
     } finally {
       db.close();
@@ -85,7 +98,7 @@ export class AgyRuntimeAdapter implements RuntimeAdapter {
     this.dbPath = deps.dbPath ?? nodePath.join(home, ".gemini", "antigravity-cli", "conversation_summaries.db");
     this.launchPath = deps.launchPath;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.captureConvId = deps.captureConversationId ?? ((cwd) => defaultCaptureAgyConversationId(this.dbPath, cwd));
+    this.captureConvId = deps.captureConversationId ?? ((cwd, sinceEpochMs) => defaultCaptureAgyConversationId(this.dbPath, cwd, sinceEpochMs));
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {

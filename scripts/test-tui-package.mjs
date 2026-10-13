@@ -48,7 +48,8 @@ async function assertDelayedSplits(entry, pkgDir) {
 try {
   execFileSync("npm", ["run", "build:package"], { cwd: root, stdio: "inherit" });
   const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], { cwd: cli, encoding: "utf8" }));
-  const tarball = path.join(temp, packed[0].filename);
+  const record = Array.isArray(packed) ? packed[0] : (packed && typeof packed === "object" ? Object.values(packed)[0] : undefined);
+  const tarball = path.join(temp, record.filename);
   execFileSync("tar", ["-xzf", tarball, "-C", temp]);
 
   const pkgDir = path.join(temp, "package");
@@ -68,7 +69,7 @@ try {
   });
   assert.equal(launched.status, 0, launched.stderr || `packed TUI exited ${launched.status}`);
   await assertDelayedSplits(entry, pkgDir);
-  console.log(`packed TUI launch PASS: ${packed[0].filename}`);
+  console.log(`packed TUI launch PASS: ${record.filename}`);
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

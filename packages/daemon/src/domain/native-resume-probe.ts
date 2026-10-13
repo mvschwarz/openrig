@@ -274,7 +274,7 @@ export function assessNativeResumeProbe(
         detail: "Antigravity is running with an active interactive TUI in the probe pane.",
       };
     }
-    if (paneCommand === "agy") {
+    if (paneCommand === "agy" || paneCommand === "antigravity") {
       return {
         status: "resumed",
         code: "active_runtime",
@@ -473,9 +473,13 @@ function looksLikeCodexModelSelectionPrompt(paneContent: string): boolean {
 }
 
 function looksLikeAgyTui(paneContent: string): boolean {
-  return (
+  if (
     paneContent.includes("Antigravity CLI")
     || paneContent.includes("? for shortcuts")
-    || /(^|\n)\s*>\s*/.test(paneContent)
-  );
+    || /agy\s*>/i.test(paneContent)
+  ) {
+    return true;
+  }
+  const hasAgyContext = /antigravity/i.test(paneContent) || /gemini/i.test(paneContent);
+  return hasAgyContext && /(^|\n)\s*>\s*/.test(paneContent);
 }

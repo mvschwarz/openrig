@@ -160,7 +160,8 @@ function derivePackageArtifacts(packageRoot) {
   } catch (error) {
     throw new Error(`npm artifact enumeration did not return JSON: ${error.message}`);
   }
-  const rawFiles = parsed?.[0]?.files;
+  const record = Array.isArray(parsed) ? parsed[0] : (parsed && typeof parsed === "object" ? Object.values(parsed)[0] : undefined);
+  const rawFiles = record?.files;
   if (!Array.isArray(rawFiles)) throw new Error("npm artifact enumeration returned no files array");
   const files = rawFiles.map((entry) => entry?.path).filter((path) => typeof path === "string");
   if (files.length !== rawFiles.length || files.length === 0) {

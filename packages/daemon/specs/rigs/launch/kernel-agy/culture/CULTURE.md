@@ -36,7 +36,7 @@ machine and have things happen.
 - **Kernel auto-boot has two distinct lifecycle phases.**
   - *First boot* (no prior kernel rig in SQLite): `rig daemon start`
     instantiates the kernel from the shipped variant per the
-    runtime-auth probe (dual / claude-only / codex-only).
+    runtime-auth probe (dual / claude-only / codex-only / agy-only).
   - *Subsequent daemon-restarts*: the kernel rig record persists in
     SQLite. The daemon's kernel-boot path short-circuits
     `already-managed` — no re-instantiation, no fresh agents. Member
@@ -48,8 +48,8 @@ machine and have things happen.
   Other rigs are NOT auto-instantiated by the daemon at any point —
   they require explicit operator-initiated `rig up` / `rig restore`
   via the agent-driven workflow.
-- **Honest auth-block, not silent fallback.** If neither Claude Code
-  nor Codex is authenticated, the daemon refuses to boot the kernel
+- **Honest auth-block, not silent fallback.** If none of Claude Code,
+  Codex, or Antigravity is authenticated, the daemon refuses to boot the kernel
   and surfaces a 3-part error (fact / reason / fix) per the
   building-agent-software skill discipline. No best-effort
   half-booted state.

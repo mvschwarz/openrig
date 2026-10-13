@@ -55,8 +55,8 @@ export function classifyPaneRuntimeMatch(
   if (expectedRuntime === "agy" && (cmd.includes("agy") || cmd.includes("antigravity"))) return "match";
 
   // Cross-runtime contradiction (a DIFFERENT agent occupies the pane).
-  if (expectedRuntime === "claude-code" && (cmd.includes("codex") || cmd.includes("agy"))) return "mismatch";
-  if (expectedRuntime === "codex" && (cmd.includes("claude") || cmd.includes("agy"))) return "mismatch";
+  if (expectedRuntime === "claude-code" && (cmd.includes("codex") || cmd.includes("agy") || cmd.includes("antigravity"))) return "mismatch";
+  if (expectedRuntime === "codex" && (cmd.includes("claude") || cmd.includes("agy") || cmd.includes("antigravity"))) return "mismatch";
   if (expectedRuntime === "agy" && (cmd.includes("claude") || cmd.includes("codex"))) return "mismatch";
 
   // A bare shell where an agent runtime was expected — the agent process is
