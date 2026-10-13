@@ -26,6 +26,9 @@ interface WorldOptions {
   shape?: Shape;
   runningArgs?: string;
   savedModel?: string | null;
+  /** Shell-backed only: the command line of a process between the pane shell and Codex (OpenRig's
+   *  staged launch script, or something else). */
+  between?: string;
   activity?: ArbitratedSeatState | null;
   launch?: HarnessLaunchResult;
   codexIgnoresSignals?: boolean;
@@ -76,7 +79,10 @@ function world(options: WorldOptions = {}) {
 
   const runningArgs = options.runningArgs ?? `-m gpt-5.5 -s workspace-write resume ${TOKEN}`;
   let rows: NativeProcessRow[] = shape === "shell_backed"
-    ? [shellRow(100, 200), codexRow(200, 100, runningArgs)]
+    ? options.between
+      ? [shellRow(100, 150), { pid: 150, ppid: 100, pgid: 150, tpgid: 150, executableName: options.between.split(" ")[0]!.split("/").pop()!, command: options.between, startedAt: LSTART },
+        codexRow(200, 150, runningArgs, LSTART, 150)]
+      : [shellRow(100, 200), codexRow(200, 100, runningArgs)]
     : [codexRow(100, 1, runningArgs, LSTART, 100)];
   let paneCommand = "codex";
   let dead = false;
@@ -109,7 +115,8 @@ function world(options: WorldOptions = {}) {
     signalPid: async (pid: number, signal: string): Promise<TmuxResult> => {
       calls.push(`signalPid ${pid} ${signal}`);
       maybeThrow("signalPid");
-      if (!options.codexIgnoresSignals) { rows = rows.filter((row) => row.executableName !== "codex"); paneCommand = "bash"; }
+      // The launch script ends with Codex, so its sh exits too.
+      if (!options.codexIgnoresSignals) { rows = rows.filter((row) => row.executableName !== "codex" && row.pid !== 150); paneCommand = "bash"; }
       return { ok: true };
     },
     signalPaneProcess: async (_pane: string, signal: string): Promise<TmuxResult> => {
@@ -237,6 +244,26 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect(await home.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ code: "settings_drift", detail: { differs: ["codex home"] } });
     const cwd = world({ facts: { 200: facts(), 100: facts({ cwd: "/elsewhere" }) } });
     expect(await cwd.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ code: "settings_drift", detail: { differs: ["cwd"] } });
+  });
+
+  it("accepts a Codex launched through OpenRig's staged launch script, and only that script, between shell and Codex", async () => {
+    const staged = "/bin/sh /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt";
+    const w = world({ between: staged });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, paneShape: "shell_backed" });
+    const done = await w.service.restartInPlace({ seatRef: SEAT, reason: "new account" });
+    expect(done).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: "shell_backed" });
+    expect(w.calls).toContain("signalPid 200 TERM");
+    for (const other of [
+      "/bin/sh /home/u/run-codex.sh",
+      "/bin/sh /tmp/openrig-tmux-send-1.txt",
+      "/bin/sh -c /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
+      "/usr/bin/script -q /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
+      "/bin/sh tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
+    ]) {
+      const refused = world({ between: other });
+      expect(await refused.service.restartInPlace({ seatRef: SEAT, plan: true }), other).toMatchObject({ ok: false, code: "pane_shape_unknown" });
+      expect(refused.calls, other).toEqual([]);
+    }
   });
 
   it("refuses when the running Codex is on another conversation, or none can be proven", async () => {
