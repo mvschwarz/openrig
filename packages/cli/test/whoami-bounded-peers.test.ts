@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { ConfigStore } from "../src/config-store.js";
 import { Command } from "commander";
 import { whoamiCommand, boundPeers } from "../src/commands/whoami.js";
@@ -233,8 +234,11 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
   });
 
   it("the bound set in the config file applies, as `rig config get` reports it", async () => {
-    const configPath = path.join(process.env.OPENRIG_HOME!, "config.json");
+    // Its own scratch home, so the test never depends on the suite's (or the caller's) OPENRIG_HOME.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "whoami-peers-home-"));
+    vi.stubEnv("OPENRIG_HOME", home);
     try {
+      expect(new ConfigStore().configPath).toBe(path.join(home, "config.json"));
       new ConfigStore().set("output.compact", "true");
       new ConfigStore().set("output.whoami_peers", "5");
       expect(new ConfigStore().resolveWithSource("output.whoami_peers")).toMatchObject({ value: 5, source: "file" });
@@ -242,14 +246,15 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
       expect(out.peers).toHaveLength(5);
       expect(out.peersOmitted).toBe(18);
     } finally {
-      fs.rmSync(configPath, { force: true });
+      // OPENRIG_HOME is restored by afterEach's vi.unstubAllEnvs(); remove only this test's own home.
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });
 
 describe("output.whoami_peers: registered like output.compact", () => {
   let home: string;
-  beforeEach(() => { vi.unstubAllEnvs(); home = fs.mkdtempSync(path.join(process.env.OPENRIG_HOME ?? "/tmp", "peers-")); });
+  beforeEach(() => { vi.unstubAllEnvs(); home = fs.mkdtempSync(path.join(os.tmpdir(), "whoami-peers-config-")); });
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); fs.rmSync(home, { recursive: true, force: true }); });
 
   it("defaults to 8 and accepts only an integer >= 1", () => {
