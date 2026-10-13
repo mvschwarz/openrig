@@ -294,6 +294,22 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     expect(commands.map((c) => c.includes("--usage-facts"))).toEqual([false, false, true]);
   });
 
+  it("OPR.0.7.0.2 K4: --openrouter-charge only with usage facts on too, read at each launch; off by default", async () => {
+    const settings = [{ facts: false, charge: true }, { facts: true, charge: false }, { facts: true, charge: true }];
+    const commands: string[] = [];
+    for (const deps of [{}, ...settings.map((x) => ({ usageFactsEnabled: () => x.facts, openRouterChargeEnabled: () => x.charge }))]) {
+      const fs = memFs();
+      const sendShellCommand = vi.fn(async (_t: string, text: string) => {
+        fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
+        commands.push(text);
+        return { ok: true as const };
+      });
+      const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
+      expect((await adapter.launchHarness(binding, { name: SESSION })).ok).toBe(true);
+    }
+    expect(commands.map((c) => c.includes("--openrouter-charge"))).toEqual([false, false, false, true]);
+  });
+
   it("explicit approve posture is honored end-to-end", async () => {
     const fs = memFs();
     let cmd = "";

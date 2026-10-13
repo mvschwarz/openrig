@@ -198,3 +198,25 @@ describe("rig usage cost: Pi seats (OPR.0.7.0.2)", () => {
     expect(absent).not.toContain("$0.00");
   });
 });
+
+describe("rig usage cost: OpenRouter charge beside the Pi estimate (OPR.0.7.0.2 K4)", () => {
+  const seat = (providerCharge: Record<string, unknown>) => ({ seatSession: "devpi@r", runtime: "pi", status: "reported", costUsd: 0.18,
+    window: { piSessionId: "s1" }, entries: { own: 4 }, tokens: { input: 1, output: 1 }, providerCharge });
+  it("names the provider charge, its coverage and account context, apart from the estimate", async () => {
+    const { costLine } = await import("../src/commands/usage.js");
+    const line = costLine(seat({ status: "partial", costUsd: 0.042, estimateForChargedUsd: 0.03,
+      requests: { covered: 3, charged: 2, pending: 0, unavailable: { count: 1, reasons: { "not available after 5 lookups (last: HTTP 404)": 1 } }, notCovered: { count: 1 } },
+      accountContext: { credentialSources: ["OPENROUTER_API_KEY (forwarded by OpenRig)"] } }));
+    expect(line).toContain("$0.18 model-priced estimate");
+    expect(line).toContain("OpenRouter charge $0.04 USD for 2 of 3 requests via OPENROUTER_API_KEY (forwarded by OpenRig), Pi estimate for them $0.03");
+    expect(line).toContain("1 unavailable (not available after 5 lookups (last: HTTP 404)), 1 not covered (provider-reported, not added to the estimate)");
+  });
+  it("says unavailable or not looked up, never a $0 charge", async () => {
+    const { costLine } = await import("../src/commands/usage.js");
+    const unavailable = costLine(seat({ status: "unavailable", requests: { covered: 1, unavailable: { count: 1, reasons: { "HTTP 401": 1 } }, notCovered: { count: 0 } } }));
+    expect(unavailable).toContain("OpenRouter charge unavailable (HTTP 401)");
+    expect(unavailable).not.toContain("$0.00");
+    expect(costLine(seat({ status: "none", requests: { covered: 2, notCovered: { count: 0 } } }))).toContain("OpenRouter charge not looked up");
+    expect(costLine(seat({ status: "not-applicable", requests: { covered: 0, notCovered: { count: 0 } } }))).not.toContain("OpenRouter");
+  });
+});

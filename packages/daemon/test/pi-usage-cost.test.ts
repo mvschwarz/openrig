@@ -379,8 +379,8 @@ describe("POST /api/activity/pi-usage", () => {
 
   it("stores the facts once; a repeated post (replay, restart) stores nothing new", async () => {
     const a = app();
-    expect(await (await a.post(body)).json()).toEqual({ ok: true, stored: 7, duplicates: 0, rejected: 0 });
-    expect(await (await a.post(body)).json()).toEqual({ ok: true, stored: 0, duplicates: 7, rejected: 0 });
+    expect(await (await a.post(body)).json()).toEqual({ ok: true, stored: 7, duplicates: 0, rejected: 0, charged: [] });
+    expect(await (await a.post(body)).json()).toEqual({ ok: true, stored: 0, duplicates: 7, rejected: 0, charged: [] });
     expect(a.d.prepare("SELECT seat_session, occupant_generation FROM pi_usage_entries LIMIT 1").get()).toEqual({ seat_session: SESSION, occupant_generation: "gen-2" });
   });
 

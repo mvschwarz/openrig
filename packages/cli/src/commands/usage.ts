@@ -67,7 +67,32 @@ function piCostLine(seat: CostPayload["seats"][number]): string {
   const head = seat.status === "reported"
     ? `${formatUsd(Number(seat["costUsd"]))} model-priced estimate (Pi persisted entries, ${e.own ?? 0} own entries) for Pi session ${w.piSessionId}${w.since ? ` since ${w.since}` : ""}${w.asOf ? `, last ${w.asOf}` : ""}`
     : `cost: not reported (${seat["reason"]}) for Pi session ${w.piSessionId}`;
-  return `${seat.seatSession}  ${head}${extras ? `; ${extras}` : ""}  tokens in ${t.input ?? "?"} / out ${t.output ?? "?"}`;
+  const charge = providerChargeText(seat["providerCharge"]);
+  return `${seat.seatSession}  ${head}${extras ? `; ${extras}` : ""}${charge ? `; ${charge}` : ""}  tokens in ${t.input ?? "?"} / out ${t.output ?? "?"}`;
+}
+
+/** OpenRouter's actual charge, beside the estimate: never summed with it, and named when it isn't there. */
+function providerChargeText(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const c = raw as { status?: string; costUsd?: number; estimateForChargedUsd?: number | null;
+    requests?: { covered?: number; charged?: number; pending?: number; unavailable?: { count: number; reasons: Record<string, number> };
+      notCovered?: { count: number } }; accountContext?: { credentialSources?: string[]; workspaceIds?: string[] } };
+  const q = c.requests ?? {};
+  const top = (reasons: Record<string, number> | undefined) => Object.entries(reasons ?? {}).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const notCovered = q.notCovered?.count ? `, ${q.notCovered.count} not covered` : "";
+  switch (c.status) {
+    case "reported":
+    case "partial": {
+      const beside = c.estimateForChargedUsd !== null && c.estimateForChargedUsd !== undefined ? `, Pi estimate for them ${formatUsd(c.estimateForChargedUsd)}` : "";
+      const rest = [q.pending ? `${q.pending} pending` : "", q.unavailable?.count ? `${q.unavailable.count} unavailable (${top(q.unavailable.reasons)})` : ""].filter(Boolean).join(", ");
+      const who = c.accountContext?.credentialSources?.length ? ` via ${c.accountContext.credentialSources.join(", ")}` : "";
+      return `OpenRouter charge ${formatUsd(Number(c.costUsd))} USD for ${q.charged} of ${q.covered} requests${who}${beside}${rest ? `; ${rest}` : ""}${notCovered} (provider-reported, not added to the estimate)`;
+    }
+    case "pending": return `OpenRouter charge pending for ${q.pending} request${q.pending === 1 ? "" : "s"}${notCovered}`;
+    case "unavailable": return `OpenRouter charge unavailable (${top(q.unavailable?.reasons)})${notCovered}`;
+    case "none": return q.covered ? `OpenRouter charge not looked up (usage.pi_openrouter_charge off, or not run yet)${notCovered}` : (q.notCovered?.count ? `OpenRouter charge: ${q.notCovered.count} request${q.notCovered.count === 1 ? "" : "s"} not covered` : "");
+    default: return "";
+  }
 }
 
 /** One labelled line per seat. Never prints a dollar figure the route didn't report. */
@@ -167,7 +192,10 @@ method reports no cost. A missing figure reads as missing and an old one as stal
 subscription window is shown in dollars. Earlier values stay in rig usage series --lane context.
 With usage.pi_cost_facts on (default off), Pi seats show Pi's model-priced estimate summed over
 their own persisted session entries, each counted once; entries a fork copied in are shown apart and
-not counted, and an entry without a cost is named, not counted as zero.`)
+not counted, and an entry without a cost is named, not counted as zero.
+With usage.pi_openrouter_charge on as well (default off), OpenRouter's actual charge for those requests
+is shown beside the estimate (never added to it), when the seat's OpenRouter key is the one OpenRig
+forwarded; requests it can't charge are counted with the reason.`)
     .action(async (opts: { seat?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);

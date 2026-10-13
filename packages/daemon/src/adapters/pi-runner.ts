@@ -27,8 +27,9 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
-import { piCredentialNotice } from "./pi-readiness.js";
-import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary } from "../domain/pi-usage-facts.js";
+import { piCredentialNotice, piCredentialSource } from "./pi-readiness.js";
+import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
+import { OpenRouterChargeLookup, openRouterGenerationFetcher } from "./pi-openrouter-charge.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -293,7 +294,10 @@ export interface RunnerIo {
   stopChild?(): void;
   /** OPR.0.7.0.2 (only with --usage-facts): POST usage facts from persisted entries to the daemon. Best-effort;
    *  resolves true only when the daemon accepted them. */
-  postUsageFacts?(payload: Record<string, unknown>): Promise<boolean>;
+  postUsageFacts?(payload: Record<string, unknown>): Promise<boolean | { charged: string[] }>;
+  /** OPR.0.7.0.2 K4 (only with --openrouter-charge): queue OpenRouter charge lookups for facts the daemon stored;
+   *  `charged` already have a charge there. */
+  enqueueChargeLookups?(piSessionId: string, facts: PiUsageFact[], charged: ReadonlySet<string>): void;
   /** The first line of a Pi session file (its header), or null when it can't be read. */
   readFirstLine?(path: string): string | null;
   /** The entry ids of a complete, valid Pi session file (a fork's parent); null when it isn't one. Never blocks. */
@@ -397,7 +401,7 @@ export class RunnerCore {
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean } = {},
+    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -571,11 +575,16 @@ export class RunnerCore {
       forked: this.usageBoundary ? this.usageBoundary.parentSession !== null : null,
       facts: fresh,
       malformed,
-    }).then((accepted) => {
+    }).then((result) => {
       // Only a stored fact with a known origin is done: a failed post, or an origin not settled yet (no readable
       // header, or a tie with an unreadable parent), is sent again with the next refresh (the store upgrades an
       // unknown origin once it is known).
-      if (accepted) for (const fact of fresh) if (fact.origin !== "unknown") this.postedUsageEntryIds.add(fact.entryId);
+      if (result === false) return;
+      for (const fact of fresh) if (fact.origin !== "unknown") this.postedUsageEntryIds.add(fact.entryId);
+      // K4: the charge is looked up only for facts the daemon has stored, never for one it already has.
+      if (this.opts.openRouterCharge && this.sessionId && this.io.enqueueChargeLookups) {
+        this.io.enqueueChargeLookups(this.sessionId, fresh, new Set(typeof result === "object" ? result.charged : []));
+      }
     }, () => { /* best-effort: resent on the next refresh */ });
   }
 
@@ -735,6 +744,7 @@ interface RunnerArgs {
   forkRef?: string;
   /** OPR.0.7.0.2: report usage facts from persisted entries (the daemon passes it when usage.pi_cost_facts is on). */
   usageFacts?: boolean;
+  openRouterCharge?: boolean;
 }
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
@@ -761,6 +771,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--session": args.sessionFile = next(); break;
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
+      case "--openrouter-charge": args.openRouterCharge = true; break;
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -1000,6 +1011,28 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // The child may close its pipe before the first RPC write completes.
   child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
 
+  // OPR.0.7.0.2 K4: OpenRouter's charge, looked up with the key this runner forwarded to Pi, only while Pi's own
+  // credential source for OpenRouter is that key (checked from metadata before every lookup).
+  const chargeLookup = new OpenRouterChargeLookup({
+    credentialSource: () => piCredentialSource({ model: "openrouter/charge-lookup", agentDir: paths.agentDir, env: childEnv, readFile: (file) => {
+      if (fs.statSync(file).size > 1024 * 1024) throw new Error("Unbounded metadata");
+      return fs.readFileSync(file, "utf8");
+    } }),
+    fetchGeneration: openRouterGenerationFetcher(() => childEnv["OPENROUTER_API_KEY"]),
+    postCharges: async (piSessionId, charges) => {
+      if (!endpoint || typeof fetch !== "function") return false;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      return fetch(new URL("/api/activity/pi-usage-charges", endpoint.baseUrl).toString(), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
+        body: JSON.stringify({ sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, piSessionId, charges }),
+        signal: controller.signal,
+      }).then((res) => res.ok, () => false).finally(() => clearTimeout(timeout));
+    },
+    schedule: (fn, ms) => { setTimeout(fn, ms).unref(); },
+  });
+
   const io: RunnerIo = {
     sendRpc: (cmd) => {
       try { child.stdin.write(`${JSON.stringify(cmd)}\n`); } catch { /* exit handler reports */ }
@@ -1044,8 +1077,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
         body: JSON.stringify(payload),
         signal: controller.signal,
-      }).then((res) => res.ok, () => false /* best-effort: a later refresh re-sends what wasn't stored */).finally(() => clearTimeout(timeout));
+      }).then(async (res) => {
+        if (!res.ok) return false;
+        const reply = await res.json().catch(() => null) as { charged?: unknown } | null;
+        return { charged: Array.isArray(reply?.charged) ? reply.charged.filter((id): id is string => typeof id === "string") : [] };
+      }, () => false /* best-effort: a later refresh re-sends what wasn't stored */).finally(() => clearTimeout(timeout));
     },
+    ...(args.openRouterCharge === true && runtime === "pi" ? {
+      enqueueChargeLookups: (piSessionId: string, facts: PiUsageFact[], charged: ReadonlySet<string>) =>
+        chargeLookup.enqueue(piSessionId, facts, charged),
+    } : {}),
     readFirstLine: (path) => {
       try {
         const fd = fs.openSync(path, "r");
@@ -1065,7 +1106,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true });
+  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true });
 
   let transportUp = runtime === "pi";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

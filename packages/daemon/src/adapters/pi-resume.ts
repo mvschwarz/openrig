@@ -38,6 +38,8 @@ interface PiResumeOptions {
   newLaunchId?: () => string;
   /** OPR.0.7.0.2: whether usage.pi_cost_facts is on, read at each resume (absent = off). */
   usageFactsEnabled?: () => boolean;
+  /** OPR.0.7.0.2 K4: whether usage.pi_openrouter_charge is on, read at each resume (absent = off). */
+  openRouterChargeEnabled?: () => boolean;
 }
 
 export class PiResumeAdapter {
@@ -111,6 +113,7 @@ export class PiResumeAdapter {
       sessionFile,
       launchId,
       usageFacts: this.runtime === "pi" && (this.options.usageFactsEnabled?.() ?? false),
+      openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
     });
 
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment

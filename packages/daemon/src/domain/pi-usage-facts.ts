@@ -40,6 +40,10 @@ export interface PiUsageFact {
   costTotal: number | null;
   /** An assistant turn's stop reason ("stop", "error", "aborted", ...), kept so error and abort usage is visible. */
   stopReason: string | null;
+  /** An assistant turn's Pi API ("openai-completions", "anthropic-messages", ...) and the provider's response id
+   *  Pi recorded for it; null otherwise. They tie the turn to a provider's own record of the request. */
+  api?: string | null;
+  responseId?: string | null;
   origin: PiUsageOrigin;
 }
 
@@ -102,12 +106,16 @@ export function extractPiUsageFacts(entries: unknown[], boundary: PiSessionBound
     let model: string | null = null;
     let usageCategory: string | null = null;
     let stopReason: string | null = null;
+    let api: string | null = null;
+    let responseId: string | null = null;
     if (entry["type"] === "message" && message?.["role"] === "assistant") {
       kind = "assistant";
       usage = message["usage"];
       provider = str(message["provider"]);
       model = str(message["responseModel"]) ?? str(message["model"]);
       stopReason = str(message["stopReason"]);
+      api = str(message["api"]);
+      responseId = str(message["responseId"]);
     } else if (entry["type"] === "usage") {
       kind = "usage";
       usage = entry["usage"];
@@ -146,6 +154,8 @@ export function extractPiUsageFacts(entries: unknown[], boundary: PiSessionBound
       cacheWrite: num(u["cacheWrite"]) ?? 0,
       costTotal: cost,
       stopReason,
+      api,
+      responseId,
       origin: originOf(id, timestamp, boundary),
     });
   }

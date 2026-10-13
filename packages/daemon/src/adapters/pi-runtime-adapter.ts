@@ -61,6 +61,8 @@ export interface PiRuntimeAdapterDeps {
   newLaunchId?: () => string;
   /** OPR.0.7.0.2: whether usage.pi_cost_facts is on, read at each launch (absent = off). */
   usageFactsEnabled?: () => boolean;
+  /** OPR.0.7.0.2 K4: whether usage.pi_openrouter_charge is on, read at each launch (absent = off). */
+  openRouterChargeEnabled?: () => boolean;
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
@@ -74,9 +76,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private newLaunchId: () => string;
   private usageFactsEnabled: () => boolean;
+  private openRouterChargeEnabled: () => boolean;
 
   constructor(deps: PiRuntimeAdapterDeps) {
     this.usageFactsEnabled = deps.usageFactsEnabled ?? (() => false);
+    this.openRouterChargeEnabled = deps.openRouterChargeEnabled ?? (() => false);
     this.tmux = deps.tmux;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
@@ -279,6 +283,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       forkRef,
       launchId,
       usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
+      openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
     });
 
     const command = this.runtime === "pi" && this.seatLaunchEnvironment

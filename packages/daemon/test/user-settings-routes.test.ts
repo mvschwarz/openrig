@@ -113,7 +113,8 @@ describe("config routes (User Settings v0)", () => {
     // + 1 provider.usage_windows (slice 01 Codex usage windows; default off).
     // + 1 output.whoami_peers (slice 15 P5 whoami peer bound; default 8).
     // + 1 usage.pi_cost_facts (slice 02 Pi cost from persisted entries; default off).
-    expect(Object.keys(body.settings).length).toBe(77);
+    // + 1 usage.pi_openrouter_charge (slice 02 K4 OpenRouter charge beside the Pi estimate; default off).
+    expect(Object.keys(body.settings).length).toBe(78);
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });
     expect(body.settings["runtime.readiness_timeout_seconds"]).toMatchObject({ value: 30, source: "default" });
     expect(body.settings["ui.enabled"]).toMatchObject({ value: false, source: "default" });
