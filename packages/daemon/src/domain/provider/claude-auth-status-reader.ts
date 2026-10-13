@@ -6,7 +6,7 @@
 // closed, bounded (10 s); however it ends, its group is stopped (a moment, TERM, KILL) and the child reaped, so
 // nothing it started keeps running. Facts are taken only from an exit-0 answer, with one exception from Claude's
 // documented contract: logged out, it prints {"loggedIn": false, ...} and exits 1, which is not_logged_in (no
-// identity fact is taken from it). Only loggedIn, authMethod, email and orgId are read, plus orgName and
+// identity fact is taken from it). Any other nonzero exit is auth_status_failed, whatever it printed. Only loggedIn, authMethod, email and orgId are read, plus orgName and
 // subscriptionType as labels. It runs with the HOME, CLAUDE_CONFIG_DIR and PATH a seat session gets, without
 // TMUX, TMUX_PANE or any OpenRig seat variable. It starts a Claude CLI process, not a session; what that
 // process may write in the config dir is open for the native run. The reader never opens a credentials file.
@@ -172,8 +172,9 @@ export function claudeAuthStatusReader(options: ClaudeAuthReaderOptions = {}): C
     let parsed: unknown;
     try { parsed = JSON.parse(r.stdout); } catch { parsed = null; }
     if (r.code !== 0) {
-      // Facts come only from a command that succeeded. The one exception is Claude's logged-out answer.
-      if (!r.signal && isRecord(parsed) && parsed.loggedIn === false) {
+      // Facts come only from a command that succeeded. The one exception is Claude's documented logged-out answer:
+      // exit 1 exactly. Any other exit (9, a signal...) is an unexpected failure, whatever the JSON says.
+      if (!r.signal && r.code === 1 && isRecord(parsed) && parsed.loggedIn === false) {
         return fail("not_logged_in", `claude auth status reports no login (exit ${r.code ?? "?"})`);
       }
       return fail("auth_status_failed", `claude auth status failed (${r.signal ? `signal ${r.signal}` : `exit ${r.code ?? "?"}`})`);

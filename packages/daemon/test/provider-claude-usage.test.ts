@@ -50,10 +50,13 @@ describe("Claude windows: the seats' status-line samples", () => {
     const [row] = windowsWith(() => samples).project(NOW);
     expect(row!.windows).toHaveLength(1);
     expect(row!.windows[0]).toMatchObject({ usedPercent: 10, seatSession: "a@rig", level: "unknown",
-      levelReason: "Claude seats report different windows (possibly different logins): a@rig, b@rig" });
+      levelReason: "Claude seats report different windows (possibly different logins): a@rig, b@rig",
+      // Each disagreeing seat's own numbers, so which login is where reads from the row.
+      disagreeingSeats: [{ seatSession: "b@rig", usedPercent: 90, resetsAt: at(5000), observedAt: at(-2) }] });
     // A stale disagreeing seat doesn't count.
     const [later] = windowsWith(() => [sample("a@rig", "weekly", 10, at(-1), at(2000)), sample("b@rig", "weekly", 90, at(-30), at(5000))]).project(NOW);
     expect(later!.windows[0]!.level).toBe("ok");
+    expect(later!.windows[0]).not.toHaveProperty("disagreeingSeats");
   });
 
   it("no seat has reported: one explicit unavailable row", () => {
@@ -207,7 +210,8 @@ describe("claudeAuthStatusReader against a fake claude", () => {
 
   it("facts only from exit 0: any other nonzero answer, even valid logged-in JSON, is auth_status_failed", async () => {
     const fake = makeFakeClaude();
-    for (const [auth, exit] of [[CLAUDE_AUTH, 9], [{ authMethod: "claude.ai" }, 1], [{ loggedIn: "false" }, 1]] as const) {
+    // Only exit 1 is Claude's documented logged-out answer: {"loggedIn": false} with exit 9 is an unexpected failure.
+    for (const [auth, exit] of [[CLAUDE_AUTH, 9], [CLAUDE_LOGGED_OUT, 9], [CLAUDE_LOGGED_OUT, 2], [{ authMethod: "claude.ai" }, 1], [{ loggedIn: "false" }, 1]] as const) {
       fake.setPlan({ auth: [auth], authExit: [exit] });
       expect(await reader(fake)(), JSON.stringify(auth)).toMatchObject({ ok: false, reason: "auth_status_failed", detail: `claude auth status failed (exit ${exit})` });
     }

@@ -184,6 +184,9 @@ export interface UsageWindowRow {
   observedAt: string;
   /** Claude: the seat whose status-line sample this window is. */
   seatSession?: string;
+  /** Claude: other seats whose fresh readings of this window disagree (a reset more than 60 s apart), with their own
+   *  numbers, so which login is where can be read from the row. Present only when they disagree. */
+  disagreeingSeats?: Array<{ seatSession: string; usedPercent: number; resetsAt: string | null; observedAt: string }>;
   level: "ok" | "nearing" | "exhausted" | "unknown";
   levelReason?: string;
   freshness: "fresh" | "stale" | "unavailable";

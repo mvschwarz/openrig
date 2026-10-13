@@ -72,6 +72,14 @@ export function latestClaudeWindowSamples(db: Database.Database): ClaudeWindowSa
   return out;
 }
 
+/** Another seat's fresh reading of the same window that disagrees with the one shown (its own numbers). */
+export interface DisagreeingSeat {
+  seatSession: string;
+  usedPercent: number;
+  resetsAt: string | null;
+  observedAt: string;
+}
+
 /** One window as shown: the freshest sample, plus the other seats whose fresh samples disagree with it. */
 interface Pick {
   window: string;
@@ -80,7 +88,7 @@ interface Pick {
   resetsAt: string | null;
   observedAt: string;
   seatSession: string;
-  disagreeing: string[];
+  disagreeing: DisagreeingSeat[];
 }
 
 function sameReset(a: string | null, b: string | null): boolean {
@@ -98,7 +106,7 @@ export function pickClaudeWindows(samples: ClaudeWindowSample[], now: string): P
     if (!freshest) continue;
     const disagreeing = forWindow.slice(1)
       .filter((s) => usageFreshness(s.sampledAt, now, null).freshness === "fresh" && !sameReset(s.resetsAt, freshest.resetsAt))
-      .map((s) => s.seatSession);
+      .map((s) => ({ seatSession: s.seatSession, usedPercent: s.usedPercent, resetsAt: s.resetsAt, observedAt: s.sampledAt }));
     picks.push({ window, durationMins, usedPercent: freshest.usedPercent, resetsAt: freshest.resetsAt, observedAt: freshest.sampledAt, seatSession: freshest.seatSession, disagreeing });
   }
   return picks;
@@ -106,7 +114,7 @@ export function pickClaudeWindows(samples: ClaudeWindowSample[], now: string): P
 
 function windowRow(p: Pick, now: string, superseded: boolean): UsageWindowRow {
   const level = p.disagreeing.length > 0
-    ? { level: "unknown" as const, levelReason: `Claude seats report different windows (possibly different logins): ${[p.seatSession, ...p.disagreeing].join(", ")}` }
+    ? { level: "unknown" as const, levelReason: `Claude seats report different windows (possibly different logins): ${[p.seatSession, ...p.disagreeing.map((d) => d.seatSession)].join(", ")}` }
     : usageLevel({ window: p.window, durationMins: p.durationMins, usedPercent: p.usedPercent, resetsAt: p.resetsAt }, null, now);
   return {
     window: p.window,
@@ -116,6 +124,7 @@ function windowRow(p: Pick, now: string, superseded: boolean): UsageWindowRow {
     resetsAt: p.resetsAt,
     observedAt: p.observedAt,
     seatSession: p.seatSession,
+    ...(p.disagreeing.length > 0 ? { disagreeingSeats: p.disagreeing } : {}),
     ...level,
     ...usageFreshness(p.observedAt, now, null, superseded),
   };
