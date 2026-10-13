@@ -88,6 +88,46 @@ describe("boundedProbeExec", () => {
   });
 });
 
+describe("boundedProbeExec where a process group can't be signalled, and with a descendant holding the output", () => {
+  it("Windows-like: the group stop reaches nothing, so the probe process itself is killed", async () => {
+    const fake = fakeRuntime("hangy", "hang", "ok");
+    // A group stop that kills nothing, as on Windows where kill(-pid) throws and stopGroup gives up.
+    const noGroupKill = async () => {};
+    const started = performance.now();
+    // exec, so the probe process is the fake itself, not a shell around it.
+    const err = await boundedProbeExec(800, 300, { stopGroup: noGroupKill })(`exec ${path.join(fake.dir, "hangy")} --version`).catch((e) => e);
+    expect(err).toBeInstanceOf(ProbeTimeoutError);
+    expect(performance.now() - started).toBeLessThan(800 + 300 + 1_000);
+    const [s] = starts(fake.log);
+    const [probePid, childPid] = s!.pids;
+    // The probe itself is gone (killed, and reaped by the runner's bounded wait); its descendant survives, as on Windows.
+    expect(exists(probePid!), `probe ${probePid}`).toBe(false);
+    expect(exists(childPid!), `descendant ${childPid}`).toBe(true);
+    process.kill(-s!.pgid, "SIGKILL");
+    expect(await leftAfterReapBound(s!)).toEqual([]);
+  });
+
+  it("a probe that prints and exits 0 while a descendant keeps its output open answers at once; the descendant is ended", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-probe-bound-holder-"));
+    const log = path.join(dir, "pids");
+    const script = path.join(dir, "holder");
+    // Prints its version, leaves a child (same group, inheriting stdout) that ignores TERM, and exits 0.
+    fs.writeFileSync(script, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+require("node:fs").writeFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid, child: child.pid }));
+process.stdout.write("holder 4.5.6\\n", () => process.exit(0));
+`, { mode: 0o755 });
+    const started = performance.now();
+    expect(await boundedProbeExec(5_000, 300)(`${script} --version`)).toBe("holder 4.5.6\n");
+    expect(performance.now() - started).toBeLessThan(3_000);
+    const { child } = JSON.parse(fs.readFileSync(log, "utf8")) as { child: number };
+    const until = Date.now() + REAP_BOUND_MS;
+    while (Date.now() < until && exists(child)) await new Promise((r) => setTimeout(r, 50));
+    expect(exists(child), `descendant ${child}`).toBe(false);
+  });
+});
+
 describe("RuntimeVerifier with a bounded probe", () => {
   let db: Database.Database;
   let restorePath: string | undefined;
