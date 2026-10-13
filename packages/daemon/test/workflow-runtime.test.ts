@@ -148,6 +148,28 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
     expect(inspected.trail[0]!.nextQitemId).toBe(projected.nextQitemId);
   });
 
+  it("continue optionally returns complete newest-first history beyond the recent fifty entries", async () => {
+    const created = await runtime.instantiate({ specPath, rootObjective: "full history", createdBySession: "ops@rig" });
+    const instanceId = created.instance.instanceId;
+    for (let index = 0; index < 111; index++) {
+      runtime.trailLog.record({
+        instanceId, stepId: `proof-${index}`, stepRole: "producer", closedAt: "2026-10-13T00:00:00Z",
+        closureReason: "done", actorSession: "producer@rig", priorQitemId: created.entryQitemId,
+        closureEvidence: { index },
+      });
+    }
+    const before = runtime.instanceStore.getByIdOrThrow(instanceId);
+    const complete = runtime.continue(instanceId, { fullHistory: true });
+    expect(complete.trail).toHaveLength(111);
+    expect(complete.trailCompleteness).toBe("complete");
+    expect(complete.trail.map((entry) => entry.closureEvidence?.index)).toEqual(Array.from({ length: 111 }, (_, index) => 110 - index));
+    const recent = runtime.continue(instanceId);
+    expect(recent.trail).toHaveLength(50);
+    expect(recent.trailCompleteness).toBe("recent");
+    expect(recent.trail).toEqual(complete.trail.slice(0, 50));
+    expect(runtime.instanceStore.getByIdOrThrow(instanceId)).toEqual(before);
+  });
+
   // ── (a) atomicity pin: mid-transaction failure → ZERO partial state ─
 
   it("FR-1a atomicity pin: a failure injected AFTER the queue close (trail append) rolls back EVERYTHING — no closed packet without its next qitem, ever", async () => {
