@@ -288,16 +288,26 @@ function bounded(text: string, max: number, field: string): string {
   return text;
 }
 
+/** Longest tag value the gate context line shows, in characters, ellipsis included. */
+export const GATE_CONTEXT_VALUE_CAP = 80;
+
 /** PR #1143 review — the one-line workflow/instance context for a rendered human gate,
  * built from the row's own `workflow:` / `instance:` / `step:` tags. The step rides along
- * only when tagged. Missing tags render as `?` so the line never names the wrong workflow. */
+ * only when tagged. Missing tags render as `?` so the line never names the wrong workflow.
+ * A hand-made row can carry a tag of any length, so each value is redacted, then cut to
+ * GATE_CONTEXT_VALUE_CAP characters by code point, and only then is the line escaped: the
+ * cut never splits an escape or a surrogate pair, and a long tag can't stop the post. */
 export function buildGateContextLine(tags: readonly string[]): string {
-  const tagValue = (prefix: string): string =>
-    tags.find((t) => t.startsWith(`${prefix}:`))?.slice(prefix.length + 1) || "?";
+  const tagValue = (prefix: string): string => {
+    const raw = tags.find((t) => t.startsWith(`${prefix}:`))?.slice(prefix.length + 1);
+    if (!raw) return "?";
+    const chars = Array.from(redactSecrets(raw));
+    return chars.length > GATE_CONTEXT_VALUE_CAP ? `${chars.slice(0, GATE_CONTEXT_VALUE_CAP - 1).join("")}…` : chars.join("");
+  };
   const parts = [`Workflow ${tagValue("workflow")}`, `instance ${tagValue("instance")}`];
   const step = tagValue("step");
   if (step !== "?") parts.push(`step ${step}`);
-  return inert(parts.join(" · "));
+  return escapeSlackText(parts.join(" · "));
 }
 
 /** Pure, deterministic rendering. Queue metadata stays in the durable request;

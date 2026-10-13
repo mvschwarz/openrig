@@ -252,6 +252,19 @@ describe("#1013 — a workflow gate parked on a human seat renders the question,
     expect(instanceA.text).not.toContain("Continuation:");
   });
 
+  it("cuts very long workflow, instance and step tags so the gate still posts", () => {
+    const m = buildOutboundMessage({
+      ...gateRow,
+      tags: ["workflow", "gate", `workflow:${"w".repeat(5000)}`, `instance:${"<".repeat(2000)}`, `step:${"\u{1F600}".repeat(200)}`],
+    }, opts);
+    // Each value is cut to 79 characters plus an ellipsis before escaping, so no escape or emoji is split.
+    const line = `Workflow ${"w".repeat(79)}… · instance ${"&lt;".repeat(79)}… · step ${"\u{1F600}".repeat(79)}…`;
+    expect(m.text).toContain(line);
+    expect(m.text).not.toContain("w".repeat(80));
+    expect(m.blocks[1]).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: line }] });
+    expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
+  });
+
   it("omits the step from the context line when the row carries no step tag", () => {
     const m = buildOutboundMessage(gateRow, opts);
     expect(m.text).toContain("Workflow tianqi-mission · instance 01M4EXAMPLEINSTANCE");
