@@ -955,6 +955,21 @@ describe("SessionTransport", () => {
       outcome: verified ? "delivered" : "rendered-unconfirmed" });
   });
 
+  it("unknown-runtime verification keeps existing boundaries", async () => {
+    const { node } = seedCanonicalRig();
+    db.prepare("UPDATE nodes SET runtime = NULL WHERE id = ?").run(node.id);
+    expect(db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(node.id)).toEqual({ runtime: null });
+    const message = "Check the blue ledger, then report its total.";
+    let submitted = false;
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async () => submitted ? "❯ " + message + "\n» reply quotation below live input" : "❯ ",
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
+  });
+
   // OPR.99.0.6.3 — honest delivery-outcome vocabulary
   it("verify capture throwing after a successful send is the middle outcome, not a failure", async () => {
     seedCanonicalRig();

@@ -2101,8 +2101,8 @@ export class SessionTransport {
         // its original prefix-count verification even while a command is running.
         const terminal = runtime === "terminal";
         const { snippet, envelope } = terminal ? { snippet: text.slice(0, 40), envelope: false } : verificationSnippet(text);
-        // Keep Claude's existing verification boundaries; Codex also draws ».
-        const promptClass = runtime === "claude-code" ? "❯›" : COMPOSER_PROMPT_CLASS;
+        // Only Codex gains »; all other runtimes keep the existing boundaries.
+        const promptClass = runtime === "codex" ? COMPOSER_PROMPT_CLASS : "❯›";
         const transcript = terminal ? (pane: string | null) => pane ?? ""
           : (pane: string | null) => envelope ? verificationTranscript(pane, promptClass)
             : normalizeVerificationText(verificationTranscript(pane, promptClass));
