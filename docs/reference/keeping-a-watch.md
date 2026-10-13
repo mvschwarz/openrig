@@ -160,6 +160,7 @@ under some conditions, with no delay guarantee. So:
   `rig watchdog list`: that's the one-shot timer `--wake-after` arms, not a registered repeating reminder. It's retired
   when it fires or when the task stops being set aside. Two exceptions: a wake held back because you were typing (a
   retained delivery) leaves the timer live, and it fires again after another interval; and a timer another task shares
-  through `--wake-watchdog` stays live for that task.
+  through `--wake-watchdog` stays live for that task when this task is handed off or stopped; it still retires after
+  its one fire.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance.
