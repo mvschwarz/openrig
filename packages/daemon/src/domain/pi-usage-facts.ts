@@ -54,13 +54,16 @@ export interface PiSessionBoundary {
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
 
+/** A fork writes its header first and then copies the parent's entries with their original timestamps, so an
+ *  entry stamped at or before the header's time is history: a tie is not evidence of new spend. Only an entry
+ *  stamped after the header is the occupant's own. */
 function originOf(timestamp: string, boundary: PiSessionBoundary | null): PiUsageOrigin {
   if (!boundary) return "unknown";
   if (!boundary.parentSession) return "own";
   const at = Date.parse(timestamp);
   const created = Date.parse(boundary.createdAt);
   if (Number.isNaN(at) || Number.isNaN(created)) return "unknown";
-  return at < created ? "inherited" : "own";
+  return at <= created ? "inherited" : "own";
 }
 
 /**
@@ -130,12 +133,18 @@ export function extractPiUsageFacts(entries: unknown[], boundary: PiSessionBound
   return { facts, malformed };
 }
 
-/** The boundary from a Pi session file's first line (its header). null when it can't be read as one. */
+/** The boundary from a Pi session file's first line (its header). null when it can't be read as one, including a
+ *  header that parses but whose creation time isn't a date or whose parentSession isn't a path: origin is then
+ *  unknown (kept out of the total), never assumed own. */
 export function parsePiSessionHeader(firstLine: string): PiSessionBoundary | null {
   try {
-    const header = JSON.parse(firstLine) as Record<string, unknown>;
-    if (header["type"] !== "session" || typeof header["timestamp"] !== "string") return null;
-    return { createdAt: header["timestamp"], parentSession: str(header["parentSession"]) };
+    const header = JSON.parse(firstLine) as unknown;
+    if (header === null || typeof header !== "object" || Array.isArray(header)) return null;
+    const h = header as Record<string, unknown>;
+    if (h["type"] !== "session" || typeof h["timestamp"] !== "string" || Number.isNaN(Date.parse(h["timestamp"]))) return null;
+    const parent = h["parentSession"];
+    if (parent !== undefined && parent !== null && str(parent) === null) return null;
+    return { createdAt: h["timestamp"], parentSession: str(parent) };
   } catch {
     return null;
   }

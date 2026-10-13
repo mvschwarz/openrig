@@ -81,6 +81,9 @@ activityRoutes.post("/pi-usage", async (c) => {
   } catch {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
   }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ ok: false, code: "invalid_pi_usage", error: "pi-usage requires a JSON object" }, 400);
+  }
   const sessionName = stringOrNull(body.sessionName);
   const piSessionId = stringOrNull(body.piSessionId);
   if (!sessionName || !piSessionId || !Array.isArray(body.facts)) {

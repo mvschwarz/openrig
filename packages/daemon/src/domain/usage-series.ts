@@ -403,12 +403,15 @@ interface PiRow {
   stop_reason: string | null; origin: "own" | "inherited" | "unknown";
 }
 
-/** Each Pi seat's latest Pi session, from the stored persisted-entry facts. Earlier sessions stay stored as history. */
+/** Each Pi seat's latest Pi session: the one whose facts first arrived most recently (a late entry for an older
+ *  session doesn't make it current again). Earlier sessions stay stored as history. */
 function piSeatCosts(db: Database, seatSession?: string): PiSeatCost[] {
   if (!hasPiUsageEntriesTable(db)) return [];
   const latest = db.prepare(
-    `SELECT seat_session, pi_session_id FROM pi_usage_entries p
-      WHERE id = (SELECT MAX(id) FROM pi_usage_entries q WHERE q.seat_session = p.seat_session)${seatSession ? " AND seat_session = ?" : ""}
+    `WITH s AS (SELECT seat_session, pi_session_id, MIN(id) AS first_id FROM pi_usage_entries
+                ${seatSession ? "WHERE seat_session = ? " : ""}GROUP BY seat_session, pi_session_id)
+     SELECT seat_session, pi_session_id FROM s
+      WHERE first_id = (SELECT MAX(first_id) FROM s s2 WHERE s2.seat_session = s.seat_session)
       ORDER BY seat_session ASC`,
   ).all(...(seatSession ? [seatSession] : [])) as Array<{ seat_session: string; pi_session_id: string }>;
   const sum = (rows: PiRow[]): number | null => {

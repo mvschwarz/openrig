@@ -78,6 +78,10 @@ describe("extractPiUsageFacts (Pi 0.87.1, session format v3)", () => {
     expect(parsePiSessionHeader(JSON.stringify({ type: "session", version: 3, id: "s", timestamp: at(1), cwd: "/w" }))).toEqual({ createdAt: at(1), parentSession: null });
     expect(parsePiSessionHeader(JSON.stringify(ENTRIES[1]))).toBeNull();
     expect(parsePiSessionHeader("not json")).toBeNull();
+    expect(parsePiSessionHeader(JSON.stringify({ type: "session", timestamp: "nonsense" }))).toBeNull();
+    expect(parsePiSessionHeader(JSON.stringify({ type: "session", timestamp: at(1), parentSession: 42 }))).toBeNull();
+    expect(parsePiSessionHeader(JSON.stringify({ type: "session", timestamp: at(1), parentSession: null }))).toEqual({ createdAt: at(1), parentSession: null });
+    expect(parsePiSessionHeader("null")).toBeNull();
   });
 });
 
@@ -319,5 +323,79 @@ describe("POST /api/activity/pi-usage", () => {
     expect((await app("claude-code").post(body)).status).toBe(404);
     expect((await app().post({ sessionName: SESSION })).status).toBe(400);
     expect(await (await app().post({ ...body, facts: [...body.facts, { entryId: "x" }] })).json()).toMatchObject({ stored: 7, rejected: 1 });
+  });
+});
+
+describe("runner → authenticated route → SQLite → cost view (round 3)", () => {
+  const TOKEN = "hook-token";
+  function pipeline(header: () => string | null) {
+    const d = db();
+    const hono = new Hono();
+    hono.use("*", async (c, next) => {
+      c.set("agentActivityStore" as never, { resolveSession: () => ({ sessionId: "sid", rigId: "r", nodeId: "node-1", sessionName: SESSION, runtime: "pi" }) } as never);
+      c.set("activityHookToken" as never, TOKEN as never);
+      c.set("sessionRegistry" as never, { db: d } as never);
+      await next();
+    });
+    hono.route("/api/activity", activityRoutes);
+    const io: RunnerIo = {
+      sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, postActivity: () => {}, writeSidecar: () => {},
+      sessionFileExists: () => true, now: () => at(0), readFirstLine: header,
+      postUsageFacts: async (payload) => (await hono.request("/api/activity/pi-usage", {
+        method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(payload) })).ok,
+    };
+    const core = new RunnerCore(io, { sessionName: SESSION, nodeId: "node-1" }, { usageFacts: true, runtime: "pi" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" } }));
+    const refresh = async (entries: unknown[]) => {
+      core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", success: true, command: "get_entries", data: { entries, leafId: null } }));
+      await settle();
+      await settle();
+    };
+    const view = () => computeCostView(d, { nowIso: at(60) }).seats[0] as Record<string, any>;
+    return { d, hono, refresh, view };
+  }
+  const forkHeader = (timestamp: unknown, parentSession: unknown = "/state/pi/parent.jsonl") =>
+    JSON.stringify({ type: "session", version: 3, id: "0197a2f0", timestamp, cwd: "/w", parentSession });
+
+  it("F1: a copied entry stamped exactly at the fork header's time is inherited, not the new occupant's spend", async () => {
+    const p = pipeline(() => forkHeader(at(7))); // b1 is stamped at(7)
+    await p.refresh(ENTRIES);
+    const seat = p.view();
+    expect(seat.entries.own).toBe(2); // a2, a3: strictly after the header
+    expect(seat.costUsd).toBeCloseTo(0.05, 10);
+    expect(seat.entries.inherited.count).toBe(5);
+    expect(p.d.prepare("SELECT origin FROM pi_usage_entries WHERE entry_id = 'b1'").get()).toEqual({ origin: "inherited" });
+  });
+
+  it("F2: a header that parses but isn't valid is unknown (nothing counted as own); a later valid header settles it", async () => {
+    for (const bad of [forkHeader("nonsense"), forkHeader(at(7), 42), JSON.stringify(null), JSON.stringify([1])]) {
+      let header: string | null = bad;
+      const p = pipeline(() => header);
+      await p.refresh(ENTRIES);
+      expect(p.view()).toMatchObject({ status: "absent", entries: { own: 0, unknownOrigin: { count: 7 } } });
+      header = forkHeader(at(7)); // read again on the next refresh
+      await p.refresh(ENTRIES);
+      expect(p.view()).toMatchObject({ status: "reported", entries: { own: 2, unknownOrigin: { count: 0 }, inherited: { count: 5 } } });
+      expect((p.d.prepare("SELECT COUNT(*) AS n FROM pi_usage_entries").get() as { n: number }).n).toBe(7);
+    }
+  });
+
+  it("N1: an authenticated JSON null (or array) body is a 400, not a server error", async () => {
+    const p = pipeline(() => HEADER());
+    for (const body of ["null", "[]", "7"]) {
+      const res = await p.hono.request("/api/activity/pi-usage", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("a late entry for an older Pi session doesn't switch the window back to it", () => {
+    const d = db();
+    const store = new PiUsageEntriesStore(d);
+    const base = { seatSession: SESSION, nodeId: null, generation: null };
+    store.record({ ...base, piSessionId: "old", facts: facts(OWN, [assistant("o1", 1, 0.1)]) }, at(20));
+    store.record({ ...base, piSessionId: "new", facts: facts(OWN, [assistant("n1", 30, 0.5)]) }, at(40));
+    store.record({ ...base, piSessionId: "old", facts: facts(OWN, [assistant("o2", 2, 0.2)]) }, at(50));
+    expect(computeCostView(d, { nowIso: at(60) }).seats[0]).toMatchObject({ costUsd: 0.5, window: { piSessionId: "new" } });
   });
 });
