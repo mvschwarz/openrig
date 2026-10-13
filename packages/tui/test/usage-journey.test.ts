@@ -18,6 +18,8 @@ import { parseCommand } from "../src/grammar.js";
 import { COMMAND_REGISTRY } from "../src/commands/registry.js";
 import { renderScreen } from "../src/render.js";
 import { resolveEscapeAction } from "../src/input.js";
+import { createLiveRefresh } from "../src/live.js";
+import { pageReadKey } from "../src/page-read.js";
 import type { FleetSnapshot, ViewStateStore, Screen } from "../src/types.js";
 
 const BASE = { accounts: [], bindings: [], signals: [], asOf: "2026-10-13T18:00:00.000Z", hostUsage: [] };
@@ -273,5 +275,38 @@ describe("System → Usage in the normal TUI journey", () => {
       const action = resolveEscapeAction({ type: "key", key: "escape" }, view.get()); if (!action) break; view.dispatch(action);
     }
     expect(view.get()).toMatchObject({ section: work.section, selection: work.selection, filter: work.filter });
+  });
+});
+
+describe("System → Usage through the live page reader", () => {
+  it("a good read, then a 503: the previous model stays, marked retained; then a 404 drops it and says so", async () => {
+    let now = 1_000;
+    view.dispatch(parseCommand("usage"));
+    const live = createLiveRefresh({ now: () => now, scopeKey: () => pageReadKey(view.get()), onFrame: () => {},
+      hydrate: (page, signal) => hydrateSnapshot(client.forPage(page, signal), undefined, null, null, null, view.get()),
+      setTimeout: () => ({ unref() {} }) as never, clearTimeout: () => {} });
+    const screen = () => renderScreen(view.get(), live.snapshot(), { cols: 400, rows: 400, load: live.load() }).lines.join("\n");
+
+    await live.refresh();
+    expect(screen()).toContain("level: exhausted (at the limit)");
+    expect(live.load()).toMatchObject({ stale: false });
+    expect(live.load().retainedAt).toBeUndefined();
+
+    // The provider service stops answering (503): the page reader keeps the last answer, marked retained.
+    providerWired = false; now = 2_000;
+    await live.refresh();
+    expect(screen()).toContain("level: exhausted (at the limit)");
+    expect(screen()).not.toContain("Usage windows unavailable");
+    expect(live.load()).toMatchObject({ stale: true, retainedAt: 1_000 });
+    expect(screen()).toContain("Could not refresh");
+    expect(live.snapshot().readErrors.join("\n")).toContain("/api/provider/status: HTTP 503");
+
+    // The route is gone (404): the kept answer is dropped and the view says so.
+    noProviderRoutes = true; now = 3_000;
+    await live.refresh();
+    expect(screen()).toContain("This daemon doesn't serve usage windows (no provider read model: HTTP 404).");
+    expect(screen()).not.toContain("level: exhausted");
+    expect(refreshUsage).not.toHaveBeenCalled();
+    live.close();
   });
 });
