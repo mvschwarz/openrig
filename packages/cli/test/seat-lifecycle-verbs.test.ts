@@ -73,6 +73,45 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("seat set-runtime", () => {
+  it.each([false, true])("posts target settings with a bounded wait and exposes the resolved preview (json=%s)", async json => {
+    const data = { ok: true, dryRun: true, changed: false, from: "codex", to: "claude-code", recoveryPending: false,
+      settings: { model: "target-model", effort: "high", permissionMode: "auto", codexConfigProfile: null } };
+    const deps = makeDeps({ status: 200, data }, []);
+    const post = vi.fn(async () => ({ status: 200, data }));
+    deps.clientFactory = () => ({ post }) as never;
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-runtime", "dev@fixture",
+      "--runtime", "claude-code", "--reason", "change provider", "--model", "target-model", "--effort", "high",
+      "--permission-mode", "auto", "--dry-run", ...(json ? ["--json"] : [])]).then(() => {}));
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/seat/set-runtime/dev%40fixture", { runtime: "claude-code", reason: "change provider",
+      model: "target-model", effort: "high", permissionMode: "auto", dryRun: true }, { timeoutMs: 120_000 });
+    if (json) expect(JSON.parse(output.logs.join("\n"))).toEqual(data);
+    else expect(output.logs).toEqual(["Runtime switch plan: dev@fixture (codex -> claude-code)",
+      "Target model: target-model", "Target effort: high", "Permission selection: auto"]);
+    expect(output.exitCode).toBeUndefined();
+  });
+
+  it("returns a nonzero exit for a committed switch awaiting recovery", async () => {
+    const data = { ok: true, changed: true, recoveryPending: true, from: "codex", to: "claude-code", warnings: ["retirement pending"] };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 202, data }, [])).parseAsync(["node", "rig", "seat", "set-runtime",
+      "dev@fixture", "--runtime", "claude-code", "--reason", "change", "--json"]).then(() => {}));
+    expect(output.exitCode).toBe(1);
+    expect(JSON.parse(output.logs.join("\n"))).toEqual(data);
+  });
+
+  it("does not retry an unknown timeout outcome", async () => {
+    const { DaemonTimeoutError } = await import("../src/client.js");
+    const deps = makeDeps({ status: 200, data: {} }, []);
+    const post = vi.fn(async () => { throw new DaemonTimeoutError("slow"); });
+    deps.clientFactory = () => ({ post }) as never;
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-runtime", "dev@fixture",
+      "--runtime", "claude-code", "--reason", "change", "--json"]).then(() => {}));
+    expect(post).toHaveBeenCalledTimes(1); expect(output.exitCode).toBe(1);
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ code: "runtime_switch_outcome_unknown", status: "unknown",
+      guidance: expect.stringContaining("rig seat status") });
+  });
+});
+
 describe("#729 startup warnings", () => {
   it.each([[200, false], [200, true], [409, false], [409, true]] as const)("seat launch retains warnings and HTTP %s (json=%s)", async (status, json) => {
     const warning = "Startup submission unverified: capture unavailable";

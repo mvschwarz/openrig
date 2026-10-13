@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER } from "../src/client.js";
+import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER, OCCUPANT_GENERATION_HEADER } from "../src/client.js";
 import { resolveOriginSelfHostId } from "../src/daemon-lifecycle.js";
 
 /** Walk every non-test, non-dist .ts under a package's src/, returning [absPath, contents]. */
@@ -28,6 +28,16 @@ function srcFiles(pkg: string): Array<[string, string]> {
 function mockFetch(handler: (url: string, init: RequestInit) => Promise<Response>): typeof fetch {
   return handler as unknown as typeof fetch;
 }
+
+describe("managed occupant generation header", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it("carries the process generation alongside the canonical seat identity", () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev@fixture"); vi.stubEnv("OPENRIG_OCCUPANT_GENERATION", "reserved-generation");
+    expect(senderIdentityHeaders()).toEqual({ [SENDER_IDENTITY_HEADER]: "dev@fixture", [OCCUPANT_GENERATION_HEADER]: "reserved-generation" });
+    vi.stubEnv("OPENRIG_SESSION_NAME", ""); vi.stubEnv("RIGGED_SESSION_NAME", "");
+    expect(senderIdentityHeaders()).toEqual({});
+  });
+});
 
 describe("DaemonClient header merge", () => {
   it("post() merges options.headers into the request", async () => {

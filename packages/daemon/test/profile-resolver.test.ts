@@ -61,6 +61,16 @@ function makeCtx(overrides?: Partial<ResolutionContext>): ResolutionContext {
 }
 
 describe("Profile resolver + precedence engine", () => {
+  it("does not inherit model/effort from a profile for another runtime", () => {
+    const spec = makeSpec({ defaults: { runtime: "codex", model: "codex-model", effort: "xhigh" } });
+    spec.profiles.default!.preferences = { runtime: "codex", model: "profile-model", effort: "high" };
+    const ctx = makeCtx({ baseSpec: makeResolved(spec), member: makeMember({ runtime: "claude-code" }) });
+    expect(resolveNodeConfig(ctx)).toMatchObject({ ok: true, config: { runtime: "claude-code", model: undefined, effort: undefined } });
+    expect(resolveNodeConfig({ ...ctx, member: { ...ctx.member, model: "claude-model", effort: "medium" } }))
+      .toMatchObject({ ok: true, config: { model: "claude-model", effort: "medium" } });
+    expect(resolveNodeConfig({ ...ctx, member: { ...ctx.member, runtime: "codex" } }))
+      .toMatchObject({ ok: true, config: { model: "profile-model", effort: "high" } });
+  });
   // T1: profile selects from combined base+import pool
   it("profile selects from combined base+import pool with effectiveId and sourcePath", () => {
     const importSpec = makeSpec({

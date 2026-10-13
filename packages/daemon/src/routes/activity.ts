@@ -108,6 +108,24 @@ activityRoutes.post("/hooks", async (c) => {
     if (!resolved) {
       return c.json({ ok: false, code: "session_not_found", error: `No session found for ${sessionName}` }, 404);
     }
+    // A staged successor and a retiring predecessor share the logical seat
+    // name. A native id from the other provider must never reach its current
+    // session row, even when the id happens to pass both providers' format rules.
+    if (runtime && resolved.runtime && runtime !== resolved.runtime
+      && ["codex", "claude-code"].includes(runtime) && ["codex", "claude-code"].includes(resolved.runtime)) {
+      const generation = stringOrNull(body.generation);
+      const token = validateResumeToken(runtime, sessionId);
+      // The target can announce its new native conversation before cutover.
+      // Keep that identity on its durable intent, never on the incumbent row.
+      if (generation && token.ok) {
+        const saved = sessionRegistry.db.prepare(`UPDATE seat_runtime_switches SET successor_resume_type=?, successor_resume_token=?
+          WHERE node_id=? AND canonical_session=? AND successor_generation=? AND to_runtime=? AND phase='preparing'`)
+          .run(token.resumeType, token.token, resolved.nodeId, sessionName, generation, runtime);
+        if (saved.changes === 1) return c.json({ ok: true, tokenPersisted: true, staged: true });
+      }
+      return c.json({ ok: false, code: "runtime_mismatch", tokenPersisted: false,
+        error: "Native session identity belongs to a different runtime than the current seat." }, 409);
+    }
     // OMP session identity (hook or seat) is strict: the exact seat name, the
     // seat's own runtime, the current occupant generation, and a materialized
     // session file that matches the seat's runner sidecar. Every refusal
@@ -220,9 +238,18 @@ activityRoutes.post("/hooks", async (c) => {
     // seat's launch when the post carries the node's current occupant generation (#1077).
     const generation = stringOrNull(body.generation);
     let currentGeneration = false;
+    let retiredGeneration = false;
     try {
       currentGeneration = !!generation && sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid === generation;
+      retiredGeneration = !!generation && !currentGeneration && sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
     } catch { /* an unreadable ledger is no evidence */ }
+    // A delayed hook can outlive two switches and match the provider again.
+    // A known retired tenure still cannot replace the current native token.
+    // Unknown/legacy provenance retains its existing compatibility behavior.
+    if (retiredGeneration) {
+      return c.json({ ok: false, code: "generation_mismatch", tokenPersisted: false,
+        error: "Native session identity belongs to a retired occupant." }, 409);
+    }
     const source = stringOrNull(body.source);
     const resumeLaunch = stringOrNull(body.resumeLaunch);
     // Only for a hook that could name the armed launch: was it the launch's first SessionStart (the
@@ -326,6 +353,11 @@ activityRoutes.post("/hooks", async (c) => {
   if (oracle && emitted?.nodeId && emitted.sessionName
       && currentSession?.status === "running" && currentSession.session_name === emitted.sessionName
       && (!suppliedSessionName || suppliedSessionName === emitted.sessionName)) {
+    const suppliedGeneration = stringOrNull(body.generation);
+    const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+    if (suppliedGeneration && registry && registry.currentOccupantTenure(emitted.nodeId)?.generationUuid !== suppliedGeneration) {
+      return c.json({ ok: true, activity: result.activity });
+    }
     // A same-name relaunch can have a different registered occupant generation.
     // Honor the store's positive mismatch verdict, while preserving legacy hooks
     // with unresolved provenance and the archival response below.

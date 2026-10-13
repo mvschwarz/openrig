@@ -201,6 +201,8 @@ export type RigEvent =
   // persisted node WITHOUT launch/relaunch/input. Distinct from node.claimed so
   // the operator is never misled about which op happened.
   | { type: "node.reconciled"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
+  | { type: "seat.runtime_changed"; rigId: string; nodeId: string; from: string; to: string; reason: string; operator: string | null;
+      generation: string; previousGeneration: string; resetPermissionSelection: boolean }
   | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
       /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
        *  record (not just the command response) carries what primed the successor:

@@ -1,5 +1,7 @@
 import type { Context } from "hono";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import { resolveGuardTarget } from "../domain/seat-delivery-guard.js";
 
 /**
  * P21 sender-provenance chokepoint — the ONE shared route helper that generalizes P18's inline
@@ -33,6 +35,24 @@ import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
  */
 export const SENDER_IDENTITY_HEADER = "x-openrig-session";
 export const ORIGIN_UNKNOWN_HEADER = "x-openrig-origin-unknown";
+export const OCCUPANT_GENERATION_HEADER = "x-openrig-occupant-generation";
+
+/** A runtime-switch candidate carries a reserved generation; the predecessor
+ * carries its retiring generation. Only the current tenure may mutate as this
+ * managed seat. Legacy/unmanaged callers keep the existing provenance rules. */
+export function occupantMutationRefusal(c: Context): Response | null {
+  if (["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return null;
+  const generation = c.req.header(OCCUPANT_GENERATION_HEADER)?.trim();
+  const session = transportSenderSession(c);
+  if (!generation || !session) return null;
+  const registry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+  let current: string | null = null;
+  try { current = registry ? resolveGuardTarget(registry.db, session)?.occupant ?? null : null; }
+  catch { /* legacy embedders without the tenure schema retain existing behavior */ }
+  if (!current || current === generation) return null;
+  return c.json({ ok: false, code: "occupant_not_current", error: "occupant_not_current",
+    message: "This process is a pending or retired occupant. The current seat generation owns mutations; inspect rig seat status before continuing." }, 409);
+}
 
 /**
  * #131 — ONE canonicalizer for the transport identity. Inside one instance a seat is bare `member@rig`
@@ -77,6 +97,9 @@ export function requireSenderIdentity(
   c: Context,
   opts?: { verb?: string; bodyClaim?: string | null },
 ): SenderIdentity {
+  // Recheck after body parsing too: an in-flight request may cross cutover.
+  const refusal = occupantMutationRefusal(c);
+  if (refusal) return { ok: false, response: refusal };
   const verb = opts?.verb ?? "this action";
   const session = transportSenderSession(c);
   const claim = opts?.bodyClaim?.trim();
@@ -144,6 +167,8 @@ export function resolveActorWithDeferral(
   c: Context,
   opts?: { verb?: string; bodyClaim?: string | null },
 ): ActorWithDeferral {
+  const refusal = occupantMutationRefusal(c);
+  if (refusal) return { ok: false, response: refusal };
   const verb = opts?.verb ?? "this action";
   const session = transportSenderSession(c);
   const claim = opts?.bodyClaim?.trim();

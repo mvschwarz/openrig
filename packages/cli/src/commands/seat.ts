@@ -23,6 +23,7 @@ interface SeatStatusResponse {
   pod_id: string | null;
   pod_namespace: string | null;
   runtime: string | null;
+  runtimeSwitch?: { id: string; phase: string; fromRuntime: string; targetRuntime: string };
   current_occupant: string | null;
   typingGuard?: { desired: boolean; effective: boolean; pending: boolean; heldCount: number };
   permissions?: {
@@ -192,6 +193,7 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Handover result: ${display(status.handover_result)}`);
   console.log(`Previous occupant: ${display(status.previous_occupant)}`);
   console.log(`Handover at: ${display(status.handover_at)}`);
+  if (status.runtimeSwitch) console.log(`Runtime switch: ${status.runtimeSwitch.phase} (${status.runtimeSwitch.fromRuntime} -> ${status.runtimeSwitch.targetRuntime}); retirement/activation recovery pending`);
 }
 
 function printHumanHandoverPlan(plan: SeatHandoverPlan): void {
@@ -506,7 +508,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-model" | "set-permissions" | "set-runtime" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -519,7 +521,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch" || path === "continue" || path === "restart"
+      res = path === "launch" || path === "continue" || path === "restart" || path === "set-runtime"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
@@ -527,8 +529,12 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart") || !(err instanceof DaemonTimeoutError)) throw err;
-      const error = path === "restart" ? {
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart" && path !== "set-runtime") || !(err instanceof DaemonTimeoutError)) throw err;
+      const error = path === "set-runtime" ? {
+        ok: false as const, code: body["dryRun"] ? "runtime_switch_plan_timeout" : "runtime_switch_outcome_unknown", status: "unknown",
+        message: body["dryRun"] ? "The runtime switch preview timed out; no change was requested." : "The CLI stopped waiting; the daemon may still be switching the seat runtime.",
+        guidance: `Inspect rig seat status ${seat} before considering another switch.`,
+      } : path === "restart" ? {
         ok: false as const,
         code: "restart_outcome_unknown",
         status: "unknown",
@@ -550,7 +556,8 @@ identity remains unverified; a version number alone cannot clear it.
     // --verify answers 200 with its outcome, and only `moved` exits 0.
     const restartFailed = res.status < 400 && (
       (path === "restart" && res.data["outcome"] !== "restarted_account_unverified")
-      || (path === "restart-verify" && res.data["outcome"] !== "moved"));
+      || (path === "restart-verify" && res.data["outcome"] !== "moved")
+      || (path === "set-runtime" && res.data["recoveryPending"] === true));
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
@@ -558,7 +565,7 @@ identity remains unverified; a version number alone cannot clear it.
       return;
     }
     if (restartFailed) process.exitCode = 1;
-    if (path === "launch" || path === "launch-plan" || path === "continue" || path === "restart" || path === "restart-plan") {
+    if (path === "launch" || path === "launch-plan" || path === "continue" || path === "restart" || path === "restart-plan" || path === "set-runtime") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
@@ -575,6 +582,47 @@ identity remains unverified; a version number alone cannot clear it.
     }
     printOk(res.data);
   };
+
+  cmd
+    .command("set-runtime")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--runtime <runtime>", "codex or claude-code")
+    .requiredOption("--reason <text>", "Reason for the runtime change")
+    .option("--model <id>", "Target-runtime model; otherwise use its profile/native default")
+    .option("--effort <effort>", "Target-runtime reasoning effort")
+    .option("--codex-config-profile <name>", "Codex native configuration profile for the successor")
+    .option("--permission-mode <mode>", "Target native permission selection (default: inherit the seat/rig policy)")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--dry-run", "Preview settings without launching or changing the seat")
+    .option("--json", "JSON output for agents")
+    .description("Switch a live Codex/Claude seat in place, starting its successor before retiring the incumbent")
+    .addHelpText("after", `
+The logical seat, queue address and tmux session stay the same. The successor
+gets a fresh native conversation, role materials and handover context. Old
+model/effort, native permission selection and Codex profile are not copied.
+The managed configuration and restore snapshot record the selected runtime.
+
+An operator may switch its own seat; its CLI can disappear when the predecessor
+retires. The daemon continues the operation. Inspect seat status after a timeout.
+
+  rig seat set-runtime operator-agent@kernel --runtime claude-code --reason runtime-change --dry-run
+  rig seat set-runtime operator-agent@kernel --runtime claude-code --reason runtime-change`)
+    .action(async (seat: string, opts: { runtime: string; reason: string; model?: string; effort?: string; codexConfigProfile?: string; permissionMode?: string; operator?: string; dryRun?: boolean; json?: boolean }) => {
+      const { json: _json, ...body } = opts;
+      await runLifecycleVerb("set-runtime", seat, body, opts, data => {
+        const label = data["dryRun"] ? "Runtime switch plan" : data["changed"] ? "Runtime switched" : "Runtime unchanged";
+        console.log(`${label}: ${seat} (${data["from"]} -> ${data["to"]})`);
+        const settings = data["settings"] as Record<string, unknown> | undefined;
+        if (settings) {
+          console.log(`Target model: ${settings["model"] ?? "native default"}`);
+          console.log(`Target effort: ${settings["effort"] ?? "native default"}`);
+          console.log(`Permission selection: ${settings["permissionMode"]}`);
+          if (data["to"] === "codex") console.log(`Codex profile: ${settings["codexConfigProfile"] ?? "native default"}`);
+        }
+        if (data["recoveryPending"]) console.log("Retirement or activation is pending. Inspect seat status before continuing.");
+        if (data["openQueueItems"] !== undefined) console.log(`Open queue items retained: ${data["openQueueItems"]}`);
+      });
+    });
 
   cmd
     .command("set-permissions")

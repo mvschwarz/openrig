@@ -8,6 +8,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { observeClaudePaneStartedAt } from "../domain/native-process-lineage.js";
 import { SeatStatusService } from "../domain/seat-status-service.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
+import { SeatRuntimeSwitchService } from "../domain/seat-runtime-switch-service.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
 import { SeatLifecycleService } from "../domain/seat-lifecycle-service.js";
 import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolver.js";
@@ -18,7 +19,7 @@ import { resolveAuthoredRecapPointer } from "../domain/context-packs/seat-recap-
 import { buildRebuildPrimingChain } from "../domain/rebuild-priming-chain.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { transportSenderSession } from "./require-sender-identity.js";
+import { transportSenderSession, occupantMutationRefusal } from "./require-sender-identity.js";
 
 export const seatRoutes = new Hono();
 
@@ -77,7 +78,10 @@ seatRoutes.get("/status/:seatRef", (c) => {
   if (result.ok) {
     const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
     const target = guard?.maybeTarget(c.req.param("seatRef")!);
-    return c.json({ ...result.status, ...(guard && target ? { typingGuard: {
+    const runtimeSwitch = rigRepo.db.prepare(`SELECT s.id, s.phase, s.from_runtime AS fromRuntime, s.to_runtime AS targetRuntime
+      FROM seat_runtime_switches s JOIN nodes n ON n.id=s.node_id WHERE n.rig_id=? AND n.logical_id=?`)
+      .get(result.status.rig_id, result.status.logical_id);
+    return c.json({ ...result.status, ...(runtimeSwitch ? { runtimeSwitch } : {}), ...(guard && target ? { typingGuard: {
       ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(target.nodeId, 1).total,
     } } : {}) });
   }
@@ -91,10 +95,9 @@ seatRoutes.get("/status/:seatRef", (c) => {
   return c.json(result, 404);
 });
 
-seatRoutes.post("/handover/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+function handoverDeps(c: { get(key: never): unknown }): ConstructorParameters<typeof SeatHandoverService>[0] {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
-  const service = new SeatHandoverService({
+  return {
     db: rigRepo.db,
     rigRepo,
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
@@ -180,7 +183,45 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     // declareOccupantSwap and the successor never inherits the retiree's evidence or
     // promoted rung authority. Optional in the deps contract; ALWAYS wired here.
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
+  };
+}
+
+seatRoutes.post("/set-runtime/:seatRef", async (c) => {
+  const parsedBody: unknown = await c.req.json().catch(() => ({}));
+  const refusal = occupantMutationRefusal(c);
+  if (refusal) return refusal;
+  if (typeof parsedBody !== "object" || parsedBody === null || Array.isArray(parsedBody)) {
+    return c.json({ ok: false, code: "invalid_runtime_settings", message: "Runtime settings must be a JSON object." }, 400);
+  }
+  const body = parsedBody as Record<string, unknown>;
+  if (body["dryRun"] !== undefined && typeof body["dryRun"] !== "boolean") {
+    return c.json({ ok: false, code: "invalid_runtime_settings", message: "dryRun must be a boolean." }, 400);
+  }
+  const options: Record<string, string> = {};
+  for (const key of ["model", "effort", "codexConfigProfile", "permissionMode"]) {
+    if (body[key] !== undefined) {
+      if (typeof body[key] !== "string") return c.json({ ok: false, code: "invalid_runtime_settings", message: `${key} must be a string.` }, 400);
+      options[key] = body[key];
+    }
+  }
+  const instantiator = c.get("podInstantiator" as never) as import("../domain/rigspec-instantiator.js").PodRigInstantiator | undefined;
+  const result = await new SeatRuntimeSwitchService({ ...handoverDeps(c), materialContext: instantiator?.runtimeSwitchMaterialContext() }).setRuntime({
+    seatRef: c.req.param("seatRef")!, runtime: typeof body["runtime"] === "string" ? body["runtime"] : "",
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
+    dryRun: body["dryRun"] === true, ...options,
   });
+  if (result.ok) return c.json(result, result.recoveryPending ? 202 : 200);
+  const code = result.code;
+  return c.json(result, code === "seat_not_found" ? 404
+    : ["invalid_runtime", "invalid_runtime_settings", "missing_reason", "seat_ref_required", "unsupported_source_runtime"].includes(code) ? 400
+    : code === "runtime_unavailable" ? 503 : code === "runtime_switch_failed" ? 500
+    : code === "runtime_materials_unavailable" || code.startsWith("startup_context_") ? 422 : 409);
+});
+
+seatRoutes.post("/handover/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const service = new SeatHandoverService(handoverDeps(c));
   const result = await service.handover({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : null,

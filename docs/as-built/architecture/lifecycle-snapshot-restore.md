@@ -230,8 +230,11 @@ cited here by number with the code that carries them):
   (`up.ts:314–317`). The daemon finds the rig by name, preferring unarchived
   rigs (`packages/daemon/src/routes/up.ts:223–226`), and restores from
   `selectRestoreUsable` (`routes/up.ts:106`), which prefers the newest
-  `auto-pre-down` or `auto-periodic` snapshot, then the newest other usable
-  one (`snapshot-repository.ts:75`).
+  `auto-pre-down`, `auto-periodic` or committed `runtime-switch` snapshot,
+  then the newest other usable one (`snapshot-repository.ts`). A runtime
+  switch enters this tier so an older automatic capture cannot restore the
+  previous provider by default; an explicitly selected cross-runtime snapshot
+  is refused before native resume.
 - `rig up <rig-name> --plan` is a read-only restore preview that never
   captures a snapshot (`routes/up.ts:127`).
 - If no usable snapshot exists, or the chosen one names an older occupant

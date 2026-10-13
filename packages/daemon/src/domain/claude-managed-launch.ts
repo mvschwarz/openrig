@@ -15,6 +15,7 @@ export interface ClaudeLaunchTarget {
   pane?: string | null;
   /** A successor may have a reserved generation before its tenure is committed. */
   generation?: string;
+  runtimeSwitchFrom?: { runtime: string; session: string; pane: string; generation: string };
 }
 
 interface TargetSnapshot {
@@ -32,13 +33,13 @@ export class ClaudeManagedLaunch {
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly rendererEnv: Readonly<NodeJS.ProcessEnv>) {}
 
-  private target(nodeId: string): TargetSnapshot {
+  private target(nodeId: string, expectedRuntime = "claude-code"): TargetSnapshot {
     const row = this.db.prepare(`SELECT n.id AS nodeId, n.runtime, n.cwd,
       b.id AS bindingId, b.tmux_session AS session, b.tmux_pane AS pane,
       (SELECT generation_uuid FROM occupant_tenures WHERE node_id=n.id
        ORDER BY generation_ordinal DESC LIMIT 1) AS generation
       FROM nodes n LEFT JOIN bindings b ON b.node_id=n.id WHERE n.id=?`).get(nodeId) as TargetSnapshot | undefined;
-    if (!row || row.runtime !== "claude-code" || !row.cwd || !path.isAbsolute(row.cwd)) {
+    if (!row || row.runtime !== expectedRuntime || !row.cwd || !path.isAbsolute(row.cwd)) {
       throw new Error("Claude managed launch context is unresolved: an absolute seat cwd and Claude node are required.");
     }
     return row;
@@ -97,15 +98,20 @@ export class ClaudeManagedLaunch {
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
     assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string;
   }> {
-    const target = Object.freeze({ ...request });
-    const before = this.target(target.nodeId);
+    const target = Object.freeze({ ...request, ...(request.runtimeSwitchFrom ? { runtimeSwitchFrom: Object.freeze({ ...request.runtimeSwitchFrom }) } : {}) });
+    const predecessor = target.runtimeSwitchFrom;
+    const before = this.target(target.nodeId, predecessor?.runtime);
     const cwd = before.cwd!;
     if (target.session !== undefined && (!before.pane || !before.generation)) {
       throw new Error("Claude managed launch context is unresolved: a bound pane and current occupant are required.");
     }
-    if ((target.cwd !== undefined && target.cwd !== cwd)
-      || (target.session !== undefined && target.session !== before.session)
-      || (target.pane != null && target.pane !== before.pane)) {
+    const staged = predecessor && predecessor.runtime === "codex"
+      && predecessor.session === before.session && predecessor.pane === before.pane && predecessor.generation === before.generation
+      && target.session && target.session !== before.session && target.pane && target.pane !== before.pane
+      && target.generation && target.generation !== before.generation;
+    if ((target.cwd !== undefined && target.cwd !== cwd) || (predecessor && !staged)
+      || (!staged && target.session !== undefined && target.session !== before.session)
+      || (!staged && target.pane != null && target.pane !== before.pane)) {
       throw new Error("Claude managed launch target disagrees with the current binding; no input or selection changed.");
     }
     const context = this.context(cwd);
@@ -115,7 +121,7 @@ export class ClaudeManagedLaunch {
       && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key));
     if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
-      if (JSON.stringify(this.target(target.nodeId)) !== JSON.stringify(before)
+      if (JSON.stringify(this.target(target.nodeId, predecessor?.runtime)) !== JSON.stringify(before)
         || JSON.stringify(this.context(cwd)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
           && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key))) !== JSON.stringify(inherited)) {

@@ -51,6 +51,7 @@ import { PodRepository } from "./domain/pod-repository.js";
 import { RigSpecPreflight } from "./domain/rigspec-preflight.js";
 import { RigInstantiator } from "./domain/rigspec-instantiator.js";
 import { Reconciler } from "./domain/reconciler.js";
+import { recoverRuntimeSwitches } from "./domain/runtime-switch-recovery.js";
 import { PackageRepository } from "./domain/package-repository.js";
 import { InstallRepository } from "./domain/install-repository.js";
 import { InstallEngine } from "./domain/install-engine.js";
@@ -489,6 +490,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
+  for (const warning of await recoverRuntimeSwitches(db, tmuxAdapter)) console.warn(`Runtime switch recovery: ${warning}`);
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
   // Lives at module scope so the projection chain (PsProjectionService,
@@ -792,6 +794,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
   const stubRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/stub-runner.js");
   const stubAdapter = new StubRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, runnerEntryPath: stubRunnerEntryPath });
+
+  for (const warning of await recoverRuntimeSwitches(db, tmuxAdapter, { "codex": codexAdapter, "claude-code": claudeAdapter })) {
+    console.warn(`Runtime switch recovery: ${warning}`);
+  }
 
   // plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag
   // codex_hooks = true is set in ~/.codex/config.toml so plugin-shipped

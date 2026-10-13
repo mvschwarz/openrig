@@ -25,7 +25,7 @@ export class NativePermissionStore {
 
   /** Kernel is the persisted class-of-one rig, never a pane-name or cwd heuristic.
    * Authored policies and named Codex profiles keep their existing meaning. */
-  private launchDefault(nodeId: string, runtime: string): "kernel" | "team" | undefined {
+  private launchDefault(nodeId: string, runtime: string, codexProfile?: string | null): "kernel" | "team" | undefined {
     if (runtime !== "claude-code" && runtime !== "codex") return undefined;
     try {
       const row = this.db.prepare(`SELECT r.name, n.permission_policy AS member_policy,
@@ -34,7 +34,7 @@ export class NativePermissionStore {
           name: string; member_policy: string | null; rig_policy: string | null; profile: string | null;
         } | undefined;
       if (!row || row.member_policy != null || row.rig_policy != null
-        || (runtime === "codex" && row.profile?.trim())) return undefined;
+        || (runtime === "codex" && (codexProfile === undefined ? row.profile : codexProfile)?.trim())) return undefined;
       return row.name === "kernel" ? "kernel" : "team";
     } catch {
       // This optional default must not block otherwise supported launches when
@@ -44,12 +44,12 @@ export class NativePermissionStore {
   }
 
   /** One decision shared by fresh/continue, legacy restore and same-seat handover. */
-  launchOverride(nodeId: string, runtime: string): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault"> {
-    const selection = this.read(nodeId);
+  launchOverride(nodeId: string, runtime: string, target?: { selection: NativePermissionSelection | null; codexProfile: string | null }): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault"> {
+    const selection = target ? target.selection : this.read(nodeId);
     if (selection && selection.runtime !== runtime) {
       throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
     }
-    const launchDefault = selection ? undefined : this.launchDefault(nodeId, runtime);
+    const launchDefault = selection ? undefined : this.launchDefault(nodeId, runtime, target?.codexProfile);
     if (launchDefault === "kernel") {
       return { kernelAuthority: true, teamPermissionDefault: false, launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
     }

@@ -66,6 +66,16 @@ describe("SnapshotRepository", () => {
     expect(repo.getSnapshot("nonexistent")).toBeNull();
   });
 
+  it("ranks a committed runtime switch above older automatic captures, then follows later automatic captures", () => {
+    repo.createSnapshot("rig-1", "auto-pre-down", sampleData());
+    repo.createSnapshot("rig-1", "auto-periodic", sampleData());
+    const switched = repo.createSnapshot("rig-1", "runtime-switch", sampleData());
+    expect(repo.findLatestRestoreUsable("rig-1")?.id).toBe(switched.id);
+    expect(repo.selectRestoreUsable("rig-1")).toMatchObject({ ok: true, snapshot: { id: switched.id } });
+    const later = repo.createSnapshot("rig-1", "auto-periodic", sampleData());
+    expect(repo.findLatestRestoreUsable("rig-1")?.id).toBe(later.id);
+  });
+
   it("getLatestSnapshot: explicit timestamps, returns newest", () => {
     db.prepare(
       "INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, ?, ?, ?, ?)"

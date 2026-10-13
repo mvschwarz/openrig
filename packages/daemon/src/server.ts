@@ -140,6 +140,7 @@ import type { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
+import { occupantMutationRefusal } from "./routes/require-sender-identity.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
@@ -660,6 +661,11 @@ export function createApp(deps: AppDeps): Hono {
   // error, never forwarding them. Absent/local host param falls through to
   // the existing handlers untouched (the FR-2 zero-regression negative).
   app.use("/api/*", hostReadThrough());
+  app.use("/api/*", async (c, next) => {
+    const refusal = occupantMutationRefusal(c);
+    if (refusal) return refusal;
+    await next();
+  });
 
   app.get("/healthz", (c) => {
     // OPR.0.4.3.21 — enrich the health surface with event-loop wedge evidence

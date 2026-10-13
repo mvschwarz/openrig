@@ -142,13 +142,18 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     ?? spec.defaults?.runtime
     ?? "claude-code";
 
+  // Model and effort belong to the runtime that declared them. A member may
+  // deliberately override that runtime (including a live seat migration).
+  const profileRuntime = profile.preferences?.runtime ?? spec.defaults?.runtime;
+  const profileMatches = !profileRuntime || profileRuntime === runtime;
+  const defaultsMatch = !spec.defaults?.runtime || spec.defaults.runtime === runtime;
   const model = member.model
-    ?? profile.preferences?.model
-    ?? spec.defaults?.model;
+    ?? (profileMatches ? profile.preferences?.model : undefined)
+    ?? (defaultsMatch ? spec.defaults?.model : undefined);
 
   const rawEffort = member.effort
-    ?? profile.preferences?.effort
-    ?? spec.defaults?.effort;
+    ?? (profileMatches ? profile.preferences?.effort : undefined)
+    ?? (defaultsMatch ? spec.defaults?.effort : undefined);
   const effort = typeof rawEffort === "string" && rawEffort.trim()
     ? rawEffort.trim()
     : undefined;

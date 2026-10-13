@@ -834,6 +834,12 @@ export class RestoreOrchestrator {
     const node = entry.node;
     const nodeId = node.id;
 
+    const configured = this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(nodeId) as { runtime: string | null } | undefined;
+    if (configured?.runtime && node.runtime && configured.runtime !== node.runtime) {
+      return { nodeId, logicalId: node.logicalId, status: "failed",
+        error: `Snapshot runtime ${node.runtime} differs from the seat's configured ${configured.runtime}. Use a snapshot taken after the runtime switch, or rig seat launch ${node.logicalId}@${data.rig.name} --fresh. No native conversation was resumed.` };
+    }
+
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
     // ambiguity must be DETECTED before any continuity_state short-circuit —
     // a pod node in 'restoring' otherwise returns a silent status "fresh"

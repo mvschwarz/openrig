@@ -12,6 +12,7 @@ export function terminalAuthHeaders(): Record<string, string> {
 
 /** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
 export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
+export const OCCUPANT_GENERATION_HEADER = "X-OpenRig-Occupant-Generation";
 
 /**
  * P18 sender-provenance — derive the caller's identity from the seat ENV (never a request-body
@@ -29,7 +30,8 @@ export function senderIdentityHeaders(originSelfHostId?: string): Record<string,
     originSelfHostId && originSelfHostId.length > 0 && session.split("@").length < 3
       ? `${session}@${originSelfHostId}`
       : session;
-  return { [SENDER_IDENTITY_HEADER]: value };
+  const generation = process.env.OPENRIG_OCCUPANT_GENERATION?.trim();
+  return { [SENDER_IDENTITY_HEADER]: value, ...(generation ? { [OCCUPANT_GENERATION_HEADER]: generation } : {}) };
 }
 
 /** Construct registered remote clients with the origin derived from this instance's durable store. */

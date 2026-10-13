@@ -196,6 +196,18 @@ describe("RestoreOrchestrator", () => {
     return updated;
   }
 
+  it("does not resume a snapshot from the seat's previous runtime", async () => {
+    const snapshot = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "prior-provider-id" });
+    db.prepare("UPDATE nodes SET runtime='codex' WHERE rig_id=?").run(snapshot.rigId);
+    const claude = mockClaudeResume(), codex = mockCodexResume();
+    const result = await createOrchestrator({ claude, codex }).restore(snapshot.id);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result.nodes).toEqual([expect.objectContaining({ status: "failed", error: expect.stringContaining("Snapshot runtime claude-code differs") })]);
+    expect(claude.resume).not.toHaveBeenCalled(); expect(codex.resume).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT runtime FROM nodes WHERE rig_id=?").get(snapshot.rigId)).toEqual({ runtime: "codex" });
+  });
+
   it("restores only the snapshot's intended roster and reports historical exclusions", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [

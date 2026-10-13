@@ -583,6 +583,79 @@ export class TmuxAdapter {
   /** The committed binding now owns identity; this is not filesystem cleanup. */
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
+  /** Recover only a helper named by a durable runtime-switch intent. The saved
+   * generation, node and exact pane must still agree before it can receive input. */
+  async recoverRuntimeSwitchSession(input: { nodeId: string; session: string; pane: string; generation: string }): Promise<TmuxResult> {
+    try {
+      if (this.deliveryGuard && !this.deliveryGuard.ownsLifecycle(input.nodeId)) throw new Error("Runtime switch recovery requires the seat lifecycle lease.");
+      const owner = this.deliveryGuard?.maybeTarget(input.session);
+      if (owner) throw new Error("The runtime switch helper has become a managed session.");
+      const panes = await this.listPanes(input.session);
+      if ((await this.listWindows(input.session)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
+        || await this.getSessionEnv(input.session, "OPENRIG_NODE_ID") !== input.nodeId
+        || await this.getSessionEnv(input.session, "OPENRIG_OCCUPANT_GENERATION") !== input.generation) {
+        throw new Error("Runtime switch helper identity changed; no process was touched.");
+      }
+      this.freshManaged.set(input.session, { nodeId: input.nodeId, pane: input.pane });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, code: "runtime_switch_target_changed", message: (error as Error).message };
+    }
+  }
+
+  /** Exchange two live panes while preserving the canonical seat session. The
+   * lifecycle lease excludes delivery/rebind; tmux verifies both memberships at
+   * the write. The same operation rolls back an uncommitted exchange. */
+  async swapRuntimeSwitchPanes(input: { nodeId: string; session: string; canonicalSession: string; canonicalPane: string; stagedPane: string }): Promise<TmuxResult> {
+    try {
+      const created = this.freshManaged.get(input.session);
+      if (this.deliveryGuard?.maybeTarget(input.session)) throw new Error("The staging session was claimed while the successor started.");
+      if (this.deliveryGuard && (!this.deliveryGuard.ownsLifecycle(input.nodeId)
+        || created?.nodeId !== input.nodeId || created.pane !== input.stagedPane)) {
+        throw new Error("Runtime switch requires custody of the staging pane.");
+      }
+      if (!/^%\d+$/.test(input.canonicalPane) || !/^%\d+$/.test(input.stagedPane)) throw new Error("Exact pane ids are required.");
+      const canonical = await this.listPanes(input.canonicalSession);
+      const staged = await this.listPanes(input.session);
+      if (canonical.length !== 1 || canonical[0]!.id !== input.canonicalPane
+        || staged.length !== 1 || staged[0]!.id !== input.stagedPane) throw new Error("Runtime switch pane membership changed.");
+      const sessionId = async (name: string) => {
+        const argv = ["tmux", "display-message", "-p", "-t", exactTarget(name, "pane"), "#{session_id}"];
+        const id = (await this.run(argv, posixJoinArgv(argv))).trim();
+        if (!/^\$\d+$/.test(id)) throw new Error("Runtime switch session identity is unresolved.");
+        return id;
+      };
+      const canonicalId = await sessionId(input.canonicalSession);
+      const stagingId = await sessionId(input.session);
+      this.deliveryGuard?.checkInput(input.nodeId);
+      const mismatch = "display-message -p runtime-switch-target-changed";
+      const swap = `swap-pane -d -s ${input.stagedPane} -t ${input.canonicalPane}`;
+      const checkStaged = `if-shell -F -t ${input.stagedPane} ${shellQuote(`#{==:#{session_id},${stagingId}}`)} ${shellQuote(swap)} ${shellQuote(mismatch)}`;
+      const argv = ["tmux", "if-shell", "-F", "-t", input.canonicalPane,
+        `#{==:#{session_id},${canonicalId}}`, checkStaged, mismatch];
+      const output = await this.run(argv, posixJoinArgv(argv));
+      if (output.includes("runtime-switch-target-changed")) throw new Error("Runtime switch pane membership changed at cutover.");
+      this.freshManaged.set(input.session, { nodeId: input.nodeId, pane: input.canonicalPane });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, code: "runtime_switch_target_changed", message: (error as Error).message };
+    }
+  }
+
+  /** Public launch metadata for the successor now occupying this session. */
+  async setRuntimeSwitchEnvironment(session: string, runtime: string, generation: string): Promise<TmuxResult> {
+    return this.guardedInput(session, async (_pane, beforeWrite) => {
+      try {
+        for (const [key, value] of [["OPENRIG_RUNTIME", runtime], ["OPENRIG_OCCUPANT_GENERATION", generation]]) {
+          beforeWrite();
+          const argv = ["tmux", "set-environment", "-t", exactTarget(session, "session"), key!, value!];
+          await this.run(argv, posixJoinArgv(argv));
+        }
+        return { ok: true };
+      } catch (error) { return classifyWriteError(error); }
+    });
+  }
+
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     // These are the daemon's resolved capture settings, not seat overrides.
     // An empty per-session value prevents the tmux server's inherited values

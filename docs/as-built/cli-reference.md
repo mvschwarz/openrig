@@ -867,11 +867,85 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
 | `rig seat set-permissions <seat>` | — | `--mode <mode>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-runtime <seat>` | — | `--runtime codex\|claude-code` **required**<br>`--reason <text>` **required**<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--permission-mode <mode>`<br>`--operator <address>`<br>`--dry-run`<br>`--json` |
 | `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>` **required**<br>`--stop`<br>`--operator <address>`<br>`--json` |
 | `rig seat continue <seat>` | — | `--json` |
 | `rig seat stop <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-resume-token <session>` | — | `--token-stdin`<br>`--reason <text>` **required**<br>`--json` |
+
+#### Switching a seat between Codex and Claude Code
+
+`rig seat set-runtime` changes a live seat's provider without recreating its rig.
+The existing `handover` command keeps the configured runtime; `set-model` and
+`set-permissions` record settings for later launches. Runtime switching starts
+a fresh target-runtime conversation and changes the live occupant:
+
+```sh
+rig seat set-runtime operator-agent@kernel --runtime claude-code --reason "Use Claude for this seat" --dry-run
+rig seat set-runtime operator-agent@kernel --runtime claude-code --reason "Use Claude for this seat"
+rig seat status operator-agent@kernel --json
+```
+
+The seat must have one live managed occupant, an absolute working directory,
+and one tmux window with one pane. Its node ID, role/profile, graph edges,
+working directory, queue address and canonical tmux session name stay the same.
+The same AgentSpec/profile is resolved for the target runtime, including its
+runtime-specific hooks and guidance. Missing source material and conflicting
+target skills/subagents refuse before launch. Saved role/culture files and a
+bounded predecessor recap/screen are carried forward; arbitrary startup actions
+are retained for subsequent launches but are not rerun by this handover.
+
+The successor starts in a private staging session while the incumbent remains
+available. It receives handover context and active queue IDs, then waits for
+activation. After readiness and context submission, the daemon swaps the panes
+and commits the target runtime, settings, native identity, occupant generation
+and a new restore snapshot together. Existing in-progress claims transfer to
+the successor generation without releasing them. Other queue items and graph
+edges are unchanged. The predecessor is retired before the activation reminder.
+The canonical session survives, but its pane ID and scrollback change; use the
+handover recap and provider history to consult the predecessor.
+
+`--model` and `--effort` select target-runtime settings. Without them, matching
+target-runtime AgentSpec/profile defaults apply, then native defaults. Values
+declared for the other runtime are not copied. The previous explicit native
+permission selection and Codex profile are cleared; `--permission-mode` and
+`--codex-config-profile` select new ones. The latter is a native Codex profile,
+not an AgentSpec profile. Member/rig permission policy and the existing
+team/kernel launch defaults still apply. Asking for the already configured
+runtime is a no-op; use the existing setting commands to change that runtime's
+settings. `--dry-run` resolves the plan without starting processes or writing
+state; it does not prove the target executable can authenticate or become ready.
+
+The managed database and `rig export` describe the new runtime; the imported
+YAML file is not rewritten. The committed switch snapshot joins the automatic
+crash-recovery tier, ahead of older automatic captures. Old snapshots cannot resume a conversation from
+the other provider into the switched seat. Use the new snapshot or an explicit
+fresh seat launch. No native conversation is converted across providers.
+
+Failures before commit restore the incumbent pane and leave its configuration
+authoritative. Target files already prepared can remain on disk. After commit,
+retirement/activation failures retain the target configuration and a durable
+recovery intent. `seat status` shows its phase; daemon startup or an explicit
+retry of `set-runtime` resumes recovery. Unknown transport or changed pane
+ownership leaves processes untouched. Recovery may repeat the same activation
+reminder, which asks the successor to refresh its queue without duplicating work.
+HTTP 202 with `recoveryPending: true` is reported with a nonzero CLI exit.
+
+The typing guard and existing seat lifecycle serialization apply. Managed CLI
+mutations from a staged or retired generation are refused; reads remain
+available. This is coordination in a trusted environment, not isolation of
+native filesystem operations or shell commands already running in either
+process. A seat may switch itself: its initiating CLI can disappear when that
+process retires, while the daemon continues. A CLI timeout reports an unknown
+outcome without retrying; inspect `seat status` before another operation.
+
+Regression coverage includes both directions, atomic failure injection,
+generation/identity handling, real target-material projection and private tmux
+process cutover/recovery with record-only adapters. Those tests do not exercise
+provider authentication or actual Claude/Codex inference. The YAML stub runtime
+cannot cover this provider-specific launch/projection path or consume its
+handover packet, so native tmux fixtures supply that plumbing coverage.
 
 A `rig seat stop` that successfully kills the current session records that it
 was intentionally stopped. With other healthy members running, the rig's `lifecycleState` in

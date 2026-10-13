@@ -490,6 +490,11 @@ export class PodRigInstantiator {
     return this.deps.skillsRootResolver?.();
   }
 
+  /** Runtime changes resolve the same managed material selection as launch. */
+  runtimeSwitchMaterialContext() {
+    return { skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() };
+  }
+
   private systemWorldResolutionContext(): { systemSkills?: string[]; systemWorldError?: string } {
     const resolution = this.deps.systemWorldResolver?.();
     if (!resolution) return {};

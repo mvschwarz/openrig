@@ -489,6 +489,13 @@ version, from checking the environment to a useful report to the OpenRig team.
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the
   running process enforces it.
+- **`rig seat set-runtime <seat> --runtime codex|claude-code --reason <text>`** — switch a live
+  seat's provider while keeping its node, role/profile, graph, queue responsibility and tmux
+  session name. The ready successor receives handover context before the incumbent retires;
+  its native conversation, pane and generation are new. Target settings replace the old
+  runtime's model/effort and explicit native permission/profile choices. Use `--dry-run` to
+  inspect the plan; `seat status` reports interrupted switches awaiting recovery. Managed
+  configuration and the new restore snapshot use the target runtime; imported YAML stays as authored.
 - **`rig seat set-typing-guard <seat> --enabled true|false --reason <text>`** — protect a human's
   draft in that seat: automatic input is retained instead of typed while the guard is on.
   **`rig seat held-messages`** lists what was retained and **`rig seat retire-held-message`**

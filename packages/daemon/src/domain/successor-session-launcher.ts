@@ -62,6 +62,8 @@ export interface SuccessorNode {
    *  Same continuity rationale as model — populated by the caller from node provenance; absent → the
    *  adapter emits no -p flag (unchanged for legacy/unpinned seats). */
   codexConfigProfile?: string | null;
+  claudeManagedBlockFile?: NodeBinding["claudeManagedBlockFile"];
+  runtimeSwitchFrom?: NodeBinding["runtimeSwitchFrom"];
 }
 
 export type SuccessorLaunchResult =
@@ -290,6 +292,40 @@ export class SuccessorSessionLauncher {
     };
   }
 
+  /** A runtime change starts in a separate, lifecycle-owned session. Its
+   * public seat identity is canonical, but its reserved generation has no
+   * authority until commit. No resume/fork token crosses this boundary. */
+  async stageSuccessor(input: {
+    node: SuccessorNode; stagingSession: string; canonicalSession: string; occupantGeneration: string;
+    onPaneCreated: (pane: string) => void;
+    prepare: (binding: NodeBinding, adapter: RuntimeAdapter) => Promise<void>;
+  }): Promise<{ ok: true; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation }
+    | { ok: false; code: string; message: string }> {
+    const adapter = input.node.runtime ? this.runtimeAdapters[input.node.runtime] : undefined;
+    if (!adapter) return { ok: false, code: "successor_runtime_unsupported", message: "Target runtime adapter is unavailable." };
+    const env = compactEnv({ ...this.sessionEnv, ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
+      OPENRIG_NODE_ID: input.node.id, OPENRIG_SESSION_NAME: input.canonicalSession,
+      OPENRIG_RUNTIME: input.node.runtime ?? undefined, OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration });
+    try {
+      const created = await this.tmuxAdapter.createSession(input.stagingSession, input.node.cwd ?? undefined, env);
+      if (!created.ok) return created;
+      const panes = await this.tmuxAdapter.listPanes(input.stagingSession);
+      if (panes.length !== 1) return { ok: false, code: "pane_unresolved", message: "Staging requires exactly one newly created pane." };
+      const pane = panes[0]!.id;
+      input.onPaneCreated(pane);
+      await this.tmuxOptionDefaults?.applyToFreshSession(input.stagingSession);
+      const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+      const blank = await this.verifyPaneIsBlankShell(pane, shell);
+      if (!blank.ok) return { ok: false, code: "successor_pane_not_blank",
+        message: `Staging pane is running ${blank.observed ?? "an unknown command"}; a verified blank shell is required before launching the target runtime.` };
+      const started = await this.startAgent(input.node, input.stagingSession, pane, input.node.cwd ?? undefined,
+        undefined, input.occupantGeneration, input.prepare, input.canonicalSession);
+      return started.ok ? { ...started, tmuxPane: pane } : started;
+    } catch (error) {
+      return { ok: false, code: "successor_launch_failed", message: (error as Error).message };
+    }
+  }
+
   /**
    * B1 — launch the successor into a live, ready agent via the runtime adapter's
    * `launchHarness` + readiness probe (the same primitives StartupOrchestrator
@@ -304,6 +340,8 @@ export class SuccessorSessionLauncher {
     cwd: string | undefined,
     forkSource?: ForkSource,
     launchGeneration?: string | null,
+    prepare?: (binding: NodeBinding, adapter: RuntimeAdapter) => Promise<void>,
+    canonicalSession?: string,
   ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation } | { ok: false; code: string; message: string }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
@@ -333,6 +371,8 @@ export class SuccessorSessionLauncher {
       updatedAt: "",
       cwd: cwd ?? "",
       launchGeneration: launchGeneration ?? undefined,
+      ...(node.runtimeSwitchFrom ? { runtimeSwitchFrom: node.runtimeSwitchFrom } : {}),
+      ...(node.claudeManagedBlockFile ? { claudeManagedBlockFile: node.claudeManagedBlockFile } : {}),
       nonInterruptive: node.nonInterruptive,
       kernelAuthority: node.kernelAuthority,
       teamPermissionDefault: node.teamPermissionDefault,
@@ -349,7 +389,8 @@ export class SuccessorSessionLauncher {
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;
     try {
-      launch = await adapter.launchHarness(binding, { name: tmuxSession, ...(forkSource ? { forkSource } : {}) });
+      await prepare?.(binding, adapter);
+      launch = await adapter.launchHarness(binding, { name: canonicalSession ?? tmuxSession, ...(forkSource ? { forkSource } : {}) });
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: `Successor harness launch threw: ${err instanceof Error ? err.message : String(err)}` };
     }

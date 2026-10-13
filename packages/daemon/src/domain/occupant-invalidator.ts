@@ -19,6 +19,8 @@ export interface OccupantInvalidator {
     retiringSessionName: string;
     successorSessionName: string;
     retiringGeneration?: string;
+    /** An enclosing transaction defers irreversible in-memory cleanup until commit. */
+    deferInMemory?: (invalidate: () => void) => void;
   }): void;
 }
 
@@ -41,17 +43,17 @@ export interface OccupantInvalidatorDeps {
 export class DefaultOccupantInvalidator implements OccupantInvalidator {
   constructor(private readonly deps: OccupantInvalidatorDeps) {}
 
-  invalidateRetiringOccupant(args: {
-    retiringSessionName: string;
-    successorSessionName: string;
-    retiringGeneration?: string;
-  }): void {
+  invalidateRetiringOccupant(args: Parameters<OccupantInvalidator["invalidateRetiringOccupant"]>[0]): void {
     const { retiringSessionName, retiringGeneration } = args;
     const log = this.deps.log ?? (() => {});
 
     // Class-A — hard-delete by name (safe by TIMING; runs at commit() before the successor writes).
-    this.deps.enforcer.invalidateOccupant(retiringSessionName);
-    this.deps.contextUsage.invalidateOccupantSidecar(retiringSessionName);
+    const invalidateMemory = () => {
+      this.deps.enforcer.invalidateOccupant(retiringSessionName);
+      this.deps.contextUsage.invalidateOccupantSidecar(retiringSessionName);
+    };
+    if (args.deferInMemory) args.deferInMemory(invalidateMemory);
+    else invalidateMemory();
 
     // Class-B — gen-scoped ONLY. Never name-scope (a shared name can't discriminate retiree from
     // successor; a name-scoped drop would neutralize the successor's own live role items).

@@ -162,7 +162,7 @@ interface PersistedStartupContextRow {
   runtime: string | null;
 }
 
-interface ParsedStartupContext {
+export interface ParsedStartupContext {
   plan: ProjectionPlan;
   resolvedStartupFiles: ResolvedStartupFile[];
   startupActions: StartupAction[];
@@ -1107,7 +1107,7 @@ export class SeatLifecycleService {
     return row?.resume_token?.trim() || null;
   }
 
-  private readStartupContext(
+  readStartupContext(
     nodeId: string,
     cwd: string,
   ): { ok: true; context: ParsedStartupContext } | { ok: false; refusal: SeatRefusal } {
@@ -1188,6 +1188,7 @@ export class SeatLifecycleService {
         required: raw["required"],
         appliesOn: raw["appliesOn"],
         ...(raw["kind"] === "file" ? { kind: "file" as const } : {}),
+        ...(raw["orientation"] === "role" ? { orientation: "role" as const } : {}),
       }));
     }
 

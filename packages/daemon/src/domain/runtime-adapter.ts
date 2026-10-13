@@ -25,6 +25,9 @@ export interface NodeBinding extends Binding {
   teamPermissionDefault?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
+  /** Internal staging proof for a cross-runtime successor. Its predecessor
+   * remains the bound occupant until the runtime-switch transaction commits. */
+  runtimeSwitchFrom?: { runtime: string; session: string; pane: string; generation: string };
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
   claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
 }

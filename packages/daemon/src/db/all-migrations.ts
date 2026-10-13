@@ -105,6 +105,7 @@ import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_trans
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
 import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
+import { seatRuntimeSwitchesSchema } from "./migrations/104_seat_runtime_switches.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -209,4 +210,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsRecoveryTagsSchema,
   resumeRotationSchema,
   sessionStopIntentSchema,
+  seatRuntimeSwitchesSchema,
 ];

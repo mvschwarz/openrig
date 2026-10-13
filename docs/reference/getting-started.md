@@ -832,6 +832,15 @@ approval_policy = "on-request"
 network_access = false
 ```
 
+### Per-seat runtime
+
+To change an existing seat between Codex and Claude Code without rebuilding its
+rig, use `rig seat set-runtime <seat> --runtime codex|claude-code --reason <text>`.
+It starts a fresh target conversation with the seat's role and handover context,
+preserving graph and queue responsibility. Preview with `--dry-run` and inspect
+`rig seat status <seat>` afterward. See [runtime switching](../as-built/cli-reference.md#switching-a-seat-between-codex-and-claude-code)
+for target defaults, recovery and the changed pane/scrollback behavior.
+
 ### Per-seat permission mode
 
 Permission mode is the native execution choice; work posture is project guidance.

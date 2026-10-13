@@ -70,6 +70,28 @@ function fixture() {
 const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "deliberate choice" };
 
 describe("S03 production managed capability selection", () => {
+  it("launches a staged Claude successor against the still-current Codex binding", async () => {
+    const f = fixture(); f.db.exec("UPDATE nodes SET runtime='codex'");
+    const request = { nodeId: "node", cwd: f.cwd, session: "staging", pane: "%2", generation: "reserved-generation",
+      runtimeSwitchFrom: { runtime: "codex", session: "seat", pane: "%1", generation: "generation-1" } };
+    const prepared = await f.managed.prepare(request, "auto");
+    const command = prepared.command(["--permission-mode", "auto"]);
+    expect(command).toContain("OPENRIG_SESSION_NAME=seat");
+    expect(command).toContain("OPENRIG_OCCUPANT_GENERATION=reserved-generation");
+    expect(command).toContain("OPENRIG_RUNTIME=claude-code");
+    f.db.exec("UPDATE bindings SET tmux_pane='%3'");
+    expect(() => prepared.assertCurrent()).toThrow(/changed/);
+  });
+
+  it("refuses a runtime switch whose predecessor changes during capability discovery", async () => {
+    const f = fixture(); f.db.exec("UPDATE nodes SET runtime='codex'");
+    vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], _options: unknown, done: (error: null, stdout: string) => void) => {
+      f.db.exec("UPDATE occupant_tenures SET generation_uuid='replacement'"); done(null, help);
+    }) as typeof execFile);
+    await expect(f.managed.prepare({ nodeId: "node", cwd: f.cwd, session: "staging", pane: "%2", generation: "reserved-generation",
+      runtimeSwitchFrom: { runtime: "codex", session: "seat", pane: "%1", generation: "generation-1" } }, "auto")).rejects.toThrow(/changed/);
+    expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
+  });
   it.skipIf(process.platform === "win32").each([
     { USER: "fixture-user", LOGNAME: "fixture-login" },
     { USER: "fixture-user" }, { LOGNAME: "fixture-login" }, {},
