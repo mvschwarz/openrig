@@ -136,6 +136,10 @@ export function resolveConcreteHint(
 export interface ForkSource {
   kind: "native_id" | "artifact_path" | "name" | "last";
   value?: string;
+  /** Set only by a seat handover: a launch whose new id isn't captured yet still succeeds, with the id
+   *  pending, so the handover can commit the ready successor. Every other fork caller keeps the
+   *  refusal on a missed capture. */
+  pendingIdAllowed?: boolean;
 }
 
 /**

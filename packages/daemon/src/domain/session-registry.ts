@@ -462,8 +462,6 @@ export class SessionRegistry {
     return claudeResumeRotation(row)?.token === token.trim();
   }
 
-  /** Test durable identity without returning the stored credential or changing
-   *  its provenance. An equal protected token needs no lower-ranked write. */
   /** A forked occupant (nodes.continuity_outcome = 'forked') whose own id is still pending must never
    *  record an id another session row already holds: in a fork's process that is its parent's
    *  (or a predecessor's) conversation, not its own. */
@@ -474,6 +472,8 @@ export class SessionRegistry {
     ).get(sessionId, type, token));
   }
 
+  /** Test durable identity without returning the stored credential or changing
+   *  its provenance. An equal protected token needs no lower-ranked write. */
   resumeTokenMatches(sessionId: string, type: string, token: string): boolean {
     if (!type.trim() || !token.trim()) return false;
     return Boolean(this.db.prepare(
