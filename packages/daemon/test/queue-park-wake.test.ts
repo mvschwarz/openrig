@@ -374,10 +374,11 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
 
     const result = await engine.evaluate(jobs.getByIdOrThrow(sharedJobId));
 
-    // The attachment is actionable work; the job must survive and deliver.
+    // The attachment is actionable work; the job must survive and deliver. That delivery consumed the last
+    // attachment of a one-shot job whose original park has ended, so it is then retired at once.
     expect(result.outcome).not.toMatchObject({ reason: "park_timer_target_terminal" });
     expect(result.outcome.action).toBe("send");
-    expect(jobs.getById(sharedJobId)?.state).toBe("active");
+    expect(jobs.getById(sharedJobId)?.state).toBe("terminal");
     expect(deliveries).toEqual([
       expect.objectContaining({ targetSession: "shared-owner@rig" }),
     ]);
@@ -523,8 +524,9 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
 
     const outcomes = await runUntilRetired(jobId);
 
+    // Retired at the consuming attempt itself, not at a later check.
     expect(deliveries.map((d) => d.status)).toEqual(["retained", "ok"]);
-    expect(outcomes).toEqual(["skipped", "sent", "terminal"]);
+    expect(outcomes).toEqual(["skipped", "sent"]);
     expect(jobs.getById(jobId)?.state).toBe("terminal");
     expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "ok"]);
   });
@@ -536,7 +538,20 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const outcomes = await runUntilRetired(jobId);
 
     expect(deliveries.map((d) => d.status)).toEqual(["ok"]);
-    expect(outcomes).toEqual(["sent", "terminal"]);
+    expect(outcomes).toEqual(["sent"]);
+    expect(jobs.getById(jobId)?.state).toBe("terminal");
+  });
+
+  it("a shared one-shot timer: once its attempt consumes the last attachment, no new task can attach to it", async () => {
+    const { tick } = scriptedEngine(["ok"]);
+    const { jobId } = await sharedTimerWithOriginalStopped("shared-window@rig");
+    await tick();
+    expect(jobs.getById(jobId)?.state).toBe("terminal");
+    const late = await item("shared-window@rig");
+    expect(() => repo.update({
+      qitemId: late.qitemId, actorSession: "shared-window@rig", state: "blocked",
+      blockedOn: "external:late", transitionNote: "late attach", wakeWatchdogId: jobId,
+    } as never)).toThrow(expect.objectContaining({ code: "wake_watchdog_not_live" }));
   });
 
   it("a shared one-shot timer: repeated retained attempts to the attached task, then a failed one consumes it", async () => {
@@ -544,7 +559,8 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const { attached, jobId } = await sharedTimerWithOriginalStopped("shared-repeat@rig");
     const outcomes = await runUntilRetired(jobId);
     expect(deliveries.map((d) => d.status)).toEqual(["retained", "retained", "failed"]);
-    expect(outcomes).toEqual(["skipped", "skipped", "sent", "terminal"]);
+    expect(outcomes).toEqual(["skipped", "skipped", "sent"]);
+    expect(jobs.getById(jobId)?.state).toBe("terminal");
     expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "retained", "failed"]);
   });
 
@@ -781,11 +797,17 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
         } else {
           expect(jobs.getById(ref)?.state).toBe("terminal");
         }
-      } else {
+      } else if (repeating) {
         expect(jobs.getById(ref)).toMatchObject({ state: "active", intervalSeconds: sharedJob.intervalSeconds,
           specYaml: sharedJob.specYaml });
         expect((await engine.evaluate(jobs.getByIdOrThrow(ref))).outcome.action).toBe("terminal");
         expect(jobs.getById(ref)?.state).toBe("terminal");
+        expect(deliveries).toHaveLength(1);
+      } else {
+        // One-shot: the original park has ended and this attempt consumed the last attachment, so the job is
+        // retired at once; while it stayed active, --wake-watchdog could have attached another task to it.
+        expect(jobs.getById(ref)?.state).toBe("terminal");
+        expect(terminalReason(ref)).toBe("park_timer_target_terminal");
         expect(deliveries).toHaveLength(1);
       }
     },

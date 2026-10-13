@@ -3139,11 +3139,21 @@ export class QueueRepository {
       const firedEvents = targets.map(recordFired);
       if (deliveryStatus === "retained") return firedEvents;
       if (usageLimitBlockers.length === 0) {
-        if (parkGeneratedTimer && !backOffQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), jobId, deliveryStatus)) {
-          (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(
+        const jobsRepo = this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db);
+        if (parkGeneratedTimer && !backOffQueueWait(jobsRepo, jobId, deliveryStatus)) {
+          jobsRepo.markTerminal(
             jobId,
             "park_timer_fired_once",
           );
+        } else if (!parkGeneratedTimer) {
+          // A one-shot generated job whose original park has ended and whose last attachment this attempt just
+          // consumed is retired now, not at its next check: while it stayed active, --wake-watchdog could attach
+          // another task to it. Repeating (queue-wait) jobs keep their own lifecycle.
+          const job = jobsRepo.getById(jobId);
+          if (job && !isQueueWait(job.specYaml)) {
+            const reason = this.resolveWatchdogPreDeliveryTerminalReason(jobId);
+            if (reason) jobsRepo.markTerminal(jobId, reason);
+          }
         }
         return firedEvents;
       }
