@@ -326,4 +326,43 @@ describe("rig provider status — usage windows", () => {
     expect(failed.exitCode).toBe(1);
     expect(JSON.parse(failed.out)).toEqual(model);
   });
+
+  it("seatAccounts (switch on): a SEATS section, one line per seat with its configured account and source, never linked", async () => {
+    const notLinked = "a registry profile name and an observed account are different kinds of fact; nothing supported links them without reading the profile's contents";
+    model = { ...MODEL, usage: [READING], seatAccounts: [
+      { seatSession: "dev-qa@r", rigName: "r", runtime: "codex",
+        configured: { source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: false },
+        registryNotes: ["profile work-a is not saved on this host"],
+        allowance: { linked: false, reason: notLinked }, observed: { note: "no per-seat observation for Codex" } },
+      { seatSession: "dev-build@r", rigName: "r", runtime: "claude-code",
+        configured: { source: "default_login", home: "/h/.claude", homeNote: "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon" },
+        allowance: { linked: false, reason: "the usage read reads the login this home holds now; the seat runs the login that was active when it launched" },
+        observed: { windowsSampled: true, differsFrom: ["dev-r1@r"], note: "possibly a different login: not a verdict" } },
+      { seatSession: "t@r", rigName: "r", runtime: "terminal",
+        configured: { source: "unknown", reason: "no account configuration is known for runtime terminal" },
+        allowance: { linked: false, reason: "no configured account" } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "SEATS (configured account; not proof of the login a running session uses)",
+      "  dev-qa@r  codex  configured: profile work-a (registry, recorded 2026-10-12T10:00:00Z; profile not saved on this host) · allowance not linked",
+      "    profile work-a is not saved on this host",
+      "    observed: no per-seat observation for Codex",
+      `    allowance not linked: ${notLinked}`,
+      "  dev-build@r  claude-code  configured: default login (/h/.claude) · allowance not linked",
+      "    the login in the daemon's Claude config dir, shared by every Claude seat on this daemon",
+      "    observed: differs from dev-r1@r (possibly a different login: not a verdict)",
+      "    allowance not linked: the usage read reads the login this home holds now; the seat runs the login that was active when it launched",
+      "  t@r  terminal  configured: unknown (no account configuration is known for runtime terminal) · allowance not linked",
+      "    allowance not linked: no configured account",
+    ].join("\n"));
+    // The usage row itself is unchanged: still "seats unknown".
+    expect(out).toContain("· seats unknown");
+    expect((await run(["status", "--json"], port)).out).toBe(JSON.stringify(model));
+  });
+
+  it("no seatAccounts key (switch off): no SEATS section", async () => {
+    model = { ...MODEL, usage: [READING] };
+    expect((await run(["status"], port)).out).not.toContain("SEATS");
+  });
 });

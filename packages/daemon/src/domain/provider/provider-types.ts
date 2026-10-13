@@ -146,6 +146,31 @@ export interface FourBlockReadModel {
   /** Slice 01 (OPR.0.7.0.1) — observed usage windows by allowance identity, ADDITIVE and present
    *  only while `provider.usage_windows` is on. Read from memory; never probed by a read. */
   usage?: ProviderUsageAllowance[];
+  /** Slice 01 — each live seat's CONFIGURED account and its source, kept apart from observed allowances
+   *  (never linked to a usage row). ADDITIVE and present only while `provider.usage_windows` is on. */
+  seatAccounts?: SeatConfiguredAccount[];
+}
+
+/** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
+ *  which login a running session uses. A default login is whatever the daemon's home held at the seat's launch. */
+export type SeatAccountConfiguration =
+  | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean }
+  | { source: "default_login"; home: string | null; homeNote: string }
+  | { source: "unknown"; reason: string };
+
+export interface SeatConfiguredAccount {
+  seatSession: string;
+  rigName: string;
+  runtime: string;
+  configured: SeatAccountConfiguration;
+  /** A registry row that exists but isn't applied or doesn't match (stale after a runtime change, another
+   *  runtime in its column, or a profile not saved on this host). */
+  registryNotes?: string[];
+  /** Always unlinked: nothing supported links a configured account to an observed allowance. */
+  allowance: { linked: false; reason: string };
+  /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose
+   *  fresh readings disagree with it (possibly a different login, never a verdict). */
+  observed?: { windowsSampled?: boolean; differsFrom?: string[]; note?: string };
 }
 
 /** Slice 01 — allowance identity: the usage answer's accountId, else the workspace account/read

@@ -112,6 +112,32 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // freshness print side by side, each window with its own observation time; a failed refresh
     // prints beside the kept reading.
     if (Array.isArray(m["usage"])) renderUsage(m["usage"] as Array<Record<string, unknown>>);
+    if (Array.isArray(m["seatAccounts"])) renderSeatAccounts(m["seatAccounts"] as Array<Record<string, unknown>>);
+  }
+
+  // Slice 01 — each seat's configured account and its source (present only while provider.usage_windows is on).
+  // Configuration, never an observed account: the allowance stays unlinked, with the reason.
+  function renderSeatAccounts(rows: Array<Record<string, unknown>>): void {
+    console.log("SEATS (configured account; not proof of the login a running session uses)");
+    for (const r of rows) {
+      const c = (r["configured"] ?? {}) as Record<string, unknown>;
+      const configured = c["source"] === "registry"
+        ? `configured: profile ${c["profileRef"]} (registry, recorded ${c["recordedAt"]}${c["profileSaved"] ? "" : "; profile not saved on this host"})`
+        : c["source"] === "default_login"
+          ? `configured: default login${c["home"] ? ` (${c["home"]})` : ""}`
+          : `configured: unknown (${c["reason"]})`;
+      const allowance = (r["allowance"] ?? {}) as Record<string, unknown>;
+      console.log(`  ${r["seatSession"]}  ${r["runtime"]}  ${configured} · allowance not linked`);
+      if (c["source"] === "default_login" && c["homeNote"]) console.log(`    ${c["homeNote"]}`);
+      for (const note of (r["registryNotes"] as string[] | undefined) ?? []) console.log(`    ${note}`);
+      const observed = r["observed"] as Record<string, unknown> | undefined;
+      const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];
+      if (differs.length) console.log(`    observed: differs from ${differs.join(", ")} (${observed?.["note"]})`);
+      else if (observed?.["windowsSampled"] === true) console.log("    observed: this seat's status line reported windows (see USAGE)");
+      else if (observed?.["windowsSampled"] === false) console.log("    observed: no status-line windows from this seat yet");
+      else if (observed?.["note"]) console.log(`    observed: ${observed["note"]}`);
+      if (allowance["reason"]) console.log(`    allowance not linked: ${allowance["reason"]}`);
+    }
   }
 
   function windowName(w: Record<string, unknown>): string {
