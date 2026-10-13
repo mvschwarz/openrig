@@ -113,6 +113,21 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
+  /**
+   * Issue #1180 — the target seat's latest context-usage sample under its live
+   * occupant generation (generation-guarded by the jobs repository). Null = no
+   * usable sample; token/percent context jobs then skip loudly.
+   */
+  resolveContextUsage?: (
+    sessionName: string,
+    occupantGeneration: string | null,
+  ) => {
+    usedTokens: number | null;
+    usedPercentage: number | null;
+    contextWindowSize: number | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  } | null;
   /** Last defense before transport for persisted jobs whose owning domain can
    *  prove they are no longer actionable. A reason terminals the job without
    *  delivering; null preserves the existing send path. */
@@ -201,6 +216,7 @@ export class WatchdogPolicyEngine {
   private readonly now: () => Date;
   private readonly policies: Map<string, Policy>;
   private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
+  private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
   private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
@@ -211,6 +227,7 @@ export class WatchdogPolicyEngine {
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
+    this.resolveContextUsage = deps.resolveContextUsage;
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
     this.onWakeAttempt = deps.onWakeAttempt;
     this.resolveQueueWait = deps.resolveQueueWait;
@@ -266,8 +283,12 @@ export class WatchdogPolicyEngine {
       : null;
     let watchedFilePath = job.watchedFilePath;
     let currentGenerationTranscriptPending = false;
+    // Issue #1180 — token/percent jobs measure the seat's sampled context use,
+    // so only byte-gated jobs need a transcript-file binding.
+    const byteGated = job.thresholdBytes != null;
     if (
       isContextUsageThreshold &&
+      byteGated &&
       occupantGeneration &&
       job.watchedFileGeneration !== occupantGeneration
     ) {
@@ -325,6 +346,13 @@ export class WatchdogPolicyEngine {
       registeredAt: job.registeredAt,
       watchedFilePath,
       thresholdBytes: job.thresholdBytes,
+      thresholdTokens: job.thresholdTokens,
+      thresholdPercent: job.thresholdPercent,
+      // Issue #1180 — sampled context use for the target seat under its live
+      // occupant generation; only fetched for token/percent jobs.
+      contextUsageSample: isContextUsageThreshold && !byteGated
+        ? (this.resolveContextUsage?.(job.targetSession, occupantGeneration) ?? null)
+        : null,
       requiresJobId: job.requiresJobId,
       lastFiredGeneration: job.lastFiredGeneration,
       occupantGeneration,

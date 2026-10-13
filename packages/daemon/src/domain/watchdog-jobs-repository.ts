@@ -50,6 +50,11 @@ export type WatchdogPolicyName = (typeof PHASE_D_POLICIES)[number];
 
 export type WatchdogJobState = "active" | "stopped" | "terminal";
 
+/** Issue #1180 — watchdog context samples share the compact-display freshness
+ *  window (ContextUsageStore.FRESHNESS_THRESHOLD_MS): a seat only samples on a
+ *  turn, so a reading older than this is a frozen estimate, not a trigger. */
+export const CONTEXT_SAMPLE_FRESHNESS_MS = 600_000;
+
 export interface WatchdogJob {
   jobId: string;
   policy: WatchdogPolicyName;
@@ -78,6 +83,10 @@ export interface WatchdogJob {
   /** Visible lifecycle of the generated transcript binding. */
   bindingState: "pending-binding" | "bound" | null;
   thresholdBytes: number | null;
+  /** Issue #1180 — per-watchdog token threshold; null = not token-gated. */
+  thresholdTokens: number | null;
+  /** Issue #1180 — per-watchdog percent-of-seat-window threshold; null = not percent-gated. */
+  thresholdPercent: number | null;
   requiresJobId: string | null;
   /** The latest occupant generation for which this threshold fired. */
   lastFiredGeneration: string | null;
@@ -96,6 +105,8 @@ export interface RegisterWatchdogJobInput {
   targetGenerationUuid?: string | null;
   watchedFilePath?: string | null;
   thresholdBytes?: number | null;
+  thresholdTokens?: number | null;
+  thresholdPercent?: number | null;
   requiresJobId?: string | null;
 }
 
@@ -122,6 +133,8 @@ interface JobRow {
   watched_file_path?: string | null;
   watched_file_generation_uuid?: string | null;
   threshold_bytes?: number | null;
+  threshold_tokens?: number | null;
+  threshold_percent?: number | null;
   requires_job_id?: string | null;
   last_fired_generation_uuid?: string | null;
 }
@@ -173,6 +186,7 @@ export class WatchdogJobsRepository {
   private readonly hasTargetGenColumn: boolean;
   private readonly hasContextUsageColumns: boolean;
   private readonly hasWatchedFileGenerationColumn: boolean;
+  private readonly hasThresholdUnitsColumns: boolean;
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -185,6 +199,115 @@ export class WatchdogJobsRepository {
     this.hasTargetGenColumn = detectWatchdogColumn(db, "target_generation_uuid");
     this.hasContextUsageColumns = detectWatchdogColumn(db, "last_fired_generation_uuid");
     this.hasWatchedFileGenerationColumn = detectWatchdogColumn(db, "watched_file_generation_uuid");
+    this.hasThresholdUnitsColumns = detectWatchdogColumn(db, "threshold_tokens");
+  }
+
+  /**
+   * Issue #1180 — exactly one threshold unit per context-usage-threshold job:
+   * transcript bytes (legacy), sampled tokens, or percent of the seat's window.
+   */
+  private validateThresholdUnits(input: RegisterWatchdogJobInput): void {
+    const hasBytes = input.thresholdBytes != null;
+    const hasTokens = input.thresholdTokens != null;
+    const hasPercent = input.thresholdPercent != null;
+    if (Number(hasBytes) + Number(hasTokens) + Number(hasPercent) !== 1) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        "context-usage-threshold requires exactly one of threshold_bytes, threshold_tokens, or threshold_percent",
+        {
+          thresholdBytes: input.thresholdBytes ?? null,
+          thresholdTokens: input.thresholdTokens ?? null,
+          thresholdPercent: input.thresholdPercent ?? null,
+        },
+      );
+    }
+    if (hasBytes && (!Number.isInteger(input.thresholdBytes) || (input.thresholdBytes ?? 0) <= 0)) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_bytes must be a positive integer (got ${String(input.thresholdBytes)})`,
+      );
+    }
+    if (hasTokens && (!Number.isInteger(input.thresholdTokens) || (input.thresholdTokens ?? 0) <= 0)) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_tokens must be a positive integer (got ${String(input.thresholdTokens)})`,
+      );
+    }
+    if (
+      hasPercent &&
+      (!Number.isFinite(input.thresholdPercent) ||
+        (input.thresholdPercent ?? 0) <= 0 ||
+        (input.thresholdPercent ?? 0) > 100)
+    ) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_percent must be a number from 0 (exclusive) to 100 (got ${String(input.thresholdPercent)})`,
+      );
+    }
+  }
+
+  /**
+   * Issue #1180 — the latest context-usage sample recorded for a seat under its
+   * CURRENT occupant generation (sampled after the live tenure's boot, mirroring
+   * the GHOST-STAGE generation guard in ContextUsageStore). Null = no usable
+   * sample; the caller decides between skip and terminal.
+   */
+  findContextUsageForSession(
+    targetSession: string,
+    occupantGeneration: string | null,
+  ): {
+    usedPercentage: number | null;
+    contextWindowSize: number | null;
+    usedTokens: number | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  } | null {
+    if (!occupantGeneration) return null;
+    const row = this.db
+      .prepare(
+        `SELECT usage.used_percentage, usage.context_window_size,
+                usage.total_input_tokens, usage.total_output_tokens,
+                usage.sampled_at
+           FROM sessions AS session
+           JOIN occupant_tenures AS tenure
+             ON tenure.node_id = session.node_id
+            AND tenure.generation_uuid = ?
+           JOIN context_usage AS usage
+             ON usage.node_id = session.node_id
+          WHERE session.session_name = ?
+            AND usage.session_name = ?
+            AND usage.availability = 'known'
+            AND usage.sampled_at IS NOT NULL
+            AND julianday(usage.sampled_at) >= julianday(tenure.boot_at)
+          ORDER BY session.id DESC
+          LIMIT 1`,
+      )
+      .get(occupantGeneration, targetSession, targetSession) as {
+      used_percentage: number | null;
+      context_window_size: number | null;
+      total_input_tokens: number | null;
+      total_output_tokens: number | null;
+      sampled_at: string | null;
+    } | undefined;
+    if (!row) return null;
+    const contextWindowSize = row.context_window_size ?? null;
+    const usedPercentage = row.used_percentage ?? null;
+    // Token estimate: seat-reported totals when present (Codex token_count),
+    // otherwise the reported percentage of the reported window (Claude statusline).
+    const sampledTotal = row.total_input_tokens != null && row.total_output_tokens != null
+      ? row.total_input_tokens + row.total_output_tokens
+      : null;
+    const usedTokens = sampledTotal != null
+      ? sampledTotal
+      : usedPercentage != null && contextWindowSize != null && contextWindowSize > 0
+        ? Math.round((usedPercentage / 100) * contextWindowSize)
+        : null;
+    const sampledAt = row.sampled_at ?? null;
+    const sampledMs = sampledAt ? Date.parse(sampledAt) : NaN;
+    const fresh = Number.isFinite(sampledMs)
+      && Date.now() - sampledMs >= 0
+      && Date.now() - sampledMs < CONTEXT_SAMPLE_FRESHNESS_MS;
+    return { usedPercentage, contextWindowSize, usedTokens, sampledAt, fresh };
   }
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
@@ -210,20 +333,26 @@ export class WatchdogJobsRepository {
         "context-usage-threshold requires migration 074_context_usage_watchdog",
       );
     }
-    if (
-      isContextUsageThreshold &&
-      (!Number.isInteger(input.thresholdBytes) || (input.thresholdBytes ?? 0) <= 0)
-    ) {
-      throw new WatchdogJobsError(
-        "threshold_invalid",
-        `threshold_bytes must be a positive integer (got ${String(input.thresholdBytes)})`,
-      );
+    if (isContextUsageThreshold) {
+      if (
+        (input.thresholdTokens != null || input.thresholdPercent != null) &&
+        !this.hasThresholdUnitsColumns
+      ) {
+        throw new WatchdogJobsError(
+          "context_usage_schema_missing",
+          "context-usage-threshold token/percent units require migration 102_context_usage_watchdog_units",
+        );
+      }
+      this.validateThresholdUnits(input);
     }
     const generatedContinuityJob =
       input.registeredBySession === "daemon@kernel" &&
       input.specYaml.includes("generated_by: continuity-policy-materializer") &&
       /continuity_mode: (managed-compaction|apprentice-handover)/.test(input.specYaml);
-    if (isContextUsageThreshold && !input.watchedFilePath && !generatedContinuityJob) {
+    // Issue #1180: token/percent jobs measure the seat's sampled context use,
+    // not a transcript file — only byte-gated jobs need a watched file.
+    const byteGated = isContextUsageThreshold && input.thresholdBytes != null;
+    if (byteGated && !input.watchedFilePath && !generatedContinuityJob) {
       throw new WatchdogJobsError(
         "watched_file_unresolved",
         `no transcript file could be resolved for ${input.targetSession}`,
@@ -280,6 +409,13 @@ export class WatchdogJobsRepository {
         isContextUsageThreshold ? input.thresholdBytes : null,
         isContextUsageThreshold ? (input.requiresJobId ?? null) : null,
         null,
+      );
+    }
+    if (this.hasThresholdUnitsColumns) {
+      columns.push("threshold_tokens", "threshold_percent");
+      values.push(
+        isContextUsageThreshold ? (input.thresholdTokens ?? null) : null,
+        isContextUsageThreshold ? (input.thresholdPercent ?? null) : null,
       );
     }
     if (this.hasWatchedFileGenerationColumn) {
@@ -649,6 +785,8 @@ function rowToJob(row: JobRow): WatchdogJob {
       ? (row.watched_file_path && row.watched_file_generation_uuid ? "bound" : "pending-binding")
       : null,
     thresholdBytes: row.threshold_bytes ?? null,
+    thresholdTokens: row.threshold_tokens ?? null,
+    thresholdPercent: row.threshold_percent ?? null,
     requiresJobId: row.requires_job_id ?? null,
     lastFiredGeneration: row.last_fired_generation_uuid ?? null,
   };

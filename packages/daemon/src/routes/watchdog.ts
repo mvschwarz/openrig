@@ -76,6 +76,8 @@ export function watchdogRoutes(): Hono {
         registeredBySession?: string;
         watchedFilePath?: string;
         thresholdBytes?: number;
+        thresholdTokens?: number;
+        thresholdPercent?: number;
         requiresJobId?: string;
       }>()
       .catch(() => ({} as never));
@@ -96,13 +98,28 @@ export function watchdogRoutes(): Hono {
       const specThresholdBytes = typeof context.threshold_bytes === "number"
         ? context.threshold_bytes
         : null;
+      // Issue #1180 — token / percent-of-window units from the spec context block.
+      const specThresholdTokens = typeof context.threshold_tokens === "number"
+        ? context.threshold_tokens
+        : null;
+      const specThresholdPercent = typeof context.threshold_percent === "number"
+        ? context.threshold_percent
+        : null;
+      const thresholdTokens = isContextUsageThreshold
+        ? (body.thresholdTokens ?? specThresholdTokens)
+        : null;
+      const thresholdPercent = isContextUsageThreshold
+        ? (body.thresholdPercent ?? specThresholdPercent)
+        : null;
+      const byteGated = isContextUsageThreshold &&
+        (body.thresholdBytes ?? specThresholdBytes) != null && thresholdTokens == null && thresholdPercent == null;
       const specRequiresJobId = typeof context.requires === "string"
         ? context.requires
         : null;
       const watchedFilePath = isContextUsageThreshold
         ? (body.watchedFilePath ?? specWatchedFile ?? jobsRepo.findTranscriptPath(body.targetSession))
         : null;
-      if (isContextUsageThreshold) {
+      if (isContextUsageThreshold && byteGated) {
         try {
           if (!watchedFilePath || !statSync(watchedFilePath).isFile()) throw new Error("not a file");
         } catch {
@@ -125,6 +142,8 @@ export function watchdogRoutes(): Hono {
         thresholdBytes: isContextUsageThreshold
           ? (body.thresholdBytes ?? specThresholdBytes)
           : null,
+        thresholdTokens,
+        thresholdPercent,
         requiresJobId: isContextUsageThreshold
           ? (body.requiresJobId ?? specRequiresJobId)
           : null,

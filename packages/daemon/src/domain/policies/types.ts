@@ -28,6 +28,23 @@ export interface PolicyJob {
   registeredAt: string;
   watchedFilePath: string | null;
   thresholdBytes: number | null;
+  /** Issue #1180 — per-watchdog sampled-token threshold; null = not token-gated. */
+  thresholdTokens: number | null;
+  /** Issue #1180 — per-watchdog percent-of-seat-window threshold; null = not percent-gated. */
+  thresholdPercent: number | null;
+  /**
+   * Issue #1180 — the target seat's latest context-usage sample under its live
+   * occupant generation (tokens estimated from the seat's own reported window).
+   * Null = no usable sample; token/percent jobs skip loudly instead of firing
+   * on a frozen transcript-byte proxy.
+   */
+  contextUsageSample: {
+    usedTokens: number | null;
+    usedPercentage: number | null;
+    contextWindowSize: number | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  } | null;
   requiresJobId: string | null;
   lastFiredGeneration: string | null;
   occupantGeneration: string | null;
