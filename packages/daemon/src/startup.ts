@@ -187,7 +187,7 @@ interface DaemonOptions {
    *  listeners by binding evidence. Absent (tests/legacy) = healthz body unchanged. */
   bindPlan?: import("./domain/bind-plan.js").BindPlan;
   tmuxExec?: ExecFn;
-  /** Optional shell-free tmux executor; selected by default on Windows. */
+  /** Optional shell-free tmux executor; the default unless tmuxExec is injected. */
   argvExec?: ArgvExecFn;
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
@@ -482,8 +482,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
-  const argvExec = opts?.argvExec
-    ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
+  // An injected string exec keeps the shell path, so its fake sees every command.
+  const argvExec = opts?.argvExec ?? (opts?.tmuxExec ? undefined : execArgvCommand);
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
   // The real tmux runs with this process's environment, so its server is the one $TMUX names.
   // An injected exec has no server of its own: printed attach commands stay in the default form.
