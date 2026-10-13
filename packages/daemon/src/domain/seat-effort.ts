@@ -101,8 +101,18 @@ export function emittedEffortFromArgv(runtime: EffortRuntime, argv: string[]): {
   return found ? { flag: "present", value: found } : { flag: "none" };
 }
 
+/**
+ * What the native session recorded is the level its client SENT for a turn; that alone isn't proof
+ * the model ran at it (measured: Codex records an unknown level the service then rejects). `outcome`
+ * says what is known about that turn:
+ * - accepted: Codex's turn completed without an error, so its service took the level;
+ * - rejected: the turn ended in an error (the service's message is in `detail`);
+ * - pending: the turn hasn't finished;
+ * - recorded: Claude wrote the level on an answered turn; whether that is the level before or after
+ *   a model fallback isn't shown, so it stays unproven as the applied level.
+ */
 export type NativeEffortObservation =
-  | { state: "observed"; value: string; at: string; source: string }
+  | { state: "observed"; value: string; at: string; source: string; outcome: "accepted" | "rejected" | "pending" | "recorded"; detail?: string }
   | { state: "not_verified"; detail: string };
 
 const TAIL_BYTES = 4_000_000;
@@ -124,11 +134,14 @@ export function readNativeEffort(runtime: EffortRuntime, transcriptPath: string 
     return { state: "not_verified", detail: `The native transcript could not be read: ${(error as Error).message}` };
   }
   const lines = text.split("\n");
+  const parse = (line: string): Record<string, unknown> | null => {
+    try { return JSON.parse(line) as Record<string, unknown>; } catch { return null; }
+  };
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]!.trim();
     if (!line.includes("ffort")) continue;
-    let entry: Record<string, unknown>;
-    try { entry = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    const entry = parse(line);
+    if (!entry) continue;
     const at = typeof entry["timestamp"] === "string" ? entry["timestamp"] : null;
     let value: unknown;
     if (runtime === "claude-code") {
@@ -142,12 +155,33 @@ export function readNativeEffort(runtime: EffortRuntime, transcriptPath: string 
     const atMs = Date.parse(at);
     // lstart has one-second resolution: a turn in the launch's own second counts.
     if (Number.isNaN(atMs) || Math.floor(atMs / 1000) < since) break;
-    return {
-      state: "observed", value: value.trim(), at,
-      source: runtime === "claude-code" ? "Claude transcript (latest assistant turn)" : "Codex rollout (latest turn_context)",
-    };
+    if (runtime === "claude-code") {
+      return {
+        state: "observed", value: value.trim(), at, source: "Claude transcript (latest assistant turn)", outcome: "recorded",
+        detail: "Claude recorded this level on an answered turn; whether it is the level after any model fallback isn't shown.",
+      };
+    }
+    const turnId = (entry["payload"] as Record<string, unknown> | undefined)?.["turn_id"];
+    return { state: "observed", value: value.trim(), at, source: "Codex rollout (latest turn_context)", ...codexTurnOutcome(lines.slice(index + 1), turnId, parse) };
   }
   return { state: "not_verified", detail: "The session has recorded no turn with an effort since this process started; it shows once the seat takes a turn." };
+}
+
+/** How the Codex turn that sent the level ended: its task_complete event, matched by turn id. */
+function codexTurnOutcome(after: string[], turnId: unknown, parse: (line: string) => Record<string, unknown> | null):
+  { outcome: "accepted" | "rejected" | "pending"; detail?: string } {
+  for (const line of after) {
+    if (!line.includes("task_complete")) continue;
+    const payload = parse(line.trim())?.["payload"] as Record<string, unknown> | undefined;
+    if (payload?.["type"] !== "task_complete" || (typeof turnId === "string" && payload["turn_id"] !== turnId)) continue;
+    const error = payload["error"] as { message?: unknown } | null | undefined;
+    if (error) {
+      const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
+      return { outcome: "rejected", detail: `The turn ended in an error: ${message.slice(0, 400)}` };
+    }
+    return { outcome: "accepted", detail: "The turn completed without an error, so the Codex service took this level." };
+  }
+  return { outcome: "pending", detail: "The turn that sent this level hasn't finished." };
 }
 
 function readTail(filePath: string, maxBytes: number): string {

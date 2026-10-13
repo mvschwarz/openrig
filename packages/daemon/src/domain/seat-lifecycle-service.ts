@@ -392,7 +392,7 @@ export class SeatLifecycleService {
         const value = flag.flag === "present" ? flag.value : null;
         emitted = { state: "observed", value, pid: process.pid, startedAt: process.startedAt ?? null, matchesSaved: value === saved.effective };
         const native = readNativeEffort(runtime, this.transcriptPath(runtime, session), process.startedAt ?? null);
-        observed = native.state === "observed" && value !== null ? { ...native, matchesEmitted: native.value === value } : native;
+        observed = native.state === "observed" ? { ...native, matchesEmitted: native.value === value } : native;
       }
     }
     return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed) };
@@ -1666,8 +1666,12 @@ function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"]
   const launch = emitted.value ?? "no flag";
   const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
   if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;
-  const native = observed.matchesEmitted === false
-    ? `${observed.value}, not the ${launch} the launch sent (capped, fallen back or overridden by the runtime)`
+  const sent = observed.matchesEmitted === false
+    ? `${observed.value}, not the ${launch} the launch sent (changed or overridden inside the session)`
     : observed.value;
-  return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native session: ${native}, from ${observed.source} at ${observed.at}.`;
+  const verdict = observed.outcome === "accepted" ? "accepted by the service for that turn"
+    : observed.outcome === "rejected" ? `REJECTED (${observed.detail})`
+    : observed.outcome === "pending" ? "its turn hasn't finished, so not yet known whether it was taken"
+    : "applied level NOT VERIFIED (whether this is after any model fallback isn't shown)";
+  return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} The session sent ${sent} with its latest turn (${observed.source}, ${observed.at}): ${verdict}.`;
 }

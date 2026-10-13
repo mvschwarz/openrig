@@ -1047,13 +1047,13 @@ function printEffortReport(data: Record<string, unknown>): void {
   const requested = data["requested"] as { value: string | null; at: string; reason: string } | null;
   const saved = data["saved"] as { effective: string | null; source: string };
   const emitted = data["emitted"] as { state: string; value?: string | null; pid?: number; detail?: string };
-  const observed = data["observed"] as { state: string; value?: string; at?: string; source?: string; detail?: string };
+  const observed = data["observed"] as { state: string; value?: string; at?: string; source?: string; outcome?: string; detail?: string };
   const precedence = data["precedence"] as { decided: boolean; detail: string };
   console.log(`Effort for ${seat?.logicalId}@${seat?.rigName} (${String(data["runtime"])}):`);
   console.log(`  Requested: ${requested ? `${requested.value ?? "cleared"} at ${requested.at} ("${requested.reason}")` : "never set with rig seat set-effort"}`);
   console.log(`  Saved:     ${saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "this seat's choice" : "authored"})` : "no effort flag (runtime default)"}`);
   console.log(`  Launch:    ${emitted.state === "observed" ? `${emitted.value ?? "no effort flag"} (process ${emitted.pid})` : `unknown: ${emitted.detail}`}`);
-  console.log(`  Native:    ${observed.state === "observed" ? `${observed.value} (${observed.source}, ${observed.at})` : `NOT VERIFIED: ${observed.detail}`}`);
+  console.log(`  Native:    ${observed.state === "observed" ? `${observed.value} sent with the latest turn, ${observed.outcome} (${observed.source}, ${observed.at})` : `NOT VERIFIED: ${observed.detail}`}`);
   console.log(String(data["summary"]));
   if (!precedence.decided) console.log(`Note: ${precedence.detail}`);
 }

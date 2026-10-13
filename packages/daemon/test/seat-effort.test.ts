@@ -73,13 +73,29 @@ describe("readNativeEffort: what the native session recorded since this process 
       { type: "assistant", timestamp: at(3), effort: "high" },
       { type: "user", timestamp: at(5) },
     ]);
-    expect(readNativeEffort("claude-code", claude, LSTART)).toMatchObject({ state: "observed", value: "high", at: at(3) });
+    expect(readNativeEffort("claude-code", claude, LSTART)).toMatchObject({ state: "observed", value: "high", at: at(3), outcome: "recorded" });
     const codex = file("rollout.jsonl", [
       { type: "session_meta", timestamp: at(-100), payload: { id: "t" } },
-      { type: "turn_context", timestamp: at(4), payload: { model: "gpt-5.5", effort: "medium" } },
+      { type: "turn_context", timestamp: at(4), payload: { turn_id: "t1", model: "gpt-5.5", effort: "medium" } },
       { type: "event_msg", timestamp: at(6), payload: { type: "token_count" } },
     ]);
-    expect(readNativeEffort("codex", codex, LSTART)).toMatchObject({ state: "observed", value: "medium", source: "Codex rollout (latest turn_context)" });
+    expect(readNativeEffort("codex", codex, LSTART)).toMatchObject({ state: "observed", value: "medium", source: "Codex rollout (latest turn_context)", outcome: "pending" });
+    const done = file("done.jsonl", [
+      { type: "turn_context", timestamp: at(4), payload: { turn_id: "t1", effort: "high" } },
+      { type: "event_msg", timestamp: at(9), payload: { type: "task_complete", turn_id: "t1", last_agent_message: "ok" } },
+    ]);
+    expect(readNativeEffort("codex", done, LSTART)).toMatchObject({ value: "high", outcome: "accepted" });
+  });
+
+  it("names a level the service rejected as rejected, never as the level in effect (measured on Codex 0.153.4)", () => {
+    const rejected = file("rejected.jsonl", [
+      { type: "turn_context", timestamp: at(4), payload: { turn_id: "t2", effort: "turbo" } },
+      { type: "event_msg", timestamp: at(6), payload: { type: "task_complete", turn_id: "t2", last_agent_message: null,
+        error: { message: "Invalid value: 'turbo'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'." } } },
+    ]);
+    const observed = readNativeEffort("codex", rejected, LSTART);
+    expect(observed).toMatchObject({ state: "observed", value: "turbo", outcome: "rejected" });
+    expect((observed as { detail: string }).detail).toContain("Invalid value: 'turbo'");
   });
 
   it("never reports a turn from before this launch: the same conversation's earlier effort is NOT VERIFIED", () => {
@@ -152,7 +168,10 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     codexSeat({ authored: "medium" });
     await service.setEffort({ seatRef: "dev-codex@eff", effort: "high", reason: "long refactor", operator: "op" });
     running(`-m gpt-5.5 -c model_reasoning_effort="high" resume 019a-thread`);
-    transcript = file("rollout.jsonl", [{ type: "turn_context", timestamp: at(5), payload: { effort: "medium" } }]);
+    transcript = file("rollout.jsonl", [
+      { type: "turn_context", timestamp: at(5), payload: { turn_id: "t1", effort: "medium" } },
+      { type: "event_msg", timestamp: at(7), payload: { type: "task_complete", turn_id: "t1" } },
+    ]);
 
     const report = await service.effortReport("dev-codex@eff");
     expect(report).toMatchObject({
@@ -160,10 +179,11 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
       requested: { value: "high", reason: "long refactor", operator: "op" },
       saved: { choice: "high", authored: "medium", effective: "high", source: "seat_choice" },
       emitted: { state: "observed", value: "high", pid: 200, matchesSaved: true },
-      observed: { state: "observed", value: "medium", matchesEmitted: false },
+      observed: { state: "observed", value: "medium", matchesEmitted: false, outcome: "accepted" },
       precedence: { decided: false },
     });
-    expect((report as { summary: string }).summary).toContain("not the high the launch sent");
+    expect((report as { summary: string }).summary).toContain("medium, not the high the launch sent");
+    expect((report as { summary: string }).summary).toContain("accepted by the service for that turn");
   });
 
   it("before the seat takes a turn, and before a continuation, says so instead of claiming the saved value", async () => {
