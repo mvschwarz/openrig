@@ -1,132 +1,167 @@
-// Slice 01 (OPR.0.7.0.1) — Claude usage windows: the `/usage` screen parser, the identity rule, the
-// reader in its private tmux server against a fake `claude`, and LOW-4 (superseded rows age to stale).
+// Slice 01 (OPR.0.7.0.1) — Claude usage windows: the seats' status-line samples joined with the identity
+// `claude auth status` reports on a refresh; the identity reader against a fake `claude`; and LOW-4 (rows a later
+// read superseded age to stale).
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { claudeResetUtc, parseClaudeUsageScreen } from "../src/domain/provider/claude-usage-screen.js";
-import {
-  CLAUDE_USAGE_NO_MODEL,
-  claudeUsageReader,
-  claudeUsageReaderEnv,
-  type ClaudeUsageAnswer,
-} from "../src/domain/provider/claude-usage-screen-reader.js";
-import { ClaudeUsageWindows, normalizeClaudeUsage } from "../src/domain/provider/claude-usage-windows.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { claudeAuthReaderEnv, claudeAuthStatusReader, type ClaudeAuthAnswer } from "../src/domain/provider/claude-auth-status-reader.js";
+import { ClaudeUsageWindows, latestClaudeWindowSamples, type ClaudeWindowSample } from "../src/domain/provider/claude-usage-windows.js";
 import { CodexUsageWindows } from "../src/domain/provider/codex-usage-windows.js";
 import type { UsageReadOutcome } from "../src/domain/provider/usage-windows.js";
-import { CLAUDE_AUTH, makeFakeClaude, usageScreen } from "./helpers/fake-claude-usage.js";
+import { CLAUDE_AUTH, CLAUDE_LOGGED_OUT, makeFakeClaude } from "./helpers/fake-claude-usage.js";
 import { ACCOUNT_ANSWER, rateLimitsAnswer } from "./helpers/fake-codex-usage.js";
 
 const NOW = "2026-10-12T12:00:00.000Z";
 const at = (minutes: number) => new Date(Date.parse(NOW) + minutes * 60_000).toISOString();
+const sample = (seatSession: string, window: "five_hour" | "weekly", usedPercent: number, sampledAt: string, resetsAt = window === "weekly" ? at(2 * 1440) : at(120)): ClaudeWindowSample =>
+  ({ seatSession, window, usedPercent, resetsAt, sampledAt });
+const authOk = (auth: Record<string, unknown> = {}, observedAt = NOW): UsageReadOutcome<ClaudeAuthAnswer> =>
+  ({ ok: true, observedAt, auth: { loggedIn: true, authMethod: "claude.ai", email: "d***@example.test", orgId: "org-1", orgName: "Example Org", subscriptionType: "team", ...auth } as ClaudeAuthAnswer["auth"] });
 
-describe("Claude /usage screen parsing (pinned shapes)", () => {
-  it("reads the session and all-models week with UTC resets", () => {
-    const r = parseClaudeUsageScreen(usageScreen(), NOW);
-    expect(r).toEqual({ ok: true, buckets: [{ bucket: "all models", windows: [
-      { window: "current_session", durationMins: 300, usedPercent: 23, resetsAt: "2026-10-12T15:00:00.000Z" },
-      { window: "current_week", durationMins: 10080, usedPercent: 41, resetsAt: "2026-10-14T09:00:00.000Z" },
-    ] }] });
-  });
+function windowsWith(samples: () => ClaudeWindowSample[], reads: Array<UsageReadOutcome<ClaudeAuthAnswer>> = []) {
+  let n = 0;
+  return new ClaudeUsageWindows({ readIdentity: async () => reads[Math.min(n++, reads.length - 1)]!, listSamples: samples, now: () => NOW });
+}
 
-  it("keeps a model-specific week as its own bucket", () => {
-    const r = parseClaudeUsageScreen(usageScreen({ extra: " Current week (Opus)\n █ 12% used\n Resets Oct 15 at 1:30pm (UTC)" }), NOW);
-    expect(r.ok && r.buckets.map((b) => [b.bucket, b.windows.map((w) => [w.window, w.usedPercent, w.resetsAt])])).toEqual([
-      ["all models", [["current_session", 23, "2026-10-12T15:00:00.000Z"], ["current_week", 41, "2026-10-14T09:00:00.000Z"]]],
-      ["Opus", [["current_week", 12, "2026-10-15T13:30:00.000Z"]]],
+describe("Claude windows: the seats' status-line samples", () => {
+  it("each window is the freshest sample across seats, observed at the sample's own time, naming its seat", () => {
+    const samples = [sample("a@rig", "five_hour", 20, at(-3)), sample("b@rig", "five_hour", 25, at(-1)), sample("a@rig", "weekly", 85, at(-3))];
+    const [row] = windowsWith(() => samples).project(NOW);
+    expect(row!.windows.map((w) => [w.window, w.usedPercent, w.observedAt, w.seatSession, w.level, w.freshness])).toEqual([
+      ["five_hour", 25, at(-1), "b@rig", "ok", "fresh"],
+      ["weekly", 85, at(-3), "a@rig", "nearing", "fresh"],
     ]);
+    expect(row!.source).toEqual({ kind: "claude_statusline_samples", host: "local" });
   });
 
-  it("reset forms: a bare time is its next occurrence; an old date rolls to next year; anything else is refused", () => {
-    expect(claudeResetUtc("11am (UTC)", NOW)).toBe("2026-10-13T11:00:00.000Z");
-    expect(claudeResetUtc("12pm (UTC)", NOW)).toBe("2026-10-12T12:00:00.000Z");
-    expect(claudeResetUtc("Jan 3, 12am (UTC)", NOW)).toBe("2027-01-03T00:00:00.000Z");
-    expect(claudeResetUtc("Jan 3, 12am (UTC)", "2026-12-30T00:00:00.000Z")).toBe("2027-01-03T00:00:00.000Z");
-    for (const bad of ["3pm", "3pm (PDT)", "13pm (UTC)", "Foo 3, 3pm (UTC)", "in 2 hours"]) expect(claudeResetUtc(bad, NOW), bad).toBeNull();
+  it("an idle seat stops advancing, so its windows age to stale", () => {
+    const [row] = windowsWith(() => [sample("a@rig", "weekly", 40, at(-20))]).project(NOW);
+    expect(row!.windows[0]).toMatchObject({ freshness: "stale", freshnessReason: "observed 20 min ago (fresh for 15 min)" });
+    expect(row!.currentAvailability).toBe("unknown");
   });
 
-  it("a date that doesn't exist is refused, never rolled into the next month", () => {
-    for (const bad of ["Apr 31, 9am (UTC)", "Feb 30 at 9am (UTC)", "Nov 31, 1am (UTC)", "Oct 0, 9am (UTC)"]) expect(claudeResetUtc(bad, NOW), bad).toBeNull();
-    expect(claudeResetUtc("Oct 31, 9am (UTC)", NOW)).toBe("2026-10-31T09:00:00.000Z");
-    expect(parseClaudeUsageScreen(usageScreen({ weekReset: "Apr 31, 9am (UTC)" }), NOW)).toMatchObject({ ok: false, detail: expect.stringContaining("unrecognized reset text") });
+  it("seats with different fresh windows (possibly different logins) make the level unknown; nothing is merged", () => {
+    const samples = [sample("a@rig", "weekly", 10, at(-1), at(2000)), sample("b@rig", "weekly", 90, at(-2), at(5000))];
+    const [row] = windowsWith(() => samples).project(NOW);
+    expect(row!.windows).toHaveLength(1);
+    expect(row!.windows[0]).toMatchObject({ usedPercent: 10, seatSession: "a@rig", level: "unknown",
+      levelReason: "Claude seats report different windows (possibly different logins): a@rig, b@rig" });
+    // A stale disagreeing seat doesn't count.
+    const [later] = windowsWith(() => [sample("a@rig", "weekly", 10, at(-1), at(2000)), sample("b@rig", "weekly", 90, at(-30), at(5000))]).project(NOW);
+    expect(later!.windows[0]!.level).toBe("ok");
   });
 
-  it("the percentage is its own unsigned token, 0-100: `<1%`, `-5%` and `>99%` are not values", () => {
-    const week = (text: string) => usageScreen().replace("41% used", text);
-    for (const bad of ["<1% used", "-5% used", ">99% used", "█-5% used", "~3% used", "1000% used"]) {
-      expect(parseClaudeUsageScreen(week(bad), NOW), bad).toMatchObject({ ok: false, detail: expect.stringContaining("unrecognized percentage under Current week (all models)") });
-    }
-    expect(parseClaudeUsageScreen(week("100.5% used"), NOW)).toMatchObject({ ok: false, detail: expect.stringContaining("out of range") });
-    for (const [good, value] of [["0% used", 0], ["100% used", 100], ["2.5% used", 2.5]] as const) {
-      const r = parseClaudeUsageScreen(week(good), NOW);
-      expect(r.ok && r.buckets[0]!.windows[1]!.usedPercent, good).toBe(value);
-    }
+  it("no seat has reported: one explicit unavailable row", () => {
+    expect(windowsWith(() => []).project(NOW)).toEqual([expect.objectContaining({
+      provider: "claude", identity: null, windows: [], currentAvailability: "unknown", unavailableReason: "no Claude seat has reported status-line rate limits yet",
+    })]);
   });
 
-  it("anything unrecognised is refused, never guessed", () => {
-    expect(parseClaudeUsageScreen("Something else entirely", NOW)).toEqual({ ok: false, detail: "no Current week (all models) on the /usage screen" });
-    expect(parseClaudeUsageScreen(usageScreen({ weekReset: "next Tuesday" }), NOW)).toMatchObject({ ok: false, detail: expect.stringContaining("unrecognized reset text") });
-    expect(parseClaudeUsageScreen(usageScreen({ week: 140 }), NOW)).toMatchObject({ ok: false, detail: expect.stringContaining("out of range") });
-    expect(parseClaudeUsageScreen(" Current week (all models)\n Resets 3pm (UTC)", NOW)).toMatchObject({ ok: false, detail: expect.stringContaining("% used") });
+  it("samples that can't be read say so, without breaking the view", () => {
+    const w = new ClaudeUsageWindows({ readIdentity: async () => authOk(), listSamples: () => { throw new Error("no such table: usage_samples"); }, now: () => NOW });
+    expect(w.project(NOW)).toEqual([expect.objectContaining({ identity: null, unavailableReason: "the status-line samples could not be read: no such table: usage_samples" })]);
+  });
+
+  it("reads each seat's latest provider-window sample per window from usage_samples", () => {
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    const insert = db.prepare(`INSERT INTO usage_samples (lane, seat_session, source, sampled_at, captured_at, window, window_used_percent, resets_at)
+      VALUES (?, ?, 'claude_statusline_json', ?, ?, ?, ?, ?)`);
+    insert.run("provider_window", "a@rig", at(-10), at(-10), "weekly", 30, at(2000));
+    insert.run("provider_window", "a@rig", at(-2), at(-1), "weekly", 32, at(2000));
+    insert.run("provider_window", "a@rig", at(-2), at(-1), "five_hour", 5, at(100));
+    insert.run("provider_window", "b@rig", null, at(-1), "weekly", 50, at(2000));
+    db.prepare(`INSERT INTO usage_samples (lane, seat_session, captured_at, used_percentage) VALUES ('context', 'a@rig', ?, 12)`).run(at(-1));
+    expect(latestClaudeWindowSamples(db).sort((x, y) => x.window.localeCompare(y.window))).toEqual([
+      { seatSession: "a@rig", window: "five_hour", usedPercent: 5, resetsAt: at(100), sampledAt: at(-2) },
+      { seatSession: "a@rig", window: "weekly", usedPercent: 32, resetsAt: at(2000), sampledAt: at(-2) },
+    ]);
+    db.close();
   });
 });
 
-describe("Claude identity: the organisation and the email, both required", () => {
-  const answer = (orgId: string | null, email: string | null = "d***@example.test"): ClaudeUsageAnswer & { observedAt: string } =>
-    ({ auth: { loggedIn: true, authMethod: "claude.ai", email, orgId, orgName: "Example Org", subscriptionType: "team" }, screen: usageScreen(), observedAt: NOW });
+describe("Claude identity: claude auth status on refresh, joined and labelled, never stored", () => {
+  const samples = () => [sample("a@rig", "five_hour", 20, at(-1)), sample("a@rig", "weekly", 50, at(-1))];
 
-  it("keys by orgId, email and bucket; organisation name and subscription are labels; either missing is unresolved", () => {
-    const r = normalizeClaudeUsage(answer("org-1"));
-    expect(r.ok && r.readings[0]!.identity).toEqual({
-      orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: "Example Org", subscriptionType: "team", source: "claude auth status orgId and email",
+  it("before any refresh the windows show with the identity not read yet; a view never starts a read", () => {
+    let reads = 0;
+    const w = new ClaudeUsageWindows({ readIdentity: async () => { reads += 1; return authOk(); }, listSamples: samples, now: () => NOW });
+    const [row] = w.project(NOW);
+    expect(reads).toBe(0);
+    expect(row).toMatchObject({
+      identity: { orgId: null, email: null, limitId: "all models", source: "unresolved" },
+      identityNote: "identity not read yet (rig provider status --refresh); windows: status-line readings from a@rig at their own times",
+      unresolved: { note: "identity not read yet: not matched to, merged with or replacing any other row" },
+      currentAvailability: "unknown",
     });
-    for (const [orgId, email] of [[null, "d***@example.test"], ["org-1", null]] as const) {
-      const u = normalizeClaudeUsage(answer(orgId, email));
-      expect(u.ok && u.readings[0]!.identity.source, `${orgId} ${email}`).toBe("unresolved");
+  });
+
+  it("a refresh attaches the login as of then, labelled as not proven to be the same login; the windows stay the samples", async () => {
+    const w = windowsWith(samples, [authOk()]);
+    expect((await w.refresh()).refresh).toMatchObject({ outcome: "ok", at: NOW });
+    const [row] = w.project(NOW);
+    expect(row).toMatchObject({
+      identity: { orgId: "org-1", email: "d***@example.test", limitId: "all models", orgName: "Example Org", subscriptionType: "team", source: "claude auth status orgId and email" },
+      identityNote: `identity: the daemon's Claude login (claude auth status) as of the refresh at ${NOW}; windows: status-line readings from a@rig at their own times; not proven to be the same login`,
+      latestFromSource: true,
+      currentAvailability: "known",
+    });
+    expect(row!.windows.map((w) => w.observedAt)).toEqual([at(-1), at(-1)]);
+    expect(row).not.toHaveProperty("unresolved");
+  });
+
+  it("either organisation or email missing is unresolved", async () => {
+    for (const missing of [{ orgId: null }, { email: null }]) {
+      const w = windowsWith(samples, [authOk(missing)]);
+      await w.refresh();
+      expect(w.project(NOW)[0]).toMatchObject({ identity: { source: "unresolved" }, unresolved: { note: "identity unresolved: not matched to, merged with or replacing any other row" } });
     }
   });
 
-  it("two members of one organisation are two rows; switching between them never relabels a row", async () => {
-    const reads: Array<[string, number]> = [["a***@example.test", 90], ["b***@example.test", 10], ["a***@example.test", 95]];
-    let n = 0;
-    const windows = new ClaudeUsageWindows({
-      now: () => NOW,
-      read: async () => {
-        const [email, week] = reads[n]!;
-        return { ok: true, observedAt: at(n++), auth: answer("org-1", email).auth, screen: usageScreen({ week }) };
-      },
-    });
-    await windows.refresh();
-    await windows.refresh();
-    const afterB = windows.project(at(3));
-    expect(afterB.map((r) => [(r.identity as { email: string }).email, r.windows[1]!.usedPercent, r.latestFromSource])).toEqual([
-      ["a***@example.test", 90, false],
-      ["b***@example.test", 10, true],
+  it("another login (a second member of the organisation) freezes the earlier row as it was at its own refresh, stale; nothing merged or relabelled", async () => {
+    let live = [sample("a@rig", "weekly", 50, at(-1))];
+    const w = windowsWith(() => live, [authOk(), authOk({ email: "e***@example.test" }, at(5))]);
+    await w.refresh();
+    live = [sample("a@rig", "weekly", 70, at(4))];
+    await w.refresh();
+    const rows = w.project(at(5));
+    expect(rows.map((r) => [(r.identity as { email: string }).email, r.windows[0]!.usedPercent, r.latestFromSource, r.windows[0]!.freshness])).toEqual([
+      ["e***@example.test", 70, true, "fresh"],
+      ["d***@example.test", 50, false, "stale"],
     ]);
-    await windows.refresh();
-    const afterA = windows.project(at(3));
-    expect(afterA.map((r) => [(r.identity as { email: string }).email, r.windows[1]!.usedPercent, r.latestFromSource])).toEqual([
-      ["a***@example.test", 95, true],
-      ["b***@example.test", 10, false],
-    ]);
-    expect(afterA[1]!.windows.every((w) => w.freshness === "stale")).toBe(true);
+    expect(rows[1]!.windows[0]!.freshnessReason).toBe("a later read exists");
+    expect(rows[1]!.identityNote).toBe(`identity: the daemon's Claude login as of the refresh at ${NOW}; a refresh at ${at(5)} reported another login; windows as they were at ${NOW} (from a@rig)`);
   });
 
-  it("the same email under another organisation is another row", async () => {
-    const outcomes: Array<UsageReadOutcome<ClaudeUsageAnswer>> = [
-      { ok: true, observedAt: NOW, auth: answer("org-1").auth, screen: usageScreen({ week: 100 }) },
-      { ok: true, observedAt: at(1), auth: answer("org-2").auth, screen: usageScreen({ week: 10 }) },
-    ];
-    let n = 0;
-    const windows = new ClaudeUsageWindows({ now: () => NOW, read: async () => outcomes[n++]! });
-    await windows.refresh();
-    await windows.refresh();
-    const rows = windows.project(at(2));
-    expect(rows.map((r) => [(r.identity as { orgId: string }).orgId, r.windows[1]!.level, r.latestFromSource])).toEqual([
-      ["org-1", "exhausted", false],
-      ["org-2", "ok", true],
-    ]);
+  it("switching back to the earlier login makes its row current again; one email in two organisations is two rows", async () => {
+    const w = windowsWith(samples, [authOk(), authOk({ orgId: "org-2" }), authOk()]);
+    await w.refresh();
+    await w.refresh();
+    expect(w.project(NOW).map((r) => [(r.identity as { orgId: string }).orgId, r.latestFromSource])).toEqual([["org-2", true], ["org-1", false]]);
+    await w.refresh();
+    expect(w.project(NOW).map((r) => [(r.identity as { orgId: string }).orgId, r.latestFromSource])).toEqual([["org-1", true], ["org-2", false]]);
+  });
+
+  it("a failed refresh keeps the last identity and the sample windows, and says so", async () => {
+    const w = windowsWith(samples, [authOk(), { ok: false, at: at(1), reason: "not_logged_in", detail: "claude auth status reports no login (exit 1)" }]);
+    await w.refresh();
+    expect((await w.refresh()).refresh).toMatchObject({ outcome: "failed", reason: "not_logged_in" });
+    const [row] = w.project(at(1));
+    expect(row).toMatchObject({ identity: { orgId: "org-1" }, lastRefresh: { outcome: "failed", reason: "not_logged_in" } });
+    expect(row!.windows.every((x) => x.freshness === "fresh")).toBe(true);
+  });
+
+  it("overlapping refreshes share one identity read", async () => {
+    let reads = 0;
+    const w = new ClaudeUsageWindows({ readIdentity: async () => { reads += 1; await new Promise((r) => setTimeout(r, 50)); return authOk(); }, listSamples: samples, now: () => NOW });
+    const results = await Promise.all([w.refresh(), w.refresh(), w.refresh()]);
+    expect(reads).toBe(1);
+    expect(results.map((r) => r.refresh.coalesced)).toEqual([false, true, true]);
   });
 });
 
@@ -144,156 +179,58 @@ describe("LOW-4: a row a later read superseded ages to stale", () => {
     expect(older!.windows.every((w) => w.freshness === "stale" && w.freshnessReason === "a later read exists")).toBe(true);
     expect(latest!.windows.every((w) => w.freshness === "fresh")).toBe(true);
   });
-
-  it("an earlier unresolved row can't read fresh, and says it may be this same login", async () => {
-    const auth = { loggedIn: true, authMethod: "claude.ai", email: "d***@example.test", orgId: null, orgName: null, subscriptionType: null };
-    let n = 0;
-    const windows = new ClaudeUsageWindows({ now: () => NOW, read: async () => ({ ok: true, observedAt: at(n++), auth, screen: usageScreen() }) });
-    await windows.refresh();
-    await windows.refresh();
-    const [earlier, latest] = windows.project(at(2));
-    expect(earlier!.windows.every((w) => w.freshness === "stale" && w.freshnessReason === "a later read exists")).toBe(true);
-    expect(earlier!.unresolved!.note).toBe("identity unresolved: from an earlier read, possibly this same login; not matched to, merged with or replacing any other row");
-    expect(latest!.windows.every((w) => w.freshness === "fresh")).toBe(true);
-  });
 });
 
-describe("claudeUsageReader against a fake claude in a private tmux server", () => {
+describe("claudeAuthStatusReader against a fake claude", () => {
   const home = () => fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-home-"));
-  // This file's readers make their private tmux dirs under their own root, so other test files reading
-  // Claude at the same time can't change what these cleanup assertions see.
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-root-"));
-  const reader = (fake: ReturnType<typeof makeFakeClaude>, deadlineMs = 8_000, launchPath = `${fake.binDir}${path.delimiter}${process.env.PATH}`) =>
-    claudeUsageReader({ launchPath, home: home(), claudeConfigDir: fake.configDir, deadlineMs, pollMs: 100, tmpRoot });
-  const ownDirs = () => fs.readdirSync(tmpRoot).filter((d) => d.startsWith("openrig-claude-usage-")).sort();
+  const reader = (fake: ReturnType<typeof makeFakeClaude>, extra: { timeoutMs?: number; launchPath?: string; graceMs?: number } = {}) =>
+    claudeAuthStatusReader({ launchPath: extra.launchPath ?? `${fake.binDir}${path.delimiter}${process.env.PATH}`, home: home(), claudeConfigDir: fake.configDir,
+      timeoutMs: extra.timeoutMs ?? 5_000, graceMs: extra.graceMs ?? 500 });
 
-  it("reads identity and the screen; starts Claude safe-mode on /usage with the no-model guard; types only exit keys", async () => {
+  it("reads identity from auth status only, by absolute path, without TMUX, TMUX_PANE or seat variables", async () => {
     const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen() });
-    const before = ownDirs();
-    const r = await reader(fake)();
-    expect(r).toMatchObject({ ok: true, auth: { loggedIn: true, authMethod: "claude.ai", email: "d***@example.test", orgId: "org-1", orgName: "Example Org", subscriptionType: "team" } });
-    expect(r.ok && r.screen).toContain("Current week (all models)");
-    expect(fake.authCalls()).toBe(2); // before and after the screen
-    const [start] = fake.screenStarts();
-    expect(start!.argv).toEqual(["--safe-mode", "--strict-mcp-config", "--tools", "", "--model", CLAUDE_USAGE_NO_MODEL, "/usage"]);
-    expect(start!.env).toMatchObject({ TMUX: null, TMUX_PANE: null, OPENRIG_SESSION_NAME: null, CLAUDECODE: null, TZ: "UTC" });
-    // Esc, Ctrl-C, Ctrl-C and nothing else.
-    expect(fake.keys()).toBe("1b0303");
-    expect(ownDirs()).toEqual(before); // private server's temp dir removed
+    fake.setPlan({ auth: [CLAUDE_AUTH] });
+    expect(await reader(fake)()).toMatchObject({ ok: true, auth: { loggedIn: true, authMethod: "claude.ai", email: "d***@example.test", orgId: "org-1", orgName: "Example Org", subscriptionType: "team" } });
+    expect(fake.authCalls()).toBe(1);
+    expect(fake.otherStarts()).toEqual([]);
+    expect(fake.authStarts()[0]).toMatchObject({ argv: ["auth", "status", "--json"], env: { TMUX: null, TMUX_PANE: null, OPENRIG_SESSION_NAME: null, CLAUDECODE: null } });
   });
 
-  it("a tmux that rewrites the pane's PATH still starts the resolved claude, never another one", async () => {
+  it("Claude's real logged-out answer ({loggedIn: false}, exit 1) is not_logged_in", async () => {
     const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen() });
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-wrapper-"));
-    const trip = path.join(root, "trip");
-    const wrap = path.join(root, "wrap");
-    fs.mkdirSync(trip);
-    fs.mkdirSync(wrap);
-    const tripped = path.join(root, "TRIPPED");
-    fs.writeFileSync(path.join(trip, "claude"), `#!/bin/sh\necho reached > ${tripped}\nexit 99\n`, { mode: 0o755 });
-    const realTmux = execFileSync("sh", ["-c", "command -v tmux"]).toString().trim();
-    // Like the repo scaffold's wrapper: real tmux, with PATH reset to one where another claude comes first.
-    fs.writeFileSync(path.join(wrap, "tmux"), `#!/bin/sh\nPATH=${trip}:$PATH exec ${realTmux} "$@"\n`, { mode: 0o755 });
-    const r = await claudeUsageReader({ launchPath: [wrap, fake.binDir, process.env.PATH].join(path.delimiter), home: home(), claudeConfigDir: fake.configDir, deadlineMs: 8_000, pollMs: 100 })();
-    expect(r).toMatchObject({ ok: true });
-    expect(fs.existsSync(tripped)).toBe(false);
-    expect(fake.screenStarts()).toHaveLength(1);
+    fake.setPlan({ auth: [CLAUDE_LOGGED_OUT] });
+    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "not_logged_in", detail: "claude auth status reports no login (exit 1)" });
+    // Labelled: the same answer with exit 0 (not Claude's documented contract) reads the same.
+    fake.setPlan({ auth: [CLAUDE_LOGGED_OUT], authExit: [0] });
+    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "not_logged_in", detail: "claude auth status reports no login" });
   });
 
-  it("a tmux call cut short by the read's bound is a timeout, never a dead pane", async () => {
+  it("facts only from exit 0: any other nonzero answer, even valid logged-in JSON, is auth_status_failed", async () => {
     const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: "hang" });
-    const wrap = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-slowtmux-"));
-    const realTmux = execFileSync("sh", ["-c", "command -v tmux"]).toString().trim();
-    // Every pane-dead check takes longer than the read has left.
-    fs.writeFileSync(path.join(wrap, "tmux"), `#!/bin/sh\ncase "$*" in *pane_dead*) sleep 3;; esac\nexec ${realTmux} "$@"\n`, { mode: 0o755 });
-    const r = await claudeUsageReader({ launchPath: [wrap, fake.binDir, process.env.PATH].join(path.delimiter), home: home(), claudeConfigDir: fake.configDir,
-      deadlineMs: 1_500, pollMs: 100, tmpRoot, graceMs: 300 })();
-    expect(r).toMatchObject({ ok: false, reason: "timeout" });
-  }, 20_000);
-
-  it("no claude on the reader's PATH fails before anything starts", async () => {
-    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-nobin-"));
-    const r = await claudeUsageReader({ launchPath: empty, home: home(), deadlineMs: 2_000 })();
-    expect(r).toMatchObject({ ok: false, reason: "binary_not_found", detail: "no claude executable on the daemon's PATH" });
-  });
-
-  it("the private tmux dir is made under tmpRoot while a read runs, and removed after", async () => {
-    const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: "hang" });
-    const running = reader(fake, 1_500)();
-    await new Promise((r) => setTimeout(r, 700));
-    expect(ownDirs()).toHaveLength(1);
-    expect(await running).toMatchObject({ ok: false, reason: "timeout" });
-    expect(ownDirs()).toEqual([]);
-  });
-
-  it("an early exit says honestly what it may mean (no version probe)", async () => {
-    const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: "exit" });
-    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "child_exited",
-      detail: "claude exited before the usage screen rendered (a Claude Code without these flags, such as --safe-mode, exits this way)" });
-  });
-
-  it("a logged-out or API-key login is refused before the screen starts", async () => {
-    const fake = makeFakeClaude();
-    fake.setPlan({ auth: [{ loggedIn: false }], screen: usageScreen() });
-    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "not_logged_in" });
-    fake.setPlan({ auth: [{ ...CLAUDE_AUTH, authMethod: "api_key" }], screen: usageScreen() });
-    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "not_subscription_login" });
-    expect(fake.screenStarts()).toEqual([]);
-  });
-
-  it("failure reasons: prompt, failed load, child exit, timeout, identity change, auth failures, missing binaries", async () => {
-    const fake = makeFakeClaude();
-    const cases: Array<[string, Parameters<typeof fake.setPlan>[0], string]> = [
-      ["trust prompt", { auth: [CLAUDE_AUTH], screen: " Do you trust the files in this folder?\n 1. Yes, proceed" }, "interaction_required"],
-      ["failed load", { auth: [CLAUDE_AUTH], screen: " Failed to load usage data" }, "usage_unavailable"],
-      ["child exit", { auth: [CLAUDE_AUTH], screen: "exit" }, "child_exited"],
-      ["hang", { auth: [CLAUDE_AUTH], screen: "hang" }, "timeout"],
-      ["identity change", { auth: [CLAUDE_AUTH, { ...CLAUDE_AUTH, orgId: "org-2" }], screen: usageScreen() }, "identity_changed_during_read"],
-      ["recheck failure", { auth: [CLAUDE_AUTH, null], screen: usageScreen() }, "identity_recheck_failed"],
-      ["auth failure", { auth: [null], screen: usageScreen() }, "auth_status_failed"],
-    ];
-    const before = ownDirs();
-    for (const [name, plan, reason] of cases) {
-      fake.setPlan(plan);
-      expect(await reader(fake, 2_000)(), name).toMatchObject({ ok: false, reason });
+    for (const [auth, exit] of [[CLAUDE_AUTH, 9], [{ authMethod: "claude.ai" }, 1], [{ loggedIn: "false" }, 1]] as const) {
+      fake.setPlan({ auth: [auth], authExit: [exit] });
+      expect(await reader(fake)(), JSON.stringify(auth)).toMatchObject({ ok: false, reason: "auth_status_failed", detail: `claude auth status failed (exit ${exit})` });
     }
-    // Every keystroke the screens received was an exit key.
-    expect(fake.keys()).toMatch(/^(1b|03)*$/);
-    expect(ownDirs()).toEqual(before);
+    fake.setPlan({ auth: [null] });
+    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "auth_status_failed", detail: "claude auth status failed (exit 1)" });
+  });
+
+  it("an API-key login, no claude, and a hang", async () => {
+    const fake = makeFakeClaude();
+    fake.setPlan({ auth: [{ ...CLAUDE_AUTH, authMethod: "api_key" }] });
+    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "not_subscription_login" });
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-nobin-"));
-    expect(await reader(fake, 2_000, empty)()).toMatchObject({ ok: false, reason: "binary_not_found" });
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen() });
-    expect(await reader(fake, 2_000, fake.binDir)()).toMatchObject({ ok: false, reason: "tmux_unavailable" });
-  }, 60_000);
+    expect(await reader(fake, { launchPath: empty })()).toMatchObject({ ok: false, reason: "binary_not_found", detail: "no claude executable on the daemon's PATH" });
+    fake.setPlan({ auth: ["hang"] });
+    const started = performance.now();
+    expect(await reader(fake, { timeoutMs: 1_000 })()).toMatchObject({ ok: false, reason: "auth_status_failed", detail: "claude auth status did not answer within 1 s" });
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
 
-  it("auth facts come only from a command that succeeded: valid JSON with exit 9 fails, first or after, and the older reading is kept", async () => {
+  it("nothing a read starts survives it (answer, logged out, hang), with processes that ignore HUP and TERM", async () => {
     const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], authExit: [9], screen: usageScreen() });
-    expect(await reader(fake, 4_000)()).toMatchObject({ ok: false, reason: "auth_status_failed", detail: "claude auth status failed (exit 9)" });
-    expect(fake.screenStarts()).toEqual([]);
-    fake.setPlan({ auth: [CLAUDE_AUTH], authExit: [0, 9], screen: usageScreen() });
-    expect(await reader(fake, 4_000)()).toMatchObject({ ok: false, reason: "identity_recheck_failed", detail: expect.stringContaining("(exit 9)") });
-
-    const windows = new ClaudeUsageWindows({ read: reader(fake, 4_000) });
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen({ week: 41 }) });
-    expect((await windows.refresh()).refresh).toMatchObject({ outcome: "ok" });
-    fake.setPlan({ auth: [CLAUDE_AUTH], authExit: [9], screen: usageScreen({ week: 99 }) });
-    expect((await windows.refresh()).refresh).toMatchObject({ outcome: "failed", reason: "auth_status_failed" });
-    const [row] = windows.project(new Date().toISOString());
-    expect(row!.windows[1]!.usedPercent).toBe(41);
-    expect(row!.windows.every((w) => w.freshness === "stale")).toBe(true);
-  }, 30_000);
-
-  it("nothing a read started survives it: auth timeout, screen failure, timeout and success, with processes that ignore HUP and TERM", async () => {
-    const fake = makeFakeClaude();
-    // A killed process keeps its pid until its parent reaps it: the reader reaps its own child before
-    // returning, and an orphaned stub child is reaped by init (launchd on macOS). So each pid must be gone
-    // within REAP_BOUND_MS; anything still there then is named with its ps state (Z = dead, unreaped).
+    // The reader reaps its own child before it returns; an orphaned stub child is reaped by init (launchd on macOS), so
+    // every recorded pid and group must be gone within REAP_BOUND_MS; anything left is named with its ps state.
     const REAP_BOUND_MS = 2_000;
     const exists = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
     const psRows = () => execFileSync("ps", ["-A", "-o", "pid=,pgid=,stat="]).toString().trim().split("\n")
@@ -303,47 +240,20 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
       while (Date.now() < until && (p.pids.some(exists) || psRows().some((r) => r.pgid === p.pgid))) await new Promise((r) => setTimeout(r, 50));
       return psRows().filter((r) => p.pids.includes(r.pid) || r.pgid === p.pgid);
     };
-    const cases: Array<[string, Parameters<typeof fake.setPlan>[0], string, number]> = [
-      ["auth timeout", { auth: ["hang"], screen: usageScreen(), stubborn: true }, "auth_status_failed", 1],
-      ["screen failure", { auth: [CLAUDE_AUTH], screen: "exit", stubborn: true }, "child_exited", 2],
-      ["timeout", { auth: [CLAUDE_AUTH], screen: "hang", stubborn: true }, "timeout", 2],
-      ["success", { auth: [CLAUDE_AUTH], screen: usageScreen(), stubborn: true }, "ok", 3],
-    ];
-    const before = ownDirs();
-    for (const [name, plan, outcome, starts] of cases) {
-      fake.setPlan(plan);
-      const r = await claudeUsageReader({ launchPath: `${fake.binDir}${path.delimiter}${process.env.PATH}`, home: home(), claudeConfigDir: fake.configDir,
-        deadlineMs: outcome === "timeout" || outcome === "auth_status_failed" ? 3_000 : 10_000, pollMs: 100, tmpRoot, graceMs: 500 })();
+    for (const [name, auth, outcome] of [["answer", CLAUDE_AUTH, "ok"], ["logged out", CLAUDE_LOGGED_OUT, "not_logged_in"], ["hang", "hang", "auth_status_failed"]] as const) {
+      fake.setPlan({ auth: [auth], stubborn: true });
+      const r = await reader(fake, { timeoutMs: 2_000, graceMs: 500 })();
       expect(r.ok ? "ok" : r.reason, name).toBe(outcome);
-      const procs = fake.procs();
-      expect(procs, name).toHaveLength(starts);
-      // The reader's own child (each auth status) is reaped before the read returns: no wait allowed.
-      for (const p of procs.filter((x) => x.what === "auth")) expect(exists(p.pids[0]!), `${name}: auth status child ${p.pids[0]} unreaped`).toBe(false);
-      for (const p of procs) {
-        expect(await leftAfterReapBound(p), `${name}: ${p.what} pids ${p.pids.join(",")} group ${p.pgid}`).toEqual([]);
-      }
+      const [p] = fake.procs();
+      expect(p, name).toBeDefined();
+      expect(exists(p!.pids[0]!), `${name}: auth status child ${p!.pids[0]} unreaped`).toBe(false);
+      expect(await leftAfterReapBound(p!), `${name}: pids ${p!.pids.join(",")} group ${p!.pgid}`).toEqual([]);
     }
-    expect(ownDirs()).toEqual(before);
   }, 60_000);
 
-  it("a trust prompt names the folder and how a person clears it", async () => {
-    const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: " Do you trust the files in this folder?\n 1. Yes, proceed" });
-    const r = await reader(fake, 4_000)();
-    expect(r).toMatchObject({ ok: false, reason: "interaction_required" });
-    expect(!r.ok && r.detail).toMatch(/^claude asked whether to trust the folder it runs in \(.*claude-reader-home-.*\), the daemon's HOME; nothing was answered\. Every read stops here until that folder is trusted: start claude there once as this login and accept the trust prompt$/);
-  });
-
-  it("a rendered but unrecognised screen reaches the cache as unrecognized_shape", async () => {
-    const fake = makeFakeClaude();
-    fake.setPlan({ auth: [CLAUDE_AUTH], screen: usageScreen({ weekReset: "next Tuesday" }) });
-    const windows = new ClaudeUsageWindows({ read: reader(fake) });
-    expect((await windows.refresh()).refresh).toMatchObject({ outcome: "failed", reason: "unrecognized_shape" });
-  });
-
   it("the child environment drops TMUX, TMUX_PANE and seat variables, and keeps the config dir", () => {
-    const env = claudeUsageReaderEnv({ launchPath: "/p", home: "/h", claudeConfigDir: "/c" },
+    const env = claudeAuthReaderEnv({ launchPath: "/p", home: "/h", claudeConfigDir: "/c" },
       { TMUX: "x", TMUX_PANE: "%1", OPENRIG_SESSION_NAME: "s@r", RIGGED_X: "1", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", KEEP: "k" });
-    expect(env).toEqual({ KEEP: "k", PATH: "/p", HOME: "/h", CLAUDE_CONFIG_DIR: "/c", TZ: "UTC", DISABLE_AUTOUPDATER: "1", TERM: "xterm-256color" });
+    expect(env).toEqual({ KEEP: "k", PATH: "/p", HOME: "/h", CLAUDE_CONFIG_DIR: "/c", DISABLE_AUTOUPDATER: "1" });
   });
 });

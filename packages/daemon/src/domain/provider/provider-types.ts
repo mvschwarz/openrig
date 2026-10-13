@@ -159,9 +159,9 @@ export interface UsageAllowanceIdentity {
   source: "account/rateLimits/read accountId" | "account/read workspace routing" | "unresolved";
 }
 
-/** Slice 01 — a Claude allowance's identity: the organisation and email `claude auth status` reports,
- *  with the bucket (the /usage screen's model group). Claude reports no per-account id, and members of
- *  one organisation have their own limits, so the email is part of the identity here (unlike Codex). */
+/** Slice 01 — a Claude allowance's identity: the organisation and email `claude auth status` reports, with the
+ *  bucket (the status line's windows cover all models). Claude reports no per-account id, and members of one
+ *  organisation have their own limits, so the email is part of the identity here (unlike Codex). */
 export interface ClaudeUsageIdentity {
   orgId: string | null;
   limitId: string;
@@ -180,8 +180,10 @@ export interface UsageWindowRow {
   /** 100 − usedPercent: a percentage; the provider reports no absolute amount. */
   remainingPercent: number | null;
   resetsAt: string | null;
-  /** When the native read answered: freshness ages from this. */
+  /** When the native read answered (Claude: the status line's own time for the sample): freshness ages from this. */
   observedAt: string;
+  /** Claude: the seat whose status-line sample this window is. */
+  seatSession?: string;
   level: "ok" | "nearing" | "exhausted" | "unknown";
   levelReason?: string;
   freshness: "fresh" | "stale" | "unavailable";
@@ -199,7 +201,7 @@ export interface ProviderUsageAllowance {
   provider: ProviderKind;
   /** Null only for the explicit row of a source never read since the daemon started. */
   identity: UsageAllowanceIdentity | ClaudeUsageIdentity | null;
-  source: { kind: "codex_app_server" | "claude_usage_screen"; host: "local" };
+  source: { kind: "codex_app_server" | "claude_statusline_samples"; host: "local" };
   observedAt: string | null;
   /** Seat links are not observed by this read. */
   seats: "unknown";
@@ -212,6 +214,9 @@ export interface ProviderUsageAllowance {
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";
   unavailableReason?: string;
+  /** Claude: how the identity and the windows were joined (identity as of a refresh; windows from seats' samples at
+   *  their own times; not proven to be the same login). */
+  identityNote?: string;
   /** Present on an unresolved observation: never matched, merged or replaced; kept from the most recent reads. */
   unresolved?: { note: string; keptReads: number; droppedReads: number };
   /** Present when rig auth profiles exist: this read covers only the login active in the daemon's CODEX_HOME. */

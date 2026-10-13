@@ -42,8 +42,9 @@ export function providerRoutes(): Hono {
     return c.json({ hostUsage: model.hostUsage ?? [] }, 200);
   });
 
-  // Slice 01 (OPR.0.7.0.1) — the ONLY route that starts a native usage read: one bounded Codex read
-  // (35 s), shared by matching overlapping requests. A failed read is a 200 outcome that keeps the
+  // Slice 01 (OPR.0.7.0.1) — the ONLY route that starts a native usage read: one bounded Codex read (35 s),
+  // or Claude's identity read (claude auth status, 10 s; Claude's windows come from the seats' status-line
+  // samples), shared by matching overlapping requests. A failed read is a 200 outcome that keeps the
   // last reading; the switch off is a 409 naming the key. Synchronous because the read is local;
   // a cross-host refresh needs an asynchronous receipt (later change).
   router.post("/usage/refresh", async (c) => {

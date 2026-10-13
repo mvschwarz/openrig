@@ -92,8 +92,8 @@ export function usageLevel(window: UsageReadWindow, limitEvidence: string | null
   return { level: "ok" };
 }
 
-const UNRESOLVED_NOTE = "identity unresolved: not matched to, merged with or replacing any other row";
-const UNRESOLVED_EARLIER_NOTE = "identity unresolved: from an earlier read, possibly this same login; not matched to, merged with or replacing any other row";
+export const UNRESOLVED_NOTE = "identity unresolved: not matched to, merged with or replacing any other row";
+export const UNRESOLVED_EARLIER_NOTE = "identity unresolved: from an earlier read, possibly this same login; not matched to, merged with or replacing any other row";
 
 type Held<I> = UsageReading<I> & { latest: boolean };
 
