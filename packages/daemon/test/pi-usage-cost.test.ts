@@ -11,14 +11,17 @@ import { extractPiUsageFacts, parsePiSessionHeader, type PiSessionBoundary } fro
 import { PiUsageEntriesStore, validPiUsageFact } from "../src/domain/pi-usage-entries-store.js";
 import { computeCostView, PI_COST_COVERAGE } from "../src/domain/usage-series.js";
 import { activityRoutes } from "../src/routes/activity.js";
-import { RunnerCore, parseRunnerArgs, type RunnerIo } from "../src/adapters/pi-runner.js";
+import { RunnerCore, parseRunnerArgs, readPiSessionEntryIds, type RunnerIo } from "../src/adapters/pi-runner.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import nodePath from "node:path";
 import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
 
 const usage = (input: number, output: number, cost?: number) => ({
   input, output, cacheRead: 5, cacheWrite: 1, totalTokens: input + output + 6,
   ...(cost === undefined ? {} : { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } }),
 });
-const at = (s: number) => new Date(Date.UTC(2026, 9, 13, 16, 0, s)).toISOString();
+const at = (s: number, ms = 0) => new Date(Date.UTC(2026, 9, 13, 16, 0, s, ms)).toISOString();
 const assistant = (id: string, s: number, cost: number | undefined, stopReason = "stop") => ({
   type: "message", id, parentId: null, timestamp: at(s),
   message: { role: "assistant", provider: "openrouter", model: "m-1", responseModel: "m-1-0801", usage: usage(100, 20, cost), stopReason },
@@ -63,6 +66,26 @@ describe("extractPiUsageFacts (Pi 0.87.1, session format v3)", () => {
     ], OWN);
     expect(facts).toEqual([expect.objectContaining({ entryId: "n1", costTotal: null })]);
     expect(malformed).toBe(2);
+  });
+
+  it("origin with the parent's ids: membership decides; without them a tie with the header is unknown", () => {
+    const tie = [assistant("b7", 7, 0.1), assistant("n7", 7, 0.2), assistant("x1", 1, 0.3), assistant("p9", 9, 0.4)];
+    const fork = { createdAt: at(7), parentSession: "/p.jsonl" };
+    const byId = (boundary: PiSessionBoundary) => Object.fromEntries(extractPiUsageFacts(tie, boundary).facts.map((f) => [f.entryId, f.origin]));
+    expect(byId(fork)).toEqual({ b7: "unknown", n7: "unknown", x1: "inherited", p9: "own" });
+    // b7 and p9 are the parent's; x1 is before the header yet not the parent's: contradictory, so unknown.
+    expect(byId({ ...fork, parentEntryIds: new Set(["b7", "p9"]) })).toEqual({ b7: "inherited", n7: "own", x1: "unknown", p9: "inherited" });
+  });
+
+  it("readPiSessionEntryIds (the runner's reader) reads a session file's entry ids, skipping the header and torn lines, within a size limit", () => {
+    const dir = mkdtempSync(nodePath.join(process.env.TMPDIR ?? tmpdir(), "pi-parent-"));
+    try {
+      const file = nodePath.join(dir, "parent.jsonl");
+      writeFileSync(file, [JSON.stringify({ type: "session", id: "sess-1", timestamp: at(0) }), JSON.stringify(ENTRIES[0]), JSON.stringify(ENTRIES[1]), "{torn", ""].join("\n"));
+      expect([...readPiSessionEntryIds(file)!].sort()).toEqual(["a1", "u1"]);
+      expect(readPiSessionEntryIds(file, 10)).toBeNull();
+      expect(readPiSessionEntryIds(nodePath.join(dir, "missing.jsonl"))).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("origin: a fork's copied entries (older than the session header) are inherited; later ones are own; no header is unknown", () => {
@@ -326,9 +349,9 @@ describe("POST /api/activity/pi-usage", () => {
   });
 });
 
-describe("runner → authenticated route → SQLite → cost view (round 3)", () => {
+describe("runner → authenticated route → SQLite → cost view", () => {
   const TOKEN = "hook-token";
-  function pipeline(header: () => string | null) {
+  function pipeline(header: () => string | null, parentIds: () => ReadonlySet<string> | null = () => null, parentReads = { n: 0 }) {
     const d = db();
     const hono = new Hono();
     hono.use("*", async (c, next) => {
@@ -341,6 +364,7 @@ describe("runner → authenticated route → SQLite → cost view (round 3)", ()
     const io: RunnerIo = {
       sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, postActivity: () => {}, writeSidecar: () => {},
       sessionFileExists: () => true, now: () => at(0), readFirstLine: header,
+      readSessionEntryIds: () => { parentReads.n += 1; return parentIds(); },
       postUsageFacts: async (payload) => (await hono.request("/api/activity/pi-usage", {
         method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(payload) })).ok,
     };
@@ -358,20 +382,50 @@ describe("runner → authenticated route → SQLite → cost view (round 3)", ()
   const forkHeader = (timestamp: unknown, parentSession: unknown = "/state/pi/parent.jsonl") =>
     JSON.stringify({ type: "session", version: 3, id: "0197a2f0", timestamp, cwd: "/w", parentSession });
 
-  it("F1: a copied entry stamped exactly at the fork header's time is inherited, not the new occupant's spend", async () => {
-    const p = pipeline(() => forkHeader(at(7))); // b1 is stamped at(7)
-    await p.refresh(ENTRIES);
+  // Round 4: Pi stamps the fork header and a new entry with the same millisecond clock, so both a copied entry and a
+  // new one can share the header's millisecond. The parent session's entry ids decide; a tie alone never does.
+  const PARENT_IDS = new Set(["u1", "a1", "s1", "t1", "t2", "c1", "b1"]); // what forkFrom copied (b1 is stamped at(7))
+  const NEW_AT_HEADER = assistant("n7", 7, 0.5); // appended after the fork in the header's own millisecond
+  const forkEntries = [...ENTRIES.slice(0, 7), NEW_AT_HEADER, ...ENTRIES.slice(7)];
+
+  it("F1: a copied entry and a new entry sharing the fork header's millisecond: copied is inherited, new is own", async () => {
+    const reads = { n: 0 };
+    const p = pipeline(() => forkHeader(at(7)), () => PARENT_IDS, reads);
+    await p.refresh(forkEntries);
+    await p.refresh(forkEntries);
     const seat = p.view();
-    expect(seat.entries.own).toBe(2); // a2, a3: strictly after the header
-    expect(seat.costUsd).toBeCloseTo(0.05, 10);
-    expect(seat.entries.inherited.count).toBe(5);
-    expect(p.d.prepare("SELECT origin FROM pi_usage_entries WHERE entry_id = 'b1'").get()).toEqual({ origin: "inherited" });
+    const origin = Object.fromEntries((p.d.prepare("SELECT entry_id, origin FROM pi_usage_entries").all() as Array<{ entry_id: string; origin: string }>)
+      .map((row) => [row.entry_id, row.origin]));
+    expect(origin).toEqual({ a1: "inherited", s1: "inherited", t1: "inherited", c1: "inherited", b1: "inherited", n7: "own", a2: "own", a3: "own" });
+    expect(seat.costUsd).toBeCloseTo(0.55, 10); // the new $0.50 is the occupant's, beside a2 and a3
+    expect(seat.entries).toMatchObject({ own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } });
+    expect(reads.n).toBe(1); // read once, to decide the ties
+  });
+
+  it("F1: with the parent unreadable a tie stays unknown (shown, not counted, not hidden as history) until it can be read", async () => {
+    let parent: ReadonlySet<string> | null = null;
+    const p = pipeline(() => forkHeader(at(7)), () => parent);
+    await p.refresh(forkEntries);
+    expect(p.view()).toMatchObject({ entries: { own: 2, inherited: { count: 4 }, unknownOrigin: { count: 2 } } }); // b1 and n7
+    expect(p.view().costUsd).toBeCloseTo(0.05, 10);
+    parent = PARENT_IDS;
+    await p.refresh(forkEntries);
+    expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } });
+    expect((p.d.prepare("SELECT COUNT(*) AS n FROM pi_usage_entries").get() as { n: number }).n).toBe(8);
+  });
+
+  it("F1: the parent is read only when a tie needs deciding", async () => {
+    const reads = { n: 0 };
+    const p = pipeline(() => forkHeader(at(7, 500)), () => PARENT_IDS, reads); // no entry shares this millisecond
+    await p.refresh(forkEntries);
+    expect(reads.n).toBe(0);
+    expect(p.view()).toMatchObject({ entries: { own: 2, inherited: { count: 6 } } }); // n7 at(7) is before at(7.5): history by time
   });
 
   it("F2: a header that parses but isn't valid is unknown (nothing counted as own); a later valid header settles it", async () => {
     for (const bad of [forkHeader("nonsense"), forkHeader(at(7), 42), JSON.stringify(null), JSON.stringify([1])]) {
       let header: string | null = bad;
-      const p = pipeline(() => header);
+      const p = pipeline(() => header, () => PARENT_IDS);
       await p.refresh(ENTRIES);
       expect(p.view()).toMatchObject({ status: "absent", entries: { own: 0, unknownOrigin: { count: 7 } } });
       header = forkHeader(at(7)); // read again on the next refresh

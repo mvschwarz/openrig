@@ -28,7 +28,7 @@ import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { piCredentialNotice } from "./pi-readiness.js";
-import { extractPiUsageFacts, parsePiSessionHeader, type PiSessionBoundary } from "../domain/pi-usage-facts.js";
+import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary } from "../domain/pi-usage-facts.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -296,6 +296,8 @@ export interface RunnerIo {
   postUsageFacts?(payload: Record<string, unknown>): Promise<boolean>;
   /** The first line of a Pi session file (its header), or null when it can't be read. */
   readFirstLine?(path: string): string | null;
+  /** The entry ids in a Pi session file (a fork's parent), or null when it can't be read or is too large. */
+  readSessionEntryIds?(path: string): ReadonlySet<string> | null;
   now(): string;
 }
 
@@ -305,6 +307,26 @@ const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 /** RPC commands that carry operator input. Their failure means the seat
  *  cannot do the requested work; other command failures are not attention. */
 const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow_up: true };
+
+/** OPR.0.7.0.2: the largest fork parent read to decide a header tie; a larger parent leaves the tie unknown. */
+const PARENT_SESSION_READ_LIMIT_BYTES = 64 * 1024 * 1024;
+
+/** OPR.0.7.0.2: the entry ids in a Pi session file (a fork's parent), read once per session and only to decide a
+ *  tie with the fork header. Ids only; null when the file can't be read or is over the limit. */
+export function readPiSessionEntryIds(path: string, limitBytes = PARENT_SESSION_READ_LIMIT_BYTES): ReadonlySet<string> | null {
+  try {
+    if (fs.statSync(path).size > limitBytes) return null;
+    const ids = new Set<string>();
+    for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as { type?: unknown; id?: unknown };
+        if (entry.type !== "session" && typeof entry.id === "string") ids.add(entry.id);
+      } catch { /* a torn line has no usable id */ }
+    }
+    return ids;
+  } catch { return null; }
+}
 
 export class RunnerCore {
   private streaming = false;
@@ -477,7 +499,18 @@ export class RunnerCore {
       const firstLine = this.sessionFile && this.io.readFirstLine ? this.io.readFirstLine(this.sessionFile) : null;
       this.usageBoundary = firstLine ? parsePiSessionHeader(firstLine) : null;
     }
-    const { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
+    let { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
+    // A new entry often shares the fork header's millisecond, and so can a copied one: only the parent session's
+    // entry ids tell them apart. Read them once, and only when such a tie needs deciding.
+    const boundary = this.usageBoundary;
+    if (boundary?.parentSession && !boundary.parentEntryIds && this.io.readSessionEntryIds
+      && facts.some((fact) => !this.postedUsageEntryIds.has(fact.entryId) && tiesPiForkHeader(fact.entryTimestamp, boundary))) {
+      const parentEntryIds = this.io.readSessionEntryIds(boundary.parentSession);
+      if (parentEntryIds) {
+        this.usageBoundary = { ...boundary, parentEntryIds };
+        ({ facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary));
+      }
+    }
     const fresh = facts.filter((fact) => !this.postedUsageEntryIds.has(fact.entryId));
     if (fresh.length === 0 && malformed === 0) return;
     void this.io.postUsageFacts({
@@ -490,8 +523,9 @@ export class RunnerCore {
       facts: fresh,
       malformed,
     }).then((accepted) => {
-      // Only a stored fact with a known origin is done: a failed post, or an origin the header couldn't settle
-      // yet, is sent again with the next refresh (the store upgrades an unknown origin once it is known).
+      // Only a stored fact with a known origin is done: a failed post, or an origin not settled yet (no readable
+      // header, or a tie with an unreadable parent), is sent again with the next refresh (the store upgrades an
+      // unknown origin once it is known).
       if (accepted) for (const fact of fresh) if (fact.origin !== "unknown") this.postedUsageEntryIds.add(fact.entryId);
     }, () => { /* best-effort: resent on the next refresh */ });
   }
@@ -975,6 +1009,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         } finally { fs.closeSync(fd); }
       } catch { return null; }
     },
+    readSessionEntryIds: (path) => readPiSessionEntryIds(path),
   };
 
   const core = new RunnerCore(io, {

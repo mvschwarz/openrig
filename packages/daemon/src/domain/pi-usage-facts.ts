@@ -49,21 +49,40 @@ export interface PiSessionBoundary {
   createdAt: string;
   /** Set when the session was forked or branched from another. */
   parentSession: string | null;
+  /** The entry ids in the parent session file, when it has been read. A fork or branch copies entries with their
+   *  parent ids unchanged, and Pi gives a new entry an id not already in the session, so membership decides. */
+  parentEntryIds?: ReadonlySet<string> | null;
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
 
-/** A fork writes its header first and then copies the parent's entries with their original timestamps, so an
- *  entry stamped at or before the header's time is history: a tie is not evidence of new spend. Only an entry
- *  stamped after the header is the occupant's own. */
-function originOf(timestamp: string, boundary: PiSessionBoundary | null): PiUsageOrigin {
+/**
+ * Where an entry of a forked or branched session belongs. Pi stamps the header and each new entry with the same
+ * millisecond clock, and a fork copies entries with their original ids and timestamps, so:
+ *   - before the header's time: copied history (inherited); after it: the occupant's own;
+ *   - the same millisecond decides nothing by itself (copies and new entries both land there): the parent
+ *     session's entry ids decide it when they have been read, and otherwise the entry stays unknown.
+ * When the parent's ids are known they are the evidence for every entry; a contradiction is unknown.
+ */
+function originOf(entryId: string, timestamp: string, boundary: PiSessionBoundary | null): PiUsageOrigin {
   if (!boundary) return "unknown";
   if (!boundary.parentSession) return "own";
   const at = Date.parse(timestamp);
   const created = Date.parse(boundary.createdAt);
   if (Number.isNaN(at) || Number.isNaN(created)) return "unknown";
-  return at <= created ? "inherited" : "own";
+  if (boundary.parentEntryIds) {
+    if (boundary.parentEntryIds.has(entryId)) return "inherited";
+    return at >= created ? "own" : "unknown";
+  }
+  return at < created ? "inherited" : at > created ? "own" : "unknown";
+}
+
+/** Whether an entry is stamped in the same millisecond as the fork header (the case only the parent's ids decide). */
+export function tiesPiForkHeader(timestamp: string, boundary: PiSessionBoundary | null): boolean {
+  if (!boundary?.parentSession) return false;
+  const at = Date.parse(timestamp);
+  return !Number.isNaN(at) && at === Date.parse(boundary.createdAt);
 }
 
 /**
@@ -127,7 +146,7 @@ export function extractPiUsageFacts(entries: unknown[], boundary: PiSessionBound
       cacheWrite: num(u["cacheWrite"]) ?? 0,
       costTotal: cost,
       stopReason,
-      origin: originOf(timestamp, boundary),
+      origin: originOf(id, timestamp, boundary),
     });
   }
   return { facts, malformed };
