@@ -106,6 +106,7 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
     expect(loaded).toEqual({
       ok: false,
       error: "no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …",
+      noHumans: true,
     });
     expect(existsSync(projectionPath(home))).toBe(false); // a load never creates the projection
   });
