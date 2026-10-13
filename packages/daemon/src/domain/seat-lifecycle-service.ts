@@ -26,7 +26,11 @@ import {
   effortPrecedence, emittedEffortFromArgv, readNativeEffort, resolveSeatEffort, unknownLevelWarning,
   type EffortResolution, type NativeEffortObservation,
 } from "./seat-effort.js";
-import { observeClaudePaneRuntime, observeCodexPaneProcess, processArgv } from "./native-process-lineage.js";
+import {
+  claudeCommandSessionToken, codexCommandResumeToken, observeClaudePaneRuntime, observeCodexPaneProcess, processArgv,
+} from "./native-process-lineage.js";
+import { defaultInPlaceRestartIo } from "./seat-restart-in-place.js";
+import nodePath from "node:path";
 import {
   CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
@@ -69,7 +73,7 @@ export interface SeatLifecycleDeps {
   inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
   inPlaceRestartDaemonStartedAt?: Date;
   /** Where a session's native transcript is (the context-usage store); without it native effort is NOT VERIFIED. */
-  transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
+  transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null; session_id?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
 }
 
 interface ResolvedSeat {
@@ -394,7 +398,10 @@ export class SeatLifecycleService {
         const flag = emittedEffortFromArgv(runtime, processArgv(process.command));
         const value = flag.flag === "present" ? flag.value : null;
         emitted = { state: "observed", value, pid: process.pid, startedAt: process.startedAt ?? null, matchesSaved: value === saved.effective };
-        const native = readNativeEffort(runtime, this.transcriptPath(runtime, session), process.startedAt ?? null);
+        // Native effort is attributed only from the transcript of the conversation this process is on.
+        const joined = await this.joinedTranscript(runtime, session, process);
+        const native = "detail" in joined ? { state: "not_verified" as const, detail: joined.detail }
+          : readNativeEffort(runtime, joined.path, process.startedAt ?? null);
         observed = native.state === "observed" ? { ...native, matchesEmitted: native.value === value } : native;
       }
     }
@@ -413,17 +420,39 @@ export class SeatLifecycleService {
     }
   }
 
-  private transcriptPath(runtime: "claude-code" | "codex", session: LatestSessionRow): string | null {
-    if (!this.transcripts) return null;
+  /** The transcript of the conversation the observed process is on, or why that join can't be made.
+   *  The recorded conversation (Codex: the session's resume token; Claude: the status sidecar's session)
+   *  must be the one the process itself names, by argv or, for a Codex that names none, by its own logs. */
+  private async joinedTranscript(runtime: "claude-code" | "codex", session: LatestSessionRow, process: { pid: number; command: string; startedAt?: string }):
+    Promise<{ path: string | null } | { detail: string }> {
+    if (!this.transcripts) return { detail: "The native transcript for this session isn't known to OpenRig." };
+    const mismatch = "The process in the pane isn't on the conversation recorded for this seat (or its conversation couldn't be read), so no native turn can be attributed to it.";
     try {
       if (runtime === "codex") {
-        const token = this.sessionResumeToken(session.id);
-        return token ? this.transcripts.readCodexTranscriptPath(token) : null;
+        const recorded = this.sessionResumeToken(session.id);
+        if (!recorded) return { detail: "No Codex conversation is recorded for this session yet." };
+        let own = codexCommandResumeToken(process.command) ?? undefined;
+        if (own === undefined && process.startedAt) {
+          const io = { ...defaultInPlaceRestartIo(), ...this.inPlaceRestartIo };
+          const facts = await io.readProcess(process.pid);
+          const home = facts?.env.CODEX_HOME ?? (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : undefined);
+          own = home ? await io.readThreadId(process.pid, process.startedAt, home) : undefined;
+        }
+        if (own !== recorded) return { detail: mismatch };
+        return { path: this.transcripts.readCodexTranscriptPath(recorded) };
       }
       const sidecar = this.transcripts.readSidecar(session.session_name);
-      return sidecar.ok ? sidecar.data.transcript_path ?? null : null;
+      if (!sidecar.ok) return { detail: "Claude's status sidecar for this session isn't available, so its transcript isn't known." };
+      const recorded = sidecar.data.session_id ?? null;
+      const own = claudeCommandSessionToken(process.command);
+      // A resumed Claude can rotate to a new session id; the registry's recorded rotation from the
+      // launched id to the sidecar's joins them too.
+      const rotated = this.db.prepare("SELECT 1 FROM sessions WHERE id = ? AND resume_token = ? AND resume_rotated_from = ?")
+        .get(session.id, recorded, own);
+      if (!recorded || !own || (own !== recorded && !rotated)) return { detail: mismatch };
+      return { path: sidecar.data.transcript_path ?? null };
     } catch {
-      return null;
+      return { detail: mismatch };
     }
   }
 

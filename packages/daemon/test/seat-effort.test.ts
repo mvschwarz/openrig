@@ -160,6 +160,8 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
   let service: SeatLifecycleService;
   let rows: NativeProcessRow[];
   let transcript: string | null;
+  let sidecarSession: string | null;
+  let logsThread: string | undefined;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -167,12 +169,18 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     sessionRegistry = new SessionRegistry(db);
     rows = [];
     transcript = null;
+    sidecarSession = null;
+    logsThread = undefined;
     const tmux = { getPanePid: async () => 100 } as unknown as TmuxAdapter;
     service = new SeatLifecycleService({
       db, rigRepo, sessionRegistry, eventBus: new EventBus(db), tmuxAdapter: tmux, listProcesses: () => rows,
       transcripts: {
-        readSidecar: () => (transcript ? { ok: true as const, data: { transcript_path: transcript } } : { ok: false as const }),
+        readSidecar: () => (transcript ? { ok: true as const, data: { transcript_path: transcript, session_id: sidecarSession } } : { ok: false as const }),
         readCodexTranscriptPath: () => transcript,
+      },
+      inPlaceRestartIo: {
+        readProcess: async () => ({ cwd: "/w", exe: "/usr/local/bin/codex", env: { CODEX_HOME: "/scratch/.codex" }, apiKeyEnvNames: [] }),
+        readThreadId: async () => logsThread,
       },
     });
   });
@@ -225,6 +233,49 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     const report = await service.effortReport("dev-codex@eff");
     expect(report).toMatchObject({ emitted: { value: "medium", matchesSaved: false }, observed: { state: "not_verified" } });
     expect((report as { summary: string }).summary).toMatch(/differs from the saved value.*NOT VERIFIED/);
+  });
+
+  it("attributes native effort only from the conversation the observed process is on", async () => {
+    codexSeat({ authored: "low" });
+    transcript = file("rollout-a.jsonl", [
+      { type: "turn_context", timestamp: at(5), payload: { turn_id: "a1", effort: "low" } },
+      { type: "event_msg", timestamp: at(7), payload: { type: "task_complete", turn_id: "a1" } },
+    ]);
+    // The pane now runs conversation B at high; the registry and its transcript still name A (019a-thread).
+    running(`-c model_reasoning_effort="high" resume 019b-other`);
+    const b = await service.effortReport("dev-codex@eff");
+    expect(b).toMatchObject({ emitted: { state: "observed", value: "high" }, observed: { state: "not_verified" } });
+    expect((b as { observed: { detail: string } }).observed.detail).toContain("isn't on the conversation recorded");
+    // A fresh Codex names no conversation in argv: its own logs decide.
+    running(`-c model_reasoning_effort="low" -C /w`);
+    logsThread = "019b-other";
+    expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "not_verified" } });
+    logsThread = "019a-thread";
+    expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "observed", value: "low", outcome: "accepted" } });
+    logsThread = undefined;
+    expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "not_verified" } });
+  });
+
+  it("joins a Claude process to its sidecar session by argv, or by a recorded resume rotation", async () => {
+    const rig = rigRepo.createRig("effc");
+    const node = rigRepo.addNode(rig.id, "dev.claude", { runtime: "claude-code", cwd: "/w", effort: "high" });
+    const session = sessionRegistry.registerSession(node.id, "dev-claude@effc");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "dev-claude@effc", tmuxPane: "%1" });
+    transcript = file("claude.jsonl", [{ type: "assistant", timestamp: at(5), effort: "high" }]);
+    const claude = (args: string) => {
+      rows = [
+        { pid: 100, ppid: 1, pgid: 100, tpgid: 200, executableName: "bash", command: "-bash", startedAt: LSTART },
+        { pid: 200, ppid: 100, pgid: 200, tpgid: 200, executableName: "claude", command: `claude --effort high ${args}`, startedAt: LSTART },
+      ];
+    };
+    sidecarSession = "sess-s";
+    claude("--resume sess-s");
+    expect(await service.effortReport("dev-claude@effc")).toMatchObject({ observed: { state: "observed", value: "high", outcome: "recorded" } });
+    claude("--resume sess-t");
+    expect(await service.effortReport("dev-claude@effc")).toMatchObject({ observed: { state: "not_verified" } });
+    db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'sess-s', resume_rotated_from = 'sess-t' WHERE id = ?").run(session.id);
+    expect(await service.effortReport("dev-claude@effc")).toMatchObject({ observed: { state: "observed", value: "high" } });
   });
 
   it("is unknown for a seat with no running session, and refuses runtimes without effort", async () => {
