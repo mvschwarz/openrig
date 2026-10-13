@@ -145,6 +145,10 @@ Architecture rule 18 (`architecture-rules-and-event-system.md`): tmux is
 transport, not truth — `send/capture/broadcast` wrap tmux reliably with honest
 errors.
 
+The daemon runs tmux without a shell: argv straight to the tmux binary found on
+`PATH`. `OPENRIG_TMUX_SHELL=1` at daemon start runs every tmux call through
+`/bin/sh` instead (Linux and macOS; Windows always uses argv).
+
 ### 3b. Cross-host coordination verbs
 
 `rig send/capture/transcript/broadcast --host <id>` (and the `agent@rig@host`

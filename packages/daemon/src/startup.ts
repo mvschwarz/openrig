@@ -482,8 +482,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
-  // An injected string exec keeps the shell path, so its fake sees every command.
-  const argvExec = opts?.argvExec ?? (opts?.tmuxExec ? undefined : execArgvCommand);
+  // An injected string exec keeps the shell path, so its fake sees every command. OPENRIG_TMUX_SHELL=1 keeps it too.
+  const argvExec = opts?.argvExec
+    ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
   // The real tmux runs with this process's environment, so its server is the one $TMUX names.
   // An injected exec has no server of its own: printed attach commands stay in the default form.

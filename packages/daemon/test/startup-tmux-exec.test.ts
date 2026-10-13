@@ -46,6 +46,20 @@ describe("createDaemon tmux exec wiring", { timeout: 120000 }, () => {
     });
   }
 
+  it("OPENRIG_TMUX_SHELL=1 keeps tmux on the shell path on linux, and is ignored on Windows", async () => {
+    vi.stubEnv("OPENRIG_TMUX_SHELL", "1");
+    for (const [host, expected] of [["linux", undefined], ["win32", execArgvCommand]] as const) {
+      Object.defineProperty(process, "platform", { ...platform, value: host });
+      const daemon = await createDaemon({ dbPath: ":memory:", cmuxFactory });
+      try {
+        expect(argvExecOf(daemon.deps.tmuxAdapter), host).toBe(expected);
+      } finally {
+        daemon.eventLoopMonitor.stop();
+        daemon.db.close();
+      }
+    }
+  });
+
   it("keeps an injected string exec on the shell path, so its fake sees every command", async () => {
     const tmuxExec: ExecFn = async () => "";
     const daemon = await createDaemon({ dbPath: ":memory:", cmuxFactory, tmuxExec });
