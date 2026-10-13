@@ -47,13 +47,18 @@ const tok = (t: unknown): string => {
   return `tokens in ${v?.input ?? "?"} / out ${v?.output ?? "?"}`;
 };
 
+/** A real estimate below a cent prints as "<$0.01", never "$0.00" (which reads as zero); JSON keeps the exact value. */
+export function formatUsd(value: number): string {
+  return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
+}
+
 /** One labelled line per seat. Never prints a dollar figure the route didn't report. */
 export function costLine(seat: CostPayload["seats"][number]): string {
   const w = (seat["window"] ?? {}) as { nativeSessionId?: string | null; since?: string; asOf?: string | null };
   if (seat.status === "reported") {
     const stale = seat["stale"] ? `, STALE (${seat["ageSeconds"] ?? "?"}s old; kept as history)` : "";
     const resets = Number(seat["resets"]) > 0 ? `, ${seat["resets"]} reset${seat["resets"] === 1 ? "" : "s"}` : "";
-    return `${seat.seatSession}  $${Number(seat["costUsd"]).toFixed(2)} client-side estimate (Claude statusline) for session ${w.nativeSessionId} since ${w.since}, as of ${w.asOf}${resets}${stale}  ${tok(seat["tokens"])}`;
+    return `${seat.seatSession}  ${formatUsd(Number(seat["costUsd"]))} client-side estimate (Claude statusline) for session ${w.nativeSessionId} since ${w.since}, as of ${w.asOf}${resets}${stale}  ${tok(seat["tokens"])}`;
   }
   if (seat.status === "absent") return `${seat.seatSession}  cost: not reported (${seat["reason"]})  ${tok(seat["tokens"])}`;
   if (seat.status === "no-cost-method") return `${seat.seatSession}  ${tok(seat["tokens"])}  cost: ${seat["note"]}`;

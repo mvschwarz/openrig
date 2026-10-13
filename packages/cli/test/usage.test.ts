@@ -165,3 +165,18 @@ describe("rig usage cost lines (OPR.0.7.0.2)", () => {
     expect(codex).not.toContain("$");
   });
 });
+
+describe("rig usage cost: a tiny estimate never reads as zero (OPR.0.7.0.2)", () => {
+  it("prints <$0.01 below half a cent, rounds normally above, and keeps an exact reported zero", async () => {
+    const { formatUsd, costLine } = await import("../src/commands/usage.js");
+    expect(formatUsd(0.0004)).toBe("<$0.01");
+    expect(formatUsd(0.0049)).toBe("<$0.01");
+    expect(formatUsd(0.005)).toBe("$0.01");
+    expect(formatUsd(1.234)).toBe("$1.23");
+    expect(formatUsd(0)).toBe("$0.00");
+    const line = costLine({ seatSession: "dev@r", status: "reported", costUsd: 0.0003, resets: 0, stale: false, ageSeconds: 5,
+      window: { nativeSessionId: "s1", since: "2026-10-13T10:00:00.000Z", asOf: "2026-10-13T10:00:05.000Z" }, tokens: { input: 1, output: 1 } });
+    expect(line).toContain("<$0.01 client-side estimate");
+    expect(line).not.toContain("$0.00");
+  });
+});
