@@ -1456,4 +1456,6 @@ export interface ContextUsage {
   sessionName: string | null;
   sampledAt: string | null;
   fresh: boolean;
+  /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
+  clientCostEstimateUsd?: number | null;
 }

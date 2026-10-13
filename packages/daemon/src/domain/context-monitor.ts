@@ -120,6 +120,8 @@ export class ContextMonitor {
                   totalInputTokens: observed.totalInputTokens,
                   totalOutputTokens: observed.totalOutputTokens,
                   usedPercentage: observed.usedPercentage,
+                  nativeSessionId: observed.sessionId,
+                  clientCostEstimateUsd: observed.clientCostEstimateUsd ?? null,
                 },
                 new Date().toISOString(),
               );
