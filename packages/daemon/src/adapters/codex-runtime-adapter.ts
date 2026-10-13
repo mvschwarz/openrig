@@ -465,6 +465,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return { ok: true, command: await this.seatCommand(binding, core), core, appliedLaunch: prepared.appliedLaunch };
   }
 
+  /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
+   *  does. Nothing is prepared again, so the command runs exactly as it was built and checked. */
+  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+    const textResult = await this.tmux.sendShellCommand(tmuxSession, command);
+    if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
+    return this.verifyResumeInPane(tmuxSession, resumeToken);
+  }
+
   /** launchHarness's resume verification for a resume the caller started itself: dismiss a skippable update
    *  prompt, then require a proven resumed conversation (never process-alive alone). */
   async verifyResumeInPane(tmuxSession: string, resumeToken: string): Promise<HarnessLaunchResult> {

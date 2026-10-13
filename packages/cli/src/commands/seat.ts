@@ -989,6 +989,8 @@ function printRestartReport(data: Record<string, unknown>): void {
   if (last) console.log(`Last restart: ${last.outcome} at ${last.finishedAt}.`);
   const held = data["paneHeld"] as { detail: string } | undefined;
   if (held) console.log(`Pane held (remain-on-exit on): ${held.detail}`);
+  const seen = data["observedAfterStop"] as { detail: string } | undefined;
+  if (seen) console.log(`Observed after the stop: ${seen.detail}.`);
   if (data["remainingStep"]) console.log(`Remaining step: ${String(data["remainingStep"])}`);
   if (data["recoveryCommand"]) console.log(`Recovery command: ${String(data["recoveryCommand"])}`);
   for (const item of (data["couldNotSee"] as string[] | undefined) ?? []) console.log(`Could not see: ${item}`);

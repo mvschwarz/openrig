@@ -343,6 +343,13 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     expect(output.logs.join("\n")).toContain("Last restart: native_unknown at 2026-10-12T21:00:00.000Z.");
   });
 
+  it("prints the pane and process state observed after a failed stop", async () => {
+    const data = { ...report(), outcome: "incomplete", observedAfterStop: { pane: "gone", process: "exited", detail: "pane gone, original Codex exited" } };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x"]).then(() => undefined));
+    expect(output.logs.join("\n")).toContain("Observed after the stop: pane gone, original Codex exited.");
+  });
+
   it("a timed-out restart says the outcome is unknown and how --plan reports it", async () => {
     const { DaemonTimeoutError } = await import("../src/client.js");
     const deps = makeDeps({ status: 200, data: {} }, []);

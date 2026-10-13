@@ -942,32 +942,12 @@ export class TmuxAdapter {
     }
   }
 
-  /** The pane's absolute line position (lines in history plus the cursor row), or null when unreadable. A
-   *  later capturePaneFrom with this value reads only what the pane printed after it. */
-  async getPaneLinePosition(paneTarget: string): Promise<number | null> {
+  /** The pane's whole text, history and visible screen, with wrapped lines joined. Null when unreadable. */
+  async capturePaneHistory(paneTarget: string): Promise<string | null> {
     const exact = exactTarget(paneTarget, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", exact, "#{history_size} #{cursor_y}"],
-        `tmux display-message -p -t ${shellQuote(exact)} "#{history_size} #{cursor_y}"`);
-      const [history, cursor] = output.trim().split(" ").map((part) => Number.parseInt(part, 10));
-      return Number.isFinite(history) && Number.isFinite(cursor) ? history! + cursor! : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** The pane's text from an absolute line position (getPaneLinePosition) to the bottom. Null when unreadable,
-   *  or when history trimmed since moved that line out of reach. */
-  async capturePaneFrom(paneTarget: string, position: number): Promise<string | null> {
-    const exact = exactTarget(paneTarget, "pane");
-    try {
-      const [history, limit] = (await this.run(["tmux", "display-message", "-p", "-t", exact, "#{history_size} #{history_limit}"],
-        `tmux display-message -p -t ${shellQuote(exact)} "#{history_size} #{history_limit}"`)).trim().split(" ").map((part) => Number.parseInt(part, 10));
-      // A full history drops its oldest lines, which shifts every absolute position: unknown, not a guess.
-      if (!Number.isFinite(history) || !Number.isFinite(limit) || history! >= limit!) return null;
-      const start = position - history!;
-      return await this.run(["tmux", "capture-pane", "-p", "-t", exact, "-S", String(start)],
-        `tmux capture-pane -p -t ${shellQuote(exact)} -S ${start}`);
+      return await this.run(["tmux", "capture-pane", "-p", "-J", "-t", exact, "-S", "-", "-E", "-"],
+        `tmux capture-pane -p -J -t ${shellQuote(exact)} -S - -E -`);
     } catch {
       return null;
     }

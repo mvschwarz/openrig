@@ -983,7 +983,7 @@ export class SeatLifecycleService {
 
   private inPlaceRestarter(): CodexInPlaceRestart | SeatRefusal {
     const adapter = this.runtimeAdapters["codex"] as (RuntimeAdapter & Partial<InPlaceCodexLauncher>) | undefined;
-    if (!adapter?.buildResumeCommand || !adapter.verifyResumeInPane) {
+    if (!adapter?.buildResumeCommand || !adapter.verifyResumeInPane || !adapter.sendResumeCommand) {
       return { ok: false, code: "runtime_adapter_missing", message: "The Codex runtime adapter with in-place resume is unavailable in this daemon." };
     }
     const activity = this.activityOracle?.getSeatState ? this.activityOracle as { getSeatState(nodeId: string): ArbitratedSeatState | null } : null;

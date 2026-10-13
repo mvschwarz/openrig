@@ -11,6 +11,9 @@
 // explicit PATH/HOME/CODEX_HOME; CODEX_HOME is the test's temp dir and asserted not to be ~/.codex;
 // every launch goes through the adapter's pinned launch PATH; and a check INSIDE the pane fails closed
 // (prints PREFLIGHT-REFUSED, starts nothing) unless `codex` resolves to the stub there.
+//
+// Pane roots are given to tmux as separate argv words, so tmux execs them directly: no outer shell sits
+// between tmux and the pane's root process on images whose shell doesn't exec a lone `-c` command.
 import { describe, it, expect, afterAll } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -45,12 +48,13 @@ function available(): boolean {
 
 const STUB_C = `
 #include <stdio.h>
+#include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
 static void bye(int s) { (void)s; _exit(0); }
 int main(int argc, char **argv) {
   signal(SIGTERM, bye);
-  for (int i = 1; i <= 40; i++) printf("history line %d from pid %d\\n", i, (int)getpid());
+  if (!getenv("STUB_QUIET")) for (int i = 1; i <= 40; i++) printf("history line %d from pid %d\\n", i, (int)getpid());
   printf("OpenAI Codex (v0.0.0-stub)\\nstub conversation %s pid %d\\n\\n\\xe2\\x80\\xba \\n", argc > 1 ? argv[argc - 1] : "?", (int)getpid());
   fflush(stdout);
   for (;;) pause();
@@ -86,7 +90,10 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
   const work = nodePath.join(root, "work");
   const launchPath = `${bin}:/usr/bin:/bin`;
 
-  async function setup(shape: "shell_backed" | "direct_native") {
+  /** Each word single-quoted for the harness's sh, so tmux receives them as separate argv words. */
+  const argv = (...words: string[]) => words.map(q).join(" ");
+
+  async function setup(shape: "shell_backed" | "direct_native", opts: { running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] }; quiet?: boolean; prelude?: string } = {}) {
     // One seat at a time: end the previous test's session and wait for its stub to exit.
     for (const name of sessions) await tmux(`kill-session -t ${q(name)}`).catch(() => {});
     for (let i = 0; i < 50 && stubPids().length > 0; i++) await sleep(100);
@@ -125,20 +132,20 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
       cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: work, launchPosture: "floor",
       kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
       nonInterruptive: setupApp.rigRepo.getRigNonInterruptive(rig.id),
-    }, { name: seat, resumeToken: TOKEN });
+    }, { name: seat, resumeToken: TOKEN, ...(opts.running ? { running: opts.running } : {}) });
     if (!built.ok) throw new Error(built.error);
     // Session env for respawns; the pane processes themselves start from env -i, non-login.
     const env = `-e ${q(`PATH=${launchPath}`)} -e ${q(`CODEX_HOME=${home}`)} -e ${q(`HOME=${root}`)}`;
-    const cleanStart = `env -i PATH=${q(launchPath)} HOME=${q(root)} CODEX_HOME=${q(home)} TERM=screen /bin/sh`;
+    const cleanStart = ["env", "-i", `PATH=${launchPath}`, `HOME=${root}`, `CODEX_HOME=${home}`, "TERM=screen", ...(opts.quiet ? ["STUB_QUIET=1"] : []), "/bin/sh"];
     const preflight = `[ "$(command -v codex)" = ${q(stub)} ] && [ "$CODEX_HOME" = ${q(home)} ]`;
     if (shape === "shell_backed") {
-      await tmux(`-f /dev/null new-session -d -s ${q(seat)} -x 120 -y 30 -c ${q(work)} ${env} ${q(cleanStart)}`);
+      await tmux(`-f /dev/null new-session -d -s ${q(seat)} -x 120 -y 30 -c ${q(work)} ${env} ${argv(...cleanStart)}`);
       await sleep(200);
-      await tmux(`send-keys -t ${q(seat)} -l -- ${q(`${preflight} && ${built.command} || echo PREFLIGHT-REFUSED`)}`);
+      await tmux(`send-keys -t ${q(seat)} -l -- ${q(`${opts.prelude ?? ""}${preflight} && ${built.command} || echo PREFLIGHT-REFUSED`)}`);
       await tmux(`send-keys -t ${q(seat)} Enter`);
     } else {
       const script = `${preflight} || { echo PREFLIGHT-REFUSED; exec sleep 30; }; exec ${built.command}`;
-      await tmux(`-f /dev/null new-session -d -s ${q(seat)} -x 120 -y 30 -c ${q(work)} ${env} ${q(`${cleanStart} -c ${q(script)}`)}`);
+      await tmux(`-f /dev/null new-session -d -s ${q(seat)} -x 120 -y 30 -c ${q(work)} ${env} ${argv(...cleanStart, "-c", script)}`);
     }
     await sleep(500);
     const refused = (await tmux(`capture-pane -p -t ${q(seat)} -S -200`)).split("\n").some((line) => line.trim() === "PREFLIGHT-REFUSED");
@@ -155,8 +162,9 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     return { seat, pane, post };
   }
 
-  it("shell-backed: the same conversation resumes in the same pane under the same shell", async () => {
-    const { seat, pane, post } = await setup("shell_backed");
+  it("shell-backed: the same conversation resumes in the same pane under the same shell, with the running choices", async () => {
+    const dirs = [nodePath.join(root, "shared-one"), nodePath.join(root, "shared-two")];
+    const { seat, pane, post } = await setup("shell_backed", { running: { networkOverride: true, daemonOptOut: true, addDirs: dirs } });
     const shellBefore = await panePid(pane);
     const [oldStub] = stubPids();
 
@@ -177,6 +185,11 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     expect(screen, "the original's output stays in the pane").toContain(`from pid ${oldStub}`);
     expect(screen).toContain(`stub conversation ${TOKEN} pid ${result.body.newProcess.pid}`);
     expect((await tmux(`list-panes -t ${q(seat)} -F '#{pane_id}'`)).trim()).toBe(pane);
+    // #1196 r2 F1: the replacement runs with the old process's --no-daemon, network override and add-dirs.
+    const newArgv = fs.readFileSync(`/proc/${result.body.newProcess.pid}/cmdline`, "utf8").split("\0");
+    expect(newArgv).toContain("--no-daemon");
+    expect(newArgv).toContain("sandbox_workspace_write.network_access=true");
+    expect(newArgv.filter((_, index) => newArgv[index - 1] === "--add-dir")).toEqual(dirs);
 
     const verified = await post("restart-verify", {});
     expect(verified.body).toMatchObject({ ok: true, outcome: "restarted_account_unverified", accountEvidence: { state: "not_requested" } });
@@ -200,5 +213,23 @@ describe.runIf(available())("in-place restart, native (private tmux socket, stub
     expect(screen).toContain(`stub conversation ${TOKEN} pid ${after}`);
     expect((await tmux(`show-options -p -v -t ${q(pane)} remain-on-exit`)).trim(), "no pane-local setting left behind").toBe("");
     expect((await tmux(`list-panes -t ${q(seat)} -F '#{pane_id}'`)).trim()).toBe(pane);
+  }, 60_000);
+
+  it("#1196 r2 F3: an Account line already below the cursor, untouched by the restart, is not account evidence", async () => {
+    // review-r2's case: the line sits on row 25, the cursor is moved to the top, and the restart's output
+    // stays above it, so the frame keeps the line in place across the restart.
+    const prelude = `printf '\\033[2J\\033[25;1H%s: %s\\033[1;1H' Account me@example.com; `;
+    const { pane, post } = await setup("shell_backed", { quiet: true, prelude });
+    const before = (await tmux(`capture-pane -p -t ${q(pane)}`)).split("\n");
+    expect(before[24], "the old Account line is on row 25 before the restart").toBe("Account: me@example.com");
+    const result = await post("restart", { reason: "native harness F3" });
+    expect(result.body, JSON.stringify(result.body)).toMatchObject({ outcome: "restarted_account_unverified" });
+    for (const pid of stubPids()) pids.add(pid);
+    const after = (await tmux(`capture-pane -p -t ${q(pane)}`)).split("\n");
+    expect(after[24], "the same line is still on row 25 after the restart").toBe("Account: me@example.com");
+    const cursor = Number((await tmux(`display-message -p -t ${q(pane)} '#{cursor_y}'`)).trim());
+    expect(cursor, "the cursor is above the old line").toBeLessThan(24);
+    const verified = await post("restart-verify", { expectAccount: "me@example.com" });
+    expect(verified.body).toMatchObject({ ok: true, outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
   }, 60_000);
 });

@@ -39,8 +39,12 @@ interface WorldOptions {
   screen?: string;
   /** Already in the pane before the restart. */
   screenBefore?: string;
-  throwAt?: "signalPid" | "launchHarness" | "readProcessAfter" | "signalPaneProcess" | "respawnPane" | "verifyResumeInPane" | "restorePaneOption";
+  throwAt?: "signalPid" | "sendResumeCommand" | "readProcessAfter" | "signalPaneProcess" | "respawnPane" | "verifyResumeInPane" | "restorePaneOption";
   daemonStartedAt?: Date;
+  /** The pane hold fails: the remain-on-exit write errors, or it doesn't read back as on. */
+  holdFails?: "write" | "readback";
+  /** The pane disappears when its process is signalled, and tmux doesn't report it dead (review-r2's case). */
+  paneVanishes?: boolean;
 }
 
 const dbs: Database.Database[] = [];
@@ -76,6 +80,7 @@ function world(options: WorldOptions = {}) {
     : [codexRow(100, 1, runningArgs, LSTART, 100)];
   let paneCommand = "codex";
   let dead = false;
+  let paneGone = false;
   let remainOnExit: string | null = options.remainOnExit === "unreadable" ? null : options.remainOnExit ?? null;
   const calls: string[] = [];
   const paneLines: string[] = (options.screenBefore ?? "").split("\n").filter(Boolean);
@@ -97,7 +102,7 @@ function world(options: WorldOptions = {}) {
 
   const tmux = {
     probeSession: async () => ({ state: "present" as const }),
-    listPanes: async () => [{ id: "%1", index: 0, cwd: "/work", width: 80, height: 24, active: true }],
+    listPanes: async () => (paneGone ? [] : [{ id: "%1", index: 0, cwd: "/work", width: 80, height: 24, active: true }]),
     getPanePid: async () => (shape === "shell_backed" ? 100 : rows[0]?.pid ?? null),
     getPaneCommand: async () => paneCommand,
     getSessionEnv: async (_s: string, key: string) => (key === "CODEX_HOME" ? HOME : undefined),
@@ -110,33 +115,44 @@ function world(options: WorldOptions = {}) {
     signalPaneProcess: async (_pane: string, signal: string): Promise<TmuxResult> => {
       calls.push(`signalPaneProcess ${signal}`);
       maybeThrow("signalPaneProcess");
-      if (!options.codexIgnoresSignals) { rows = []; dead = true; }
+      if (!options.codexIgnoresSignals) {
+        // Other processes keep running: an empty table would mean the process list couldn't be read.
+        rows = options.paneVanishes ? [{ ...shellRow(900, 900), command: "sshd" }] : [];
+        if (options.paneVanishes) paneGone = true; else dead = true;
+      }
       return { ok: true };
     },
     isPaneDead: async () => dead,
-    setRemainOnExit: async (_pane: string, on: boolean): Promise<TmuxResult> => { calls.push(`remain-on-exit ${on ? "on" : "off"}`); remainOnExit = on ? "on" : "off"; return { ok: true }; },
+    setRemainOnExit: async (_pane: string, on: boolean): Promise<TmuxResult> => {
+      calls.push(`remain-on-exit ${on ? "on" : "off"}`);
+      if (options.holdFails === "write") return { ok: false, code: "unknown", message: "injected write failure" } as TmuxResult;
+      if (options.holdFails !== "readback") remainOnExit = on ? "on" : "off";
+      return { ok: true };
+    },
     getPaneLocalOption: async () => (options.remainOnExit === "unreadable" ? undefined : remainOnExit),
     restorePaneOption: async (_pane: string, _option: string, value: string | null): Promise<TmuxResult> => {
       calls.push(`restore remain-on-exit ${value}`); maybeThrow("restorePaneOption"); remainOnExit = value; return { ok: true };
     },
     respawnPane: async (_pane: string, command?: string): Promise<TmuxResult> => { calls.push(`respawn ${command}`); maybeThrow("respawnPane"); relaunch(); return { ok: true }; },
-    getPaneLinePosition: async () => paneLines.length,
-    capturePaneFrom: async (_pane: string, position: number) => paneLines.slice(position).join("\n"),
+    capturePaneHistory: async () => paneLines.join("\n"),
   } as unknown as TmuxAdapter;
 
-  const launches: Array<{ binding: NodeBinding; resumeToken?: string }> = [];
+  const launches: Array<{ command: string; resumeToken: string }> = [];
   const builds: Array<{ running?: unknown }> = [];
   const codex = {
     runtime: "codex",
-    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: unknown }) {
+    async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] } }) {
       builds.push({ running: opts.running });
-      const core = `codex${binding.model ? ` -m '${binding.model}'` : ""} -s workspace-write resume '${opts.resumeToken}'`;
-      return { ok: true as const, core, command: core };
+      const running = opts.running;
+      const core = `codex${running?.daemonOptOut ? " --no-daemon" : ""}${binding.model ? ` -m '${binding.model}'` : ""} -s workspace-write`
+        + `${running?.networkOverride ? " -c 'sandbox_workspace_write.network_access=true'" : ""} resume`
+        + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
+      return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
     },
-    async launchHarness(binding: NodeBinding, opts: { resumeToken?: string }): Promise<HarnessLaunchResult> {
-      launches.push({ binding, ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {}) });
-      maybeThrow("launchHarness");
-      const result = options.launch ?? { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id" };
+    async sendResumeCommand(_session: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+      launches.push({ command, resumeToken });
+      maybeThrow("sendResumeCommand");
+      const result = options.launch ?? { ok: true, resumeToken, resumeType: "codex_id" };
       if (result.ok && !options.identityFails) relaunch();
       return result;
     },
@@ -271,7 +287,7 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
       oldProcess: { pid: 200 }, newProcess: { pid: 300, startedAt: LATER, sameExecutable: true } });
     expect(w.calls).toEqual(["signalPid 200 TERM"]);
     expect(w.launches).toHaveLength(1);
-    expect(w.launches[0]).toMatchObject({ resumeToken: TOKEN, binding: { cwd: "/work", model: "gpt-5.5", launchPosture: "floor" } });
+    expect(w.launches[0]).toEqual({ resumeToken: TOKEN, command: `env CODEX_HOME='${HOME}' codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'` });
     expect(w.events().map((event) => [event.type, event.outcome])).toEqual([
       ["seat.restart_in_place_started", undefined], ["seat.restart_in_place_finished", "restarted_account_unverified"]]);
   });
@@ -310,7 +326,7 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: "direct_native" });
     expect(result).not.toHaveProperty("paneHeld");
-    expect(w.calls).toEqual(["remain-on-exit on", "signalPaneProcess TERM", `respawn codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`,
+    expect(w.calls).toEqual(["remain-on-exit on", "remain-on-exit on", "signalPaneProcess TERM", `respawn env CODEX_HOME='${HOME}' codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`,
       "verifyResumeInPane", "restore remain-on-exit null"]);
   });
 
@@ -383,7 +399,7 @@ describe("effective settings parsing", () => {
 describe("#1196 round 1: every exit after started records a result; stale starts don't lock the seat", () => {
   it.each([
     ["shell_backed", "signalPid", "stop", false],
-    ["shell_backed", "launchHarness", "resume", false],
+    ["shell_backed", "sendResumeCommand", "resume", false],
     ["shell_backed", "readProcessAfter", "identity check", false],
     ["direct_native", "signalPaneProcess", "stop", true],
     ["direct_native", "respawnPane", "respawn", true],
@@ -480,5 +496,101 @@ describe("--expect-account matches the account as a whole value (CodeRabbit on #
     expect(accountLineNames("Account: bob@corp.com.au", "bob@corp.com")).toBe(false);
     expect(accountLineNames("Account: bob@corpXcom", "bob@corp.com")).toBe(false);
     expect(accountLineNames("Account: bob@corp.com", "  ")).toBe(false);
+  });
+});
+
+describe("#1196 round 2: the shell branch keeps the running settings (F1)", () => {
+  it("types the exact command built from the old argv: --no-daemon, the network override and every --add-dir survive", async () => {
+    const w = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write -c sandbox_workspace_write.network_access=true resume --add-dir /shared/one --add-dir /shared/two ${TOKEN}` });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: "shell_backed" });
+    // Built once, before anything stopped; nothing is prepared again after Codex exits.
+    expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/one", "/shared/two"] } }]);
+    expect(w.launches).toHaveLength(1);
+    const typed = shellWords(w.launches[0]!.command);
+    expect(typed).toContain("--no-daemon");
+    expect(typed).toContain("sandbox_workspace_write.network_access=true");
+    expect(typed.filter((_, index) => typed[index - 1] === "--add-dir")).toEqual(["/shared/one", "/shared/two"]);
+  });
+
+  it("the production adapter types the given command as is and verifies the resume", async () => {
+    const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+    const sent: string[] = [];
+    const adapter = new CodexRuntimeAdapter({
+      tmux: { sendShellCommand: async (_s: string, text: string) => { sent.push(text); return { ok: true }; } } as never,
+      fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {} },
+    });
+    const verified: string[] = [];
+    (adapter as unknown as { verifyResumeInPane: (s: string, t: string) => Promise<HarnessLaunchResult> }).verifyResumeInPane =
+      async (_s, token) => { verified.push(token); return { ok: true, resumeToken: token, resumeType: "codex_id" }; };
+    const command = `env CODEX_HOME='${HOME}' codex --no-daemon resume --add-dir '/a b' '${TOKEN}'`;
+    expect(await adapter.sendResumeCommand(SEAT, command, TOKEN)).toMatchObject({ ok: true });
+    expect(sent).toEqual([command]);
+    expect(verified).toEqual([TOKEN]);
+  });
+});
+
+describe("#1196 round 2: the pane hold comes first and the report says what is observed (F2)", () => {
+  it.each(["write", "readback"] as const)("a hold that fails (%s) signals nothing and ends not_started, with no pane held", async (holdFails) => {
+    const w = world({ shape: "direct_native", remainOnExit: "off", holdFails });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "not_started", message: expect.stringContaining("could not be held") });
+    expect(result).not.toHaveProperty("paneHeld");
+    expect(w.calls.some((call) => call.startsWith("signal"))).toBe(false);
+    expect(w.calls.some((call) => call.startsWith("respawn"))).toBe(false);
+    expect(w.events().at(-1)).toMatchObject({ type: "seat.restart_in_place_finished", outcome: "not_started", paneHeld: false });
+  });
+
+  it("a pane that disappears is reported as gone, with the original exited, never as still running or held", async () => {
+    const w = world({ shape: "direct_native", remainOnExit: null, paneVanishes: true });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ ok: true, outcome: "incomplete", observedAfterStop: { pane: "gone", process: "exited" },
+      message: expect.stringContaining("pane is gone"), remainingStep: expect.stringContaining("new pane") });
+    expect(result).not.toHaveProperty("paneHeld");
+    expect(JSON.stringify(result)).not.toContain("still running");
+    expect(w.events().at(-1)).toMatchObject({ outcome: "incomplete", paneHeld: false });
+  });
+
+  it("a Codex that survives TERM and KILL in a direct pane is observed running, and the pane stays held", async () => {
+    const w = world({ shape: "direct_native", remainOnExit: null, codexIgnoresSignals: true });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(result).toMatchObject({ outcome: "not_started", observedAfterStop: { pane: "present", process: "running" }, paneHeld: { value: "on" } });
+  });
+});
+
+describe("#1196 round 2: account evidence only from lines produced after the restart (F3)", () => {
+  const rollout = JSON.stringify({ timestamp: "2099-01-01T00:00:00Z", type: "response_item", payload: { type: "function_call_output" } });
+
+  it("review-r2's case: an old Account line that stays in the frame across the restart never gives moved", async () => {
+    // Rows above and below the cursor, unchanged across the restart: nothing about the cursor matters now.
+    const w = world({ screenBefore: "header\n\n\n\n\n\n\n\n\n  Account:  me@example.com (Pro)\nfooter", rollout });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "restarted_account_unverified" });
+    expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" }))
+      .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+  });
+
+  it("an old matching line plus a new plan-only line is not_matched, not moved", async () => {
+    const w = world({ screenBefore: "Account: me@example.com", rollout });
+    await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    w.print("Account: Pro plan");
+    expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" }))
+      .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_matched" } });
+  });
+
+  it("no record of the pane's text at the restart means not_observed", async () => {
+    const w = world({ rollout });
+    await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    w.db.prepare("UPDATE events SET payload = json_set(payload, '$.accountLinesAtRestart', NULL) WHERE type = 'seat.restart_in_place_finished'").run();
+    w.print("Account: me@example.com");
+    expect(await w.service.verifyRestartInPlace({ seatRef: SEAT, expectAccount: "me@example.com" }))
+      .toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+  });
+
+  it("the event log keeps digests, not account names", async () => {
+    const w = world({ screenBefore: "Account: me@example.com" });
+    await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    const finished = w.events().at(-1)!;
+    expect(Object.values(finished.accountLinesAtRestart)).toEqual([1]);
+    expect(JSON.stringify(finished)).not.toContain("example.com");
   });
 });
