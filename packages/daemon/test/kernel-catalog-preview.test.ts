@@ -26,9 +26,10 @@ describe("kernel catalog preview versus selected materialization (#21)", () => {
     ["ok", "unavailable", "rig-claude-only.yaml", ["claude-code", "claude-code", "claude-code", "terminal"]],
     ["ok", "ok", "rig.yaml", ["claude-code", "codex", "codex", "terminal"]],
     ["unavailable", "ok", "rig-codex-only.yaml", ["codex", "codex", "codex", "terminal"]],
+    ["unavailable", "unavailable", "rig-agy-only.yaml", ["agy", "agy", "agy", "terminal"]],
   ] as const)("keeps the %s/%s selection and its actual member runtimes", (claudeCode, codex, filename, runtimes) => {
     // Pure selection plus the exact selected source, not bootstrap/auth probing.
-    expect(selectVariant({ claudeCode, codex })).toBe(filename);
+    expect(selectVariant({ claudeCode, codex, agy: filename.includes("agy") ? "ok" : "unavailable" })).toBe(filename);
     const yaml = readFileSync(resolve(specs, "rigs/launch/kernel", filename), "utf8");
     const selected = reviews.reviewRigSpec(yaml, "file_preview");
     expect(selected.graph.nodes.map(n => n.runtime).sort()).toEqual(runtimes);

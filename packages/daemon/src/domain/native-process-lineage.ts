@@ -18,7 +18,7 @@ export interface NativeProcessRow {
   startedAt?: string;
 }
 
-export type NativeRuntime = "claude-code" | "codex";
+export type NativeRuntime = "claude-code" | "codex" | "agy";
 
 function tokens(command: string): string[] {
   // ps flattens argv: inline settings JSON retains its string delimiters.
@@ -152,6 +152,16 @@ function codexResumeToken(args: string[]): string | null | undefined {
     return arg;
   }
   return null;
+}
+
+// agy names its conversation with --conversation <id>; undefined is a launch without one.
+function agyConversationToken(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--conversation") return args[index + 1];
+    if (arg.startsWith("--conversation=")) return arg.slice("--conversation=".length);
+  }
+  return undefined;
 }
 
 /** A `ps` command line split the way identity proof splits it. */
@@ -436,7 +446,7 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
   const root = byPid.get(panePid);
   if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return [];
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
-  const executable = runtime === "claude-code" ? "claude" : "codex";
+  const executable = runtime === "claude-code" ? "claude" : runtime;
   for (const row of rows) {
     const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
     if ((runtime === "claude-code" ? !claudeProcess(row, selectedExecutable)
@@ -467,6 +477,10 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
     if (!expectedToken) return null;
     const launched = claudeSessionToken(tokens(process.command).slice(1));
     if (launched !== expectedToken && !(launched === rotation?.token && rotationProcess(process, rotation))) return null;
+  } else if (runtime === "agy") {
+    // An agy without --conversation verifies as the only candidate; one that names a conversation must match the expected token.
+    const conversation = agyConversationToken(tokens(process.command).slice(1));
+    if (conversation !== undefined && expectedToken && conversation !== expectedToken) return null;
   } else {
     // Every link that names a conversation must name the expected one, and
     // links naming different conversations stay refused. Exact resume proof
@@ -510,6 +524,17 @@ export async function verifyCodexPaneProcess(input: Parameters<typeof observeCod
   const first = await observeCodexPaneProcess(input);
   if (!first) return null;
   const second = await observeCodexPaneProcess(input);
+  return second?.fingerprint === first.fingerprint ? second : null;
+}
+
+export async function observeAgyPaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  return observeNativePaneProcess(input, "agy");
+}
+
+export async function verifyAgyPaneProcess(input: Parameters<typeof observeAgyPaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  const first = await observeAgyPaneProcess(input);
+  if (!first) return null;
+  const second = await observeAgyPaneProcess(input);
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 

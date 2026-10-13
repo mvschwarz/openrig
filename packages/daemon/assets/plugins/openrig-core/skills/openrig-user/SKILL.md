@@ -290,7 +290,7 @@ OpenRig sets only a **minimal usability floor** on your harness permissions and 
   - **Open** — allow-by-default; everything except explicitly-destructive, which ask.
 
   The built-in definitions ship as read-only policy spec files (Locked / Standard / Open); applying your pick is the job of the **`applying-a-permission-policy`** skill — it translates the chosen spec into your live harness config (Claude `settings.json` / Codex `config.toml`), interactively, showing the diff before it writes.
-- **YOLO MODE** — done with permissions, just want it to work: OpenRig boots every seat with the harness full-bypass launch flag. No config policy is applied (the bypass overrides it). This is a deterministic OpenRig setting, not a skill.
+- **YOLO MODE** — done with permissions, just want it to work: OpenRig boots every seat with the harness full-bypass launch flag. The flag removes the approval step; the rendered deny rules still apply. This is a deterministic OpenRig setting, not a skill.
 - **No choice = the floor** — the minimal usability baseline (Claude `acceptEdits` / Codex workspace-only / Pi `--no-approve`), one consistent minimum, nothing more.
 
 The floor and YOLO are **launch flags** OpenRig sets deterministically; the Locked / Standard / Open policies are **config-file** policies the skill applies (agent-driven, because harness config formats drift). A rig **carries** its chosen policy on its spec and boots with it — see Lifecycle → Bring a rig up. To (re)apply or change a policy, open **`applying-a-permission-policy`**.

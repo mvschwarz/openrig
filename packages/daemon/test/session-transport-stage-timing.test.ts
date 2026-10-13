@@ -111,7 +111,7 @@ describe("SessionTransport stage timing", () => {
     } as never);
   }
 
-  it("records the four real verify-path stages in source order with durations", async () => {
+  it("records the five real verify-path stages in source order with durations", async () => {
     const timer = new RecordingStageTimer();
     let captures = 0;
     const result = await transport(mockTmux({
@@ -123,6 +123,7 @@ describe("SessionTransport stage timing", () => {
       "session_transport.pre_capture",
       "session_transport.send_text",
       "session_transport.submit",
+      "session_transport.submit_only_precheck",
       "session_transport.post_capture",
     ]);
     expect(timer.records.every((r) => Number.isFinite(r.durationMs) && r.durationMs >= 0)).toBe(true);
@@ -178,6 +179,7 @@ describe("SessionTransport stage timing", () => {
         "session_transport.pre_capture",
         "session_transport.send_text",
         "session_transport.submit",
+        "session_transport.submit_only_precheck",
         "session_transport.post_capture",
       ]);
     } finally {

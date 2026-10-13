@@ -1,6 +1,6 @@
 /** Native permission choices are future-launch settings, not work posture. */
 export interface NativePermissionSelection {
-  runtime: "codex" | "claude-code";
+  runtime: "codex" | "claude-code" | "agy";
   mode: string;
 }
 
@@ -14,11 +14,11 @@ export function validateNativePermissionSelection(
   mode: string,
   supportedClaudeModes: readonly string[] | null = null,
 ): NativePermissionSelection {
-  if (runtime !== "codex" && runtime !== "claude-code") {
+  if (runtime !== "codex" && runtime !== "claude-code" && runtime !== "agy") {
     throw new Error(`Per-seat permission mode is unsupported for runtime '${runtime}'. Pi resource trust is separate.`);
   }
-  if (mode === "floor" || mode === "full_bypass") return { runtime, mode };
-  if (runtime === "codex") throw new Error("Codex permission mode must be floor or full_bypass (or inherit to clear the selection).");
+  if (mode === "floor" || mode === "full_bypass") return { runtime: runtime as NativePermissionSelection["runtime"], mode };
+  if (runtime === "codex" || runtime === "agy") throw new Error(`${runtime === "codex" ? "Codex" : "Agy"} permission mode must be floor or full_bypass (or inherit to clear the selection).`);
   // Only an exact, shell-safe option advertised by the installed harness is accepted.
   if (!supportedClaudeModes) throw new Error("Claude permission options are unavailable; selection was not changed.");
   if (!/^[A-Za-z][A-Za-z0-9]*$/.test(mode) || !supportedClaudeModes.includes(mode)) {

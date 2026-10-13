@@ -103,6 +103,7 @@ beforeEach(() => {
   writeFileSync(join(kernelDir, "rig.yaml"), "name: kernel\n");
   writeFileSync(join(kernelDir, "rig-claude-only.yaml"), "name: kernel\n");
   writeFileSync(join(kernelDir, "rig-codex-only.yaml"), "name: kernel\n");
+  writeFileSync(join(kernelDir, "rig-agy-only.yaml"), "name: kernel\n");
 });
 
 afterEach(() => {
@@ -119,6 +120,9 @@ describe("selectVariant — auth-state → variant mapping", () => {
   });
   it("picks rig-codex-only.yaml when only Codex available", () => {
     expect(selectVariant({ claudeCode: "unavailable", codex: "ok" })).toBe("rig-codex-only.yaml");
+  });
+  it("picks rig-agy-only.yaml when only Antigravity available", () => {
+    expect(selectVariant({ claudeCode: "unavailable", codex: "unavailable", agy: "ok" })).toBe("rig-agy-only.yaml");
   });
 });
 
@@ -142,6 +146,7 @@ describe("authBlockMessage — 3-part error contract", () => {
     expect(msg).toMatch(/^Fix:/m);
     expect(msg).toContain("claude auth login");
     expect(msg).toContain("codex login");
+    expect(msg).toContain("agy");
   });
 });
 
@@ -248,6 +253,14 @@ describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "ok" }),
     }, tmpSpecsDir));
     expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
+    tracker.stop();
+  });
+
+  it("uses the agy-only variant when only Antigravity is available", async () => {
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
+      probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "unavailable", agy: "ok" }),
+    }, tmpSpecsDir));
+    expect(tracker.getStatus().variant).toBe("rig-agy-only.yaml");
     tracker.stop();
   });
 });

@@ -9,7 +9,8 @@ test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () =>
     encoding: "utf-8",
   });
   const entries = JSON.parse(output);
-  const files = entries[0]?.files?.map((f) => f.path) ?? [];
+  const record = Array.isArray(entries) ? entries[0] : (entries && typeof entries === "object" ? Object.values(entries)[0] : undefined);
+  const files = record?.files?.map((f) => f.path) ?? [];
 
   assert.ok(
     files.some((f) => f.includes("scripts/check-abi.mjs")),

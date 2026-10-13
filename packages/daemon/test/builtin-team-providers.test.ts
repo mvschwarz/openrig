@@ -21,6 +21,7 @@ const choices = [
   ["code-review", [["orch.lead", "claude-code"], ["review.r1", "claude-code"], ["review.r2", "codex"]]],
   ["research", [["orch.lead", "claude-code"], ["research.analyst", "claude-code"], ["research.synthesizer", "codex"]]],
   ["pm", [["pm.lead", "claude-code"], ["pm.researcher", "codex"], ["dev.build", "claude-code"]]],
+  ["first-project-agy", [["dev.owner", "agy"], ["dev.check", "agy"]]],
 ] as const;
 
 describe("built-in team names and resource resolution", () => {
@@ -85,6 +86,7 @@ describe("built-in team names and resource resolution", () => {
         const runtimeResources = projection.plan.entries.filter((entry) => entry.category === "runtime_resource");
         expect(runtimeResources.map((entry) => entry.resourceType).sort()).toEqual(
           member.runtime === "codex" ? ["codex_config_fragment"]
+            : member.runtime === "agy" ? []
             : ["claude_activity_hooks", "claude_mcp_fragment", "claude_settings_fragment"],
         );
         for (const entry of runtimeResources) expect(existsSync(entry.absolutePath)).toBe(true);

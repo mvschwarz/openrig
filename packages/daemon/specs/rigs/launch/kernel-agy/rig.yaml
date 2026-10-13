@@ -1,0 +1,65 @@
+version: "0.2"
+name: kernel-agy
+summary: >
+  Full Antigravity kernel team: an advisor lead, operator agent, human mission-control terminal,
+  and queue worker, all powered by Antigravity (agy).
+
+culture_file: culture/CULTURE.md
+
+pods:
+  - id: advisor
+    label: Advisor
+    members:
+      - id: lead
+        agent_ref: "local:../kernel/agents/advisor/lead"
+        runtime: agy
+        profile: default
+        cwd: "."
+
+  - id: operator
+    label: Operator
+    members:
+      - id: human
+        agent_ref: "builtin:terminal"
+        runtime: terminal
+        profile: none
+        cwd: "."
+        startup:
+          actions:
+            - type: send_text
+              value: rig tui
+              phase: after_ready
+              applies_on: [fresh_start]
+              idempotent: true
+      - id: agent
+        agent_ref: "local:../kernel/agents/operator/agent"
+        runtime: agy
+        profile: default
+        cwd: "."
+    edges:
+      - kind: collaborates_with
+        from: agent
+        to: human
+      - kind: escalates_to
+        from: agent
+        to: human
+
+  - id: queue
+    label: Queue
+    members:
+      - id: worker
+        agent_ref: "local:../kernel/agents/queue/worker"
+        runtime: agy
+        profile: default
+        cwd: "."
+
+edges:
+  - kind: delegates_to
+    from: advisor.lead
+    to: operator.agent
+  - kind: delegates_to
+    from: advisor.lead
+    to: queue.worker
+  - kind: escalates_to
+    from: queue.worker
+    to: advisor.lead
