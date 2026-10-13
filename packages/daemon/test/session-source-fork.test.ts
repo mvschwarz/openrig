@@ -524,7 +524,7 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     }
   });
 
-  it("a missed post-fork capture is pending metadata: ok with no token, never the parent's id (Root, 10-13)", async () => {
+  it("a missed post-fork capture is pending metadata: ok with no token, never the parent's id", async () => {
     const { adapter } = makeCodexAdapter(); // no thread id captured
     const result = await adapter.launchHarness(makeBinding(), {
       name: "dev-impl@test-rig",

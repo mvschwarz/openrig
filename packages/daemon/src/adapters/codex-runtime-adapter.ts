@@ -407,7 +407,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (updatePrompt.failure) return updatePrompt.failure;
       const threadId = await this.captureFreshThreadId(binding, updatePrompt);
       if (updatePrompt.failure) return updatePrompt.failure;
-      // A missed capture is pending metadata, not a failed launch (Root, 10-13): the fork returns
+      // A missed capture is pending metadata, not a failed launch: the fork returns
       // without a token, as a fresh launch does, and the caller's readiness checks still decide
       // success. The parent's id is never returned in its place.
       if (!threadId) return { ok: true, appliedLaunch };

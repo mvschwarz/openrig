@@ -196,10 +196,9 @@ describe("seat-handover source execution e2e (isolated tmux)", () => {
     60_000,
   );
 
-  // Root's ruling (10-13, qitem-20261013071846-35cbc806): a fork whose own conversation id isn't captured at
-  // launch is pending metadata, not a failed launch. The ready successor commits with no resume token and the
-  // id PENDING; the existing late capture may fill it with the fork's own id, never its parent's; and launch,
-  // readiness and attention failures stay failures.
+  // A fork whose own conversation id isn't captured at launch is pending metadata, not a failed launch. The
+  // ready successor commits with no resume token and the id PENDING; the existing late capture may fill it with
+  // the fork's own id, never its parent's; and launch, readiness and attention failures stay failures.
   async function forkSeat(seat: string, launch: { ok: boolean; error?: string }, ready: { ready: boolean; code?: string; reason?: string }) {
     const pane = await seedPane(seat);
     const db = createDb(); db.pragma("foreign_keys = ON"); migrate(db, ALL_MIGRATIONS);
