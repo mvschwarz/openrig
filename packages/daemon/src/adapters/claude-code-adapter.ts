@@ -483,6 +483,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
+    // The wait can end on the read that first shows Claude's missing-conversation report.
+    if (finalProbe.code === "no_conversation_found") {
+      return {
+        ok: false,
+        error: "Claude resume failed: no conversation found for the requested session",
+        recovery: "retry_fresh",
+        missingConversation: true,
+      };
+    }
+
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
       return {
         ok: false,
