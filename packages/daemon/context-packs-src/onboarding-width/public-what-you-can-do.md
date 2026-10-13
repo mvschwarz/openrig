@@ -24,7 +24,8 @@ model IDs).
 one command away. Your memory of the fleet is a claim about the past.
 
 - **`rig whoami`** — who you are, who your peers are, and the exact string you use to reach each of
-  them. Ground truth over anything your startup overlay says.
+  them. Ground truth over anything your startup overlay says. On a large rig the JSON peer list can be
+  bounded; `peersNote` says how many it left out, and `--all-peers` lists them all.
 - **`rig ps`** — what rigs exist. **`rig ps --nodes -A`** — the state of every seat everywhere,
   *including the broken ones*. **The bare form is the question you usually want:** `--active`
   filters to running and **hides detached, exited and attention states** — which are exactly the

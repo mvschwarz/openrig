@@ -2644,6 +2644,7 @@ export class PodRigInstantiator {
       "This is your startup identity hint. For durable identity recovery after compaction, run:",
       "  rig whoami --json",
       "That command returns your full topology context: rig, pod, peers, edges, and transcript path.",
+      "If its peersNote says some peers are not shown, rig whoami --json --all-peers lists them all.",
     ].filter((line): line is string => Boolean(line));
 
     return {

@@ -117,7 +117,9 @@ read only the pieces a task needs.
 
 The session-name format `{pod}-{member}@{rig}` is your address. When you
 run `rig whoami --json`, you get back your full topology context: rig name,
-pod, member, peers, edges, transcript path.
+pod, member, peers, edges, transcript path. On a large rig the peer list can be
+a bounded, edge-first selection: `peersNote` then says how many are not shown,
+and `rig whoami --json --all-peers` lists them all.
 
 ---
 
@@ -232,7 +234,7 @@ OpenRig has a few load-bearing cultural principles. Internalize these:
 If you're booting into a new seat in an OpenRig rig:
 
 1. **`rig whoami --json`** — recover identity. Know your rig, pod, member,
-   peers.
+   peers (`--all-peers` when `peersNote` says some are not shown).
 2. **Read your role guidance** — typically delivered via startup files.
    `guidance/role.md` for your specific seat.
 3. **Read the rig's `CULTURE.md`** if it has one — the team operating

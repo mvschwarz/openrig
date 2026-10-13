@@ -66,6 +66,7 @@ const LABELS: Record<string, string> = {
   "ui.preview.default_lines": "Preview lines", "context.system_world": "System world",
   "onboarding.default_pack.enabled": "Default onboarding pack",
   "output.compact": "Compact command output",
+  "output.whoami_peers": "Peers listed by whoami (compact)",
   "provider.usage_windows": "Codex and Claude usage windows",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",

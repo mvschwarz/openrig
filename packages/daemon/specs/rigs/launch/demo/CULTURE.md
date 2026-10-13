@@ -40,7 +40,7 @@ Do not stall silently. Do not pretend you have permissions you don't.
 
 ## After startup
 
-Every agent should run `rig whoami --json` immediately after launch or compaction to recover identity, peers, and edges.
+Every agent should run `rig whoami --json` immediately after launch or compaction to recover identity, peers, and edges. If `peersNote` says some peers are not shown, `rig whoami --json --all-peers` lists them all.
 
 ## Culture
 

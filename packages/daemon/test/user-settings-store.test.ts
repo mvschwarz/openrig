@@ -155,6 +155,8 @@ describe("SettingsStore (User Settings v0)", () => {
       "terminal.status_bar",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
+      // Slice 15 P5 — the whoami peer bound under output.compact.
+      "output.whoami_peers",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
@@ -199,6 +201,16 @@ describe("SettingsStore (User Settings v0)", () => {
   it("defaults the advisor session to the kernel's advisor seat", () => {
     const store = new SettingsStore(configPath);
     expect(store.resolveOne("agents.advisor_session")).toMatchObject({ value: "advisor-lead@kernel", source: "default" });
+  });
+
+  it("defaults output.whoami_peers to 8 and accepts only an integer >= 1 (slice 15 P5)", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("output.whoami_peers")).toMatchObject({ value: 8, source: "default" });
+    store.set("output.whoami_peers", "12");
+    expect(store.resolveOne("output.whoami_peers")).toMatchObject({ value: 12, source: "file" });
+    for (const raw of ["0", "-3", "2.5", "8junk", "many"]) {
+      expect(() => store.set("output.whoami_peers", raw)).toThrow(/output\.whoami_peers/);
+    }
   });
 
   it("resolves mutable 95/99 context-pressure thresholds and rejects invalid order", () => {

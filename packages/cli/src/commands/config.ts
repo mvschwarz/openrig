@@ -101,7 +101,8 @@ Keys:
                          watchdog_keep_per_job, batch_size
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
-  output.compact         short default output for queue writes; --full restores the whole row (default off)
+  output.compact         short default output for queue writes and whoami peers; --full restores today's output (default off)
+  output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
 
 Precedence: CLI flag > environment variable > config file > default`)
