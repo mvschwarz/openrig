@@ -920,6 +920,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           ok: false,
           error: "Codex resume failed: no saved session found for the requested session",
           recovery: "retry_fresh",
+          missingConversation: true,
         };
       }
 

@@ -234,7 +234,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       if (!this.fs.exists(opts.resumeToken)) {
         // Session file gone — the honest outcome is the caller's stop-and-ask
         // (awaiting-decision), never a silent fresh start (BR-6).
-        return { ok: false, error: `${this.runtime} resume: the persisted session file no longer exists`, recovery: "retry_fresh" };
+        return { ok: false, error: `${this.runtime} resume: the persisted session file no longer exists`, recovery: "retry_fresh", missingConversation: true };
       }
     }
 

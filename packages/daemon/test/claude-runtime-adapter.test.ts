@@ -607,6 +607,7 @@ describe("Claude Code runtime adapter", () => {
       ok: false,
       error: "Claude resume failed: no conversation found for the requested session",
       recovery: "retry_fresh",
+      missingConversation: true,
     });
   });
 

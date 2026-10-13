@@ -432,6 +432,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           ok: false,
           error: "Claude resume failed: no conversation found for the requested session",
           recovery: "retry_fresh",
+          missingConversation: true,
         };
       }
 
