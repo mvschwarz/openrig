@@ -36,11 +36,14 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
   const registryBySeat = new Map(input.auth.seats.map((row) => [row.seat, row]));
   const claudeHome = claudeConfigHome(input.claudeConfigDir, input.home);
   const claudeObserved = claudeObservations(input.usage);
+  const sharedBySession = new Map<string, number>();
+  for (const seat of input.seats) sharedBySession.set(seat.seatSession, (sharedBySession.get(seat.seatSession) ?? 0) + 1);
 
   return input.seats.map((seat): SeatConfiguredAccount => {
     const base = { seatSession: seat.seatSession, rigName: seat.rigName, runtime: seat.runtime };
     const row = registryBySeat.get(seat.seatSession);
     const notes: string[] = [];
+    const shared = sharedBySession.get(seat.seatSession) ?? 1;
     if (row && seat.runtime !== "codex") {
       notes.push(`stale registry row: names profile ${row.authProfile} (recorded ${row.updatedTs}) for runtime ${row.runtime}; not applied: this seat now runs ${seat.runtime}`);
     }
@@ -50,6 +53,8 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
         if (row.runtime !== "codex") notes.push(`the registry row's runtime column says ${row.runtime}, not codex`);
         const profileSaved = profiles.has(row.authProfile);
         if (!profileSaved) notes.push(`profile ${row.authProfile} is not saved on this host`);
+        if (row.rig && row.rig !== seat.rigName) notes.push(`registry row names rig ${row.rig}; this seat is in rig ${seat.rigName}`);
+        if (shared > 1) notes.push(`${shared} seats share session name ${seat.seatSession}; the seat-keyed registry row cannot tell them apart`);
         return {
           ...base,
           configured: { source: "registry", profileRef: row.authProfile, recordedAt: row.updatedTs, profileSaved },
@@ -73,7 +78,9 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
         configured: { source: "default_login", home: claudeHome.home, homeNote: claudeHome.note },
         ...(notes.length ? { registryNotes: notes } : {}),
         allowance: { linked: false, reason: DEFAULT_LOGIN_NOT_LINKED },
-        observed: observed
+        observed: shared > 1
+          ? { withheld: true, note: `observation withheld: ${shared} seats share session name ${seat.seatSession}; status-line samples are keyed by session name and cannot be attributed to one seat` }
+          : observed
           ? {
               windowsSampled: true,
               ...(observed.size ? { differsFrom: [...observed].sort(), note: DIFFERS_NOTE } : {}),

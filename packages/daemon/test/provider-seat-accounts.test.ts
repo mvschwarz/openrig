@@ -129,6 +129,41 @@ describe("configuredSeatAccounts — each state", () => {
     expect(row!.allowance.linked).toBe(false);
     expect(JSON.stringify(usage)).toBe(before);
   });
+
+  it("a registry row naming another rig is still applied, as bindings[] applies it, and noted", () => {
+    const [row] = configuredSeatAccounts(input({
+      seats: [seat("dev-qa@r", "codex")],
+      auth: { profiles: ["work-a"], seats: [{ ...reg("dev-qa@r", "codex", "work-a"), rig: "other" }] },
+    }));
+    expect(row!.configured).toEqual({ source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: true });
+    expect(row!.registryNotes).toEqual(["registry row names rig other; this seat is in rig r"]);
+  });
+
+  it("two Claude seats with the same session name and rig: observations withheld, never attributed", () => {
+    const usage = [claudeRow([claudeWindow("a@r", "2026-10-13T18:00:00Z", ["b@r"])])];
+    const rows = configuredSeatAccounts(input({ seats: [seat("a@r", "claude-code"), seat("a@r", "claude-code"), seat("b@r", "claude-code")], usage }));
+    const withheld = {
+      withheld: true,
+      note: "observation withheld: 2 seats share session name a@r; status-line samples are keyed by session name and cannot be attributed to one seat",
+    };
+    expect(rows[0]!.observed).toEqual(withheld);
+    expect(rows[1]!.observed).toEqual(withheld);
+    expect(rows[2]!.observed).toMatchObject({ windowsSampled: true });
+  });
+
+  it("two Codex seats with the same session name and rig and a registry row: applied to both, with a note that it can't tell them apart", () => {
+    const rows = configuredSeatAccounts(input({
+      seats: [seat("dev-qa@r", "codex"), seat("dev-qa@r", "codex")],
+      auth: { profiles: ["work-a"], seats: [reg("dev-qa@r", "codex", "work-a")] },
+    }));
+    for (const row of rows) {
+      expect(row.configured).toMatchObject({ source: "registry", profileRef: "work-a" });
+      expect(row.registryNotes).toEqual(["2 seats share session name dev-qa@r; the seat-keyed registry row cannot tell them apart"]);
+    }
+    // A default login stays true for both, so no note without a row.
+    const plain = configuredSeatAccounts(input({ seats: [seat("x@r", "codex"), seat("x@r", "codex")] }));
+    for (const row of plain) expect(row.registryNotes).toBeUndefined();
+  });
 });
 
 /** Seed live seats (rig + pod + node + running session) into node-inventory. */

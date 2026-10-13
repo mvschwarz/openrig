@@ -361,6 +361,16 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status", "--json"], port)).out).toBe(JSON.stringify(model));
   });
 
+  it("a withheld observation renders its note", async () => {
+    const note = "observation withheld: 2 seats share session name a@r; status-line samples are keyed by session name and cannot be attributed to one seat";
+    model = { ...MODEL, seatAccounts: [
+      { seatSession: "a@r", rigName: "r", runtime: "claude-code",
+        configured: { source: "default_login", home: "/h/.claude", homeNote: "shared" },
+        allowance: { linked: false, reason: "r" }, observed: { withheld: true, note } },
+    ] };
+    expect((await run(["status"], port)).out).toContain(`    observed: ${note}`);
+  });
+
   it("no seatAccounts key (switch off): no SEATS section", async () => {
     model = { ...MODEL, usage: [READING] };
     expect((await run(["status"], port)).out).not.toContain("SEATS");
