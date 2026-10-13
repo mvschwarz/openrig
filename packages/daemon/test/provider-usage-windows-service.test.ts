@@ -116,3 +116,93 @@ describe("usage windows: switch on", () => {
     expect((await bare.request("/api/provider/usage/refresh", { method: "POST" })).status).toBe(503);
   });
 });
+
+describe("usage windows with the Claude reader alongside Codex", () => {
+  async function both(enabled = true, withSamples = true) {
+    const { ClaudeUsageWindows, latestClaudeWindowSamples } = await import("../src/domain/provider/claude-usage-windows.js");
+    const { claudeAuthStatusReader } = await import("../src/domain/provider/claude-auth-status-reader.js");
+    const { makeFakeClaude, CLAUDE_AUTH } = await import("./helpers/fake-claude-usage.js");
+    const base = setup({ enabled });
+    const fakeClaude = makeFakeClaude();
+    fakeClaude.setPlan({ auth: [CLAUDE_AUTH] });
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "usage-svc-home-"));
+    // All migrations, so usage_samples (062) exists as in a running daemon.
+    const { createDb } = await import("../src/db/connection.js");
+    const { migrate } = await import("../src/db/migrate.js");
+    const { ALL_MIGRATIONS } = await import("../src/db/all-migrations.js");
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    if (withSamples) {
+      // A Claude seat's status-line windows, as the context monitor records them (lane provider_window).
+      const insert = db.prepare(`INSERT INTO usage_samples (lane, seat_session, source, sampled_at, captured_at, window, window_used_percent, resets_at)
+        VALUES ('provider_window', 'dev@rig', 'claude_statusline_json', ?, ?, ?, ?, ?)`);
+      const sampledAt = new Date(Date.parse(ASOF) - 60_000).toISOString();
+      const later = (days: number) => new Date(Date.parse(ASOF) + days * 86_400_000).toISOString();
+      insert.run(sampledAt, sampledAt, "five_hour", 20, later(0.1));
+      insert.run(sampledAt, sampledAt, "weekly", 85, later(2));
+    }
+    const claude = new ClaudeUsageWindows({
+      now: () => ASOF,
+      readIdentity: claudeAuthStatusReader({ launchPath: `${fakeClaude.binDir}${path.delimiter}${process.env.PATH}`, home, claudeConfigDir: fakeClaude.configDir, now: () => ASOF }),
+      listSamples: () => latestClaudeWindowSamples(db),
+    });
+    const codex = new CodexUsageWindows({
+      now: () => ASOF,
+      read: codexUsageReader({ launchPath: `${base.fake.binDir}${path.delimiter}${process.env.PATH}`, home, codexHome: base.fake.codexHome, deadlineMs: 5_000, graceMs: 200, now: () => ASOF }),
+    });
+    const svc = new ProviderServiceImpl({ db, listRigs: () => [], env: { CODEX_HOME: base.fake.codexHome } as NodeJS.ProcessEnv, now: () => ASOF,
+      usageWindows: { enabled: () => enabled, windows: codex, claude } });
+    return { ...base, svc, fakeClaude };
+  }
+  const post = (app: Hono, provider: string) => app.request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider }) });
+
+  it("reads start nothing; rows are Codex's then Claude's; Claude's windows show before any refresh, its identity not read yet", async () => {
+    const { svc, fake, fakeClaude } = await both();
+    const usage = (await svc.getReadModel()).usage!;
+    expect(usage.map((r) => [r.provider, r.identity === null ? null : (r.identity as { source: string }).source, r.source.kind, r.windows.length]))
+      .toEqual([["codex", null, "codex_app_server", 0], ["claude", "unresolved", "claude_statusline_samples", 2]]);
+    expect([fake.spawns(), fakeClaude.authCalls(), fakeClaude.otherStarts().length]).toEqual([0, 0, 0]);
+    const none = await both(true, false);
+    expect((await none.svc.getReadModel()).usage!.at(-1)).toMatchObject({ provider: "claude", identity: null, unavailableReason: "no Claude seat has reported status-line rate limits yet" });
+  });
+
+  it("a Claude refresh reads only Claude, answers with Claude's rows only, and the status carries them", async () => {
+    const { svc, app, fake } = await both();
+    const res = await post(app(svc), "claude");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { refresh: { outcome: string }; usage: Array<{ provider: string; identity: { orgId: string }; windows: Array<{ window: string; level: string }> }> };
+    expect(body.refresh).toMatchObject({ outcome: "ok", coalesced: false });
+    expect(body.usage.map((r) => [r.provider, r.identity.orgId, r.windows.map((w) => `${w.window}:${w.level}`)])).toEqual([
+      ["claude", "org-1", ["five_hour:ok", "weekly:nearing"]],
+    ]);
+    expect(fake.spawns()).toBe(0);
+    const status = (await svc.getReadModel()).usage!;
+    expect(status.map((r) => r.provider)).toEqual(["codex", "claude"]);
+  }, 30_000);
+
+  it("a Codex refresh answers with Codex rows only, as before", async () => {
+    const { svc, app, fakeClaude } = await both();
+    const body = await (await post(app(svc), "codex")).json() as { usage: Array<{ provider: string }> };
+    expect(body.usage.map((r) => r.provider)).toEqual(["codex"]);
+    expect(fakeClaude.authCalls()).toBe(0);
+  });
+
+  it("switch off: the Claude refresh is 409 naming the key; saved Codex profiles are noted on Codex rows only", async () => {
+    const off = await both(false);
+    const res = await post(off.app(off.svc), "claude");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "usage_windows_disabled", message: "Claude usage windows are off. Turn them on with: rig config set provider.usage_windows true" });
+    const on = await both();
+    fs.mkdirSync(path.join(on.fake.codexHome, "auth-profiles"));
+    fs.writeFileSync(path.join(on.fake.codexHome, "auth-profiles", "work.json"), "{}");
+    const usage = (await on.svc.getReadModel()).usage!;
+    expect(usage.map((r) => [r.provider, r.savedProfiles?.names ?? null])).toEqual([["codex", ["work"]], ["claude", null]]);
+  });
+
+  it("an unknown provider is a 400; Claude on a service without its reader is a 400", async () => {
+    const { svc, app } = await both();
+    expect((await post(app(svc), "gemini")).status).toBe(400);
+    const { svc: codexOnly, app: appOf } = setup({ enabled: true });
+    expect((await post(appOf(codexOnly), "claude")).status).toBe(400);
+  });
+});

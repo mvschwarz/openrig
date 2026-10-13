@@ -513,7 +513,9 @@ export class SessionRegistry {
 
   /** OPR.0.4.0.22 — resolve a canonical session name to the context needed to
    *  set its resume token: the latest session row + its node's runtime + the
-   *  current resume provenance. Returns null when no session matches. */
+   *  current resume provenance. Match inventory's ID ordering: the monotonic
+   *  factory preserves registration order through clock rollback in this daemon.
+   *  Returns null when no session matches. */
   findResumeContextByName(sessionName: string): {
     sessionId: string;
     nodeId: string;
@@ -526,7 +528,7 @@ export class SessionRegistry {
        FROM sessions s
        JOIN nodes n ON n.id = s.node_id
        WHERE s.session_name = ?
-       ORDER BY s.created_at DESC, s.id DESC LIMIT 1`
+       ORDER BY s.id DESC LIMIT 1`
     ).get(sessionName) as {
       session_id: string;
       node_id: string;

@@ -340,7 +340,10 @@ export class DaemonClient {
    *  Herdr's layout and falls back to plain tmux without Herdr, so preview the same composition: its planId is the
    *  window opener's expected plan. A provider-less preview may pick cmux, whose plan the window opener never matches. */
   async previewTerminal(view: string): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
-    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr`) as import("./terminals/terminal-model.js").TerminalPreview;
+    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow.
+    const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
+    const viewport = Number.isSafeInteger(columns) && columns! > 0 ? `&viewportColumns=${columns}` : "";
+    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr${viewport}`) as import("./terminals/terminal-model.js").TerminalPreview;
   }
   async openTerminal(view: string, expectedPlan?: string): Promise<TerminalOpenResult> {
     const result = (await this.post(`/api/terminal/open`, { view, ...(expectedPlan !== undefined ? { expectedPlan } : {}) })) as TerminalOpenResult;

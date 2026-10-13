@@ -2,7 +2,7 @@
 // Managed/attested/audited resume-token set, with per-runtime validation,
 // credential redaction across response/error/event, and terminalAuthGuard.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -81,6 +81,54 @@ describe("POST /api/sessions/:sessionName/resume-token", () => {
     const row = db.prepare("SELECT resume_token, resume_provenance FROM sessions WHERE id = ?").get(s.id) as { resume_token: string; resume_provenance: string };
     expect(row.resume_token).toBe("operator-token");
     expect(row.resume_provenance).toBe("operator");
+  });
+
+  describe("replacement session targeting", () => {
+    let clock = Date.UTC(2100, 0, 1);
+
+    beforeEach(() => {
+      clock += 60_000;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(clock);
+      // Control both production clock reads without patching session IDs or rows.
+      db.function("datetime", (value: string) => {
+        expect(value).toBe("now");
+        return new Date().toISOString().replace("T", " ").slice(0, 19);
+      });
+    });
+    afterEach(() => { vi.useRealTimers(); });
+
+    describe.each([
+      ["forward", 2_000], ["same millisecond", 0], ["rollback", -2_000],
+    ] as const)("after a %s clock", (_name, delta) => {
+      it.each(["running", "exited"])("writes only the latest %s registration", async (status) => {
+        const { app, sessionRegistry } = createTestApp(db);
+        const name = "dev1-impl@test-rig";
+        const old = sessionRegistry.registerSession("node-1", name);
+        sessionRegistry.updateResumeToken(old.id, "claude_id", "historical-token", "adoption");
+        sessionRegistry.markSuperseded(old.id);
+        const historical = db.prepare("SELECT * FROM sessions WHERE id = ?").get(old.id);
+        vi.setSystemTime(clock + delta);
+        const current = sessionRegistry.registerSession("node-1", name);
+        sessionRegistry.updateStatus(current.id, status);
+        sessionRegistry.updateResumeToken(current.id, "claude_id", "current-hook-token", "hook");
+        expect(current.id > old.id).toBe(true);
+        if (delta < 0) expect(current.createdAt < old.createdAt).toBe(true);
+
+        const res = await post(app, name, { token: "operator-token", reason: "verified current conversation" });
+        expect(res.status).toBe(200);
+        const json = await res.json();
+        expect.soft(json).toMatchObject({ ok: true, resumeType: "claude_id", previousProvenance: "hook" });
+        expect(JSON.stringify(json)).not.toContain("operator-token");
+        expect.soft(db.prepare("SELECT resume_token, resume_provenance FROM sessions WHERE id = ?").get(current.id))
+          .toEqual({ resume_token: "operator-token", resume_provenance: "operator" });
+        expect.soft(db.prepare("SELECT * FROM sessions WHERE id = ?").get(old.id)).toEqual(historical);
+        expect.soft(resumeTokenEvents(db)).toEqual([expect.objectContaining({
+          sessionId: current.id, previousProvenance: "hook", redacted: true,
+        })]);
+        expect(JSON.stringify(resumeTokenEvents(db))).not.toContain("operator-token");
+      });
+    });
   });
 
   it("rejects a malformed token (422) WITHOUT echoing it, and does not persist", async () => {

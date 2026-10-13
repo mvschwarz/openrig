@@ -14,7 +14,9 @@ import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-read
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { precheckSwitch } from "./provider-policy.js";
 import { collectReactiveEventSignals } from "./reactive-tap.js";
-import type { CodexUsageWindows, UsageRefreshResult } from "./codex-usage-windows.js";
+import type { CodexUsageWindows } from "./codex-usage-windows.js";
+import type { ClaudeUsageWindows } from "./claude-usage-windows.js";
+import type { UsageRefreshResult } from "./usage-windows.js";
 import type {
   ProviderService,
   ProviderPrecheckInput,
@@ -36,7 +38,7 @@ export interface ProviderServiceImplDeps {
   env?: NodeJS.ProcessEnv;
   now?: () => string;
   /** Slice 01: Codex usage windows, served only while `enabled()` (provider.usage_windows) is true. */
-  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows };
+  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows; claude?: ClaudeUsageWindows };
 }
 
 export class ProviderServiceImpl implements ProviderService {
@@ -82,11 +84,13 @@ export class ProviderServiceImpl implements ProviderService {
     const savedProfiles = profiles.length > 0
       ? { names: profiles, note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" }
       : null;
-    return { ...model, usage: savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage };
+    const codexRows = savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage;
+    return { ...model, usage: [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? [])] };
   }
 
-  async refreshUsage(_provider: "codex"): Promise<UsageRefreshResult | { disabled: true }> {
+  async refreshUsage(provider: "codex" | "claude"): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
     if (!this.usageWindowsEnabled()) return { disabled: true };
+    if (provider === "claude") return this.deps.usageWindows!.claude?.refresh() ?? { unavailable: true };
     return this.deps.usageWindows!.windows.refresh();
   }
 

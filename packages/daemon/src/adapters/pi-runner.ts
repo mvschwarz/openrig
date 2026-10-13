@@ -176,10 +176,11 @@ function piCredentialHint(message: string): string {
     : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
 }
 
-function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
-  const text = typeof detail === "string"
+function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+  // Empty or control-only fields must not hide a later usable diagnostic.
+  const text = details.map(detail => typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
-    : "";
+    : "").find(Boolean) ?? "";
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
@@ -191,12 +192,11 @@ function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
  *  repeats into one notice per failure. */
 function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime): { errorNotice?: string } {
   if (event.type === "auto_retry_end") {
-    return event.success === false ? { errorNotice: errorNotice(event.finalError ?? event.error, runtime) } : {};
+    return event.success === false ? { errorNotice: errorNotice([event.finalError, event.error], runtime) } : {};
   }
   const message = event.message as Record<string, unknown> | undefined;
   if (message?.role === "assistant" && message.stopReason === "error") {
-    const detail = message.errorMessage ?? message.error ?? event.error;
-    return { errorNotice: errorNotice(detail, runtime) };
+    return { errorNotice: errorNotice([message.errorMessage, message.error, event.error], runtime) };
   }
   return {};
 }
