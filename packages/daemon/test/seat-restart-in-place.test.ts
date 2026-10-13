@@ -243,11 +243,32 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     const done = await chosen.service.restartInPlace({ seatRef: SEAT, reason: "new account" });
     expect(done).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
     expect(chosen.launches[0]!.command).toContain(`-c 'model_reasoning_effort="high"'`);
-    // Cleared to the runtime's default: the relaunch sends no effort flag.
-    const cleared = world({ runningArgs: `-m gpt-5.5 -c model_reasoning_effort="high" -s workspace-write resume ${TOKEN}` });
-    expect(await cleared.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: null, changes: true } } });
+    expect((plan as { settings: { effort: { source: string } } }).settings.effort.source).toBe("seat_choice");
     const same = world({ savedEffort: { choice: "high" }, runningArgs: `-m gpt-5.5 -c model_reasoning_effort="high" -s workspace-write resume ${TOKEN}` });
     expect(await same.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: "high", changes: false } } });
+  });
+
+  it("with no saved effort choice (never set, or cleared), an effort difference still refuses as settings_drift", async () => {
+    const running = `-m gpt-5.5 -c model_reasoning_effort="high" -s workspace-write resume ${TOKEN}`;
+    // Never set, authored medium: relaunching would send medium in place of the running high.
+    const authored = world({ savedEffort: { authored: "medium" }, runningArgs: running });
+    const a = await authored.service.restartInPlace({ seatRef: SEAT, reason: "new account" });
+    expect(a).toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["effort"] } });
+    expect((a as { guidance: string }).guidance).toContain("no saved effort choice (never set, or cleared)");
+    expect(authored.calls).toEqual([]);
+    // Never set, no authored value: relaunching would send no flag in place of high.
+    const none = world({ runningArgs: running });
+    expect(await none.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["effort"] } });
+    // Cleared after a choice: the same refusal; clearing doesn't apply anything in place.
+    const cleared = world({ savedEffort: { authored: "medium", choice: "low" }, runningArgs: running });
+    cleared.db.prepare("UPDATE nodes SET effort_choice = NULL WHERE id = ?").run(cleared.node.id);
+    expect(await cleared.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "settings_drift", detail: { differs: ["effort"] } });
+    expect(cleared.calls).toEqual([]);
+    // No difference without a choice: no refusal, and the note says effort is kept.
+    const same = world({ savedEffort: { authored: "high" }, runningArgs: running });
+    const kept = await same.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(kept).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: "high", changes: false, source: "authored" } } });
+    expect((kept as { settings: { note: string } }).settings.note).toContain("effort included");
   });
 
   it("refuses drift in home and cwd, naming each", async () => {

@@ -759,10 +759,11 @@ Examples:
     .description("Restart one Codex seat in place so it reads its Codex home's current account")
     .addHelpText("after", `
 The seat's own conversation resumes in its own pane with the settings the running
-Codex uses now (model, profile, permissions, cwd, Codex home). Effort follows the
-seat's saved effort (rig seat set-effort), as at every managed continuation; --plan
-shows the change. A pending set-model is not applied: a difference refuses as
-settings_drift.
+Codex uses now (model, effort, profile, permissions, cwd, Codex home), with one
+exception: an explicit effort choice saved with rig seat set-effort is applied, and
+--plan shows that change. With no saved choice (never set, or cleared with --clear),
+an effort difference refuses as settings_drift, as a pending set-model does; the
+next ordinary managed launch or resume resolves effort instead.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
 not restarted.

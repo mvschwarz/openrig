@@ -349,7 +349,7 @@ export class SeatLifecycleService {
     const running = await this.runningState(seat.nodeId);
     const fallback = saved.source === "authored" ? `the authored effort ${saved.authored}` : "no effort flag (the runtime's own default)";
     const effect = requested === null
-      ? `Cleared: the next managed continuation uses ${fallback}. The running process is unchanged; nothing was restarted.`
+      ? `Cleared: the seat has no saved effort choice now. Its next ordinary managed launch or resume resolves effort under the seat's rules (today: ${fallback}). An in-place restart keeps the running effort and refuses if it would change it. The running process is unchanged; nothing was restarted.`
       : `Saved for the seat's next managed continuation. The running process is unchanged; nothing was restarted.`;
     return {
       ok: true, seat, runtime, requested, from, saved, changed,
@@ -1244,7 +1244,7 @@ export class SeatLifecycleService {
     const savedEffort = resolveSeatEffort(node);
     return {
       seat, sessionId: session.id, sessionName: session.session_name,
-      saved: { model: node.model ?? null, effort: savedEffort.effective, codexConfigProfile: node.codexConfigProfile ?? null },
+      saved: { model: node.model ?? null, effort: savedEffort.effective, codexConfigProfile: node.codexConfigProfile ?? null, effortSource: savedEffort.source },
       binding: {
         ...binding, cwd: node.cwd ?? ".",
         ...(node.model ? { model: node.model } : {}),

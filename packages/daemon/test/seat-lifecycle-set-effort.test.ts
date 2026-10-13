@@ -105,7 +105,7 @@ describe("SeatLifecycleService.setEffort", () => {
     const cleared = await service.setEffort({ seatRef: sessionName, effort: null, reason: "back to spec" });
     if (!cleared.ok) throw new Error(cleared.message);
     expect(cleared).toMatchObject({ requested: null, changed: true, saved: { choice: null, effective: "medium", source: "authored" } });
-    expect(cleared.effect).toMatch(/uses the authored effort medium/);
+    expect(cleared.effect).toMatch(/no saved effort choice now.*today: the authored effort medium.*in-place restart keeps the running effort/);
     expect(nodeRow(db, node.id).effort_choice).toBeNull();
     expect(eventsOfType(db, "node.effort_changed").at(-1)).toMatchObject({ from: "high", to: null });
   });
