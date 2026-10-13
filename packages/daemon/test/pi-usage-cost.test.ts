@@ -13,6 +13,7 @@ import { computeCostView, PI_COST_COVERAGE } from "../src/domain/usage-series.js
 import { activityRoutes } from "../src/routes/activity.js";
 import { RunnerCore, parseRunnerArgs, readPiSessionEntryIds, type RunnerIo } from "../src/adapters/pi-runner.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
@@ -77,14 +78,36 @@ describe("extractPiUsageFacts (Pi 0.87.1, session format v3)", () => {
     expect(byId({ ...fork, parentEntryIds: new Set(["b7", "p9"]) })).toEqual({ b7: "inherited", n7: "own", x1: "unknown", p9: "inherited" });
   });
 
-  it("readPiSessionEntryIds (the runner's reader) reads a session file's entry ids, skipping the header and torn lines, within a size limit", () => {
+  it("readPiSessionEntryIds (the runner's reader) answers only for a complete, valid regular file within the limit", async () => {
     const dir = mkdtempSync(nodePath.join(process.env.TMPDIR ?? tmpdir(), "pi-parent-"));
     try {
       const file = nodePath.join(dir, "parent.jsonl");
-      writeFileSync(file, [JSON.stringify({ type: "session", id: "sess-1", timestamp: at(0) }), JSON.stringify(ENTRIES[0]), JSON.stringify(ENTRIES[1]), "{torn", ""].join("\n"));
-      expect([...readPiSessionEntryIds(file)!].sort()).toEqual(["a1", "u1"]);
-      expect(readPiSessionEntryIds(file, 10)).toBeNull();
-      expect(readPiSessionEntryIds(nodePath.join(dir, "missing.jsonl"))).toBeNull();
+      const header = JSON.stringify({ type: "session", id: "sess-1", timestamp: at(0) });
+      const good = [header, JSON.stringify(ENTRIES[0]), JSON.stringify(ENTRIES[1]), ""].join("\n");
+      writeFileSync(file, good);
+      expect([...(await readPiSessionEntryIds(file))!].sort()).toEqual(["a1", "u1"]);
+      expect(await readPiSessionEntryIds(file, good.length - 1)).toBeNull(); // over the limit
+      for (const bad of ["", good.slice(0, -1), good + "{torn\n", good.replace(header, "{}"), good + "null\n", good + JSON.stringify({ type: "message" }) + "\n"]) {
+        writeFileSync(file, bad);
+        expect(await readPiSessionEntryIds(file)).toBeNull();
+      }
+      expect(await readPiSessionEntryIds(nodePath.join(dir, "missing.jsonl"))).toBeNull();
+      expect(await readPiSessionEntryIds(dir)).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("readPiSessionEntryIds: a FIFO parent is refused at once, with no writer or with one streaming past the limit", async () => {
+    const dir = mkdtempSync(nodePath.join(process.env.TMPDIR ?? tmpdir(), "pi-fifo-"));
+    try {
+      const fifo = nodePath.join(dir, "parent.jsonl");
+      execFileSync("mkfifo", [fifo]);
+      const started = Date.now();
+      expect(await readPiSessionEntryIds(fifo)).toBeNull(); // no writer: would block a plain read forever
+      const writer = spawn("sh", ["-c", `for i in $(seq 1 200); do echo '{"type":"message","id":"x'$i'"}'; done > "$1"`, "sh", fifo]);
+      expect(await readPiSessionEntryIds(fifo, 32)).toBeNull();
+      expect(Date.now() - started).toBeLessThan(2000);
+      writer.kill();
+      expect(await readPiSessionEntryIds("/dev/zero")).toBeNull(); // a device, never read
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -351,7 +374,7 @@ describe("POST /api/activity/pi-usage", () => {
 
 describe("runner → authenticated route → SQLite → cost view", () => {
   const TOKEN = "hook-token";
-  function pipeline(header: () => string | null, parentIds: () => ReadonlySet<string> | null = () => null, parentReads = { n: 0 }) {
+  function pipeline(header: () => string | null, parentIds: () => ReadonlySet<string> | null | Promise<ReadonlySet<string> | null> = () => null, parentReads = { n: 0 }) {
     const d = db();
     const hono = new Hono();
     hono.use("*", async (c, next) => {
@@ -364,7 +387,7 @@ describe("runner → authenticated route → SQLite → cost view", () => {
     const io: RunnerIo = {
       sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, postActivity: () => {}, writeSidecar: () => {},
       sessionFileExists: () => true, now: () => at(0), readFirstLine: header,
-      readSessionEntryIds: () => { parentReads.n += 1; return parentIds(); },
+      readSessionEntryIds: async () => { parentReads.n += 1; return parentIds(); },
       postUsageFacts: async (payload) => (await hono.request("/api/activity/pi-usage", {
         method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(payload) })).ok,
     };
@@ -373,8 +396,7 @@ describe("runner → authenticated route → SQLite → cost view", () => {
     core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" } }));
     const refresh = async (entries: unknown[]) => {
       core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", success: true, command: "get_entries", data: { entries, leafId: null } }));
-      await settle();
-      await settle();
+      for (let i = 0; i < 6; i += 1) await settle();
     };
     const view = () => computeCostView(d, { nowIso: at(60) }).seats[0] as Record<string, any>;
     return { d, hono, refresh, view };
@@ -400,6 +422,35 @@ describe("runner → authenticated route → SQLite → cost view", () => {
     expect(seat.costUsd).toBeCloseTo(0.55, 10); // the new $0.50 is the occupant's, beside a2 and a3
     expect(seat.entries).toMatchObject({ own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } });
     expect(reads.n).toBe(1); // read once, to decide the ties
+  });
+
+  it("R4-F1: a parent read that never answers doesn't hold up the runner; the ties go as unknown meanwhile", async () => {
+    const p = pipeline(() => forkHeader(at(7)), () => new Promise(() => {}));
+    await p.refresh(forkEntries);
+    expect(p.view()).toMatchObject({ entries: { own: 2, inherited: { count: 4 }, unknownOrigin: { count: 2 } } });
+    await p.refresh(forkEntries); // still processing refreshes; no second read while one is under way
+    expect(p.view().costUsd).toBeCloseTo(0.05, 10);
+  });
+
+  it("R4-F2 with the runner's real reader: an empty, malformed or torn parent leaves the ties unknown; once the parent is valid they settle", async () => {
+    const dir = mkdtempSync(nodePath.join(process.env.TMPDIR ?? tmpdir(), "pi-parent-"));
+    try {
+      const file = nodePath.join(dir, "parent.jsonl");
+      const valid = [JSON.stringify({ type: "session", version: 3, id: "par", timestamp: at(0), cwd: "/w" }),
+        ...ENTRIES.slice(0, 7).map((e) => JSON.stringify(e)), ""].join("\n");
+      for (const broken of ["", "{not json\n", valid.slice(0, -40), valid.replace(/"id":"t2"/, '"id":7')]) {
+        writeFileSync(file, broken);
+        const p = pipeline(() => forkHeader(at(7), file), () => readPiSessionEntryIds(file));
+        await p.refresh(forkEntries);
+        await p.refresh(forkEntries);
+        expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } }); // b1 and n7: never charged
+        writeFileSync(file, valid);
+        await p.refresh(forkEntries);
+        expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } });
+        expect(p.view().costUsd).toBeCloseTo(0.55, 10);
+        expect(p.d.prepare("SELECT origin FROM pi_usage_entries WHERE entry_id = 'b1'").get()).toEqual({ origin: "inherited" });
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("F1: with the parent unreadable a tie stays unknown (shown, not counted, not hidden as history) until it can be read", async () => {

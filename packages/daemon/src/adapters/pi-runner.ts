@@ -296,8 +296,8 @@ export interface RunnerIo {
   postUsageFacts?(payload: Record<string, unknown>): Promise<boolean>;
   /** The first line of a Pi session file (its header), or null when it can't be read. */
   readFirstLine?(path: string): string | null;
-  /** The entry ids in a Pi session file (a fork's parent), or null when it can't be read or is too large. */
-  readSessionEntryIds?(path: string): ReadonlySet<string> | null;
+  /** The entry ids of a complete, valid Pi session file (a fork's parent); null when it isn't one. Never blocks. */
+  readSessionEntryIds?(path: string): Promise<ReadonlySet<string> | null>;
   now(): string;
 }
 
@@ -311,21 +311,48 @@ const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow
 /** OPR.0.7.0.2: the largest fork parent read to decide a header tie; a larger parent leaves the tie unknown. */
 const PARENT_SESSION_READ_LIMIT_BYTES = 64 * 1024 * 1024;
 
-/** OPR.0.7.0.2: the entry ids in a Pi session file (a fork's parent), read once per session and only to decide a
- *  tie with the fork header. Ids only; null when the file can't be read or is over the limit. */
-export function readPiSessionEntryIds(path: string, limitBytes = PARENT_SESSION_READ_LIMIT_BYTES): ReadonlySet<string> | null {
+/**
+ * OPR.0.7.0.2: the entry ids of a fork's parent session file, read only to decide a tie with the fork header.
+ * Absence from the result is a claim that the parent doesn't have the entry, so only a complete, valid file
+ * answers: a regular file (checked on the opened handle, opened non-blocking so a FIFO or device can't stall the
+ * runner), at most `limitBytes` actually read from that handle, a session header first, every line a whole
+ * entry with an id, and no torn last line. Anything else is null (the tie stays unknown and is retried). Ids only.
+ */
+export async function readPiSessionEntryIds(path: string, limitBytes = PARENT_SESSION_READ_LIMIT_BYTES): Promise<ReadonlySet<string> | null> {
+  let handle: fs.promises.FileHandle | undefined;
   try {
-    if (fs.statSync(path).size > limitBytes) return null;
+    handle = await fs.promises.open(path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > limitBytes) return null;
+    const buffer = Buffer.alloc(Math.min(stat.size, limitBytes) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length === 0 || length > limitBytes) return null; // empty, or grew past the limit since the stat
+    const text = buffer.subarray(0, length).toString("utf8");
+    if (!text.endsWith("\n")) return null; // Pi ends every entry with a newline: a torn or partial write
+    const lines = text.slice(0, -1).split("\n");
     const ids = new Set<string>();
-    for (const line of fs.readFileSync(path, "utf8").split("\n")) {
-      if (!line) continue;
-      try {
-        const entry = JSON.parse(line) as { type?: unknown; id?: unknown };
-        if (entry.type !== "session" && typeof entry.id === "string") ids.add(entry.id);
-      } catch { /* a torn line has no usable id */ }
+    for (const [index, line] of lines.entries()) {
+      const entry = JSON.parse(line) as unknown; // a malformed line throws: incomplete, so null
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+      const { type, id } = entry as { type?: unknown; id?: unknown };
+      if (index === 0) {
+        if (type !== "session") return null;
+        continue;
+      }
+      if (typeof id !== "string" || !id) return null;
+      ids.add(id);
     }
     return ids;
-  } catch { return null; }
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 export class RunnerCore {
@@ -347,6 +374,8 @@ export class RunnerCore {
   private identityInFlight = false;
   /** OPR.0.7.0.2: the session header boundary; null until it has been read (read again until it can be). */
   private usageBoundary: PiSessionBoundary | null = null;
+  /** OPR.0.7.0.2: a fork parent read is under way (at most one at a time). */
+  private parentReadInFlight = false;
   /** Entry ids the daemon has accepted with a known origin. Anything else is sent again on the next refresh;
    *  the daemon stores each (session, entry) once regardless. */
   private readonly postedUsageEntryIds = new Set<string>();
@@ -499,17 +528,21 @@ export class RunnerCore {
       const firstLine = this.sessionFile && this.io.readFirstLine ? this.io.readFirstLine(this.sessionFile) : null;
       this.usageBoundary = firstLine ? parsePiSessionHeader(firstLine) : null;
     }
-    let { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
+    const { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
     // A new entry often shares the fork header's millisecond, and so can a copied one: only the parent session's
-    // entry ids tell them apart. Read them once, and only when such a tie needs deciding.
+    // entry ids tell them apart. Read them in the background, only when such a tie needs deciding; meanwhile the
+    // tie goes as unknown. A complete answer is kept and these entries are reported again with it; anything
+    // else leaves the tie unknown, to be read again on a later refresh.
     const boundary = this.usageBoundary;
-    if (boundary?.parentSession && !boundary.parentEntryIds && this.io.readSessionEntryIds
+    if (boundary?.parentSession && !boundary.parentEntryIds && !this.parentReadInFlight && this.io.readSessionEntryIds
       && facts.some((fact) => !this.postedUsageEntryIds.has(fact.entryId) && tiesPiForkHeader(fact.entryTimestamp, boundary))) {
-      const parentEntryIds = this.io.readSessionEntryIds(boundary.parentSession);
-      if (parentEntryIds) {
+      this.parentReadInFlight = true;
+      void this.io.readSessionEntryIds(boundary.parentSession).then((parentEntryIds) => {
+        this.parentReadInFlight = false;
+        if (!parentEntryIds || this.usageBoundary !== boundary) return;
         this.usageBoundary = { ...boundary, parentEntryIds };
-        ({ facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary));
-      }
+        this.reportUsageFacts(entries);
+      }, () => { this.parentReadInFlight = false; });
     }
     const fresh = facts.filter((fact) => !this.postedUsageEntryIds.has(fact.entryId));
     if (fresh.length === 0 && malformed === 0) return;
