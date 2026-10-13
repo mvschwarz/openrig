@@ -202,6 +202,18 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
     expect(fake.screenStarts()).toHaveLength(1);
   });
 
+  it("a tmux call cut short by the read's bound is a timeout, never a dead pane", async () => {
+    const fake = makeFakeClaude();
+    fake.setPlan({ auth: [CLAUDE_AUTH], screen: "hang" });
+    const wrap = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-slowtmux-"));
+    const realTmux = execFileSync("sh", ["-c", "command -v tmux"]).toString().trim();
+    // Every pane-dead check takes longer than the read has left.
+    fs.writeFileSync(path.join(wrap, "tmux"), `#!/bin/sh\ncase "$*" in *pane_dead*) sleep 3;; esac\nexec ${realTmux} "$@"\n`, { mode: 0o755 });
+    const r = await claudeUsageReader({ launchPath: [wrap, fake.binDir, process.env.PATH].join(path.delimiter), home: home(), claudeConfigDir: fake.configDir,
+      deadlineMs: 1_500, pollMs: 100, tmpRoot, graceMs: 300 })();
+    expect(r).toMatchObject({ ok: false, reason: "timeout" });
+  }, 20_000);
+
   it("no claude on the reader's PATH fails before anything starts", async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-nobin-"));
     const r = await claudeUsageReader({ launchPath: empty, home: home(), deadlineMs: 2_000 })();

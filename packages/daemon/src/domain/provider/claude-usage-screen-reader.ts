@@ -285,8 +285,11 @@ async function readScreen(
     let ready = false;
     let last = "";
     while (left() > 0) {
+      // A tmux call cut short by the read's bound is the bound running out, not a dead pane.
       const dead = await tmux(["display-message", "-p", "-t", "usage", "#{pane_dead}"]);
+      if (dead.timedOut) break;
       const captured = await tmux(["capture-pane", "-p", "-t", "usage"]);
+      if (captured.timedOut) break;
       if (dead.code !== 0 || dead.stdout.trim() === "1" || captured.code !== 0) {
         // A Claude Code without one of the start flags (such as --safe-mode) exits this way: a visible failure.
         return { ok: false, reason: "child_exited", detail: "claude exited before the usage screen rendered (a Claude Code without these flags, such as --safe-mode, exits this way)" };
