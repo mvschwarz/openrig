@@ -85,14 +85,16 @@ const SESSION = "devpi-a@rig";
 const SESSION_FILE = "/state/pi/devpi-a@rig/sessions/2026_0197.jsonl";
 const HEADER = (parentSession?: string) => JSON.stringify({ type: "session", version: 3, id: "0197a2f0", timestamp: at(8), cwd: "/w", ...(parentSession ? { parentSession } : {}) });
 
-function runner(opts: { usageFacts?: boolean; runtime?: "pi" | "omp"; header?: string | null } = {}) {
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function runner(opts: { usageFacts?: boolean; runtime?: "pi" | "omp"; header?: string | null | (() => string | null); accept?: () => boolean } = {}) {
   const posted: Record<string, any>[] = [];
   const rpc: Record<string, unknown>[] = [];
   const io: RunnerIo = {
     sendRpc: (cmd) => rpc.push(cmd), mirrorLine: () => {}, mirrorAppend: () => {}, postActivity: () => {}, writeSidecar: () => {},
     sessionFileExists: () => true, now: () => at(0),
-    postUsageFacts: (payload) => posted.push(payload),
-    readFirstLine: () => (opts.header === undefined ? HEADER() : opts.header),
+    postUsageFacts: async (payload) => { posted.push(payload); return opts.accept ? opts.accept() : true; },
+    readFirstLine: () => (opts.header === undefined ? HEADER() : typeof opts.header === "function" ? opts.header() : opts.header),
   };
   const core = new RunnerCore(io, { sessionName: SESSION, nodeId: "node-1", generation: "gen-2" },
     { usageFacts: opts.usageFacts ?? true, runtime: opts.runtime ?? "pi" });
@@ -103,14 +105,28 @@ function runner(opts: { usageFacts?: boolean; runtime?: "pi" | "omp"; header?: s
 }
 
 describe("RunnerCore usage facts (--usage-facts)", () => {
-  it("posts persisted-entry facts after a turn's refresh, each entry once per process", () => {
+  it("posts persisted-entry facts after a turn's refresh, each accepted entry once per process", async () => {
     const r = runner();
     r.refresh(ENTRIES.slice(0, 4));
+    await settle();
     r.refresh(ENTRIES); // the next turn's refresh returns the whole session again
     expect(r.posted).toHaveLength(2);
     expect(r.posted[0]).toMatchObject({ sessionName: SESSION, nodeId: "node-1", generation: "gen-2", piSessionId: "0197a2f0", forked: false, malformed: 0 });
     expect(r.posted[0]!.facts.map((f: { entryId: string }) => f.entryId)).toEqual(["a1", "s1", "t1"]);
     expect(r.posted[1]!.facts.map((f: { entryId: string }) => f.entryId)).toEqual(["c1", "b1", "a2", "a3"]);
+  });
+
+  it("a failed post marks nothing: the next refresh sends the same entries again, and only success settles them", async () => {
+    let up = false;
+    const r = runner({ accept: () => up });
+    r.refresh(ENTRIES.slice(0, 4)); // daemon restarting, timeout, 503 or 404
+    await settle();
+    up = true;
+    r.refresh(ENTRIES.slice(0, 4));
+    await settle();
+    r.refresh(ENTRIES.slice(0, 4));
+    await settle();
+    expect(r.posted.map((p) => p.facts.map((f: { entryId: string }) => f.entryId))).toEqual([["a1", "s1", "t1"], ["a1", "s1", "t1"]]);
   });
 
   it("live message_update usage is never posted; only get_entries responses are", () => {
@@ -126,6 +142,22 @@ describe("RunnerCore usage facts (--usage-facts)", () => {
     expect(r.posted[0]).toMatchObject({ forked: true, sessionCreatedAt: at(8) });
     const origin = Object.fromEntries(r.posted[0]!.facts.map((f: { entryId: string; origin: string }) => [f.entryId, f.origin]));
     expect(origin).toMatchObject({ a1: "inherited", c1: "inherited", a2: "own" });
+  });
+
+  it("an unreadable header is read again on the next refresh; unknown facts are resent until their origin settles", async () => {
+    let header: string | null = null;
+    const r = runner({ header: () => header });
+    r.refresh(ENTRIES);
+    await settle();
+    header = HEADER("/state/pi/parent.jsonl");
+    r.refresh(ENTRIES);
+    await settle();
+    r.refresh(ENTRIES);
+    await settle();
+    expect(r.posted).toHaveLength(2);
+    expect(r.posted[0]!.facts.every((f: { origin: string }) => f.origin === "unknown")).toBe(true);
+    expect(r.posted[1]).toMatchObject({ forked: true });
+    expect(Object.fromEntries(r.posted[1]!.facts.map((f: { entryId: string; origin: string }) => [f.entryId, f.origin]))).toMatchObject({ a1: "inherited", a2: "own" });
   });
 
   it("an unreadable header leaves origin unknown; the switch off and OMP post nothing", () => {
@@ -177,6 +209,18 @@ describe("PiUsageEntriesStore", () => {
     const input = { seatSession: SESSION, nodeId: "node-1", generation: "gen-2", piSessionId: "0197a2f0", facts: facts(OWN) };
     expect(store.record(input, at(20))).toEqual({ stored: 7, duplicates: 0 });
     expect(store.record(input, at(30))).toEqual({ stored: 0, duplicates: 7 });
+  });
+
+  it("an unknown origin settles to own or inherited when resent; a known origin never changes", () => {
+    const d = db();
+    const store = new PiUsageEntriesStore(d);
+    const base = { seatSession: SESSION, nodeId: null, generation: null, piSessionId: "f" };
+    store.record({ ...base, facts: facts(null) }, at(20));
+    expect(store.record({ ...base, facts: facts({ createdAt: at(8), parentSession: "/p.jsonl" }) }, at(30))).toEqual({ stored: 7, duplicates: 0 });
+    expect(store.record({ ...base, facts: facts(OWN) }, at(40))).toEqual({ stored: 0, duplicates: 7 });
+    expect(store.record({ ...base, facts: facts(null) }, at(50))).toEqual({ stored: 0, duplicates: 7 });
+    const origins = d.prepare("SELECT origin, COUNT(*) AS n FROM pi_usage_entries GROUP BY origin ORDER BY origin").all();
+    expect(origins).toEqual([{ origin: "inherited", n: 5 }, { origin: "own", n: 2 }]);
   });
 
   it("validates a posted fact field by field", () => {

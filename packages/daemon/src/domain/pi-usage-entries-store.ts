@@ -1,6 +1,7 @@
 // OPR.0.7.0.2 (cost reporting, Pi atom): the store behind Pi's persisted-entry usage facts (migration 107).
-// Insert-or-ignore on (pi_session_id, entry_id): an entry Pi returns again (catch-up, the refresh after every
-// turn, a runner restart, a replay) is never stored or counted twice. History is never mutated.
+// One row per (pi_session_id, entry_id): an entry Pi returns again (catch-up, the refresh after every turn, a
+// runner restart, a replay) is never stored or counted twice. The only change ever made to a stored row is an
+// "unknown" origin settling to own or inherited once the session header could be read.
 import type { Database } from "better-sqlite3";
 import type { PiUsageFact, PiUsageFactKind, PiUsageOrigin } from "./pi-usage-facts.js";
 
@@ -43,15 +44,17 @@ export function validPiUsageFact(raw: unknown): PiUsageFact | null {
 export class PiUsageEntriesStore {
   constructor(private readonly db: Database) {}
 
-  /** Store each fact once. Returns how many were new and how many were already stored. */
+  /** Store each fact once. Returns how many were new (or had an unknown origin settled) and how many were already stored. */
   record(input: { seatSession: string; nodeId: string | null; generation: string | null; piSessionId: string; facts: PiUsageFact[] }, recordedAt: string):
     { stored: number; duplicates: number } {
     const insert = this.db.prepare(
-      `INSERT OR IGNORE INTO pi_usage_entries
+      `INSERT INTO pi_usage_entries
          (pi_session_id, entry_id, parent_entry_id, entry_timestamp, kind, usage_category, provider, model,
           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_total, stop_reason, origin,
           seat_session, node_id, occupant_generation, recorded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pi_session_id, entry_id) DO UPDATE SET origin = excluded.origin
+         WHERE pi_usage_entries.origin = 'unknown' AND excluded.origin <> 'unknown'`,
     );
     let stored = 0;
     this.db.transaction(() => {

@@ -291,8 +291,9 @@ export interface RunnerIo {
   sessionFileExists?(path: string): boolean;
   /** Terminate OMP when get_state cannot establish a resumable seat. */
   stopChild?(): void;
-  /** OPR.0.7.0.2 (only with --usage-facts): POST usage facts from persisted entries to the daemon. Best-effort. */
-  postUsageFacts?(payload: Record<string, unknown>): void;
+  /** OPR.0.7.0.2 (only with --usage-facts): POST usage facts from persisted entries to the daemon. Best-effort;
+   *  resolves true only when the daemon accepted them. */
+  postUsageFacts?(payload: Record<string, unknown>): Promise<boolean>;
   /** The first line of a Pi session file (its header), or null when it can't be read. */
   readFirstLine?(path: string): string | null;
   now(): string;
@@ -322,9 +323,10 @@ export class RunnerCore {
   /** Set once the daemon confirms it persisted the resume token. */
   private identityPersisted = false;
   private identityInFlight = false;
-  /** OPR.0.7.0.2: the session header boundary (undefined until read; null when unreadable). */
-  private usageBoundary: PiSessionBoundary | null | undefined;
-  /** Entry ids already posted by this process; the daemon stores each (session, entry) once regardless. */
+  /** OPR.0.7.0.2: the session header boundary; null until it has been read (read again until it can be). */
+  private usageBoundary: PiSessionBoundary | null = null;
+  /** Entry ids the daemon has accepted with a known origin. Anything else is sent again on the next refresh;
+   *  the daemon stores each (session, entry) once regardless. */
   private readonly postedUsageEntryIds = new Set<string>();
 
   constructor(
@@ -471,15 +473,14 @@ export class RunnerCore {
    *  restart, or the refresh after each agent_end). Pi only, and only with --usage-facts. Never live updates. */
   private reportUsageFacts(entries: unknown[]): void {
     if (!this.opts.usageFacts || this.runtime !== "pi" || !this.io.postUsageFacts) return;
-    if (this.usageBoundary === undefined) {
+    if (this.usageBoundary === null) {
       const firstLine = this.sessionFile && this.io.readFirstLine ? this.io.readFirstLine(this.sessionFile) : null;
       this.usageBoundary = firstLine ? parsePiSessionHeader(firstLine) : null;
     }
     const { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
     const fresh = facts.filter((fact) => !this.postedUsageEntryIds.has(fact.entryId));
     if (fresh.length === 0 && malformed === 0) return;
-    for (const fact of fresh) this.postedUsageEntryIds.add(fact.entryId);
-    this.io.postUsageFacts({
+    void this.io.postUsageFacts({
       sessionName: this.identity.sessionName,
       nodeId: this.identity.nodeId,
       generation: this.identity.generation,
@@ -488,7 +489,11 @@ export class RunnerCore {
       forked: this.usageBoundary ? this.usageBoundary.parentSession !== null : null,
       facts: fresh,
       malformed,
-    });
+    }).then((accepted) => {
+      // Only a stored fact with a known origin is done: a failed post, or an origin the header couldn't settle
+      // yet, is sent again with the next refresh (the store upgrades an unknown origin once it is known).
+      if (accepted) for (const fact of fresh) if (fact.origin !== "unknown") this.postedUsageEntryIds.add(fact.entryId);
+    }, () => { /* best-effort: resent on the next refresh */ });
   }
 
   private raiseAttention(subtype: "runtime_error" | "permission_prompt"): void {
@@ -947,16 +952,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     now: () => new Date().toISOString(),
     stopChild: () => { child.kill(); },
     sessionFileExists: (path) => fs.existsSync(path),
-    postUsageFacts: (payload) => {
-      if (!endpoint || typeof fetch !== "function") return;
+    postUsageFacts: async (payload) => {
+      if (!endpoint || typeof fetch !== "function") return false;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
-      fetch(new URL("/api/activity/pi-usage", endpoint.baseUrl).toString(), {
+      return fetch(new URL("/api/activity/pi-usage", endpoint.baseUrl).toString(), {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
         body: JSON.stringify(payload),
         signal: controller.signal,
-      }).catch(() => { /* best-effort: a later refresh re-sends what wasn't stored */ }).finally(() => clearTimeout(timeout));
+      }).then((res) => res.ok, () => false /* best-effort: a later refresh re-sends what wasn't stored */).finally(() => clearTimeout(timeout));
     },
     readFirstLine: (path) => {
       try {
