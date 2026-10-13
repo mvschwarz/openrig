@@ -154,6 +154,8 @@ function runAuthStatus(file: string, env: NodeJS.ProcessEnv, cwd: string | undef
     let stdout = "";
     let timedOut = false;
     let settled = false;
+    // Node reaps the child on its exit event; until then a killed child is a zombie that still has its pid.
+    const reaped = new Promise<void>((resolveReap) => child.once("exit", () => resolveReap()));
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       if (stdout.length < 1024 * 1024) stdout += chunk;
@@ -162,7 +164,14 @@ function runAuthStatus(file: string, env: NodeJS.ProcessEnv, cwd: string | undef
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (child.pid !== undefined) await stopProcessGroup(child.pid, graceMs);
+      if (child.pid !== undefined) {
+        await stopProcessGroup(child.pid, graceMs);
+        // A killed group leaves the group list before Node reaps the child: wait, bounded, for the reap too
+        // (as the Codex reader's stopGroup does), so the read never returns with its own child unreaped.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([reaped, new Promise((r) => { timer = setTimeout(r, graceMs); })]);
+        clearTimeout(timer);
+      }
       child.stdout?.destroy();
       resolve({ ...result, stdout, timedOut });
     };

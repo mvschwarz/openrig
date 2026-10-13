@@ -291,11 +291,18 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
 
   it("nothing a read started survives it: auth timeout, screen failure, timeout and success, with processes that ignore HUP and TERM", async () => {
     const fake = makeFakeClaude();
-    // Running processes, from ps (Linux and macOS): a killed process its parent hasn't reaped yet (a zombie,
-    // state Z) still answers kill(pid, 0) but isn't running, so it doesn't count.
-    const running = () => execFileSync("ps", ["-A", "-o", "pid=,pgid=,stat="]).toString().trim().split("\n")
-      .map((l) => l.trim().split(/\s+/)).filter(([, , stat]) => stat !== undefined && !stat.startsWith("Z"))
-      .map(([pid, pgid, stat]) => ({ pid: Number(pid), pgid: Number(pgid), stat: stat! }));
+    // A killed process keeps its pid until its parent reaps it: the reader reaps its own child before
+    // returning, and an orphaned stub child is reaped by init (launchd on macOS). So each pid must be gone
+    // within REAP_BOUND_MS; anything still there then is named with its ps state (Z = dead, unreaped).
+    const REAP_BOUND_MS = 2_000;
+    const exists = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const psRows = () => execFileSync("ps", ["-A", "-o", "pid=,pgid=,stat="]).toString().trim().split("\n")
+      .map((l) => l.trim().split(/\s+/)).map(([pid, pgid, stat]) => ({ pid: Number(pid), pgid: Number(pgid), stat: stat ?? "" }));
+    const leftAfterReapBound = async (p: { pids: number[]; pgid: number }) => {
+      const until = Date.now() + REAP_BOUND_MS;
+      while (Date.now() < until && (p.pids.some(exists) || psRows().some((r) => r.pgid === p.pgid))) await new Promise((r) => setTimeout(r, 50));
+      return psRows().filter((r) => p.pids.includes(r.pid) || r.pgid === p.pgid);
+    };
     const cases: Array<[string, Parameters<typeof fake.setPlan>[0], string, number]> = [
       ["auth timeout", { auth: ["hang"], screen: usageScreen(), stubborn: true }, "auth_status_failed", 1],
       ["screen failure", { auth: [CLAUDE_AUTH], screen: "exit", stubborn: true }, "child_exited", 2],
@@ -310,10 +317,10 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
       expect(r.ok ? "ok" : r.reason, name).toBe(outcome);
       const procs = fake.procs();
       expect(procs, name).toHaveLength(starts);
-      const now = running();
+      // The reader's own child (each auth status) is reaped before the read returns: no wait allowed.
+      for (const p of procs.filter((x) => x.what === "auth")) expect(exists(p.pids[0]!), `${name}: auth status child ${p.pids[0]} unreaped`).toBe(false);
       for (const p of procs) {
-        const survivors = now.filter((r) => p.pids.includes(r.pid) || r.pgid === p.pgid);
-        expect(survivors, `${name}: ${p.what} pids ${p.pids.join(",")} group ${p.pgid}`).toEqual([]);
+        expect(await leftAfterReapBound(p), `${name}: ${p.what} pids ${p.pids.join(",")} group ${p.pgid}`).toEqual([]);
       }
     }
     expect(ownDirs()).toEqual(before);
