@@ -66,9 +66,11 @@ function runningDeps(port: number): StatusDeps {
 
 function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   lifecycleState?: string;
+  sessionStatus?: string;
   startupStatus?: string;
   activityState?: string;
   activityReason?: string;
+  identityReason?: string;
   hasAssignedWork?: boolean;
   assignedWorkCount?: number;
   pendingWorkCount?: number;
@@ -90,10 +92,11 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     hostSelfId: "host-84c37990",
     nodeKind: "agent" as const,
     runtime: "claude-code",
-    sessionStatus: "running",
+    sessionStatus: opts?.sessionStatus ?? "running",
     startupStatus: opts?.startupStatus ?? "ready",
     restoreOutcome: "n-a",
     lifecycleState: opts?.lifecycleState ?? "running",
+    identityVerdict: opts?.identityReason ? { reason: opts.identityReason } : null,
     tmuxAttachCommand: `tmux attach -t ${logicalId.replace(".", "-")}@${rigName}`,
     resumeCommand: `claude --resume /path/to/session/${logicalId}`,
     latestError: opts?.latestError ?? null,
@@ -145,6 +148,10 @@ const RIG_A_NODES = [
     inProgressWorkCount: 2,
     blockedWorkCount: 1,
     contextPercent: 92,
+  }),
+  makeFatNode("rig-a", "openrig-build", "ops.missing", {
+    lifecycleState: "detached", sessionStatus: "detached", activityState: "unknown",
+    identityReason: "session_missing",
   }),
 ];
 
@@ -357,6 +364,27 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(healthyNode.latestError).toBeUndefined();
   });
 
+  it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
+    const node = RIG_B_NODES[0]!;
+    const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError };
+    node.agentActivity = {
+      ...original.agentActivity, state: "unknown", reason: "usage_limit", evidenceSource: "runtime_hook",
+      rawEvent: "at_limit", stale, fallback: false,
+    } as typeof original.agentActivity;
+    if (failed) Object.assign(node, { startupStatus: "failed", latestError: "startup failure" });
+    try {
+      const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]).then(() => {}));
+      const activity = JSON.parse(json.logs.join(""))[0].agentActivity;
+      expect(activity.state).toBe("unknown");
+      expect.soft(activity.reason).toBe(stale ? undefined : "usage_limit");
+      const text = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms"]).then(() => {}));
+      expect(text.logs.join("\n").includes("usage_limit")).toBe(!stale && !failed);
+      if (failed) expect(text.logs.join("\n")).toContain("startup failure");
+    } finally {
+      Object.assign(node, original);
+    }
+  });
+
   // -- AC-5: --rig and --session filters compose --
   it("AC-5: --rig narrows to nodes of that rig", async () => {
     const { logs } = await captureLogs(async () => {
@@ -472,6 +500,35 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     });
   });
 
+  it.each([
+    { mode: "compact", args: [] },
+    { mode: "full", args: ["--full"] },
+    { mode: "fields", args: ["--fields", "logicalId,intentionallyStopped"] },
+  ])(
+    "preserves explicit stop intent in $mode node JSON",
+    async ({ args: extra }) => {
+      const original = NODES_BY_RIG["rig-c"];
+      NODES_BY_RIG["rig-c"] = [
+        { ...RIG_C_NODES[0], intentionallyStopped: true, sessionStatus: "exited" },
+        { ...RIG_C_NODES[1], intentionallyStopped: false },
+        RIG_C_NODES[2], // Older daemons omit the field.
+      ];
+      try {
+        const { logs, errLogs, exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-velocity", "--json", ...extra]);
+        });
+        expect(exitCode ?? 0, errLogs.join("\n")).toBe(0);
+        const output = JSON.parse(logs.join(""));
+        const entries = Array.isArray(output) ? output : output.entries;
+        expect(entries[0].intentionallyStopped).toBe(true);
+        expect(entries[1].intentionallyStopped).toBe(false);
+        expect(entries[2]).not.toHaveProperty("intentionallyStopped");
+      } finally {
+        NODES_BY_RIG["rig-c"] = original;
+      }
+    },
+  );
+
   // -- --verbose alias --
   it("--verbose is an alias for --full", async () => {
     const { logs: fullLogs } = await captureLogs(async () => {
@@ -539,6 +596,15 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // WORK begins after the fixed RIG/SESSION/LIFECYCLE/ACTIVITY columns.
     // It renders the total active assignment count (6), never the pending-only count (3).
     expect(assignedLine!.slice(22 + 38 + 11 + 14, 22 + 38 + 11 + 14 + 6).trim()).toBe("6");
+  });
+
+  it("human node views explain a missing tmux session and the recovery path", async () => {
+    for (const extra of [[], ["--full"]]) {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--session", "ops-missing@openrig-build", ...extra]);
+      });
+      expect(logs.join("\n")).toContain("tmux session missing; restore or relaunch the seat");
+    }
   });
 
   it("--full human table uses full-detail columns", async () => {

@@ -3,7 +3,7 @@
 // seat is permanently `already_bound`) is demonstrated inside the P5 pin against
 // the real NodeLauncher, so the committed RED models the runtime relation, not a
 // fixture of the author's imagination.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -12,6 +12,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { PsProjectionService } from "../src/domain/ps-projection.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 
 interface FakeTmux {
   adapter: TmuxAdapter;
@@ -237,6 +239,139 @@ describe("SeatLifecycleService", () => {
     const events = eventsOfType(db, "session.stopped");
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ nodeId: a.node.id, sessionName: a.sessionName, reason: "single-seat stop test", operator: "op@rig" });
+  });
+
+  describe("intentional stop in the rig lifecycle", () => {
+    function summary(rigId: string) {
+      return new PsProjectionService({ db }).getEntries().find((entry) => entry.rigId === rigId)!;
+    }
+
+    it("keeps a rig running after stopping an on-demand seat, with truthful process counts", async () => {
+      const stopped = seatFixture("on-demand", "dev.qa");
+      seatFixture("on-demand", "dev.impl");
+      const lineage = lineageSnapshot(db, stopped.node.id);
+
+      expect((await service.stopSeat({ seatRef: stopped.sessionName, reason: "wait for the next review" })).ok).toBe(true);
+
+      expect(summary(stopped.rig.id)).toMatchObject({
+        lifecycleState: "running", status: "partial", nodeCount: 2, runningCount: 1,
+      });
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)).toMatchObject({
+        sessionStatus: "exited", intentionallyStopped: true,
+      });
+      expect(lineageSnapshot(db, stopped.node.id)).toEqual(lineage);
+      // Reconstruct the reader after pruning audit events: intent is durable state.
+      db.prepare("DELETE FROM events").run();
+      expect(summary(stopped.rig.id).lifecycleState).toBe("running");
+    });
+
+    it("does not hide an exit between the live probe and the kill", async () => {
+      const stopped = seatFixture("stop-race", "dev.qa");
+      seatFixture("stop-race", "dev.impl");
+      vi.spyOn(tmux.adapter, "killSession").mockImplementationOnce(async () => {
+        tmux.setAlive(stopped.sessionName, false);
+        return { ok: false, code: "session_not_found", message: "session exited before kill" };
+      });
+
+      expect((await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" })).ok).toBe(true);
+      expect(tmux.adapter.killSession).toHaveBeenCalledWith(stopped.sessionName);
+      expect(summary(stopped.rig.id)).toMatchObject({
+        lifecycleState: "degraded", status: "partial", nodeCount: 2, runningCount: 1,
+      });
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)).toMatchObject({
+        sessionStatus: "exited", intentionallyStopped: false,
+      });
+      expect(sessionRegistry.getBindingForNode(stopped.node.id)).toBeNull();
+    });
+
+    it("does not leave a stopped seat's old startup prompt in the rig lifecycle", async () => {
+      const stopped = seatFixture("stop-prompt", "dev.qa");
+      seatFixture("stop-prompt", "dev.impl");
+      sessionRegistry.updateStartupStatus(stopped.session.id, "attention_required");
+      expect(summary(stopped.rig.id).lifecycleState).toBe("attention_required");
+
+      expect((await service.stopSeat({ seatRef: stopped.sessionName, reason: "do not run this seat now" })).ok).toBe(true);
+      expect(summary(stopped.rig.id).lifecycleState).toBe("running");
+    });
+
+    it("keeps the whole rig stopped when every seat was intentionally stopped", async () => {
+      const first = seatFixture("all-stopped", "dev.qa");
+      const second = seatFixture("all-stopped", "dev.impl");
+      await service.stopSeat({ seatRef: first.sessionName, reason: "pause review" });
+      await service.stopSeat({ seatRef: second.sessionName, reason: "pause implementation" });
+      expect(summary(first.rig.id)).toMatchObject({ lifecycleState: "stopped", status: "stopped", runningCount: 0 });
+    });
+
+    it("still reports a crashed sibling and a live sibling needing attention", async () => {
+      const stopped = seatFixture("mixed-stops", "dev.qa");
+      const crashed = seatFixture("mixed-stops", "dev.impl");
+      const live = seatFixture("mixed-stops", "dev.lead");
+      await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
+      sessionRegistry.markDetached(crashed.session.id);
+      sessionRegistry.clearBinding(crashed.node.id);
+
+      expect(summary(stopped.rig.id).lifecycleState).toBe("degraded");
+      sessionRegistry.updateStartupStatus(live.session.id, "attention_required");
+      expect(summary(stopped.rig.id).lifecycleState).toBe("attention_required");
+    });
+
+    it("does not carry stop intent into a new session on the same seat", async () => {
+      const stopped = seatFixture("new-occupant", "dev.qa");
+      seatFixture("new-occupant", "dev.impl");
+      await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
+      expect(summary(stopped.rig.id).lifecycleState).toBe("running");
+
+      const replacement = sessionRegistry.registerSession(stopped.node.id, stopped.sessionName);
+      sessionRegistry.updateStatus(replacement.id, "running");
+      sessionRegistry.markDetached(replacement.id);
+      expect(summary(stopped.rig.id).lifecycleState).toBe("degraded");
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)?.intentionallyStopped).not.toBe(true);
+    });
+
+    it("does not reuse stop intent for an ordinary exit after resuming the same session", async () => {
+      const stopped = seatFixture("same-session", "dev.qa");
+      seatFixture("same-session", "dev.impl");
+      await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
+      expect(summary(stopped.rig.id).lifecycleState).toBe("running");
+
+      sessionRegistry.updateStatus(stopped.session.id, "running");
+      sessionRegistry.updateStatus(stopped.session.id, "exited");
+      expect(summary(stopped.rig.id).lifecycleState).toBe("degraded");
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)?.intentionallyStopped).not.toBe(true);
+    });
+
+    it("does not exempt a stopped session after a replacement binding appears", async () => {
+      const stopped = seatFixture("rebound-seat", "dev.qa");
+      seatFixture("rebound-seat", "dev.impl");
+      await service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" });
+      sessionRegistry.updateBinding(stopped.node.id, {
+        attachmentType: "tmux", tmuxSession: stopped.sessionName, tmuxPane: "%replacement",
+      });
+
+      expect(summary(stopped.rig.id).lifecycleState).toBe("degraded");
+      expect(getNodeInventory(db, stopped.rig.id).find((entry) => entry.nodeId === stopped.node.id)?.intentionallyStopped).toBe(false);
+    });
+
+    it("does not turn cleaning an already-dead seat into an intentional stop", async () => {
+      const dead = seatFixture("dead-clean", "dev.qa");
+      seatFixture("dead-clean", "dev.impl");
+      tmux.setAlive(dead.sessionName, false);
+      expect((await service.cleanSeat({ seatRef: dead.sessionName, reason: "clean stale binding" })).ok).toBe(true);
+      expect(summary(dead.rig.id).lifecycleState).toBe("degraded");
+      expect(getNodeInventory(db, dead.rig.id).find((entry) => entry.nodeId === dead.node.id)?.intentionallyStopped).not.toBe(true);
+    });
+
+    it("does not persist stop intent when the audited stop transaction fails", async () => {
+      const stopped = seatFixture("failed-stop", "dev.qa");
+      seatFixture("failed-stop", "dev.impl");
+      vi.spyOn(eventBus, "persistWithinTransaction").mockImplementationOnce(() => { throw new Error("audit unavailable"); });
+
+      await expect(service.stopSeat({ seatRef: stopped.sessionName, reason: "pause review" })).rejects.toThrow("audit unavailable");
+      const entry = getNodeInventory(db, stopped.rig.id).find((node) => node.nodeId === stopped.node.id)!;
+      expect(entry.sessionStatus).toBe("running");
+      expect(entry.intentionallyStopped).not.toBe(true);
+      expect(sessionRegistry.getBindingForNode(stopped.node.id)).not.toBeNull();
+    });
   });
 
   it("P4: stop refuses a dead seat (session_not_live → guidance names clean), no mutation", async () => {

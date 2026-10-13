@@ -98,6 +98,12 @@ questions by clicking a button (`rig queue create --human-questions-file`). In S
 clicks arrive over the same socket, so no request URL is needed. An app created from an older
 manifest has Interactivity off: turn it on under **Interactivity & Shortcuts**, or the buttons
 will do nothing. A typed reply in the thread still answers the decision either way.
+Each click gets one short reply in the decision's thread: what was recorded, or, when OpenRig
+refuses the click or can't record it, why and what to do instead (the sender isn't registered, the
+decision is no longer waiting for answers or was sent to someone else, the button no longer
+matches its questions, or the message can't be matched to a decision). Slack's redelivery of a
+click OpenRig already handled gets no second reply. The reply is best effort: while Slack is
+rate-limiting OpenRig's posts it may not be posted, and the click is handled the same either way.
 
 In the decision's `humanAnswers`, clicked answers remain option-id strings. A whole typed reply
 is stored as `{kind: "typed-reply", text: "…", placement: "first-unanswered", unansweredCount: N}`
@@ -172,8 +178,9 @@ are not supported targets.
 
 ## Reconnect recovery and status
 
-The daemon scans available top-level messages in the configured channel after a
-Socket Mode connection and on its existing five-minute retry cadence. Recovered
+The daemon scans available top-level messages and replies broadcast with **Also send to
+channel** in the configured default channel after a Socket Mode connection and on its
+existing five-minute retry cadence. Broadcast replies keep their thread's routing. Recovered
 tasks say **Recovered after a gap** and show the original Slack posting time.
 They use the same sender admission, routing, attachment handling, fixed identity
 and dead-letter path as live messages. A durable dead letter is custody of a
@@ -198,8 +205,9 @@ When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.
 Missing bot credentials, history scope, membership, retention limits and API
 failures appear as recovery limitations. No additional scope is required to keep
-live delivery working. Thread-reply catch-up and dead-connection detection remain
-outside this recovery scope; global chronological order is not promised.
+live delivery working. Non-broadcast thread replies and other channels remain outside
+this recovery scope; global chronological order is not promised. This change does not
+replay intervals already checkpointed before broadcast-reply recovery was added.
 
 `rig slack status` retains local configuration checks and adds a bounded daemon
 snapshot: socket state/generation, last event, recovery interval/state/reason,

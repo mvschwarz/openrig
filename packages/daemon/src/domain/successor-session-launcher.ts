@@ -9,6 +9,7 @@ import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { terminatePaneInPlace, type PaneTerminationResult } from "./pane-cutover.js";
 
 /**
  * OPR.0.4.3.04 — the explicit successor-creation seam for the seat-handover
@@ -285,6 +286,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
     };
   }
 
@@ -419,29 +421,14 @@ export class SuccessorSessionLauncher {
   }
 
   /**
-   * Cutover: terminate the retiree occupant in its pane so the successor can respawn into it WHILE
-   * PRESERVING scrollback. `setRemainOnExit(true)` FIRST (so the pane survives dead, not destroyed, on
-   * exit); graceful SIGTERM ("exits in place" — a clean exit also protects the provider session state the
-   * successor's resume depends on); a bounded-timeout SIGKILL is the pinned DEGRADED fallback. Returns
-   * which path terminated the retiree, or a failure if it never became dead (then commit never runs).
+   * Cutover: terminate the retiree occupant in its pane so the successor can respawn into it while
+   * preserving scrollback (the shared in-place cutover, pane-cutover.ts). Returns which path terminated
+   * the retiree, or a failure if it never became dead (then commit never runs).
    * (Graceful signal = SIGTERM as the desk-provisional default under build-ahead; dev-planner ratifies
    * the exact graceful mechanism — SIGTERM vs a runtime-specific quit — at their resume.)
    */
-  private async terminateRetiree(
-    paneId: string,
-  ): Promise<{ ok: true; path: "graceful" | "forced" } | { ok: false; message: string }> {
-    const failures: string[] = [];
-    const remain = await this.tmuxAdapter.setRemainOnExit(paneId, true);
-    if (!remain.ok) failures.push(`remain-on-exit: ${remain.message}`);
-    const term = await this.tmuxAdapter.signalPaneProcess(paneId, "TERM");
-    if (!term.ok) failures.push(`TERM: ${term.message}`);
-    if (await this.waitPaneDead(paneId)) return { ok: true, path: "graceful" };
-    // Graceful window elapsed — force-kill (the pinned degraded path).
-    const kill = await this.tmuxAdapter.signalPaneProcess(paneId, "KILL");
-    if (!kill.ok) failures.push(`KILL: ${kill.message}`);
-    if (await this.waitPaneDead(paneId)) return { ok: true, path: "forced" };
-    const detail = failures.length > 0 ? ` Tmux failures: ${failures.join("; ")}.` : "";
-    return { ok: false, message: `Retiree in pane "${paneId}" did not exit after graceful TERM + forced KILL.${detail}` };
+  private async terminateRetiree(paneId: string): Promise<PaneTerminationResult> {
+    return terminatePaneInPlace(this.tmuxAdapter, paneId, { pollMs: this.exitPollMs, timeoutMs: this.exitTimeoutMs, sleep: this.sleep });
   }
 
   /** KI-14: is the respawned pane's foreground a bare shell? A non-shell here means the pane booted
@@ -457,16 +444,6 @@ export class SuccessorSessionLauncher {
     observed = await this.tmuxAdapter.getPaneCommand(paneId);
     if (observed && isShellForeground(observed, expectedShell)) return { ok: true };
     return { ok: false, observed };
-  }
-
-  /** Poll `isPaneDead` up to the bounded exit timeout (count-bounded so injected no-op sleeps stay fast). */
-  private async waitPaneDead(paneId: string): Promise<boolean> {
-    const maxPolls = Math.max(1, Math.ceil(this.exitTimeoutMs / this.exitPollMs));
-    for (let i = 0; i < maxPolls; i++) {
-      if (await this.tmuxAdapter.isPaneDead(paneId)) return true;
-      await this.sleep(this.exitPollMs);
-    }
-    return this.tmuxAdapter.isPaneDead(paneId);
   }
 
   /**

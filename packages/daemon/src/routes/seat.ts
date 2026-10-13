@@ -9,7 +9,7 @@ import { observeClaudePaneStartedAt } from "../domain/native-process-lineage.js"
 import { SeatStatusService } from "../domain/seat-status-service.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
-import { SeatLifecycleService, type SeatRefusal } from "../domain/seat-lifecycle-service.js";
+import { SeatLifecycleService } from "../domain/seat-lifecycle-service.js";
 import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolver.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import { existsSync } from "node:fs";
@@ -243,7 +243,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
   });
 }
 
-function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 500 | 502 {
+function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
@@ -277,6 +277,15 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
   return c.json(result, seatLifecycleStatus(result.code));
 });
 
+// A distinct route fails closed against older daemons that do not support previews.
+seatRoutes.post("/launch-plan/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).planFresh({
+    seatRef: c.req.param("seatRef")!, fresh: body["fresh"] === true, stop: body["stop"] === true,
+  });
+  return result.ok ? c.json(result) : c.json(result, seatLifecycleStatus(result.code));
+});
+
 seatRoutes.post("/launch/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const result = await seatLifecycleService(c).launchFresh({
@@ -288,6 +297,33 @@ seatRoutes.post("/launch/:seatRef", async (c) => {
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
+});
+
+// OPR.0.7.0.5 — in-place restart. A refusal (nothing was stopped) is an error status; once a restart ran,
+// the reply is 200 and its `outcome` says what happened, so a not-started/incomplete/unknown result is
+// reported, never retried by the transport.
+seatRoutes.post("/restart-plan/:seatRef", async (c) => {
+  const result = await seatLifecycleService(c).restartInPlace({ seatRef: c.req.param("seatRef")!, plan: true });
+  return result.ok ? c.json(result) : c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/restart/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).restartInPlace({
+    seatRef: c.req.param("seatRef")!,
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  return result.ok ? c.json(result) : c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/restart-verify/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).verifyRestartInPlace({
+    seatRef: c.req.param("seatRef")!,
+    expectAccount: typeof body["expectAccount"] === "string" ? body["expectAccount"] : null,
+  });
+  return result.ok ? c.json(result) : c.json(result, seatLifecycleStatus(result.code));
 });
 
 seatRoutes.post("/continue/:seatRef", async (c) => {

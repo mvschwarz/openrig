@@ -236,3 +236,147 @@ describe("rig seat clean", () => {
     expect(logs.join("\n")).toContain("launchable again");
   });
 });
+
+describe("fresh launch preview", () => {
+  it.each([true, false, null].flatMap(launchable => [false, true].map(json => ({ launchable, json }))))("renders a read-only plan and its exit status: %j", async ({ launchable, json }) => {
+    const data = { ok: true, planOnly: true, complete: launchable !== null, launchable,
+      sessionName: "dev@fixture", currentOccupant: launchable === null ? "unknown" : "present",
+      startup: { projectionCount: 2, fileCount: 1, actionCount: 0 },
+      stopRequired: launchable === null ? null : true, wouldStop: launchable === null ? null : launchable,
+      blockers: launchable === false ? [{ code: "session_live", message: "Needs --stop" }] : [], warnings: [],
+      siblings: [{ logicalId: "qa", effect: "unchanged" }] };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data }, calls);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan", ...(json ? ["--json"] : []),
+    ]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/launch-plan/dev%40fixture", body: { fresh: true, reason: undefined, stop: false, operator: undefined } }]);
+    expect(output.exitCode).toBeUndefined();
+    if (json) expect(JSON.parse(output.logs.join("\n"))).toEqual(data);
+    else {
+      expect(output.logs.join("\n")).toContain("no changes made");
+      expect(output.logs.join("\n")).toContain("launchable:");
+      expect(output.logs.join("\n")).toContain("2 projections, 1 files, 0 actions");
+      expect(output.logs.join("\n")).toContain("Sibling qa: unchanged");
+      expect(output.logs.join("\n")).not.toContain("Fresh occupant ready");
+    }
+    expect(deps.lifecycleDeps.writeFile).not.toHaveBeenCalled();
+    expect(deps.lifecycleDeps.spawn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on an older daemon without ever posting to the launch endpoint", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 404, data: { error: "Not Found" } }, calls);
+    const output = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan", "--stop", "--reason", "optional preview reason", "--json",
+    ]).then(() => undefined));
+    expect(output.exitCode).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].path).toBe("/api/seat/launch-plan/dev%40fixture");
+  });
+
+  it("requires a reason for execution before contacting the daemon", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--json",
+    ]).then(() => undefined));
+    expect(output.exitCode).toBe(1);
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ code: "missing_reason" });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
+  const report = (outcome?: string) => ({
+    ok: true, planOnly: outcome === undefined, ...(outcome ? { outcome } : {}), message: "Done.",
+    seat: { logicalId: "dev.codex", rigName: "r" }, sessionName: "dev-codex@r", pane: "%1", paneShape: "shell_backed",
+    conversationId: "tok", conversationProof: "argv", activity: { state: "working", detail: "Mid-turn." },
+    childProcesses: [{ pid: 9, name: "node" }], codexHome: "/h/.codex", billingRoute: { detail: "Unknown." },
+    account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: null },
+    peers: [{ logicalId: "dev.peer", effect: "Not restarted; account unverified." }], warnings: [],
+  });
+
+  it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const missing = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--json"]).then(() => undefined));
+    expect(missing.exitCode).toBe(1);
+    expect(JSON.parse(missing.logs.join("\n"))).toMatchObject({ code: "missing_reason" });
+    const both = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--plan", "--verify"]).then(() => undefined));
+    expect(both.exitCode).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("plan posts to restart-plan and prints activity, children and peers", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: report() }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--plan"]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/restart-plan/dev%40r", body: {} }]);
+    expect(output.exitCode).toBeUndefined();
+    const text = output.logs.join("\n");
+    expect(text).toContain("Activity: working. Mid-turn.");
+    expect(text).toContain("Child processes (stopped with Codex): node 9.");
+    expect(text).toContain("Peer dev.peer: Not restarted; account unverified.");
+  });
+
+  it.each([
+    ["restarted_account_unverified", false, undefined], ["incomplete", false, 1], ["not_started", true, 1], ["native_unknown", true, 1],
+  ] as const)("restart %s (json=%s) exits %s", async (outcome, json, exitCode) => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: report(outcome) }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "new account", "--operator", "op@r",
+      ...(json ? ["--json"] : [])]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/restart/dev%40r", body: { reason: "new account", operator: "op@r" } }]);
+    expect(output.exitCode).toBe(exitCode);
+    if (json) expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ outcome });
+    else expect(output.logs[0]).toContain(`${outcome}: dev.codex@r`);
+  });
+
+  it("prints a stale restart and the last recorded result", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const data = { ...report(), staleRestart: { startedAt: "2026-10-12T20:59:59.000Z", detail: "Started before this daemon did." },
+      lastRestart: { outcome: "native_unknown", finishedAt: "2026-10-12T21:00:00.000Z" } };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--plan"]).then(() => undefined));
+    expect(output.logs.join("\n")).toContain("Stale restart from 2026-10-12T20:59:59.000Z: Started before this daemon did.");
+    expect(output.logs.join("\n")).toContain("Last restart: native_unknown at 2026-10-12T21:00:00.000Z.");
+  });
+
+  it("prints the pane and process state observed after a failed stop", async () => {
+    const data = { ...report(), outcome: "incomplete", observedAfterStop: { pane: "gone", process: "exited", detail: "pane gone, original Codex exited" } };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x"]).then(() => undefined));
+    expect(output.logs.join("\n")).toContain("Observed after the stop: pane gone, original Codex exited.");
+  });
+
+  it("a timed-out restart says the outcome is unknown and how --plan reports it", async () => {
+    const { DaemonTimeoutError } = await import("../src/client.js");
+    const deps = makeDeps({ status: 200, data: {} }, []);
+    deps.clientFactory = () => ({ post: vi.fn(async () => { throw new DaemonTimeoutError("slow"); }) }) as never;
+    const output = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x", "--json"]).then(() => undefined));
+    expect(output.exitCode).toBe(1);
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ code: "restart_outcome_unknown",
+      guidance: expect.stringContaining("refuses with restart_in_progress while it is still running, then shows its result as lastRestart") });
+  });
+
+  it("verify posts the expected account and prints the outcome", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const data = { ok: true, outcome: "moved", message: "Moved.", toolTurn: { state: "observed", completed: 1, errors: 0 }, accountEvidence: { detail: "Matched." } };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, calls)).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--verify", "--expect-account", "me@example.com"]).then(() => undefined));
+    expect(calls).toEqual([{ path: "/api/seat/restart-verify/dev%40r", body: { expectAccount: "me@example.com" } }]);
+    expect(output.logs.join("\n")).toContain("moved: Moved.");
+    expect(output.exitCode).toBeUndefined();
+  });
+
+  it("verify exits 1 unless the outcome is moved, with and without --json", async () => {
+    const data = { ok: true, outcome: "restarted_account_unverified", message: "Account unverified.", toolTurn: { state: "observed", completed: 1, errors: 0 }, accountEvidence: { detail: "Not matched." } };
+    for (const json of [[], ["--json"]]) {
+      const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+        "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--verify", "--expect-account", "me@example.com", ...json]).then(() => undefined));
+      expect(output.exitCode).toBe(1);
+    }
+  });
+});

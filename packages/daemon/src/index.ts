@@ -6,6 +6,7 @@ import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
+import { removeParentSessionEnv } from "./domain/parent-session-env.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
@@ -425,5 +426,9 @@ const isDirectRun =
   import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isDirectRun) {
+  // Before anything spawns: the tmux server this daemon starts passes its
+  // environment to every seat, so drop the launching session's identity.
+  const removed = removeParentSessionEnv(process.env);
+  if (removed.length) console.log(`[openrig] Seats will not inherit the launching session's ${removed.join(", ")}.`);
   startServer();
 }

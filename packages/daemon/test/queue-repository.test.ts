@@ -122,6 +122,64 @@ describe("QueueRepository", () => {
     expect(captured.some((e) => e.type === "queue.claimed")).toBe(true);
   });
 
+  describe("lastNudgeResult presents a claim over an unconfirmed wake (#165)", () => {
+    const createRow = () => repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    const storedResult = (qitemId: string) =>
+      (db.prepare("SELECT last_nudge_result FROM queue_items WHERE qitem_id = ?").get(qitemId) as { last_nudge_result: string | null }).last_nudge_result;
+
+    it("wake then claim: an unconfirmed result reads claimed, definite ones are kept, the wire result is stored", async () => {
+      const results: Array<[string, string]> = [
+        ["delivered-ack-pending", "claimed"],
+        ["indeterminate:send timed out", "claimed"],
+        ["verified", "verified"],
+        ["failed:Session 'bob@rig' not found", "failed:Session 'bob@rig' not found"],
+        ["retained:typing_guard", "retained:typing_guard"],
+        ["gateway-owned:slack", "gateway-owned:slack"],
+      ];
+      for (const [recorded, expected] of results) {
+        const item = await createRow();
+        repo.recordNudgeAttempt(item.qitemId, recorded);
+        expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe(recorded);
+        const claimed = repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+        expect(claimed.lastNudgeResult).toBe(expected);
+        expect(claimed.lastNudgeWireResult).toBe(recorded);
+        expect(storedResult(item.qitemId)).toBe(recorded);
+      }
+      const unnudged = await createRow();
+      db.prepare("UPDATE queue_items SET last_nudge_result = NULL WHERE qitem_id = ?").run(unnudged.qitemId);
+      expect(repo.claim({ qitemId: unnudged.qitemId, destinationSession: "bob@rig" }).lastNudgeResult).toBeNull();
+    });
+
+    it("claim then wake: a wake recorded on a claimed row reads claimed", async () => {
+      const item = await createRow();
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      repo.recordNudgeAttempt(item.qitemId, "delivered-ack-pending");
+      const row = repo.getById(item.qitemId)!;
+      expect(row.lastNudgeResult).toBe("claimed");
+      expect(row.lastNudgeWireResult).toBe("delivered-ack-pending");
+    });
+
+    it("a re-wake after the claim is stored as sent and still presented against the claim", async () => {
+      const item = await createRow();
+      repo.recordNudgeAttempt(item.qitemId, "delivered-ack-pending");
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      repo.recordNudgeAttempt(item.qitemId, "indeterminate:pane render unconfirmed");
+      expect(storedResult(item.qitemId)).toBe("indeterminate:pane render unconfirmed");
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("claimed");
+      repo.recordNudgeAttempt(item.qitemId, "failed:Session 'bob@rig' not found");
+      expect(repo.getById(item.qitemId)!.lastNudgeResult).toBe("failed:Session 'bob@rig' not found");
+    });
+
+    it("unclaim returns the row to its wire result", async () => {
+      const item = await createRow();
+      repo.recordNudgeAttempt(item.qitemId, "delivered-ack-pending");
+      repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+      const unclaimed = repo.unclaim(item.qitemId, "bob@rig", "handing back");
+      expect(unclaimed.lastNudgeResult).toBe("delivered-ack-pending");
+      expect(unclaimed.lastNudgeWireResult).toBe("delivered-ack-pending");
+    });
+  });
+
   it("claim rejects mismatched destination", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",

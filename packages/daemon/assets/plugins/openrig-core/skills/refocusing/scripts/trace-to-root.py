@@ -351,7 +351,12 @@ def render_held_and_next(evidence):
             missions = ", ".join(row.get("missions") or [])
             output.append(f"- {row.get('qitemId') or 'a row'} — {row.get('summary') or 'no summary'}"
                           + (f" [mission: {missions}]" if missions else ""))
-    if evidence.get("heldAndNextTruncated"):
+    if "heldTruncated" in evidence or "nextTruncated" in evidence:
+        if evidence.get("heldTruncated"):
+            output.append("(the held list was cut; `rig queue list --owned --state blocked` has the rest)")
+        if evidence.get("nextTruncated"):
+            output.append("(the next list was cut; `rig queue list --owned --state pending` has the rest)")
+    elif evidence.get("heldAndNextTruncated"):
         output.append("(held and next lists were cut; `rig queue list` has the rest)")
     return "\n".join(output)
 

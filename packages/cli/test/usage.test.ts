@@ -3,7 +3,7 @@
 // precedent: values must ARRIVE at the route (option-parity doctrine), --json is
 // verbatim, and the human render keeps the honest-unknown rail explicit.
 // RED-first: written before commands/usage.ts existed.
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
 import http from "node:http";
 import { usageCommand } from "../src/commands/usage.js";
 import { DaemonClient } from "../src/client.js";
@@ -36,12 +36,13 @@ function runningDeps(port: number): StatusDeps {
     clientFactory: (baseUrl) => new DaemonClient(baseUrl),
   };
 }
-async function run(args: string[], deps: StatusDeps): Promise<{ logs: string[]; exitCode: number | undefined }> {
+async function run(args: string[], deps: StatusDeps): Promise<{ logs: string[]; errors: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];
+  const errors: string[] = [];
   const origLog = console.log, origErr = console.error, origExit = process.exitCode;
   process.exitCode = undefined;
   console.log = (...a: unknown[]) => logs.push(a.join(" "));
-  console.error = (...a: unknown[]) => logs.push(a.join(" "));
+  console.error = (...a: unknown[]) => errors.push(a.join(" "));
   try {
     await usageCommand(deps).parseAsync(["node", "rig", ...args]);
   } finally {
@@ -50,7 +51,7 @@ async function run(args: string[], deps: StatusDeps): Promise<{ logs: string[]; 
   }
   const exitCode = process.exitCode;
   process.exitCode = origExit;
-  return { logs, exitCode };
+  return { logs, errors, exitCode };
 }
 
 const TOP_PAYLOAD = {
@@ -68,11 +69,19 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
   let server: http.Server;
   let port: number;
   const seen: Array<{ url: string }> = [];
+  let failure: { status: number; data: Record<string, unknown> } | undefined;
+
+  beforeEach(() => { failure = undefined; });
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       seen.push({ url: req.url ?? "" });
       res.setHeader("content-type", "application/json");
+      if (failure) {
+        res.statusCode = failure.status;
+        res.end(JSON.stringify(failure.data));
+        return;
+      }
       if ((req.url ?? "").includes("/usage/top")) res.end(JSON.stringify(TOP_PAYLOAD));
       else res.end(JSON.stringify(SERIES_PAYLOAD));
     });
@@ -110,10 +119,32 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
 
   it("an unparseable --window is a teaching error, exit 1, no request fired", async () => {
     seen.length = 0;
-    const { logs, exitCode } = await run(["top", "--window", "soon"], runningDeps(port));
+    const { logs, errors, exitCode } = await run(["top", "--window", "soon"], runningDeps(port));
     expect(exitCode).toBe(1);
-    expect(logs.join("\n")).toMatch(/--window/);
-    expect(logs.join("\n")).toMatch(/1h|90m|2d/); // teaches the accepted forms
+    expect(logs).toEqual([]);
+    expect(errors.join("\n")).toMatch(/--window/);
+    expect(errors.join("\n")).toMatch(/1h|90m|2d/); // teaches the accepted forms
     expect(seen.length).toBe(0);
+  });
+
+  describe.each(["top", "series"])("usage %s HTTP errors", (command) => {
+    it.each([400, 503])("keeps an HTTP %s response intact on stdout with --json", async (status) => {
+      failure = { status, data: { error: "usage query failed", detail: "fixture error detail" } };
+      const { logs, errors, exitCode } = await run([command, "--json"], runningDeps(port));
+
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!)).toEqual(failure.data);
+      expect(errors).toEqual([]);
+      expect(exitCode).toBe(status >= 500 ? 2 : 1);
+    });
+
+    it.each([400, 503])("keeps HTTP %s errors on stderr in human output", async (status) => {
+      failure = { status, data: { error: "usage query failed" } };
+      const { logs, errors, exitCode } = await run([command], runningDeps(port));
+
+      expect(logs).toEqual([]);
+      expect(errors).toEqual([failure.data.error]);
+      expect(exitCode).toBe(status >= 500 ? 2 : 1);
+    });
   });
 });

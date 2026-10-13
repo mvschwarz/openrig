@@ -23,6 +23,11 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
 import { ViewProjector } from "../src/domain/view-projector.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import nodePath from "node:path";
+import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { CodexUsageWindows } from "../src/domain/provider/codex-usage-windows.js";
+import { codexUsageReader } from "../src/domain/provider/codex-usage-reader.js";
+import { ACCOUNT_ANSWER, makeFakeCodex, rateLimitsAnswer } from "./helpers/fake-codex-usage.js";
 import {
   LADDER_ATTEMPT_PREFIX,
   LADDER_RUNG_PREFIX,
@@ -418,6 +423,119 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(calls.some((c) => c.target === "worker@r")).toBe(false); // never escalated INTO the dead seat
   });
 
+  // #811 — queue.wake_human_rung: "explicit-only" keeps agent-to-agent escalations
+  // out of a person's channel; the default posts exactly as before.
+  async function exhaustToSelfSkip(dest = "worker@r"): Promise<QueueItem> {
+    const baton = await mkBaton(dest);
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 120);
+    for (let a = 1; a <= 3; a++) {
+      repo.transitionLog.append({
+        qitemId: baton.qitemId,
+        state: "pending",
+        actorSession: "wake-ladder@system",
+        transitionNote: `${LADDER_ATTEMPT_PREFIX} ${a}/3 outcome=failed:tmux session not found`,
+      });
+    }
+    ageMarkers(baton.qitemId, 30);
+    return baton;
+  }
+  function recordingEngine(posted: string[]) {
+    return {
+      dispatchEscalation: async (row: QueueItem) => {
+        posted.push(row.qitemId);
+        return { decision: "post", resolved: true, dispatched: true };
+      },
+    };
+  }
+
+  const founderRegistry = () => ({ ok: true as const, entities: [{
+    entityId: "human-founder", class: "human" as const, displayName: "Founder", address: "human-founder@external",
+    connectorBindings: [], prefs: { deliveryClass: "B" as const, availability: "available" as const },
+  }] });
+
+  it("HUMAN RUNG DEFAULT: with the engine wired and no setting, the operator rung posts the escalation as before", async () => {
+    const baton = await exhaustToSelfSkip();
+    const posted: string[] = [];
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted) });
+    expect(posted).toEqual([baton.qitemId]);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /dispatched-to-engine/.test(r))).toBe(true);
+  });
+
+  it("HUMAN RUNG EXPLICIT-ONLY: an agent-to-agent baton ends at the escalation row and nothing is posted to a person", async () => {
+    const baton = await exhaustToSelfSkip();
+    const posted: string[] = [];
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    expect(posted).toEqual([]);
+    const rungs = markersOf(baton.qitemId, LADDER_RUNG_PREFIX);
+    expect(rungs.some((r) => /operator floor=escalation view \(human rung explicit-only/.test(r))).toBe(true);
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1);
+    const escRows = await escalationRowsFor("worker@r");
+    expect(escRows).toHaveLength(1);
+    expect(escRows[0]!.state).toBe("pending");
+    ageMarkers(baton.qitemId, 30);
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    expect(posted).toEqual([]); // exhausted: never posts later either
+  });
+
+  it("HUMAN RUNG EXPLICIT-ONLY: after a failed orchestrator rung, the operator rung still posts nothing", async () => {
+    const baton = await exhaustToSelfSkip();
+    const posted: string[] = [];
+    outcomes["orch@r"] = "failed:tmux session not found";
+    await tick({ deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    ageMarkers(baton.qitemId, 30);
+    await tick({ deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    expect(posted).toEqual([]);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX)[1]).toMatch(/human rung explicit-only/);
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1);
+  });
+
+  it("HUMAN RUNG EXPLICIT-ONLY: a handoff to a registry alias of a person still posts to that person", async () => {
+    const baton = await exhaustToSelfSkip("human-founder@r");
+    const posted: string[] = [];
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    expect(posted).toEqual([baton.qitemId]);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /human rung explicit-only/.test(r))).toBe(false);
+  });
+
+  it("HUMAN RUNG EXPLICIT-ONLY: a handoff to a one-off @external address the registry does not know still posts", async () => {
+    const baton = await exhaustToSelfSkip("slack:U012AB3CD@external");
+    const posted: string[] = [];
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    expect(posted).toEqual([baton.qitemId]);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /human rung explicit-only/.test(r))).toBe(false);
+  });
+
+  it("HUMAN RUNG EXPLICIT-ONLY: a person-shaped address the registry does not know is agent-to-agent", async () => {
+    const baton = await exhaustToSelfSkip("human-stranger@r");
+    const posted: string[] = [];
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "explicit-only", loadHumanRegistry: founderRegistry });
+    expect(posted).toEqual([]);
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /human rung explicit-only/.test(r))).toBe(true);
+  });
+
+  it("HUMAN RUNG EXPLICIT-ONLY: an unreadable registry is not evidence of agent-to-agent work, so the rung posts", async () => {
+    const baton = await exhaustToSelfSkip();
+    const posted: string[] = [];
+    await tick({ resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "explicit-only",
+      loadHumanRegistry: () => ({ ok: false as const, error: "registry projection missing" }) });
+    expect(posted).toEqual([baton.qitemId]);
+  });
+
+  it("HUMAN RUNG SETTING: defaults to always; explicit-only resolves from the env; other values are refused", async () => {
+    const mod = await ladderMod();
+    const missingConfig = `/tmp/openrig-811-missing-${process.pid}-${Date.now()}.json`;
+    const store = new SettingsStore(missingConfig);
+    expect(store.resolveOne("queue.wake_human_rung" as never)).toMatchObject({ value: "always", source: "default" });
+    expect(mod.DEFAULT_WAKE_HUMAN_RUNG).toBe("always");
+    process.env.OPENRIG_QUEUE_WAKE_HUMAN_RUNG = "explicit-only";
+    try {
+      expect(store.resolveOne("queue.wake_human_rung" as never)).toMatchObject({ value: "explicit-only", source: "env" });
+      expect(() => store.set("queue.wake_human_rung" as never, "never")).toThrow(/always.*explicit-only/);
+    } finally {
+      delete process.env.OPENRIG_QUEUE_WAKE_HUMAN_RUNG;
+    }
+  });
+
   // ── G7: F5 — THE S02 SEAM HOLDS ──────────────────────────────────────────────
 
   it("SEAM (live ladder): a baton under a live ladder produces ZERO S02 undelivered findings", async () => {
@@ -575,6 +693,26 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     });
     expect(repo.list({ limit: 500 }).filter((row) => row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG))).toHaveLength(1);
     expect(calls).toEqual([]);
+  });
+
+  it("slice 01: a ladder tick over the real provider service with usage windows on starts no native read", async () => {
+    const fake = makeFakeCodex();
+    fake.setPlan({ mode: "ok", account: ACCOUNT_ANSWER, rateLimits: rateLimitsAnswer({ secondaryUsed: 100 }) });
+    const windows = new CodexUsageWindows({
+      read: codexUsageReader({ launchPath: `${fake.binDir}${nodePath.delimiter}${process.env.PATH}`, codexHome: fake.codexHome, deadlineMs: 5_000 }),
+    });
+    const svc = new ProviderServiceImpl({
+      db,
+      listRigs: () => [],
+      env: { CODEX_HOME: fake.codexHome } as NodeJS.ProcessEnv,
+      usageWindows: { enabled: () => true, windows },
+    });
+    let reads = 0;
+    const getProviderReadModel = () => { reads += 1; return svc.getReadModel(); };
+    await tick({ now: new Date(), usageLimitJitterSeconds: 0, getProviderReadModel });
+    await tick({ now: new Date(), usageLimitJitterSeconds: 0, getProviderReadModel });
+    expect(reads).toBe(2);
+    expect(fake.spawns()).toBe(0);
   });
 
   it("A FAILED EXPIRY WAKE RESUMES the shipped ladder after the provider reset", async () => {

@@ -123,7 +123,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
   const core = isCoreRole(data.role);
   const isInfra = data.nodeKind === "infrastructure";
   const { state: activityState, source: activitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive, data.identityVerdict);
-  const activityLabel = getActivityLabel(activityState);
+  const activityLabel = getActivityLabel(activityState, data.agentActivity);
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityStale = isActivityStale(data.agentActivity);

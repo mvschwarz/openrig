@@ -182,6 +182,10 @@ export const SETTINGS_VALID_KEYS = [
   // twins). Consumed by NodeLauncher at session-create only; a flip is
   // future-launches-only and never retroactive (BR-1 never-retro).
   "terminal.status_bar",
+  // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
+  "output.compact",
+  // Slice 01 (OPR.0.7.0.1) — Codex usage windows in the provider view; daemon-read, twin of the CLI key.
+  "provider.usage_windows",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
   // arch-safe defaults BAKED in getDefaultValue, bounded validation in
   // KEY_CONSTRAINTS). CLI-settable twin: lockstep with cli/src/config-store.ts
@@ -208,6 +212,10 @@ export const SETTINGS_VALID_KEYS = [
   "queue.wake_retry_cap",
   "queue.wake_unconfirmed_window_minutes",
   "queue.wake_swap_grace_seconds",
+  // #811 — whether the operator rung posts agent-to-agent escalations to a person.
+  // Under explicit-only, an ask that needs a person must be addressed to the person;
+  // without a human registry, explicit-only posts everything, as always does.
+  "queue.wake_human_rung",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -281,6 +289,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
+  "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -295,6 +305,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "queue.wake_retry_interval_seconds": { primary: "OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS" },
   "queue.wake_retry_cap": { primary: "OPENRIG_QUEUE_WAKE_RETRY_CAP" },
   "queue.wake_unconfirmed_window_minutes": { primary: "OPENRIG_QUEUE_WAKE_UNCONFIRMED_WINDOW_MINUTES" },
+  "queue.wake_human_rung": { primary: "OPENRIG_QUEUE_WAKE_HUMAN_RUNG" },
   "queue.wake_swap_grace_seconds": { primary: "OPENRIG_QUEUE_WAKE_SWAP_GRACE_SECONDS" },
 };
 
@@ -358,6 +369,8 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "output.compact": ["output", "compact"],
+  "provider.usage_windows": ["provider", "usageWindows"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -370,6 +383,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "queue.wake_retry_interval_seconds": ["queue", "wakeRetryIntervalSeconds"],
   "queue.wake_retry_cap": ["queue", "wakeRetryCap"],
   "queue.wake_unconfirmed_window_minutes": ["queue", "wakeUnconfirmedWindowMinutes"],
+  "queue.wake_human_rung": ["queue", "wakeHumanRung"],
   "queue.wake_swap_grace_seconds": ["queue", "wakeSwapGraceSeconds"],
 };
 
@@ -630,6 +644,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // (herdr's pane label already carries identity; the inner tmux status
     // is redundant chrome). Operator flip is future-launches-only.
     case "terminal.status_bar": return false;
+    case "output.compact": return false;
+    case "provider.usage_windows": return false;
     // OPR.0.4.6.FS-1 W2 — retention defaults (arch D3 safe values: archive
     // terminal+aged transitions >30d; prune watchdog_history >14d keep-50/job;
     // 500 rows/qitems per bounded batch; enabled by default).
@@ -646,6 +662,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "queue.wake_retry_cap": return 3;
     case "queue.wake_unconfirmed_window_minutes": return 30;
     case "queue.wake_swap_grace_seconds": return 180;
+    case "queue.wake_human_rung": return "always";
     default: return "";
   }
 }
@@ -677,6 +694,12 @@ function positiveIntegerConstraint(key: string) {
   };
 }
 
+function wakeHumanRungConstraint(raw: string): void {
+  if (raw !== "always" && raw !== "explicit-only") {
+    throw new Error(`Invalid value for queue.wake_human_rung: must be "always" or "explicit-only", got "${raw}"`);
+  }
+}
+
 function percentageConstraint(key: string) {
   return (raw: string, coerced: string | number | boolean): void => {
     if (!/^\d+$/.test((raw ?? "").trim())
@@ -703,6 +726,27 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "runtime.readiness_timeout_seconds": (raw, coerced) => {
     if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
+    }
+  },
+  // Constraint gap fix — lockstep with cli/src/config-store.ts KEY_CONSTRAINTS.
+  // daemon.port had no entry, so `rig config set daemon.port 99999` stored
+  // 99999 and the next daemon start died with a raw ERR_SOCKET_BAD_PORT
+  // from serve(). The check range-validates the value the runtime actually
+  // consumes — the same parseInt the boot path runs on OPENRIG_PORT
+  // (startServer) — rather than the raw input format, so everything that
+  // resolves today keeps resolving: 7433abc, 7433.5 and +7433 resolve to
+  // 7433, 1e4 to 1, 0x1D11 to 0, and a quoted in-range port in config.json
+  // ("7434") stays "7434". Only ports that cannot be bound are refused.
+  // 0 stays legal: checkPort treats port <= 0 as "always available" and the
+  // repo's own preflight tests write daemon.port = 0 on purpose. The
+  // ui.preview.* keys are deliberately unconstrained: their consumers
+  // floor/clamp out-of-range values today (refresh 0 disables polling on
+  // purpose; max_pins floors to 1; the daemon preview route falls back to
+  // 50 lines), so tightening them here would refuse input that works.
+  "daemon.port": (raw, coerced) => {
+    const port = parseInt(String(coerced), 10);
+    if (Number.isNaN(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid value for daemon.port: must be an integer in [0, 65535], got "${raw}"`);
     }
   },
   "ui.timezone": (_raw, value) => {
@@ -805,6 +849,7 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "queue.wake_retry_cap": positiveIntegerConstraint("queue.wake_retry_cap"),
   "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
   "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
+  "queue.wake_human_rung": wakeHumanRungConstraint,
 };
 
 function validateKeyConstraints(key: SettingsValidKey, raw: string, coerced: string | number | boolean): void {

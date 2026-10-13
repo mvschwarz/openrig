@@ -38,6 +38,7 @@ interface SeatStatusResponse {
     };
   };
   session_status: string | null;
+  session_reason?: string | null;
   startup_status: string | null;
   occupant_lifecycle: string;
   continuity_outcome: string | null;
@@ -149,6 +150,10 @@ function display(value: string | null | undefined, empty = "none"): string {
   return value ?? empty;
 }
 
+function sessionReason(reason: string | null | undefined): string | null {
+  return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
+}
+
 function printHuman(status: SeatStatusResponse): void {
   console.log(`Seat ${status.seat_ref}`);
   console.log(`Rig: ${status.rig_name}`);
@@ -160,6 +165,8 @@ function printHuman(status: SeatStatusResponse): void {
     console.log("Automatic input pauses while on, including writing lifecycle. Disabling does not replay held messages.");
   }
   console.log(`Session: ${display(status.session_status, "unknown")}`);
+  const reason = sessionReason(status.session_reason);
+  if (reason) console.log(`Reason: ${reason}`);
   if (status.permissions) {
     const p = status.permissions;
     const formatSource = (source: string): string => {
@@ -499,7 +506,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "continue" | "stop" | "clean",
+    path: "set-model" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -512,7 +519,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch" || path === "continue"
+      res = path === "launch" || path === "continue" || path === "restart"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
@@ -520,25 +527,38 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
-      const error = {
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue" && path !== "restart") || !(err instanceof DaemonTimeoutError)) throw err;
+      const error = path === "restart" ? {
         ok: false as const,
-        code: `${path}_outcome_unknown`,
+        code: "restart_outcome_unknown",
         status: "unknown",
-        message: `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
-        guidance: `Check the outcome before retrying: rig seat status ${seat}`,
+        message: "The CLI timed out waiting for the daemon; the in-place restart may still be in progress.",
+        guidance: `Check the outcome before running it again: rig seat restart ${seat} --keep-conversation --plan refuses with restart_in_progress while it is still running, then shows its result as lastRestart.`,
+      } : {
+        ok: false as const,
+        code: path === "launch-plan" ? "launch_plan_timeout" : `${path}_outcome_unknown`,
+        status: "unknown",
+        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
+        guidance: path === "launch-plan" ? "Retry the preview when the daemon responds." : `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
       else printSeatError(error, error.message);
       process.exitCode = 1;
       return;
     }
+    // A restart that ran answers 200 with its outcome; only a verified replacement exits 0. Likewise
+    // --verify answers 200 with its outcome, and only `moved` exits 0.
+    const restartFailed = res.status < 400 && (
+      (path === "restart" && res.data["outcome"] !== "restarted_account_unverified")
+      || (path === "restart-verify" && res.data["outcome"] !== "moved"));
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+      else if (restartFailed) process.exitCode = 1;
       return;
     }
-    if (path === "launch" || path === "continue") {
+    if (restartFailed) process.exitCode = 1;
+    if (path === "launch" || path === "launch-plan" || path === "continue" || path === "restart" || path === "restart-plan") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
@@ -602,7 +622,8 @@ resume/successor launch reads it at call time. Examples:
     .command("launch")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--fresh", "Explicitly create a blank native occupant; no continuity source is used")
-    .requiredOption("--reason <text>", "Audit reason recorded on the seat.fresh_launched event")
+    .option("--reason <text>", "Audit reason (required when executing, optional with --plan)")
+    .option("--plan", "Preview this fresh launch without changing any seat or starting tmux")
     .option("--stop", "Stop the current live managed occupant before launching fresh")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--json", "JSON output for agents")
@@ -610,22 +631,111 @@ resume/successor launch reads it at call time. Examples:
     .addHelpText("after", `
 No resume, fork, rebuild, snapshot, checkpoint, or restore packet is used.
 A live managed seat requires --stop; adopted and unmanaged sessions are refused.
+Sibling seats stay attached and untouched. The runtime adapter composes a new
+command from current settings; launch does not replay a stored wrapper command.
+The seat launch environment and managed executable selection still apply.
+Preview is a read-only snapshot, not a reservation or a native readiness check.
+A successful preview exits 0; inspect launchable to decide whether launch is allowed.
+Unreadable tmux produces complete:false and unknown eligibility unless already blocked.
 Examples:
+  rig seat launch dev.impl --fresh --plan --json
   rig seat launch dev-impl@my-rig --fresh --reason "deliberate blank restart"
   rig seat launch dev.impl --fresh --stop --reason "replace managed occupant" --json`)
-    .action(async (seat: string, opts: { fresh: boolean; reason: string; stop?: boolean; operator?: string; json?: boolean }) => {
-      await runLifecycleVerb("launch", seat, {
+    .action(async (seat: string, opts: { fresh: boolean; reason?: string; plan?: boolean; stop?: boolean; operator?: string; json?: boolean }) => {
+      if (!opts.plan && !opts.reason?.trim()) {
+        const error = { ok: false, code: "missing_reason", message: "Execution requires --reason; use --plan for a read-only preview." };
+        if (opts.json) console.log(JSON.stringify(error, null, 2));
+        else console.error(error.message);
+        process.exitCode = 1;
+        return;
+      }
+      await runLifecycleVerb(opts.plan ? "launch-plan" : "launch", seat, {
         fresh: opts.fresh === true,
         reason: opts.reason,
         stop: opts.stop === true,
         operator: opts.operator,
       }, opts, (data) => {
+        if (opts.plan) {
+          console.log(`Fresh launch preview: ${String(data["sessionName"])} (no changes made).`);
+          console.log(`Current occupant: ${String(data["currentOccupant"])}.`);
+          console.log(`Complete: ${String(data["complete"])}; launchable: ${data["launchable"] == null ? "unknown" : String(data["launchable"])}; stop required: ${data["stopRequired"] == null ? "unknown" : String(data["stopRequired"])}; would stop: ${data["wouldStop"] == null ? "unknown" : String(data["wouldStop"])}.`);
+          for (const blocker of data["blockers"] as Array<{ message: string; guidance?: string }>) {
+            console.log(`Blocked: ${blocker.message}`);
+            if (blocker.guidance) console.log(blocker.guidance);
+          }
+          const startup = data["startup"] as { projectionCount: number; fileCount: number; actionCount: number };
+          console.log(`Startup: ${startup.projectionCount} projections, ${startup.fileCount} files, ${startup.actionCount} actions.`);
+          for (const sibling of data["siblings"] as Array<{ logicalId: string }>) console.log(`Sibling ${sibling.logicalId}: unchanged.`);
+          return;
+        }
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const superseded = data["supersededSessionIds"] as string[] | undefined;
         console.log(`Fresh occupant ready: ${s?.logicalId}@${s?.rigName} (${String(data["sessionName"])}).`);
         console.log(`Generation: ${String(data["generation"])}; model: ${String(data["model"] ?? "none")}.`);
         console.log(`Startup policy: ${String(data["startupPolicyHash"])}; superseded sessions: ${superseded?.length ?? 0}.`);
         console.log("No continuity source was used; siblings and durable work were preserved.");
+      });
+    });
+
+  cmd
+    .command("restart")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--keep-conversation", "Resume the seat's own conversation in its own pane; never a fresh launch or fork")
+    .option("--reason <text>", "Audit reason (required when executing)")
+    .option("--plan", "Run every check and show what a restart would keep; nothing is stopped or restarted")
+    .option("--verify", "After a real tool-using turn, check whether the restarted seat can be reported as moved")
+    .option("--expect-account <text>", "With --verify: the account Codex's /status Account line must name")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Restart one Codex seat in place so it reads its Codex home's current account")
+    .addHelpText("after", `
+The seat's own conversation resumes in its own pane with the settings the running
+Codex uses now (model, effort, profile, permissions, cwd, Codex home). A pending
+set-model or set-effort is not applied: a difference refuses as settings_drift.
+This never switches an account (use rig auth switch first), never reads credentials,
+never launches fresh, forks or retries. Peers sharing the Codex home are reported,
+not restarted.
+Mid-turn activity and child processes are shown in --plan and the result; deciding
+whether to interrupt them is the operator's call.
+--plan starts no Codex process: the network override, --no-daemon and add-dirs are
+taken from the running Codex's own command line, not probed again. Building the
+command can create OpenRig's own seat-bin link, as every managed launch does.
+A restart that started under an earlier daemon run and never recorded a result is
+shown as staleRestart; it does not block a new restart.
+Results: restarted_account_unverified, not_started (the original is still running),
+incomplete (it exited; the resume was not proven; the pane may be held for recovery),
+native_unknown (what happened could not be observed). Only --verify reports moved,
+and only with a completed tool turn since the restart AND --expect-account matched.
+Examples:
+  rig seat restart dev.impl --keep-conversation --plan --json
+  rig seat restart dev-impl@my-rig --keep-conversation --reason "take the home's new account"
+  rig seat restart dev.impl --keep-conversation --verify --expect-account me@example.com`)
+    .action(async (seat: string, opts: { keepConversation: boolean; reason?: string; plan?: boolean; verify?: boolean; expectAccount?: string; operator?: string; json?: boolean }) => {
+      if (opts.plan && opts.verify) {
+        const error = { ok: false, code: "invalid_options", message: "--plan and --verify are separate steps; pass one." };
+        if (opts.json) console.log(JSON.stringify(error, null, 2));
+        else console.error(error.message);
+        process.exitCode = 1;
+        return;
+      }
+      if (!opts.plan && !opts.verify && !opts.reason?.trim()) {
+        const error = { ok: false, code: "missing_reason", message: "A restart requires --reason; use --plan for a read-only preview." };
+        if (opts.json) console.log(JSON.stringify(error, null, 2));
+        else console.error(error.message);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.verify) {
+        await runLifecycleVerb("restart-verify", seat, { expectAccount: opts.expectAccount }, opts, (data) => {
+          console.log(`${String(data["outcome"])}: ${String(data["message"])}`);
+          const turn = data["toolTurn"] as { completed: number; errors: number; state: string };
+          console.log(`Tool turn since the restart: ${turn.state}, ${turn.completed} completed, ${turn.errors} errors.`);
+          console.log(`Account evidence: ${(data["accountEvidence"] as { detail: string }).detail}`);
+        });
+        return;
+      }
+      await runLifecycleVerb(opts.plan ? "restart-plan" : "restart", seat, opts.plan ? {} : { reason: opts.reason, operator: opts.operator }, opts, (data) => {
+        printRestartReport(data);
       });
     });
 
@@ -653,7 +763,10 @@ Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
 session is refused (use rig unclaim). Stopping ends that agent's session and any
 work in progress: check it first (rig capture <seat>) and stop only a seat you
 own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
-a fresh occupant there; it does not resume the stopped conversation. Examples:
+a fresh occupant there; it does not resume the stopped conversation.
+An intentionally stopped seat does not degrade an otherwise running rig.
+Running counts still exclude the stopped seat; stopping every seat leaves the
+rig stopped. Examples:
   rig seat stop dev-impl@my-rig --reason "wave boundary retirement"
   rig seat stop dev.impl --reason "stuck occupant" --json`)
     .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
@@ -857,4 +970,32 @@ Examples:
   rig handover spec-writer@openrig-pm --source rebuild --reason degraded-incumbent
   rig handover spec-writer@openrig-pm --source discovered:01H... --reason mvp-proof --json`)
     .action((seat: string, opts: HandoverActionOpts) => runSeatHandover(seat, opts, getDeps()));
+}
+
+function printRestartReport(data: Record<string, unknown>): void {
+  const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+  console.log(`${data["outcome"] ? String(data["outcome"]) : "preview"}: ${seat?.logicalId}@${seat?.rigName} (${String(data["sessionName"])}, pane ${String(data["pane"])}, ${String(data["paneShape"])}).`);
+  console.log(String(data["message"]));
+  console.log(`Conversation: ${String(data["conversationId"])} (proved by ${String(data["conversationProof"])}).`);
+  const activity = data["activity"] as { state: string; detail: string };
+  console.log(`Activity: ${activity.state}. ${activity.detail}`);
+  const children = data["childProcesses"] as Array<{ pid: number; name: string }>;
+  if (children.length > 0) console.log(`Child processes (stopped with Codex): ${children.map((child) => `${child.name} ${child.pid}`).join(", ")}.`);
+  console.log(`Codex home: ${String(data["codexHome"])}.`);
+  console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
+  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };
+  console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
+  if (account.startupGate) console.log(`Codex startup gate: ${account.startupGate}`);
+  const stale = data["staleRestart"] as { startedAt: string; detail: string } | undefined;
+  if (stale) console.log(`Stale restart from ${stale.startedAt}: ${stale.detail}`);
+  const last = data["lastRestart"] as { outcome: string; finishedAt: string } | undefined;
+  if (last) console.log(`Last restart: ${last.outcome} at ${last.finishedAt}.`);
+  const held = data["paneHeld"] as { detail: string } | undefined;
+  if (held) console.log(`Pane held (remain-on-exit on): ${held.detail}`);
+  const seen = data["observedAfterStop"] as { detail: string } | undefined;
+  if (seen) console.log(`Observed after the stop: ${seen.detail}.`);
+  if (data["remainingStep"]) console.log(`Remaining step: ${String(data["remainingStep"])}`);
+  if (data["recoveryCommand"]) console.log(`Recovery command: ${String(data["recoveryCommand"])}`);
+  for (const item of (data["couldNotSee"] as string[] | undefined) ?? []) console.log(`Could not see: ${item}`);
+  for (const peer of data["peers"] as Array<{ logicalId: string; effect: string }>) console.log(`Peer ${peer.logicalId}: ${peer.effect}`);
 }

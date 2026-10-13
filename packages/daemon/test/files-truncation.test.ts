@@ -13,6 +13,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FILE_READ_TRUNCATION_BYTES, filesRoutes } from "../src/routes/files.js";
+import { readAllowedFile } from "../src/local-reading-surface.js";
 import type { AllowlistRoot } from "../src/domain/files/path-safety.js";
 
 function buildApp(allowlist: AllowlistRoot[]): Hono {
@@ -81,6 +82,37 @@ describe("Operator Surface Reconciliation v0 — /api/files/read truncation", ()
     // operator knows to use an external editor.)
     const fullHash = createHash("sha256").update(content).digest("hex");
     expect(body.contentHash).toBe(fullHash);
+  });
+
+  it.each([["é", 1], ["界", 1], ["界", 2], ["😀", 1], ["😀", 2], ["😀", 3]] as const)(
+    "keeps %s intact at a cap cutting after %s bytes in HTTP and the local reader", async (character, partialBytes) => {
+      const prefix = "a".repeat(FILE_READ_TRUNCATION_BYTES - partialBytes);
+      const content = prefix + character + " tail";
+      writeFileSync(join(tempDir, "ws", "unicode.md"), content);
+      const response = await app.request("/api/files/read?root=ws&path=unicode.md");
+      expect(response.status).toBe(200);
+      const http = await response.json();
+      const local = readAllowedFile(allowlist, "ws", "unicode.md");
+      for (const result of [http, local]) {
+        expect(Buffer.byteLength(result.content)).toBe(Buffer.byteLength(prefix));
+        expect(createHash("sha256").update(result.content).digest("hex")).toBe(createHash("sha256").update(prefix).digest("hex"));
+        expect(result.binary).toBe(false);
+        expect(result.truncated).toBe(true);
+        expect(result.truncatedAtBytes).toBe(Buffer.byteLength(prefix));
+        expect(result.totalBytes).toBe(Buffer.byteLength(content));
+        expect(result.contentHash).toBe(createHash("sha256").update(content).digest("hex"));
+        expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(FILE_READ_TRUNCATION_BYTES);
+      }
+    });
+
+  it("keeps the byte cap and binary classification for an invalid UTF-8 file", () => {
+    const bytes = Buffer.alloc(FILE_READ_TRUNCATION_BYTES + 2, 0x61);
+    bytes[FILE_READ_TRUNCATION_BYTES - 1] = 0xff;
+    writeFileSync(join(tempDir, "ws", "binary.dat"), bytes);
+    const result = readAllowedFile(allowlist, "ws", "binary.dat");
+    expect(result.binary).toBe(true);
+    expect(result.truncatedAtBytes).toBe(FILE_READ_TRUNCATION_BYTES);
+    expect(result.contentHash).toBe(createHash("sha256").update(bytes).digest("hex"));
   });
 
   it("FILE_READ_TRUNCATION_BYTES is exactly 1 MB per PRD § Item 5", () => {

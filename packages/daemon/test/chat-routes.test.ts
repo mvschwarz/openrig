@@ -12,6 +12,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { ChatRepository } from "../src/domain/chat-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { chatRoutes } from "../src/routes/chat.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function setupDb(): Database.Database {
   const db = createDb();
@@ -51,6 +52,77 @@ describe("chat routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each([
+    ["send", null], ["send", []], ["send", "text"], ["send", { body: {} }], ["send", { body: true }],
+    ["send", { body: "message", sender: 42 }],
+    ["topic", null], ["topic", []], ["topic", { topic: {} }], ["topic", { topic: true }],
+    ["topic", { topic: "discussion", body: {} }], ["topic", { topic: "discussion", body: true }],
+    ["topic", { topic: "discussion", sender: 42 }],
+  ])("rejects malformed %s payload before persistence or emission: %j", async (route, payload) => {
+    const emit = vi.spyOn(eventBus, "emit");
+    const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(400);
+    expect(chatRepo.history(rigId)).toEqual([]);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "", null])("keeps optional empty topic body and transport sender precedence: %s", async body => {
+    const response = await app.request(`/api/rigs/${rigId}/chat/topic`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify({ topic: "discussion", sender: "claimed@rig", body }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ sender: "wire@rig", topic: "discussion", body: "" });
+  });
+
+  it.each([
+    ["send", { body: "message", sender: null }, { body: "message" }],
+    ["topic", { topic: "discussion", sender: null }, { topic: "discussion", body: "" }],
+    ["send", { body: 42 }, { body: "42.0" }],
+    ["topic", { topic: 42 }, { topic: "42.0", body: "" }],
+    ["topic", { topic: "discussion", body: 42 }, { topic: "discussion", body: "42.0" }],
+    ["send", { body: ["message"] }, { body: "message" }],
+    ["topic", { topic: ["discussion"], body: "message" }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: "discussion", body: ["message"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: [], body: ["message", "discussion"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: {}, body: ["message", "discussion"] }, { topic: "discussion", body: "message" }],
+    ["topic", { topic: ["message", "discussion"], body: {} }, { topic: "discussion", body: "message" }],
+  ])("preserves SQLite-bound %s values and transport identity: %j", async (route, payload, expected) => {
+    const emitted: unknown[] = [];
+    const unsubscribe = eventBus.subscribe(event => emitted.push(event));
+    try {
+      const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+        body: JSON.stringify(payload),
+      });
+      expect(response.status).toBe(201);
+      const returned = await response.json();
+      expect(returned).toMatchObject({ ...expected, sender: "wire@rig" });
+      const stored = chatRepo.history(rigId);
+      expect(stored).toEqual([expect.objectContaining({ ...expected, sender: "wire@rig" })]);
+      expect(returned).toEqual(stored[0]);
+      expect(emitted).toEqual([expect.objectContaining({
+        type: "chat.message", rigId, messageId: stored[0]!.id,
+        sender: stored[0]!.sender, kind: stored[0]!.kind, body: stored[0]!.body,
+        ...(route === "topic" ? { topic: stored[0]!.topic } : {}),
+      })]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each([["send", { body: 0 }], ["topic", { topic: 0 }]])("keeps required zero %s fields missing", async (route, payload) => {
+    const response = await app.request(`/api/rigs/${rigId}/chat/${route}`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "wire@rig" },
+      body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(400);
+    expect(chatRepo.history(rigId)).toEqual([]);
   });
 
   it.each([false, true])("watch drains buffered messages before switching to live delivery (late arrival: %s)", async lateArrival => {
@@ -183,6 +255,20 @@ describe("chat routes", () => {
     expect(data).toHaveLength(2);
     expect(data[0].body).toBe("msg1");
     expect(data[1].body).toBe("msg2");
+  });
+
+  it("GET /history refuses only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["one", "two", "three"]) chatRepo.send(rigId, "alice", body);
+    await expectLimitParsing(app, `/api/rigs/${rigId}/chat/history`);
+  });
+
+  it("GET /history?topic= keeps answering [] for a topic that hasn't started, whatever the limit (#586)", async () => {
+    chatRepo.send(rigId, "alice", "no topic yet");
+    const res = await app.request(`/api/rigs/${rigId}/chat/history?topic=later&limit=abc`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+    chatRepo.sendTopic(rigId, "alice", "later");
+    expect((await app.request(`/api/rigs/${rigId}/chat/history?topic=later&limit=abc`)).status).toBe(400);
   });
 
   it("GET /history?topic=X filters", async () => {

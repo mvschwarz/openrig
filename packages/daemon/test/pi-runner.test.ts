@@ -425,6 +425,34 @@ describe("RunnerCore terminal assistant failures", () => {
     expect(errors(lines)).toEqual(["[pi-runner] ERROR request failed"]);
   });
 
+  it("extracts fallback error detail from message.error or event.error when errorMessage is missing", () => {
+    const { core, lines } = readyCore();
+    // Fallback to message.error
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", error: "backend stream broke" },
+    }));
+    // Fallback to event.error
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      error: "upstream service unavailable",
+      message: { role: "assistant", stopReason: "error" },
+    }));
+    // auto_retry_end fallback to event.error
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "auto_retry_end",
+      success: false,
+      error: "retry limit reached",
+    }));
+    expect(errors(lines)).toEqual([
+      "[pi-runner] ERROR backend stream broke",
+      "[pi-runner] ERROR upstream service unavailable",
+      "[pi-runner] ERROR retry limit reached",
+    ]);
+  });
+
   it("ignores malformed message envelopes and does not dump thinking or tool arguments", () => {
     const { core, lines, appends } = readyCore();
     for (const message of [undefined, null, 7, [], { role: "user", stopReason: "error" }]) {

@@ -153,6 +153,10 @@ describe("SettingsStore (User Settings v0)", () => {
       "snapshots.periodic.retention_keep",
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
+      // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
+      "output.compact",
+      // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
+      "provider.usage_windows",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -169,6 +173,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "queue.wake_retry_cap",
       "queue.wake_unconfirmed_window_minutes",
       "queue.wake_swap_grace_seconds",
+      "queue.wake_human_rung",
     ]);
   });
 
@@ -360,6 +365,63 @@ describe("SettingsStore (User Settings v0)", () => {
     } finally {
       delete process.env["OPENRIG_PORT"];
     }
+  });
+
+  // Constraint gap (Slice 27 residue, lockstep twin of the CLI store):
+  // daemon.port had no KEY_CONSTRAINTS entry, so `rig config set
+  // daemon.port 99999` stored 99999 and the next daemon start died with a
+  // raw ERR_SOCKET_BAD_PORT from serve(). The contract: refuse only ports
+  // that cannot be bound, checked on the value the runtime consumes (the
+  // same parseInt the boot path runs on OPENRIG_PORT), never against a
+  // stricter input format than today's.
+  it("daemon.port refuses ports that cannot be bound; 0 and 65535 stay legal", () => {
+    const store = new SettingsStore(configPath);
+    for (const raw of ["-1", "65536", "99999"]) {
+      expect(() => store.set("daemon.port", raw), `daemon.port must reject ${raw}`)
+        .toThrow(/integer in \[0, 65535\]/);
+    }
+    store.set("daemon.port", "0");
+    expect(store.resolveOne("daemon.port").value).toBe(0);
+    store.set("daemon.port", "65535");
+    expect(store.resolveOne("daemon.port").value).toBe(65535);
+  });
+
+  it("daemon.port keeps resolving every input form that resolves today", () => {
+    const store = new SettingsStore(configPath);
+    for (const [raw, expected] of [
+      ["7433abc", 7433],
+      ["7433.5", 7433],
+      ["+7433", 7433],
+      ["1e4", 1],
+      ["0x1D11", 0],
+    ] as const) {
+      store.set("daemon.port", raw);
+      expect(store.resolveOne("daemon.port").value, `${raw} must keep resolving to ${expected}`).toBe(expected);
+    }
+  });
+
+  it("unusable daemon.port in config.json falls back to the default with a warning", () => {
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: 99999 } }));
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const store = new SettingsStore(configPath);
+      expect(store.resolveOne("daemon.port").value).toBe(7433);
+      expect(store.resolveOne("daemon.port").source).toBe("default");
+      const warns = stderrSpy.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes("file value for daemon.port rejected"))).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("a quoted in-range port in config.json keeps its port, and the CLI target and daemon bind agree", () => {
+    writeFileSync(configPath, JSON.stringify({ daemon: { port: "7434" } }));
+    const store = new SettingsStore(configPath);
+    // Used as-is, exactly as before this constraint existed: the CLI's
+    // target stays "7434" and startServer binds parseInt of the same value.
+    expect(store.resolveOne("daemon.port").value).toBe("7434");
+    expect(store.resolveOne("daemon.port").source).toBe("file");
+    expect(Number.parseInt(String(store.resolveOne("daemon.port").value), 10)).toBe(7434);
   });
 
   it("workspace.root cascades into per-subdir defaults", () => {

@@ -191,11 +191,14 @@ function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
  *  repeats into one notice per failure. */
 function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime): { errorNotice?: string } {
   if (event.type === "auto_retry_end") {
-    return event.success === false ? { errorNotice: errorNotice(event.finalError, runtime) } : {};
+    return event.success === false ? { errorNotice: errorNotice(event.finalError ?? event.error, runtime) } : {};
   }
   const message = event.message as Record<string, unknown> | undefined;
-  return message?.role === "assistant" && message.stopReason === "error"
-    ? { errorNotice: errorNotice(message.errorMessage, runtime) } : {};
+  if (message?.role === "assistant" && message.stopReason === "error") {
+    const detail = message.errorMessage ?? message.error ?? event.error;
+    return { errorNotice: errorNotice(detail, runtime) };
+  }
+  return {};
 }
 
 export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime = "pi"): MirrorAndActivity {
