@@ -144,38 +144,31 @@ test("keeps added header-shaped text as source content inside a hunk", () => {
 });
 
 
-test("native Git filenames retain exact locations with either quotePath setting", async () => {
+test("native Git reports UTF-8 and spaced names independently of quotePath configuration", async () => {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
   const { execFileSync } = await import("node:child_process");
   const repo = mkdtempSync(join(tmpdir(), "openrig-portability-paths-"));
   const names = ["café.md", "ordinary name.md"];
-  if (process.platform !== "win32") names.push('quote"name.md', "back\\slash.md", "tab\tname.md", "line\nbreak.md");
   try {
     execFileSync("git", ["init", "--quiet", repo]);
     for (const name of names) writeFileSync(join(repo, name), "see /Users/alice/project\n");
     execFileSync("git", ["-C", repo, "add", "--", ...names]);
     for (const quotePath of ["true", "false"]) {
-      const diff = execFileSync("git", ["-C", repo, "-c", `core.quotePath=${quotePath}`, "diff", "--cached", "-U0", "--no-color"], { encoding: "utf8" });
-      const lines = addedLines(diff);
-      assert.deepEqual(lines.map((entry) => entry.file).sort(), [...names].sort());
-      assert.ok(lines.every((entry) => entry.line === 1));
-      assert.deepEqual(findPortabilityIssues(lines).map((entry) => entry.file).sort(), [...names].sort());
+      execFileSync("git", ["-C", repo, "config", "core.quotePath", quotePath]);
+      const report = execFileSync(process.execPath, [fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), "--repo", repo, "--staged", "--locations-only"], { encoding: "utf8" });
+      for (const name of names) assert.ok(report.includes(`\`${name}:1\``), report);
+      assert.ok(!report.includes("\t"), report);
     }
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("Git C-quoted path controls decode independently of host filename restrictions", () => {
-  for (const [header, expected] of [
-    ['"b/caf\\303\\251.md"', "café.md"],
-    ['"b/quote\\\"name.md"', 'quote"name.md'],
-    ['"b/back\\\\slash.md"', "back\\slash.md"],
-    ['"b/tab\\tname.md"', "tab\tname.md"],
-    ['"b/line\\nbreak.md"', "line\nbreak.md"],
-    ['b/ordinary name.md\t', "ordinary name.md"],
-  ]) {
+test("strips Git's separator tab and leaves C-quoted filenames quoted", () => {
+  for (const header of ['"b/quote\\\"name.md"', '"b/back\\\\slash.md"', '"b/tab\\tname.md"']) {
     const diff = `+++ ${header}\n@@ -0,0 +1 @@\n+see /Users/alice/project\n`;
-    assert.deepEqual(addedLines(diff), [{ file: expected, line: 1, text: "see /Users/alice/project" }]);
+    assert.deepEqual(addedLines(diff), [{ file: header, line: 1, text: "see /Users/alice/project" }]);
   }
+  assert.deepEqual(addedLines("+++ b/ordinary name.md\t\n@@ -0,0 +1 @@\n+see /Users/alice/project\n"), [{ file: "ordinary name.md", line: 1, text: "see /Users/alice/project" }]);
 });

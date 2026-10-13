@@ -52,35 +52,6 @@ export const CHECKS = [
   },
 ];
 
-// Git quotes unusual path bytes with C escapes, including octal UTF-8 bytes.
-// Decode before dropping its b/ prefix so locations still name the real file.
-function decodeDiffPath(raw) {
-  // Git appends a tab separator after an unquoted name containing spaces.
-  // Actual tabs in filenames are escaped inside its quoted form.
-  raw = raw.split("\t", 1)[0];
-  if (!raw.startsWith('"')) return raw;
-  const bytes = [];
-  const escaped = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
-  const body = raw.slice(1, -1);
-  for (let i = 0; i < body.length;) {
-    if (body[i] === "\\") {
-      const octal = /^[0-7]{1,3}/.exec(body.slice(i + 1));
-      if (octal) {
-        bytes.push(parseInt(octal[0], 8));
-        i += 1 + octal[0].length;
-      } else {
-        bytes.push(escaped[body[i + 1]] ?? body.charCodeAt(i + 1));
-        i += 2;
-      }
-    } else {
-      const character = String.fromCodePoint(body.codePointAt(i));
-      bytes.push(...Buffer.from(character));
-      i += character.length;
-    }
-  }
-  return Buffer.from(bytes).toString("utf8");
-}
-
 // Parses `git diff -U0` output into the lines it adds, with their new line numbers.
 export function addedLines(diffText) {
   const lines = [];
@@ -96,7 +67,7 @@ export function addedLines(diffText) {
       lineNumber += 1;
       remainingNewLines -= 1;
     } else if (raw.startsWith("+++ ")) {
-      file = raw === "+++ /dev/null" ? null : decodeDiffPath(raw.slice(4)).replace(/^b\//, "");
+      file = raw === "+++ /dev/null" ? null : raw.slice(4).split("\t", 1)[0].replace(/^b\//, "");
     } else if (raw.startsWith("@@")) {
       const hunk = /\+(\d+)(?:,(\d+))?/.exec(raw);
       lineNumber = Number(hunk?.[1] ?? 0);
@@ -191,7 +162,7 @@ export function main(argv = process.argv.slice(2)) {
     range = [`${from}..${to}`];
     label = `${from.slice(0, 8)}..${to.length > 12 ? to.slice(0, 8) : to}`;
   }
-  const diff = git(repo, ["diff", "-U0", "--no-color", "--diff-filter=ACMR", ...range]);
+  const diff = git(repo, ["-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--diff-filter=ACMR", ...range]);
   const report = renderReport(findPortabilityIssues(addedLines(diff)), label, {
     locationsOnly: options.locationsOnly,
   });
