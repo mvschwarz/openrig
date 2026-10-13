@@ -100,7 +100,9 @@ export function boundedProbeExec(
         if (pending === 0) r();
         setTimeout(r, DRAIN_MS);
       });
-      void drained.then(() => (open().length > 0 ? end() : undefined)).then(() => {
+      // Yield once to I/O before deciding: if the event loop stalled past the drain timer, the pipes' end events
+      // may be queued behind it, and a closed-stdio descendant must not be taken for one holding the output.
+      void drained.then(() => new Promise((r) => setImmediate(r))).then(() => (open().length > 0 ? end() : undefined)).then(() => {
         if (code === 0) resolve(stdout);
         else {
           const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
