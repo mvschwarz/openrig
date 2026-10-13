@@ -1182,12 +1182,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // than constructed with) so service construction order is untouched.
   {
     const { recordCodexLimitBanner } = await import("./domain/provider/codex-limit-banner.js");
-    seatStructuralActivityService.attachCodexLimitBanner((sessionName, banner) => {
+    seatStructuralActivityService.attachCodexLimitBanner((sessionName, banner, observedAt) => {
       recordCodexLimitBanner({
         store: agentActivityStore,
         resolveGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
         sessionName,
         banner,
+        now: () => observedAt,
       });
     });
   }

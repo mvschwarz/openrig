@@ -20,6 +20,12 @@ import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
+import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import type { PaneCutoverTiming } from "./pane-cutover.js";
+import {
+  CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
+  type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
+} from "./seat-restart-in-place.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -52,7 +58,11 @@ export interface SeatLifecycleDeps {
   startupOrchestrator?: StartupOrchestrator;
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   occupantInvalidator?: OccupantInvalidator;
-  activityOracle?: { declareOccupantSwap(nodeId: string, generation: string): void };
+  activityOracle?: { declareOccupantSwap(nodeId: string, generation: string): void; getSeatState?(nodeId: string): ArbitratedSeatState | null };
+  /** Test seams for the in-place restart's OS reads and stop timing; production uses the defaults. */
+  inPlaceRestartIo?: Partial<InPlaceRestartIo>;
+  inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
+  inPlaceRestartDaemonStartedAt?: Date;
 }
 
 interface ResolvedSeat {
@@ -85,11 +95,16 @@ export interface SeatRefusal {
     | "launch_failed"
     | "startup_failed"
     | "attention_required"
-    | "runtime_identity_unverified";
+    | "runtime_identity_unverified"
+    | "not_codex"
+    | "typing_guard_enabled";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
 }
+
+export type RestartInPlaceResult = InPlaceRestartReport | InPlaceRestartRefusal | SeatRefusal;
+export type VerifyRestartInPlaceResult = InPlaceVerifyResult | SeatRefusal;
 
 export interface SeatDescriptor {
   rigId: string;
@@ -166,6 +181,9 @@ export class SeatLifecycleService {
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
   private readonly occupantInvalidator: OccupantInvalidator | null;
   private readonly activityOracle: SeatLifecycleDeps["activityOracle"] | null;
+  private readonly inPlaceRestartIo?: Partial<InPlaceRestartIo>;
+  private readonly inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
+  private readonly inPlaceRestartDaemonStartedAt?: Date;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -182,6 +200,9 @@ export class SeatLifecycleService {
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.activityOracle = deps.activityOracle ?? null;
+    this.inPlaceRestartIo = deps.inPlaceRestartIo;
+    this.inPlaceRestartTiming = deps.inPlaceRestartTiming;
+    this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
   }
 
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -916,6 +937,113 @@ export class SeatLifecycleService {
       startupPolicyHash: startup.hash,
       supersededSessionIds,
       warnings: startupResult.warnings,
+    };
+  }
+
+  /**
+   * OPR.0.7.0.5 — restart one Codex seat in place so it reads its home's current account: same conversation,
+   * same pane, the settings it is running with now. `plan` runs every gate read-only. Activity (mid-turn,
+   * needs input) and child processes are reported for the operator to judge, not refused. Identity, typing
+   * guard, adopted sessions, unreadable tmux and settings drift are named refusals before any signal.
+   */
+  async restartInPlace(input: { seatRef: string; reason?: string; plan?: boolean; operator?: string | null }): Promise<RestartInPlaceResult> {
+    if (!input.plan) {
+      const required = this.requireReason(input.reason ?? "");
+      if (required) return required;
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const prepared = this.inPlaceRestarter();
+    if ("code" in prepared) return prepared;
+    if (input.plan) {
+      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      return "code" in target ? target : prepared.plan(target);
+    }
+    // Recorded before waiting for the lease: a restart that ran meanwhile refuses this one (no repeat
+    // on a slow reply).
+    const seenStartedSeq = prepared.latestStartedSeq(resolved.nodeId);
+    const run = async (): Promise<RestartInPlaceResult> => {
+      const target = await this.inPlaceTarget(resolved, input.seatRef);
+      if ("code" in target) return target;
+      return prepared.execute(target, { reason: input.reason ?? "", operator: input.operator ?? null, seenStartedSeq });
+    };
+    const guard = this.tmuxAdapter.deliveryGuard;
+    return guard && !guard.ownsLifecycle(resolved.nodeId) ? guard.lifecycle([resolved.nodeId], run) : run();
+  }
+
+  /** `--verify`: report `moved` only with a completed tool turn since the restart and account-specific evidence. */
+  async verifyRestartInPlace(input: { seatRef: string; expectAccount?: string | null }): Promise<VerifyRestartInPlaceResult> {
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const prepared = this.inPlaceRestarter();
+    if ("code" in prepared) return prepared;
+    const target = await this.inPlaceTarget(resolved, input.seatRef);
+    return "code" in target ? target : prepared.verify(target, { expectAccount: input.expectAccount ?? null });
+  }
+
+  private inPlaceRestarter(): CodexInPlaceRestart | SeatRefusal {
+    const adapter = this.runtimeAdapters["codex"] as (RuntimeAdapter & Partial<InPlaceCodexLauncher>) | undefined;
+    if (!adapter?.buildResumeCommand || !adapter.verifyResumeInPane || !adapter.sendResumeCommand) {
+      return { ok: false, code: "runtime_adapter_missing", message: "The Codex runtime adapter with in-place resume is unavailable in this daemon." };
+    }
+    const activity = this.activityOracle?.getSeatState ? this.activityOracle as { getSeatState(nodeId: string): ArbitratedSeatState | null } : null;
+    return new CodexInPlaceRestart({
+      db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmux: this.tmuxAdapter,
+      codex: adapter as InPlaceCodexLauncher, activity, listProcesses: this.listProcesses,
+      io: this.inPlaceRestartIo, timing: this.inPlaceRestartTiming, daemonStartedAt: this.inPlaceRestartDaemonStartedAt,
+    });
+  }
+
+  /** The shared seat refusals, then the binding the relaunch is built from (the handover's posture rules). */
+  private async inPlaceTarget(resolved: ResolvedSeat, seatRef: string): Promise<InPlaceRestartTarget | SeatRefusal> {
+    const seat = this.describe(resolved);
+    const node = this.rigRepo.getRig(seat.rigId)?.nodes.find((candidate) => candidate.id === seat.nodeId);
+    if (!node) return { ok: false, code: "seat_not_found", message: `Seat "${seatRef}" no longer exists.`, guidance: SEAT_LOOKUP_GUIDANCE };
+    if (node.runtime !== "codex") {
+      return { ok: false, code: "not_codex", message: `Seat "${seatRef}" runs ${node.runtime ?? "an unknown runtime"}; in-place restart supports Codex seats only.` };
+    }
+    const preference = this.tmuxAdapter.deliveryGuard?.preference(node.id);
+    if (preference?.effective || preference?.desired) {
+      return { ok: false, code: "typing_guard_enabled", message: "Typing protection blocks lifecycle operations for this seat; nothing was restarted." };
+    }
+    const session = this.latestSession(node.id);
+    if (!session || TERMINAL_SESSION_STATUSES.has(session.status)) {
+      return { ok: false, code: "no_session", message: `Seat "${seatRef}" has no live managed session to restart (checked: latest sessions row).` };
+    }
+    if (session.origin === "claimed") {
+      return { ok: false, code: "claimed_session", message: `Session "${session.session_name}" was adopted (origin=claimed), not launched by OpenRig; in-place restart refuses it.`,
+        guidance: "Release an adopted session with: rig unclaim" };
+    }
+    const probed = await this.probeLiveness(session.session_name, "in-place restart refuses rather than act on an unknown session");
+    if ("code" in probed) return probed;
+    if (probed.state === "absent") {
+      return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to restart in place.` };
+    }
+    const binding = this.sessionRegistry.getBindingForNode(node.id);
+    if (!binding?.tmuxSession || binding.tmuxSession !== session.session_name || !binding.tmuxPane) {
+      return { ok: false, code: "session_not_live", message: `Seat "${seatRef}" has no bound tmux pane for session "${session.session_name}".` };
+    }
+    let permissionOverride: ReturnType<NativePermissionStore["launchOverride"]>;
+    try {
+      permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, "codex");
+    } catch (error) {
+      return { ok: false, code: "permission_selection_refused", message: `Permission selection: ${(error as Error).message}` };
+    }
+    const launchPosture = permissionOverride.launchPosture
+      ?? this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
+      ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture
+      ?? "floor";
+    return {
+      seat, sessionId: session.id, sessionName: session.session_name,
+      saved: { model: node.model ?? null, effort: node.effort ?? null, codexConfigProfile: node.codexConfigProfile ?? null },
+      binding: {
+        ...binding, cwd: node.cwd ?? ".",
+        ...(node.model ? { model: node.model } : {}),
+        ...(node.effort ? { effort: node.effort } : {}),
+        ...(node.codexConfigProfile ? { codexConfigProfile: node.codexConfigProfile } : {}),
+        launchPosture, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault,
+        nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
+      },
     };
   }
 

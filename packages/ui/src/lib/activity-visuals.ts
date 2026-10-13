@@ -63,6 +63,12 @@ export interface ActivityStateResult {
   source: ActivitySource;
 }
 
+export function isCurrentUsageLimit(activity: AgentActivitySummary | null | undefined): boolean {
+  return activity?.state === "unknown" && activity.reason === "usage_limit"
+    && activity.rawEvent === "at_limit" && activity.evidenceSource === "runtime_hook"
+    && activity.stale === false && !activity.fallback;
+}
+
 export function getActivityState(
   activity: AgentActivitySummary | null | undefined,
   terminalActive?: boolean | null,
@@ -86,7 +92,7 @@ export function getActivityStateWithSource(
 
   const isFreshHook = activity
     && activity.evidenceSource === "runtime_hook"
-    && activity.state !== "unknown"
+    && (activity.state !== "unknown" || isCurrentUsageLimit(activity))
     && !activity.stale
     && !activity.fallback;
 
@@ -107,7 +113,8 @@ export function getActivityStateWithSource(
   return { state: "unknown", source: "none" };
 }
 
-export function getActivityLabel(state: ActivityState): string {
+export function getActivityLabel(state: ActivityState, activity?: AgentActivitySummary | null): string {
+  if (state === "unknown" && isCurrentUsageLimit(activity)) return "usage limit";
   return ACTIVITY_LABELS[state];
 }
 

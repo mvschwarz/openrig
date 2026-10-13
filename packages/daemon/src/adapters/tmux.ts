@@ -912,6 +912,59 @@ export class TmuxAdapter {
     }
   }
 
+  /** The pane's OWN value for an option, without inherited window/global values: the string, null when the
+   *  pane sets none, undefined when tmux could not be read. A caller that changes the option for a while
+   *  restores exactly this with restorePaneOption. */
+  async getPaneLocalOption(paneTarget: string, option: string): Promise<string | null | undefined> {
+    const exact = exactTarget(paneTarget, "pane");
+    try {
+      const output = await this.run(["tmux", "show-options", "-p", "-v", "-t", exact, option],
+        `tmux show-options -p -v -t ${shellQuote(exact)} ${shellQuote(option)}`);
+      // tmux prints nothing for an unset option and the value plus a newline when set (an empty value prints
+      // a bare newline), so only the line ending is removed: the value comes back exactly as it was set.
+      return output.length === 0 ? null : output.replace(/\r?\n$/, "");
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Put back what getPaneLocalOption read: set the value, or unset the pane's own value when it had none. */
+  async restorePaneOption(paneTarget: string, option: string, value: string | null): Promise<TmuxResult> {
+    const exact = exactTarget(paneTarget, "pane");
+    const argv = value === null
+      ? ["tmux", "set-option", "-p", "-u", "-t", exact, option]
+      : ["tmux", "set-option", "-p", "-t", exact, option, value];
+    try {
+      await this.run(argv, argv.map((part, index) => index < 2 ? part : shellQuote(part)).join(" "));
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /** The pane's whole text, history and visible screen, with wrapped lines joined. Null when unreadable. */
+  async capturePaneHistory(paneTarget: string): Promise<string | null> {
+    const exact = exactTarget(paneTarget, "pane");
+    try {
+      return await this.run(["tmux", "capture-pane", "-p", "-J", "-t", exact, "-S", "-", "-E", "-"],
+        `tmux capture-pane -p -J -t ${shellQuote(exact)} -S - -E -`);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
+   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
+  async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+    if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
+    try {
+      await this.exec(`kill -${signal} ${pid}`);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
   /** Seat-handover cutover: is the pane's process dead (the retiree exited; the pane held by
    *  remain-on-exit)? A known-missing pane also proves physical cutover; unknown probe errors stay false. */
   async isPaneDead(paneId: string): Promise<boolean> {

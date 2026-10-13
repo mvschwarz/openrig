@@ -1,3 +1,4 @@
+import { CODEX_TURN_STATUS_PATTERN } from "../codex-pane-patterns.js";
 import {
   AGENT_ACTIVITY_FRESHNESS_MS,
   type AgentActivityStore,
@@ -25,16 +26,15 @@ const RESET_RE = /try again at ([^.!\n]+)/i;
 // not the seat's own state.
 const FENCE_RE = /^\s*```/;
 
-// The input line starts the composer's input area: everything from it down is
-// input area whatever the footer format, so the footer never needs matching.
-const INPUT_LINE_RE = /^›\s*(Ask Codex to do anything)?\s*$/;
+// A prompt can be a draft composer or a submitted message; its suffix decides.
+const INPUT_LINE_RE = /^\s*›(?:\s|$)/;
 
 /**
  * Match the banner's own line form: the ■ marker must lead (after indent).
  * An agent quoting the sentence, or an error line merely containing the
  * words without the marker, never matches. A match inside a fenced code
  * block is quoted agent output, not seat state. And the banner must still be
- * the most recent content: anything below it other than the empty composer
+ * the most recent content: anything below it other than the composer
  * or footer (a user message, a reply, further output) means a recovered seat
  * whose old banner merely scrolled into view — Codex prints a new banner at
  * the bottom when the limit hits again, so that is still detected.
@@ -45,6 +45,10 @@ export function detectCodexLimitBanner(paneContent: string): CodexLimitBanner | 
     const line = lines[i]!;
     if (!BANNER_LINE_RE.test(line)) continue;
     if (isFenced(lines, i)) continue;
+    // Once a banner is established, its following user blocks cannot supply
+    // output or alter quote boundaries. Keep initial banner recognition intact.
+    const after = withoutPromptContinuations(lines.slice(i + 1));
+    lines.splice(i + 1, after.length, ...after);
     // The reset phrase can wrap onto the following lines in a capture — but
     // only when the banner line doesn't carry it yet. A one-line banner with
     // its reset text ends here: the next line is newer output, not a
@@ -69,6 +73,22 @@ export function detectCodexLimitBanner(paneContent: string): CodexLimitBanner | 
   return null;
 }
 
+function withoutPromptContinuations(lines: string[]): string[] {
+  // Codex renders draft continuations in a two-column gutter. Preserve the
+  // outer prompt as their boundary; nested markers, banners and fences are
+  // user text. Conservatively keep any deeper indentation inside that block.
+  let promptIndent: number | null = null;
+  let fenced = false;
+  return lines.map((line) => {
+    const indent = line.search(/\S/);
+    if (indent < 0) return line;
+    if (promptIndent !== null && indent > promptIndent) return "";
+    if (FENCE_RE.test(line)) fenced = !fenced;
+    promptIndent = !fenced && INPUT_LINE_RE.test(line) ? indent : null;
+    return line;
+  });
+}
+
 function isFenced(lines: string[], index: number): boolean {
   let fenced = false;
   for (let i = 0; i < index; i++) {
@@ -78,12 +98,20 @@ function isFenced(lines: string[], index: number): boolean {
 }
 
 function isMostRecent(lines: string[], index: number): boolean {
-  // The input line starts the input area: everything from it down is input
-  // area whatever the footer format. Search for it only after the banner
-  // block — an input-like line above the banner must not mask newer output
-  // below it. Before it, only blank lines may follow the block.
+  // Before the last possible composer, only blanks may follow the banner.
+  // A live turn-status row after that prompt proves it was submitted history,
+  // not an input boundary. Keep indented draft continuations as user text.
   const after = lines.slice(index + 1);
-  const inputAt = after.findIndex((line) => INPUT_LINE_RE.test(line));
+  let inputAt = after.length - 1;
+  while (inputAt >= 0 && !INPUT_LINE_RE.test(after[inputAt]!)) inputAt--;
+  if (inputAt >= 0) {
+    const indent = after[inputAt]!.search(/\S/);
+    if (after.slice(inputAt + 1).some((line, offset) => {
+      const text = line.trimStart();
+      return line.length - text.length <= indent && CODEX_TURN_STATUS_PATTERN.test(text) &&
+        !isFenced(after, inputAt + 1 + offset);
+    })) return false;
+  }
   const tail = inputAt < 0 ? after : after.slice(0, inputAt);
   return tail.every((line) => /^\s*$/.test(line));
 }
@@ -115,12 +143,26 @@ export function recordCodexLimitBanner(deps: {
   store: Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">;
   resolveGeneration: (sessionName: string) => string | null;
   sessionName: string;
-  banner: CodexLimitBanner;
+  banner: CodexLimitBanner | null;
   now?: () => Date;
 }): boolean {
   const nowFn = deps.now ?? (() => new Date());
   const nowMs = nowFn().getTime();
   const latest = deps.store.getLatestForNode({ sessionName: deps.sessionName });
+  if (!deps.banner) {
+    clearRecordedBanner(deps.sessionName);
+    const generation = deps.resolveGeneration(deps.sessionName);
+    // Only a newer, same-occupant capture can end the stored episode. A
+    // neutral notification supersedes the limit without inventing idle/work;
+    // the ordinary structural and motion evidence still decides the state.
+    if (latest?.rawEvent !== "at_limit" || latest.generation !== generation ||
+        !(nowMs > Date.parse(latest.eventAt ?? ""))) return false;
+    return deps.store.recordHookEvent({
+      runtime: "codex", sessionName: deps.sessionName,
+      hookEvent: "Notification", subtype: "usage_limit_cleared",
+      occurredAt: new Date(nowMs).toISOString(), generation,
+    }).ok;
+  }
   if (latest?.rawEvent === "at_limit") {
     // Still the reported episode: refresh only once the report ages out, so
     // a night at the limit is a handful of rows, not thousands.

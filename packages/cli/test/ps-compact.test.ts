@@ -364,6 +364,27 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(healthyNode.latestError).toBeUndefined();
   });
 
+  it.each([[false, false], [true, false], [false, true]])("shows current limits without hiding startup failures (stale: %s, failed: %s)", async (stale, failed) => {
+    const node = RIG_B_NODES[0]!;
+    const original = { agentActivity: node.agentActivity, startupStatus: node.startupStatus, latestError: node.latestError };
+    node.agentActivity = {
+      ...original.agentActivity, state: "unknown", reason: "usage_limit", evidenceSource: "runtime_hook",
+      rawEvent: "at_limit", stale, fallback: false,
+    } as typeof original.agentActivity;
+    if (failed) Object.assign(node, { startupStatus: "failed", latestError: "startup failure" });
+    try {
+      const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]).then(() => {}));
+      const activity = JSON.parse(json.logs.join(""))[0].agentActivity;
+      expect(activity.state).toBe("unknown");
+      expect.soft(activity.reason).toBe(stale ? undefined : "usage_limit");
+      const text = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms"]).then(() => {}));
+      expect(text.logs.join("\n").includes("usage_limit")).toBe(!stale && !failed);
+      if (failed) expect(text.logs.join("\n")).toContain("startup failure");
+    } finally {
+      Object.assign(node, original);
+    }
+  });
+
   // -- AC-5: --rig and --session filters compose --
   it("AC-5: --rig narrows to nodes of that rig", async () => {
     const { logs } = await captureLogs(async () => {
