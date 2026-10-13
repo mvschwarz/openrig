@@ -101,7 +101,7 @@ export function streamCommand(depsOverride?: StreamDeps): Command {
   cmd
     .command("emit")
     .description("Append a stream item")
-    .requiredOption("--source <session>", "Source session (e.g. velocity-driver@openrig-velocity-claude)")
+    .requiredOption("--source <session>", "Source session (e.g. dev-build@starter)")
     .requiredOption("--body <text>", "Stream item body")
     .option("--hint-destination <session>", "Hint at intended destination seat")
     .option("--hint-type <type>", "Hint type (e.g. review, handoff, idea)")

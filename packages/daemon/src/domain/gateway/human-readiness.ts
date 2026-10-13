@@ -1,6 +1,7 @@
 import type { HumanFragment } from "./human-registry.js";
 import type { SlackConnectorConfig } from "./slack/config.js";
 import { verifyScopes, verifyChannelMembership, type ScopeVerdict } from "./slack/slack-api.js";
+import { mappedChannels } from "./slack/channel-map.js";
 
 export type HumanDeliveryReadinessState = "ready" | "not-ready" | "indeterminate";
 
@@ -68,10 +69,24 @@ export async function resolveHumanDeliveryReadiness(
         ? result("indeterminate", `scope verification unavailable: ${scope.error}`, "rig slack verify --json")
         : result("not-ready", `connector is missing required scopes: ${scope.missing.join(", ")}`, "rig slack verify --json");
     }
-    const membership = await (deps.verifyMembership ?? ((token, channel) => verifyChannelMembership(token, channel)))(input.botToken, input.config.channel);
-    if (!membership.ok) return result("indeterminate", `channel membership verification unavailable: ${membership.error ?? "unknown error"}`, "rig slack verify --json");
-    if (!membership.isMember) return result("not-ready", "connector is not a member of its configured channel", "rig slack verify --json");
-    return result("ready", "required scopes and channel membership verified", null);
+    // #192: membership in every channel the connector posts to (the default plus each mapped
+    // channel), the same set `rig slack verify` checks. With no map this is the default alone.
+    const verifyMembership = deps.verifyMembership ?? ((token, channel) => verifyChannelMembership(token, channel));
+    const channels = mappedChannels(input.config);
+    const missing: string[] = [];
+    const unavailable: string[] = [];
+    for (const c of channels) {
+      const membership = await verifyMembership(input.botToken, c.channel);
+      const label = c.isDefault ? "its configured channel" : `mapped channel ${c.channel} (${c.matches.join(", ")})`;
+      if (!membership.ok) unavailable.push(c.isDefault ? membership.error ?? "unknown error" : `${c.channel}: ${membership.error ?? "unknown error"}`);
+      else if (!membership.isMember) missing.push(label);
+    }
+    // A known non-member decides it: posts there would fail whatever the unavailable checks say.
+    if (missing.length) return result("not-ready", `connector is not a member of ${missing.join("; ")}`, "rig slack verify --json");
+    if (unavailable.length) return result("indeterminate", `channel membership verification unavailable: ${unavailable.join("; ")}`, "rig slack verify --json");
+    return result("ready", channels.length > 1
+      ? `required scopes and channel membership verified (${channels.length} channels)`
+      : "required scopes and channel membership verified", null);
   } catch (error) {
     return result("indeterminate", `connector readiness could not be verified: ${(error as Error).message}`, "rig slack verify --json");
   }

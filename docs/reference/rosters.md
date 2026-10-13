@@ -4,7 +4,8 @@ A roster records who to involve for a purpose and why. The same seat can appear 
 rosters with different capabilities and engagement. Membership is a recommendation, not an
 assignment or a grant of authority. Contact someone with the existing `rig send` or `rig queue` commands.
 
-Put JSON files in `<workspace.root>/rosters/`. Read `workspace.root` with
+Put JSON files in `<workspace.root>/rosters/`; the included starter and factory leads write
+their team's `<rig>.json` there at first start and never replace an existing one. Read `workspace.root` with
 `rig config get workspace.root`, or use `--folder` to read another folder in place.
 
 ```sh

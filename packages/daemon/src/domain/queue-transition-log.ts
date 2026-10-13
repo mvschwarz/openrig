@@ -131,6 +131,9 @@ function recentChange(row: RecentQueueTransitionRow): string | null {
  * Append-only transition log. Domain code MUST NOT update or delete rows here.
  * This log is the authoritative audit trail for queue state evolution.
  */
+/** The prefix `rig queue block --continuation` writes on the park transition, matched exactly. */
+const CONTINUATION_MARKER = "continuation: ";
+
 export class QueueTransitionLog {
   readonly db: Database.Database;
   /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
@@ -204,6 +207,29 @@ export class QueueTransitionLog {
       )
       .all(qitemId) as QueueTransitionRow[];
     return rows.map((r) => this.rowToTransition(r));
+  }
+
+  /**
+   * OPR.0.7.0.12 — the continuation `rig queue block --continuation` recorded for the row's
+   * CURRENT park. The current park is the trailing run of `blocked` transitions: the daemon
+   * appends its own later blocked transitions (e.g. "parked-owner episode closed"), so the latest
+   * one is not the park, and an earlier park's plan must never resurface.
+   *
+   * One newest-first seek on idx_queue_transitions_qitem_id_order (migration 098) that stops at
+   * the first non-blocked transition, so the work is bounded by the current park, not the row's
+   * history. The marker match is exact-case, as `rig queue block` writes it. The live table
+   * suffices: retention archives only terminal rows, and a parked row is not terminal.
+   */
+  currentParkContinuation(qitemId: string): string | null {
+    const newestFirst = this.db.prepare(
+      "SELECT state, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC",
+    );
+    // Leaving the loop early releases the statement (better-sqlite3 closes the iterator).
+    for (const row of newestFirst.iterate(qitemId) as Iterable<{ state: string; transition_note: string | null }>) {
+      if (row.state !== "blocked") return null;
+      if (row.transition_note?.startsWith(CONTINUATION_MARKER)) return row.transition_note.slice(CONTINUATION_MARKER.length);
+    }
+    return null;
   }
 
   /** Bounded source adapter: apply the time window and limit before materializing rows. */

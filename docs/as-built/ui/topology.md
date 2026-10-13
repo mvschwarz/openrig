@@ -11,8 +11,8 @@ applies-when: |
   the topology navigation/overlay contracts.
 siblings: [shell-and-routing.md, project-and-for-you.md]
 prerequisite-reads: [../README.md, shell-and-routing.md]
-last-verified-against-source: 104b78ee
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # UI Topology — Graph/Table/Terminal, HotPotato, ActivityRing
@@ -21,7 +21,7 @@ Topology is a scoped workspace with graph, table, and terminal views at the
 `/topology` route family (`shell-and-routing.md` §3). It is the operator's
 live picture of host → rig → pod → seat.
 
-> Verified against source at `104b78ee` (package version 0.6.6). The web UI
+> Verified against source at `e8f0ab34` (package version 0.6.7). The web UI
 > is in maintenance mode (`docs/reference/developing.md`). The source file
 > that defines the hybrid nodes is `HybridTopologyNodes.tsx` (DESIGN.md's
 > implementation reference).

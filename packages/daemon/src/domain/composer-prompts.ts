@@ -47,6 +47,7 @@ export const COMPOSER_SELECTION_SCAN_PATTERN = promptPattern(COMPOSER_PROMPT_CLA
 export function composerSelectionPrefixPattern(promptClass: string = COMPOSER_PROMPT_CLASS): RegExp {
   return promptPattern(promptClass, "\\s*\\d+\\.");
 }
+
 /**
  * A numbered-option line with either separator (`❯ 1. Yes`, `› 1) No`, `» 2) Later`):
  * a prompt selection, never the typed answer. The prompt-answer path accepts both

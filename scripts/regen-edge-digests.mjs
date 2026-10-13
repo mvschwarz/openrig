@@ -3,9 +3,9 @@
 //
 // Recomputes every edge's file-integrity hashes from the files ON DISK, using the in-repo (already
 // correct) scripts/skill-edge-layout.generated.json to know which edges to walk. NO external-canon
-// YAMLs are required — the digests are purely disk + layout derived. The full mirror APPLY that also
-// re-derives membership/denylist/layout from the external skill canon requires the explicit canon-root
-// path (OPENRIG_SKILL_CANON_ROOT); THIS regen only refreshes the reality side (hashes of present files)
+// YAMLs are required — the digests are purely disk + layout derived. Full mirror APPLY reads the same
+// product policy JSON and uses OPENRIG_SKILL_CANON_ROOT only for skill content.
+// THIS regen only refreshes the reality side (hashes of present files)
 // to match folded main.
 //
 // PROPERTY (layout = authority, disk = reality, regen touches only reality): buildEdgeDigests hashes

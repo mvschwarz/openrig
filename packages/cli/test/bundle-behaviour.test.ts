@@ -236,3 +236,16 @@ describe("before-action bundle view", () => {
     }
   });
 });
+
+
+it("shows authored non-interruptive broad access before action without asking for a flag", () => {
+  const files = new Map([["rig.yaml", "version: '0.2'\nname: workshop\npermission_policy: builtin:yolo\nnon_interruptive: true\npods: [{id: dev, members: [{id: work, runtime: claude-code, agent_ref: 'local:agent', profile: default, cwd: .}]}]\n"], ["agent/agent.yaml", "name: worker\nversion: '1'\nprofiles: {default: {uses: {}}}\n"]]);
+  const actual = describeBundleBehaviour({ files, manifest: { schema_version: 2, rig_spec: "rig.yaml" }, generator: { openrigVersion: "0.6.6" }, digestValid: true, filesVerified: true });
+  expect(actual.state).toBe("generated");
+  const text = formatBundleBehaviour(actual).join("\n");
+  expect(text).toContain("Non-interruptive launches are declared by this bundle");
+  expect(text).toContain("broad file, command and network access");
+  expect(text).toContain("--no-non-interruptive");
+  expect(text).not.toContain("Claude Code asks for bypass-warning acceptance");
+  expect(text).not.toContain("Non-interruptive mode is available using");
+});

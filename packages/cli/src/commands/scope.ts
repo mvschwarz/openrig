@@ -48,6 +48,7 @@ import {
   moveSlice,
   rollbackMovedSlice,
   nextSliceNN,
+  tryClaimSliceNN,
   NOTES_FILE_PRECEDENCE,
   pad2,
   readFrontmatter,
@@ -78,6 +79,7 @@ import { deriveScopeTrust } from "../lib/scope/trust.js";
 import { capabilityDeltaExpiryFindings } from "../lib/scope/capability-delta.js";
 import {
   applyMissionCompositionEdits,
+  appendMissionMembership,
   nextMissionMembershipOrder,
   planMissionMembershipAdd,
   planMissionMembershipRemove,
@@ -335,41 +337,50 @@ function buildSliceCreateCommand(): Command {
         }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const mission = findMission(missionsRoot, missionName);
-        const nn = nextSliceNN(mission.absPath);
-        const sliceFolder = `${pad2(nn)}-${slug}`;
-        const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
-        if (fs.existsSync(sliceAbs)) {
-          throw new ScopeCliError({
-            fact: `Slice folder ${sliceAbs} already exists.`,
-            consequence: "Refusing to overwrite.",
-            action: "Pick a different slug, or rm -rf the existing folder first.",
-          });
-        }
+        let nn = nextSliceNN(mission.absPath);
         const title = opts.title ?? titleFromSlug(slug);
         const intent = opts.intent ?? title;
-        const compositionEdit = planMissionMembershipAdd(
-          mission.absPath,
-          `slices/${sliceFolder}/slice.yaml`,
-          nextMissionMembershipOrder(mission.absPath),
-        );
         const missionId = ensureMissionId(mission, missionsRoot);
-        const id = sliceIdFromMission(missionId, nn);
+        let id = sliceIdFromMission(missionId, nn);
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
-        for (const dependency of dependsOn) {
-          if (dependency === id) {
+        // Validate before reserving any number; re-check self-dependency if a
+        // competing creator claimed the initial candidate.
+        let sliceFolder: string;
+        let sliceAbs: string;
+        for (;;) {
+          for (const dependency of dependsOn) {
+            if (dependency === id) {
+              throw new ScopeCliError({
+                fact: `Slice ${id} cannot depend on itself.`,
+                consequence: "Slice not created.",
+                action: "Use a different sibling slice ID, or omit --depends-on.",
+              });
+            }
+            if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
+              throw new ScopeCliError({
+                fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
+                consequence: "Slice not created.",
+                action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
+              });
+            }
+          }
+          sliceFolder = `${pad2(nn)}-${slug}`;
+          sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
+          if (fs.existsSync(sliceAbs)) {
             throw new ScopeCliError({
-              fact: `Slice ${id} cannot depend on itself.`,
-              consequence: "Slice not created.",
-              action: "Use a different sibling slice ID, or omit --depends-on.",
+              fact: `Slice folder ${sliceAbs} already exists.`,
+              consequence: "Refusing to overwrite.",
+              action: "Pick a different slug, or rm -rf the existing folder first.",
             });
           }
-          if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
-            throw new ScopeCliError({
-              fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
-              consequence: "Slice not created.",
-              action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
-            });
-          }
+          // Validate an explicit manifest before reserving an ordinal. The
+          // post-scaffold write re-plans from the latest manifest and disk.
+          planMissionMembershipAdd(
+            mission.absPath, `slices/${pad2(nn)}-${slug}/slice.yaml`,
+          );
+          if (tryClaimSliceNN(mission.absPath, nn, `slices/${sliceFolder}/slice.yaml`)) break;
+          nn++;
+          id = sliceIdFromMission(missionId, nn);
         }
         const createdDate = todayDateISO();
         const body = renderSliceTemplate(kind, {
@@ -383,11 +394,12 @@ function buildSliceCreateCommand(): Command {
           depends_on: dependsOn,
         });
         const proofBody = renderSliceProofTemplate({ id, title });
-        const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
         const readmePath = path.join(sliceAbs, "SPEC.md");
+        const proofPath = path.join(sliceAbs, "PROOF.md");
+        let scaffoldCompleted = false;
         try {
-          // Persist the parent id in the same rollback boundary as the child
-          // and composition membership. Validation above performs no writes.
+          // Persist the parent id before building the scaffold. Incomplete
+          // scaffolds roll back; the ordinal remains reserved even then.
           ensureMissionIdPersisted(mission, missionsRoot);
           fs.mkdirSync(sliceAbs, { recursive: true });
           fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
@@ -405,11 +417,20 @@ function buildSliceCreateCommand(): Command {
             fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
           }
           fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
-          fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
-          applyMissionCompositionEdits(compositionEdit ? [compositionEdit] : []);
+          // Publish the completion sentinel only after its entire contents exist.
+          const proofTemporary = `${proofPath}.openrig-${process.pid}.tmp`;
+          fs.writeFileSync(proofTemporary, proofBody, { encoding: "utf8", flag: "wx" });
+          fs.renameSync(proofTemporary, proofPath);
+          scaffoldCompleted = true;
+          await appendMissionMembership(mission.absPath, `slices/${sliceFolder}/slice.yaml`);
         } catch (error) {
-          fs.rmSync(sliceAbs, { recursive: true, force: true });
-          if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
+          // PROOF.md is the final scaffold file. Once complete, leave this
+          // pending registration available for a later creator to repair.
+          if (!scaffoldCompleted) {
+            fs.rmSync(sliceAbs, { recursive: true, force: true });
+            // The parent identity may already be shared by another creator.
+            // Rolling this child back must not undo it or authored parent edits.
+          }
           throw error;
         }
         const payload = {
@@ -424,10 +445,10 @@ function buildSliceCreateCommand(): Command {
           },
         };
         emit(out, payload, json, [
-          `Created ${mission.name}/slices/${sliceFolder}`,
-          `  id: ${id}`,
+          `Created ${payload.slice.mission}/slices/${payload.slice.name}`,
+          `  id: ${payload.slice.id}`,
           `  template: ${kind}`,
-          `  path: ${sliceAbs}`,
+          `  path: ${payload.slice.path}`,
         ]);
       } catch (err) {
         fail(err, json, out);
@@ -466,10 +487,10 @@ function buildSliceShipCommand(): Command {
           planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
           planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
         ].filter((edit): edit is MissionCompositionEdit => edit !== null);
-        applyMissionCompositionEdits(edits);
-        let moveResult: ReturnType<typeof moveSlice> | null = null;
         const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         const originalTargetNode = target.readmePath ? fs.readFileSync(target.readmePath, "utf8") : null;
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
         try {
           moveResult = moveSlice(slice.absPath, destAbs);
           const targetId = ensureMissionIdPersisted(target, missionsRoot);
@@ -545,9 +566,9 @@ function buildSliceCloseCommand(): Command {
           sliceManifestRef(mission.absPath, slice.absPath),
         );
         const edits = compositionEdit ? [compositionEdit] : [];
+        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         applyMissionCompositionEdits(edits);
         let moveResult: ReturnType<typeof moveSlice> | null = null;
-        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         try {
           moveResult = moveSlice(slice.absPath, destAbs);
         } catch (error) {
@@ -630,10 +651,10 @@ function buildSliceMoveCommand(): Command {
           planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
           planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
         ].filter((edit): edit is MissionCompositionEdit => edit !== null);
-        applyMissionCompositionEdits(edits);
-        let moveResult: ReturnType<typeof moveSlice> | null = null;
         const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
         const originalTargetNode = target.readmePath ? fs.readFileSync(target.readmePath, "utf8") : null;
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
         try {
           moveResult = moveSlice(slice.absPath, destAbs);
           const targetId = ensureMissionIdPersisted(target, missionsRoot);
@@ -1139,7 +1160,7 @@ function buildAuditCommand(): Command {
                 : null,
             });
 
-            if (!/^\d{2}-/.test(entry)) {
+            if (!/^\d{2,}-/.test(entry)) {
               sliceResult.findings.push({
                 kind: "id_convention_violation",
                 severity: "high",
@@ -1988,7 +2009,15 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         }
         // Resolve the scope target LOCALLY (rich NN-slug resolution), then
         // send the canonical missions-root-relative path to the daemon.
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        // #995 — approve is the one scope write that happens inside the DAEMON.
+        // The resolved root travels WITH the request so the daemon stamps the
+        // tree the caller named instead of its own; strictOverride stops a
+        // named workspace without a missions/ directory from falling back to
+        // the configured root, which would stamp a tree nobody named.
+        const missionsRoot = resolveMissionsRoot({
+          override: getOpts(command).workspace,
+          strictOverride: true,
+        });
         let scopeAbsPath: string;
         if (tier === "slice") {
           const slice = findSlice(missionsRoot, target, opts.mission ?? null);
@@ -2012,6 +2041,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         const res = await client.post<Record<string, unknown>>("/api/scope/approve", {
           scopeTier: tier,
           scopePath,
+          missionsRoot,
           approvalScope: opts.scope,
           // P21: no body actorSession — the daemon derives the approver from the transport header.
           onBehalfOf: opts.onBehalfOf ?? null,

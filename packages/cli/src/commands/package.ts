@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { resolve } from "node:path";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -28,7 +29,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
         error?: string;
         errors?: string[];
         manifest?: { name: string; version: string; summary: string; runtimes: string[]; exportCounts: Record<string, number> };
-      }>("/api/packages/validate", { sourceRef: sourcePath });
+      }>("/api/packages/validate", { sourceRef: sourcePath, cwd: process.cwd() });
 
       if (res.status >= 400 || !res.data.valid) {
         if (res.data.errors) {
@@ -83,7 +84,8 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
         errors?: string[];
       }>("/api/packages/plan", {
         sourceRef: sourcePath,
-        targetRoot: opts.target,
+        cwd: process.cwd(),
+        targetRoot: resolve(opts.target),
         runtime: opts.runtime,
         roleName: opts.role,
       });
@@ -141,7 +143,8 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
         rejected?: Array<{ entry: { exportType: string; exportName: string }; reason: string }>;
       }>("/api/packages/install", {
         sourceRef: sourcePath,
-        targetRoot: opts.target,
+        cwd: process.cwd(),
+        targetRoot: resolve(opts.target),
         runtime: opts.runtime,
         roleName: opts.role,
         allowMerge: opts.allowMerge ?? false,

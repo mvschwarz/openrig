@@ -1,12 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import { monotonicFactory } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention, arbitratedNeedsInputSignal } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { AgentActivity, NodeInventoryEntry } from "../src/domain/types.js";
-import type { EvidenceRungId, RungTrust } from "../src/domain/activity-taxonomy.js";
+import type { EvidenceRungId } from "../src/domain/activity-taxonomy.js";
+
+const sessionId = monotonicFactory();
 
 describe("PsProjectionService", () => {
   let db: Database.Database;
@@ -32,7 +37,7 @@ describe("PsProjectionService", () => {
   }
 
   function seedSession(nodeId: string, status: string, createdAt?: string): string {
-    const id = `sess-${nodeId}-${Date.now()}-${Math.random()}`;
+    const id = sessionId();
     db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(id, nodeId, `tmux-${nodeId}`, status, createdAt ?? new Date().toISOString().replace("T", " ").slice(0, 19));
     return id;
@@ -222,6 +227,27 @@ describe("PsProjectionService", () => {
 
       const entries = ps.getEntries();
       expect(entries[0]!.lifecycleState).toBe("recoverable");
+    });
+
+    it("keeps intentionally stopped seats recoverable without degrading the active rig", () => {
+      const rigId = seedRig("intentional-recoverable");
+      const stopped = seedNode(rigId, "qa");
+      const live = seedNode(rigId, "dev");
+      const stoppedSession = seedSession(stopped, "running");
+      const liveSession = seedSession(live, "running");
+      const registry = new SessionRegistry(db);
+      seedSnapshotForRig(rigId, [{ nodeId: stopped, resumeToken: "qa-resume-token" }]);
+      registry.markIntentionallyStopped(stoppedSession);
+
+      expect(getNodeInventory(db, rigId).find((entry) => entry.nodeId === stopped)).toMatchObject({
+        lifecycleState: "recoverable", intentionallyStopped: true, sessionStatus: "exited",
+      });
+      expect(ps.getEntries()[0]).toMatchObject({
+        lifecycleState: "running", status: "partial", nodeCount: 2, runningCount: 1,
+      });
+
+      registry.markIntentionallyStopped(liveSession);
+      expect(ps.getEntries()[0]).toMatchObject({ lifecycleState: "stopped", runningCount: 0 });
     });
 
     it("all nodes detached + no usable snapshot -> lifecycleState=stopped", () => {
@@ -513,17 +539,18 @@ describe("PsProjectionService", () => {
       expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), null)).toBe(true);
     });
 
-    it("#180 review: arbitratedNeedsInputSignal is tri-state over rung trust", () => {
-      const rung = (r: EvidenceRungId, trust: RungTrust) => ({ rung: r, sourceId: "src", trust, lastEvidenceAt: null });
+    it("#180 review: arbitratedNeedsInputSignal is tri-state over observed needs-input evidence", () => {
+      const zero = { count: 0, reason: null };
+      const observed = (rung: EvidenceRungId) => ({ rung, observedAt: new Date().toISOString() });
       expect(arbitratedNeedsInputSignal(null)).toBeNull();
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 1, reason: "prompt" }, rungs: [] })).toBe(true);
-      // count: 0 with no authoritative needs-input source is "no trusted evidence"
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("lifecycle-hooks", "trial")] })).toBeNull();
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("window-sampling", "authoritative")] })).toBeNull();
-      // ...and a trusted clear is a real no
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("self-report", "authoritative")] })).toBe(false);
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("needs-input-chrome", "authoritative")] })).toBe(false);
-      expect(arbitratedNeedsInputSignal({ needsInput: { count: 0, reason: null }, rungs: [rung("lifecycle-hooks", "authoritative")] })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: { count: 1, reason: "prompt" }, needsInputEvidence: observed("lifecycle-hooks") })).toBe(true);
+      // count: 0 that no needs-input evidence supplied is "no trusted evidence", whatever rungs are declared
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: null })).toBeNull();
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("window-sampling") })).toBeNull();
+      // ...and an observed clear from a needs-input rung is a real no
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("self-report") })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("needs-input-chrome") })).toBe(false);
+      expect(arbitratedNeedsInputSignal({ needsInput: zero, needsInputEvidence: observed("lifecycle-hooks") })).toBe(false);
     });
 
     it("getEntries: multi-signal seat counts ONCE; healthy peers count zero", () => {
@@ -601,16 +628,17 @@ describe("PsProjectionService", () => {
           sampledAt: new Date().toISOString(), eventAt: new Date().toISOString(), evidence: "permission_prompt", fallback: false, stale: false },
       } as never);
       // The hook store still carries needs_input, but the seat's arbitrated state
-      // (what its row renders) is already clear from an AUTHORITATIVE source —
-      // the totals must agree.
+      // (what its row renders) is already clear from AUTHORITATIVE needs-input
+      // evidence (a later hook turn boundary) — the totals must agree.
       const seatActivity = {
         getSeatActivity: () => null,
         getSeatStateBySession: () => ({
           seatNodeId: n, activity: "working",
           needsInput: { count: 0, reason: null },
-          decidedBy: "self-report", seq: 2,
+          needsInputEvidence: { rung: "lifecycle-hooks", observedAt: new Date().toISOString() },
+          decidedBy: "lifecycle-hooks", seq: 2,
           changedAt: new Date().toISOString(),
-          rungs: [{ rung: "self-report", sourceId: "claude:pid-json", trust: "authoritative", lastEvidenceAt: new Date().toISOString() }],
+          rungs: [{ rung: "lifecycle-hooks", sourceId: "claude-code:hooks", trust: "authoritative", lastEvidenceAt: new Date().toISOString() }],
           lastSwap: null,
         }),
       };
@@ -678,16 +706,12 @@ describe("PsProjectionService", () => {
 
 // ===================================================================
 // SLICE-05 item-5 (D5) — ps must not fabricate a dead seat as running.
-// runningCount/status are raw `sessions.status='running'` SQL (verdict-blind);
-// the SeatIdentityReconciler writes a session_missing verdict to a separate table
-// that runningCount never reads. After an out-of-band tmux teardown the persisted
-// status stays 'running', so ps fabricates running. RED pins that effective
-// runningCount/status must exclude a seat with a session_missing identity verdict.
-// Production seam UNDECIDED (ps consumes verdict, or adapter/verdict demotion) —
-// this asserts the OUTCOME, not the mechanism. self-contained (own db).
+// The persisted status stays running after an out-of-band tmux teardown.
+// Effective counts and lifecycle must honor the applicable absence verdict
+// while keeping the registration intact. Self-contained (own db).
 // ===================================================================
 describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () => {
-  it("RED: a running session with an APPLICABLE session_missing verdict is NOT counted running", () => {
+  it("a running session with an applicable session_missing verdict is not counted running", () => {
     const db = createFullTestDb();
     try {
       db.prepare("INSERT INTO rigs (id, name) VALUES ('r-d5','d5')").run();
@@ -711,11 +735,11 @@ describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () =
         observedAt: "2026-07-02T12:00:00.000Z",
       });
       const entry = new PsProjectionService({ db }).getEntries()[0]!;
-      // The verdict IS applicable: the lifecycle axis already honors it (down-ranked).
-      expect(entry.lifecycleState).toBe("attention_required");
-      // ...but the running axis is verdict-blind — the exact inconsistency this RED pins.
-      expect(entry.runningCount).toBe(0); // <-- RED: currently 1 (raw sessions.status, verdict-blind)
-      expect(entry.status).not.toBe("running"); // <-- RED: currently "running"
+      expect(entry.lifecycleState).toBe("stopped");
+      expect(entry.runningCount).toBe(0);
+      expect(entry.activeCount).toBe(0);
+      expect(entry.status).toBe("stopped");
+      expect(db.prepare("SELECT status FROM sessions WHERE id = 's-d5'").get()).toEqual({ status: "running" });
     } finally {
       db.close();
     }

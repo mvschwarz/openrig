@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -11,7 +12,6 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
 
 const EDGE_NAMES = ["canonical", "plugin", "spec"];
 const CATEGORIES = new Set(["core", "pm", "pods", "process", null]);
@@ -38,27 +38,36 @@ export async function generateControlPlaneJson({
   layoutPath,
   outputDir,
 }) {
-  const membership = readYaml(membershipPath);
-  const denylist = readYaml(denylistPath);
-  const layoutConfig = readYaml(layoutPath);
-
+  const policyFiles = [
+    ["product-public-skills.generated.json", membershipPath],
+    ["internal-tokens.generated.json", denylistPath],
+    ["skill-edge-layout.generated.json", layoutPath],
+  ].map(([name, override]) => {
+    const source = resolve(repoRoot, "scripts", name);
+    if (override !== undefined && resolve(override) !== source) {
+      throw new Error(`Policy inputs now live in ${source}. Edit that product JSON; external YAML overrides are no longer supported.`);
+    }
+    return { name, source };
+  });
+  [membershipPath, denylistPath, layoutPath] = policyFiles.map(({ source }) => source);
+  const membership = readJson(membershipPath);
+  const denylist = readJson(denylistPath);
+  const layout = readJson(layoutPath);
   validateMembership(membership, membershipPath);
   validateDenylist(denylist, denylistPath);
-  const layout = await extractSkillEdgeLayout({
-    repoRoot,
-    sourcePath: layoutPath,
-    config: layoutConfig,
-  });
   const digests = buildEdgeDigests({ repoRoot, layout });
 
   mkdirSync(outputDir, { recursive: true });
-  writeJson(join(outputDir, "product-public-skills.generated.json"), publicProjection(membership));
-  writeJson(join(outputDir, "internal-tokens.generated.json"), denylist);
-  writeJson(join(outputDir, "skill-edge-layout.generated.json"), publicProjection(layout));
+  // These three files are authority, despite their historical .generated names.
+  // Export exact bytes if requested; an in-place refresh never rewrites them.
+  for (const { name, source } of policyFiles) {
+    const destination = resolve(outputDir, name);
+    if (destination !== source) copyFileSync(source, destination);
+  }
   writeJson(join(outputDir, "skill-edge-digests.generated.json"), digests);
 }
 
-// Ownership belongs to the private authoring source, not its public projection.
+// Historical projection helper. Regeneration preserves the product JSON bytes.
 export function publicProjection({ owner, ...value }) {
   return value;
 }
@@ -138,8 +147,8 @@ export async function extractSkillEdgeLayout({
 
 // Exported for the disk-truth digest regen (scripts/regen-edge-digests.mjs): digests derive purely
 // from the on-disk edge files + the (already-correct) in-repo layout — no external-canon YAMLs. This
-// refreshes file-integrity hashes to match folded reality WITHOUT re-deriving membership/denylist/layout
-// (those require the explicit canon-root path). It hashes PRESENT files only; a layout-demanded file missing from disk is
+// refreshes file-integrity hashes to match folded reality WITHOUT re-deriving membership/denylist/layout.
+// Those product JSON files are authoritative. It hashes PRESENT files only; a layout-demanded file missing from disk is
 // never given a digest here, so the staleness check stays loud about it (layout=authority, disk=reality).
 export function buildEdgeDigests({ repoRoot, layout }) {
   return {
@@ -200,6 +209,12 @@ function validateDenylist(value, sourcePath) {
       invalid(sourcePath, `${field} must be an array`);
     }
   }
+  if (Object.hasOwn(value, "allowed_context_lines") && (
+    !isStringArray(value.allowed_context_lines) ||
+    value.allowed_context_lines.some((line) => line === "" || /[\r\n]/.test(line))
+  )) {
+    invalid(sourcePath, "allowed_context_lines must be an array of nonempty single-line strings");
+  }
   if (
     !isObject(value.section_fence) ||
     typeof value.section_fence.begin !== "string" ||
@@ -255,9 +270,9 @@ function validateOverride(skill, override, edges, sourcePath) {
   }
 }
 
-function readYaml(path) {
+function readJson(path) {
   try {
-    return parse(readFileSync(path, "utf8"));
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
     throw new Error(`${path}: ${error.message}`);
   }
@@ -316,7 +331,7 @@ function cliOptions(argv) {
     }
     values[key.slice(2)] = resolve(value);
   }
-  const required = ["repo-root", "membership", "denylist", "layout", "output"];
+  const required = ["repo-root", "output"];
   for (const key of required) {
     if (!values[key]) throw new Error(`--${key} is required`);
   }

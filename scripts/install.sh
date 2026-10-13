@@ -42,8 +42,9 @@ install_main() {
     "        Show the installed version's setup plan without applying it." \
     '  [4/4] rig setup' \
     '        Checks both Claude Code and Codex; may install missing tools.' \
-    '        Checks tmux, writes its defaults, and on macOS may install/configure cmux.' \
-    '        On macOS, setup may start cmux while configuring its control.' \
+    '        Checks tmux and writes its defaults. rig setup installs herdr by default;' \
+    '        an unavailable herdr install is a warning. Existing cmux settings stay unchanged.' \
+    '        On macOS, an installing agent offers Ghostty; rig setup --ghostty attempts it after acceptance.' \
     'This broader setup is optional for the manual selected-provider path.' \
     'The wrapper does not log in, choose a permission policy, launch a team or open a kernel conversation.' \
     'Node advice: Node.js 22 or 24 with npm; use 22 on Apple silicon.' \
@@ -88,7 +89,7 @@ install_main() {
   fi
   install_step 3/4 "$install_rig" setup --dry-run
   install_step 4/4 "$install_rig" setup
-  printf '\n%s\n' 'Follow the next steps printed by rig setup: choose your providers, then rig up.'
+  printf '\n%s\n' 'Follow the next steps printed by rig setup: start the daemon, open the OpenRig view, then tell the operator what you want to build.'
 }
 
 # Setup prints policy guidance, not an input prompt. EOF keeps children from

@@ -10,6 +10,7 @@ import path from "node:path";
 import { getOpenRigHome } from "../../../openrig-compat.js";
 import { OWNER_NOTIFICATION_LEVELS, type OwnerNotificationLevel } from "../../queue-transition-log.js";
 import { BASELINE_REQUIRED_SCOPES } from "./capabilities.js";
+import { unsupportedChannelMapFields, validateChannelMap, type ChannelMapEntry } from "./channel-map.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -34,6 +35,12 @@ export interface SlackConnectorConfig {
   queueUrl: string | null;
   minimumLevelThatPosts: OwnerNotificationLevel;
   minimumLevelThatInterrupts: OwnerNotificationLevel;
+  /**
+   * #192: optional per-rig / per-seat outbound channels (channel-map.ts). Absent or empty = every
+   * item posts to `channel`, as before. Deliberately not in DEFAULT_CONFIG, so a config without
+   * it saves and digests unchanged.
+   */
+  channelMap?: ChannelMapEntry[];
 }
 
 export const DEFAULT_CONFIG: SlackConnectorConfig = {
@@ -55,9 +62,12 @@ function validateLevel(field: string, value: unknown): asserts value is OwnerNot
   }
 }
 
-function validateConfig(cfg: SlackConnectorConfig): void {
+/** `reading`: a channel-map entry field written by a newer OpenRig is ignored (and reported by
+ *  staticReadiness and the gateway log) rather than failing the connector after a downgrade. */
+function validateConfig(cfg: SlackConnectorConfig, opts: { reading?: boolean } = {}): void {
   validateLevel("minimumLevelThatPosts", cfg.minimumLevelThatPosts);
   validateLevel("minimumLevelThatInterrupts", cfg.minimumLevelThatInterrupts);
+  validateChannelMap(cfg, { allowUnknownFields: opts.reading });
 }
 
 export function configPathFor(home?: string): string {
@@ -74,7 +84,7 @@ export function loadConfig(home?: string): SlackConnectorConfig {
   }
   const { alertTag: _retiredAlertTag, ...supported } = raw;
   const cfg = { ...DEFAULT_CONFIG, ...supported };
-  validateConfig(cfg);
+  validateConfig(cfg, { reading: true });
   return cfg;
 }
 
@@ -112,5 +122,18 @@ export function staticReadiness(cfg: SlackConnectorConfig, hasBotToken: boolean,
     { ok: cfg.channel !== null, label: "channel", detail: cfg.channel ?? "unset (outbound cannot post)" },
     { ok: Boolean(cfg.inboundDestination), label: "inbound-destination", detail: cfg.inboundDestination },
     { ok: cfg.enabled, label: "enabled", detail: cfg.enabled ? "yes" : "no (run `rig slack enable`)" },
+    ...channelMapReadiness(cfg),
   ];
+}
+
+/** #192: one row only when a channel map is set. Fields this version does not support make the
+ *  row fail loudly: they are ignored, and saving the config refuses them. */
+function channelMapReadiness(cfg: SlackConnectorConfig): ReadinessItem[] {
+  if (!cfg.channelMap?.length) return [];
+  const channels = new Set(cfg.channelMap.map((e) => e.channel)).size;
+  const summary = `${cfg.channelMap.length} entr${cfg.channelMap.length === 1 ? "y" : "ies"} over ${channels} channel(s); \`rig slack verify\` checks membership in each`;
+  const unsupported = unsupportedChannelMapFields(cfg);
+  return [unsupported.length
+    ? { ok: false, label: "channel-map", detail: `${summary}; IGNORED unsupported field(s) ${unsupported.join(", ")} (written by a newer OpenRig?); remove them before saving the config` }
+    : { ok: true, label: "channel-map", detail: summary }];
 }

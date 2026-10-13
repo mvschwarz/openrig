@@ -467,6 +467,42 @@ describe("Up CLI", () => {
     }
   });
 
+  // #226: a launch from '/' continues, and the person is told why their agents would work in '/'.
+  // Only the cwd the CLI defaults warns; an explicit --cwd / is the person's choice.
+  it.each([
+    { args: ["demo"], warns: true },
+    { args: ["demo", "--cwd", "/"], warns: false },
+  ])("up $args from / sends cwdOverride / and warns only when / was defaulted", async ({ args, warns }) => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const reply = (status: number, data: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
+      if ((req.url ?? "").startsWith("/api/specs/library")) return reply(200, [{
+        id: "builtin:rig:demo", kind: "rig", name: "demo", version: "0.0.0", sourceType: "builtin",
+        sourcePath: "/install/@openrig/cli/daemon/specs/rigs/launch/demo/rig.yaml", relativePath: "rigs/launch/demo/rig.yaml", updatedAt: "2026-04-10T00:00:00Z",
+      }]);
+      if (req.url === "/api/rigs/summary") return reply(200, []);
+      if (req.url === "/api/up") { lastBody = JSON.parse(body); return reply(201, { status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }); }
+      reply(404, { error: "not found" });
+    });
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue("/");
+    try {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", ...args]);
+      });
+      expect(lastBody.cwdOverride).toBe("/");
+      expect(exitCode).toBeUndefined();
+      expect(logs.some((l) => l.includes("warning:") && l.includes("--cwd <project dir>"))).toBe(warns);
+    } finally {
+      cwd.mockRestore();
+      server.removeAllListeners("request");
+      for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+    }
+  });
+
   it("up --cwd sends absolute cwdOverride", async () => {
     let lastBody: Record<string, unknown> = {};
     const origListeners = server.listeners("request");

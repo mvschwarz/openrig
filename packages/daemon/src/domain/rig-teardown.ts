@@ -125,6 +125,11 @@ export class RigTeardownOrchestrator {
         );
         await this.deps.resumeMetadataRefresher.refresh(refreshableSessions);
       }
+    } catch (err) {
+      result.errors.push(`Resume metadata refresh failed: ${(err as Error).message}`);
+    }
+    // Discovery is best-effort; preserve the durable ledger even if it fails.
+    try {
       const snap = this.deps.snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
       result.snapshotId = snap.id;
     } catch (err) {

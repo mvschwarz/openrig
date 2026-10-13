@@ -45,7 +45,7 @@ interface GeneratedBehaviour {
   state: "generated";
   identity: BehaviourIdentity;
   team: Array<{ seat: string; pod: string; member: string; agentRef: string; profile: string; runtime: string; model?: string; cwd: string }>;
-  posture: Array<{ seat: string; shellAccess: string; selection: string; basis: "explicit" | "product_default" | "unresolved"; permissionPrompts?: "off" | "on" | "default"; firstRunWarnings?: { claudeBypass: "harness_asks_once" }; nonInterruptive?: "available"; nativeEffect: "unknown"; sourceRefs: SourceRef[] }>;
+  posture: Array<{ seat: string; shellAccess: string; selection: string; basis: "explicit" | "product_default" | "unresolved"; permissionPrompts?: "off" | "on" | "default"; firstRunWarnings?: { claudeBypass: "harness_asks_once" }; nonInterruptive?: "available"; nonInterruptiveDefault?: boolean; nativeEffect: "unknown"; sourceRefs: SourceRef[] }>;
   toldFiles: FileFact[];
   alsoRuns: FileFact[];
   writes: WriteFact[];
@@ -215,8 +215,8 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           : posture === "auto" ? (runtime === "codex" ? "on" : undefined)
           : policySurface === "flag" && posture === "floor" ? "on"
           : basis === "product_default" ? "default" : undefined;
-        view.posture.push({ seat, shellAccess: "Can run shell commands as the launching user, subject to runtime and host policy.", selection, basis, ...(permissionPrompts ? { permissionPrompts } : {}), ...(posture === "full_bypass" && nativePermissionSurface ? { nonInterruptive: "available" as const } : {}),
-          ...(posture === "full_bypass" && runtime === "claude-code" ? { firstRunWarnings: { claudeBypass: "harness_asks_once" as const } } : {}),
+        view.posture.push({ seat, shellAccess: "Can run shell commands as the launching user, subject to runtime and host policy.", selection, basis, ...(permissionPrompts ? { permissionPrompts } : {}), ...(posture === "full_bypass" && nativePermissionSurface ? { nonInterruptive: "available" as const, ...(typeof rig.non_interruptive === "boolean" ? { nonInterruptiveDefault: rig.non_interruptive } : {}) } : {}),
+          ...(posture === "full_bypass" && runtime === "claude-code" && rig.non_interruptive !== true ? { firstRunWarnings: { claudeBypass: "harness_asks_once" as const } } : {}),
           nativeEffect: "unknown", sourceRefs });
         const managed = runtime === "claude-code" ? text(object(rig.managed_blocks)["claude-code"]) ?? "CLAUDE.md" : runtime === "codex" ? "AGENTS.md" : undefined;
         if (managed) write(seat, "managed_guidance", "seat_cwd", managed, sourceRefs, "merge managed blocks");

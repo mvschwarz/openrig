@@ -218,6 +218,15 @@ function validateRules(rules, path) {
       );
     }
   }
+  if (Object.hasOwn(rules, "allowed_context_lines") && (
+    !Array.isArray(rules.allowed_context_lines) ||
+    rules.allowed_context_lines.some((value) =>
+      typeof value !== "string" || value === "" || /[\r\n]/.test(value))
+  )) {
+    throw new Error(
+      `Invalid rules file ${path}: allowed_context_lines must be an array of nonempty single-line strings`,
+    );
+  }
 }
 
 function git(repo, args) {

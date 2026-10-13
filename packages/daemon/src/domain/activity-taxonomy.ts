@@ -141,6 +141,10 @@ export interface ArbitratedSeatState {
   seatNodeId: string;
   activity: ActivityValue;
   needsInput: NeedsInput;
+  /** The authoritative needs-input evidence that supplied `needsInput`: its rung and when it
+   *  was observed. Null when no rung answered and `needsInput` is only the default zero — a
+   *  declared rung that never reported is not an observation that the seat is clear. */
+  needsInputEvidence: { rung: EvidenceRungId; observedAt: string } | null;
   /** Which rung decided `activity` — confidence made visible. */
   decidedBy: EvidenceRungId | null;
   /** Monotonic arbitrated-state sequence (wait-after-seq consumes it). */

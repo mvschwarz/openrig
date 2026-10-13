@@ -56,10 +56,10 @@ export class UsageSamplesStore {
       .prepare(
         `SELECT sampled_at, total_input_tokens, total_output_tokens, used_percentage
          FROM usage_samples
-         WHERE lane = 'context' AND seat_session = ?
+         WHERE lane = 'context' AND seat_session = ? AND node_id = ?
          ORDER BY id DESC LIMIT 1`,
       )
-      .get(s.seatSession) as LastContextRow | undefined;
+      .get(s.seatSession, s.nodeId) as LastContextRow | undefined;
     if (
       last &&
       last.sampled_at === s.sampledAt &&

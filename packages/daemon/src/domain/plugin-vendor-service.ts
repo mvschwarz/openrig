@@ -221,6 +221,24 @@ export class PluginVendorService {
     }
 
     const sourceVersion = this.pluginVersion(nodePath.join(this.userPluginsDir, pluginName));
+    this.ensureSkillDirGlobally(sourceDir, skillName, sourceVersion, globalSkillRoots);
+  }
+
+  /**
+   * Project one skill folder into the harness-global skill roots under `sourceVersion`
+   * authority. A target without OpenRig's version marker was installed another way (for
+   * example by skills.sh) and is left unchanged, as is one marked equal or newer.
+   */
+  ensureSkillDirGlobally(
+    sourceDir: string,
+    skillName: string,
+    sourceVersion: string,
+    globalSkillRoots: string[],
+  ): void {
+    if (!this.fs.exists(sourceDir)) {
+      throw new Error(`Required global seed '${skillName}' is missing at ${sourceDir}`);
+    }
+    parseNumericVersion(sourceVersion, `${skillName} source`);
     const files = this.fs.listFiles(sourceDir);
     for (const root of globalSkillRoots) {
       const targetDir = nodePath.join(root, skillName);

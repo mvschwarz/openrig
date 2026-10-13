@@ -79,6 +79,11 @@ Missing or malformed selections fail; absence is never inferred as disablement.
 `rig context work-install --json` reports the effective state, source, manifest,
 context selectors, and skills. With `--runtime`, its managed skill loadout then
 combines System World, topology, and Project World selectors with provenance.
+The catalog is a Git checkout. A skill folder with uncommitted or untracked content is
+skipped by itself and named. With `--runtime`, work-install reports selected skips with
+exit 1. It inspects by default; `--apply-skills` projects the remaining clean skills while
+keeping any previously projected copy of the skipped skill. An uncommitted change directly
+in the catalog root, such as `catalog.yaml`, still makes the whole catalog unavailable.
 
 For a pre-0.5.9 home, use the `openrig-upgrade` skill's
 `migrate-telemetry-state-0.5.9.mjs` helper as an Agent-Operated Migration. Its

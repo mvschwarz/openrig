@@ -97,7 +97,7 @@ describe("contained Claude restore activity resources", () => {
   function settings() { return JSON.parse(fs.readFileSync(settingsPath, "utf8")); }
   function owned(s = settings()): string[] {
     return Object.values(s.hooks ?? {}).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks ?? []))
-      .map((h: any) => h.command as string).filter(c => c.includes(".openrig/hooks/scripts/activity-relay.cjs"));
+      .map((h: any) => h.command as string).filter(c => c.includes("state/claude-activity-hooks/activity-relay.cjs"));
   }
   function seed(pod: boolean, selected = true, runtime = "claude-code") {
     const rig = rigs.createRig("restore");

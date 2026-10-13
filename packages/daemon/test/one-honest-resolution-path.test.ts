@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
+import { decodeTime } from "ulid";
 import type Database from "better-sqlite3";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
@@ -96,7 +97,7 @@ describe("one path at the verbs: send and capture surface the transport outcome"
     return { rig, node, session };
   }
 
-  function transportOver(make: () => Error): SessionTransport {
+  function transportOver(make: () => Error, now?: () => Date): SessionTransport {
     // The REAL adapter over an injected failing exec — the diagnosis repro
     // shape, not a stubbed error at the seam under test.
     return new SessionTransport({
@@ -104,6 +105,7 @@ describe("one path at the verbs: send and capture surface the transport outcome"
       rigRepo,
       sessionRegistry,
       tmuxAdapter: new TmuxAdapter(failingExec(make)),
+      now,
     });
   }
 
@@ -207,8 +209,10 @@ describe("one path at the verbs: send and capture surface the transport outcome"
     });
 
     it("genuine session absence still writes the verdict and ps down-ranks the seat", async () => {
-      seedSeat();
-      await transportOver(SESSION_GONE).send(SEAT, "hello");
+      const { session } = seedSeat();
+      // This case observes the registered occupant, not an ambiguous same-ms cutover.
+      const observedAt = new Date(Math.max(Date.now(), decodeTime(session.id)) + 1);
+      await transportOver(SESSION_GONE, () => observedAt).send(SEAT, "hello");
       const rows = verdictRows();
       expect(rows).toHaveLength(1);
       expect(rows[0]!.reason).toBe("session_missing");

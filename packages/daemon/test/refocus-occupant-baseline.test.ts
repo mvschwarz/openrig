@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,10 @@ function makeHome(): { home: string; stateDir: string } {
   const home = join(root, "home");
   const stateDir = join(home, "refocus");
   mkdirSync(stateDir, { recursive: true });
+  // Isolate occupant state from trace resolution (covered by refocus-context-ref).
+  const trace = join(home, "trace-success");
+  writeFileSync(trace, '#!/bin/sh\nprintf "WORK TRACE: fixture intent\\n"\n');
+  chmodSync(trace, 0o755);
   return { home, stateDir };
 }
 
@@ -51,6 +55,11 @@ function runHook(home: string, input: Record<string, unknown>, event = "UserProm
       OPENRIG_REFOCUS_ENABLED: "1",
       OPENRIG_REFOCUS_NOW: "",
       OPENRIG_REFOCUS_CONTENT_REF: "",
+      OPENRIG_REFOCUS_CONTENT_FILE: "",
+      OPENRIG_REFOCUS_TREES: "work",
+      OPENRIG_REFOCUS_WORK_NODE: home,
+      OPENRIG_WORKSPACE_ROOT: home,
+      PYTHON: join(home, "trace-success"),
     },
     timeout: 15_000,
   });

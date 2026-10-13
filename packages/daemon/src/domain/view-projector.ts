@@ -73,6 +73,10 @@ interface CustomViewRow {
   last_evaluated_at: string | null;
 }
 
+function customDefinitionHasLimit(definition: string): boolean {
+  return definition.toLowerCase().includes("limit");
+}
+
 export class ViewProjectorError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -153,14 +157,25 @@ export class ViewProjector {
     return this.runCustom(custom, limit);
   }
 
+  /** #586: whether showing this view binds `limit` into SQL. The execution view
+   *  never reads it, a custom view with its own LIMIT keeps that one, and an
+   *  unregistered name is refused before any SQL runs. */
+  bindsLimit(viewName: string): boolean {
+    if (viewName === "execution") return false;
+    if ((BUILT_IN_VIEW_NAMES as readonly string[]).includes(viewName)) return true;
+    const custom = this.getCustomView(viewName);
+    return custom !== null && !customDefinitionHasLimit(custom.definition);
+  }
+
   list(): { builtIn: BuiltInViewName[]; custom: CustomView[] } {
     return { builtIn: [...BUILT_IN_VIEW_NAMES], custom: this.listCustomViews() };
   }
 
   private runBuiltIn(name: BuiltInViewName, rig: string | undefined, limit: number): ViewQueryResult {
     const fixtureClause = fixtureExclusionClause();
-    const rigClause = rig ? `AND (destination_session LIKE ? OR source_session LIKE ?)` : "";
-    const rigParams: unknown[] = rig ? [`%@${rig}`, `%@${rig}`] : [];
+    const rigClause = rig ? `AND (destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')` : "";
+    const rigPattern = rig ? `%@${rig.replace(/[\\%_]/g, "\\$&")}` : undefined;
+    const rigParams: unknown[] = rigPattern ? [rigPattern, rigPattern] : [];
 
     // S04 — the pickup lens post-processes through the ONE shared derivation rule
     // (derivePickup), never a second SQL copy of it: claimed live rows, oldest claim first,
@@ -294,7 +309,7 @@ export class ViewProjector {
               q.source_session NOT LIKE '%@fixture-%'
             )`;
         const rigClauseQI = rig
-          ? `AND (q.destination_session LIKE ? OR q.source_session LIKE ?)`
+          ? `AND (q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')`
           : "";
         sql = `
           SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session, t.transition_note,
@@ -328,7 +343,7 @@ export class ViewProjector {
     // Custom view definitions are operator-supplied SQL. Append LIMIT if
     // the operator's SQL does not already include one. We do not parse SQL;
     // operators are responsible for the definition's correctness.
-    const sql = view.definition.toLowerCase().includes("limit")
+    const sql = customDefinitionHasLimit(view.definition)
       ? view.definition
       : `${view.definition.trim().replace(/;$/, "")} LIMIT ${limit}`;
     let rows: Record<string, unknown>[];

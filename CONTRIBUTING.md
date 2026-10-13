@@ -61,7 +61,8 @@ specific failure. A shipped skill may exist in more than one copy (see ARCHITECT
 `npm run mirror-skills` apply needs maintainer-only inputs; see "A shipped skill" in
 [ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)). The repository checks include a docs guard: a
 tracked file under `docs/` must be in `docs/as-built/`, `docs/reference/` or `docs/releases/`
-(`docs/DESIGN.md` is the one exception). They also validate the context-pack sources;
+(`docs/DESIGN.md` is the one exception). They check that shipped first-run text names only teams, skills and
+commands that exist, and they validate the context-pack sources;
 `npm run generate-context-packs` rebuilds the generated packs locally, which aren't committed.
 The UI unit-test suite is separate from `npm test`: run `npm run test:ui`. CI runs it on every pull
 request as `package-tests (ui)`, so a change has to pass it.

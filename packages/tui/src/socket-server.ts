@@ -35,8 +35,14 @@ export function describeState(state: ViewState) {
     ...(mission ? [`mission:${mission}`] : []),
     ...(slice ? [`slice:${slice}`] : []),
   ];
+  const pending = state.pendingDrill;
   return {
     ok: !state.lastError,
+    // Not done yet: the address resolves when Topology's read settles; `state` reports the outcome.
+    ...(pending ? {
+      resolving: `${pending.resource} ${pending.name}`,
+      notice: `Switched to Topology; resolving ${pending.resource} "${pending.name}" once its read settles. Send "state" for the result.`,
+    } : {}),
     screen: state.section,
     drill: state.drill.map((d) => `${d.kind}:${d.name}`),
     filter: state.filter || undefined,

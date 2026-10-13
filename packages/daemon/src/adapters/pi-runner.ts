@@ -15,8 +15,8 @@
 // a dead pi process prints the EXIT/ERROR marker and records `exited` in the
 // sidecar — never a silently frozen pane.
 //
-// Only node builtins + pi-runner-protocol are imported so the compiled entry
-// stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
+// Only node builtins and local runner helpers are imported so the compiled
+// entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -27,6 +27,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { piCredentialNotice } from "./pi-readiness.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -175,10 +176,11 @@ function piCredentialHint(message: string): string {
     : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
 }
 
-function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
-  const text = typeof detail === "string"
+function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
+  // Empty or control-only fields must not hide a later usable diagnostic.
+  const text = details.map(detail => typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
-    : "";
+    : "").find(Boolean) ?? "";
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
@@ -190,11 +192,13 @@ function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
  *  repeats into one notice per failure. */
 function modelErrorNotice(event: Record<string, unknown>, runtime: RunnerRuntime): { errorNotice?: string } {
   if (event.type === "auto_retry_end") {
-    return event.success === false ? { errorNotice: errorNotice(event.finalError, runtime) } : {};
+    return event.success === false ? { errorNotice: errorNotice([event.finalError, event.error], runtime) } : {};
   }
   const message = event.message as Record<string, unknown> | undefined;
-  return message?.role === "assistant" && message.stopReason === "error"
-    ? { errorNotice: errorNotice(message.errorMessage, runtime) } : {};
+  if (message?.role === "assistant" && message.stopReason === "error") {
+    return { errorNotice: errorNotice([message.errorMessage, message.error, event.error], runtime) };
+  }
+  return {};
 }
 
 export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntime = "pi"): MirrorAndActivity {
@@ -828,6 +832,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     runtime,
   });
 
+  if (runtime === "pi") {
+    console.log(`[pi-runner] seat ${args.sessionName}: ${piCredentialNotice({
+      model: args.model, agentDir: paths.agentDir, env: childEnv,
+      readFile: (file) => {
+        if (fs.statSync(file).size > 1024 * 1024) throw new Error("Unbounded metadata");
+        return fs.readFileSync(file, "utf8");
+      },
+    })}`);
+  }
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 

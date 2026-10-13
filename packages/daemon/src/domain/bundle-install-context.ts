@@ -39,12 +39,25 @@ export function bundleInstallContext(
   };
 }
 
-/** Materialization leaves this manifest in the install folder; --cwd can point seats elsewhere. */
-export function isExistingBundleTarget(context: BundleInstallContext, target: string): boolean {
+// Before 0.6.7 an unnamed bundle was "my-bundle" ("github-bundle" for a link), so a team installed then carries that
+// name in its folder; context.existing already requires a team with the offered rig's name.
+const EARLIER_DEFAULT_NAMES = new Set(["my-bundle", "github-bundle"]);
+
+/** Require the recorded folder when available; old generations retain the manifest-only check. */
+export function isExistingBundleTarget(context: BundleInstallContext, target: string, db: Database.Database): boolean {
   if (context.existing.length === 0) return false;
   try {
+    const repo = new RigRepository(db);
+    const recordedRoots = context.existing.flatMap(rig => {
+      const root = repo.getRigInstallRoot(rig.rigId);
+      return root === null ? [] : [root];
+    });
+    // An unbound older generation must not weaken a known generation's folder identity.
+    if (recordedRoots.length > 0 && !recordedRoots.includes(fs.realpathSync.native(target))) return false;
     const manifest = parsePodBundleManifest(fs.readFileSync(path.join(target, "bundle.yaml"), "utf8")) as Record<string, unknown> | null;
-    return manifest?.["schema_version"] === 2 && manifest["name"] === context.offered.name;
+    const name = manifest?.["name"];
+    return manifest?.["schema_version"] === 2
+      && (name === context.offered.name || (typeof name === "string" && EARLIER_DEFAULT_NAMES.has(name)));
   } catch {
     // Missing or unreadable identity keeps the existing first-install conflict handling.
     return false;

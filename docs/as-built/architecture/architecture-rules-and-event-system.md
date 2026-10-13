@@ -11,8 +11,8 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Architecture Invariants, Event System, Compatibility Notes
@@ -21,7 +21,7 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -61,7 +61,7 @@ system-level invariants.
     `monotonicFactory()`. Restore does not pick the newest session by max
     ULID; it resolves the active occupant recorded in the snapshot
     (`resolveActiveSnapshotSession`, `active-occupant.ts:74`, called at
-    `restore-orchestrator.ts:767` and `:964`).
+    `restore-orchestrator.ts:774` and `:971`).
 13. Readiness checking is a retry loop with exponential backoff and
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
@@ -73,9 +73,9 @@ system-level invariants.
     new process assembled from artifacts.
 15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
     the blank session rolled back and no session running
-    (`restore-orchestrator.ts:1048`). No automatic fresh fallback. Fresh launch
+    (`restore-orchestrator.ts:1055`). No automatic fresh fallback. Fresh launch
     is explicit follow-up only (`rig up --fresh <seats...>`,
-    `packages/cli/src/commands/up.ts:93`).
+    `packages/cli/src/commands/up.ts:99`).
 16. Post-command handoff required on `up`, `down`, `restore`,
     `snapshot create`: what happened + current state + next action.
 17. Session naming: `{pod}-{member}@{rig}` — human-authored,
@@ -119,7 +119,7 @@ system-level invariants.
 
 The reboot supports `local:...` and `path:/abs/...` agent refs. Remote
 `agent_ref` sources remain unsupported and fail in preflight (schema
-validation, `rigspec-schema.ts:550`; restated in compat note 1).
+validation, `rigspec-schema.ts:563`; restated in compat note 1).
 
 ### Startup, delivery and launch invariants
 
@@ -136,20 +136,20 @@ comments:
   caller's opt-in to wait, and a failed wait returns without sending. Otherwise
   only positive evidence of an open
   picker or approval prompt refuses a send; a busy or unknown seat gets the
-  message with an advisory warning (`session-transport.ts:1410`–`1416`). The
+  message with an advisory warning (`session-transport.ts:1427`–`1433`). The
   audited `--dangerously-interact` override is the only way past an open prompt.
 - **Non-interruptive mode is per-launch flags only.** It never changes
   permissions or native settings files, applies only to full-bypass Claude Code
   and Codex seats, and is saved per rig, off by default
   (`adapters/non-interruptive.ts:9`–`26`; `rigs.non_interruptive`, migration
-  `095`).
+  `095`). A rig spec can author it as `non_interruptive` (`rigspec-schema.ts:179`).
 - **Inside a notify envelope, events are delivered from the log.** Within
   `withNotifyEnvelope` (`event-bus.ts:106`–`112`), every event persisted through
   the event bus must be registered before the callback returns; after commit
   the bus delivers the committed rows from the log, and an unreadable row
   emits `event.delivery_poisoned`. Legacy callers outside an envelope persist
   inside their own transaction and notify subscribers explicitly after commit
-  (`persistWithinTransaction`, `:70`; for example `node-launcher.ts:240`).
+  (`persistWithinTransaction`, `:70`; for example `node-launcher.ts:241`).
 
 ## 2. Event system
 
@@ -226,7 +226,7 @@ SSE delivery surfaces include the following. The daemon has **11**
 - `GET /api/queue/watch` — queue/inbox coordination events
   (`routes/queue.ts:1054`, with a `/sse` alias at `:1055`).
 - The chat SSE stream `GET /api/rigs/:rigId/chat/watch` delivers
-  `chat.message` for one rig (`routes/chat.ts:68`, mounted at `server.ts:782`;
+  `chat.message` for one rig (`routes/chat.ts:82`, mounted at `server.ts:782`;
   rig-scoped; see compat note 6).
 - The other SSE routes are activity events and the watch or `sse` routes for
   mission control, projects, views, watchdog and workflow; list them with
@@ -268,7 +268,7 @@ Intentional limits that still describe the shipped system:
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
 7. `--verify` on `rig send` checks pane content for message visibility, not
    agent acknowledgement: it compares occurrences of the message's first 40
-   characters before and after the send (`session-transport.ts:1588`–`1591`).
+   characters before and after the send (`session-transport.ts:1605`–`1608`).
 8. Terminal node readiness is shell-ready only — no service health probes.
 9. Managed-app service surfaces are descriptive only — OpenRig does not
    auto-inject service URLs/tokens into agent prompts beyond authored

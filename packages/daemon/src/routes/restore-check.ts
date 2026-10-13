@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
+import { OPENRIG_HOME } from "../openrig-compat.js";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry, type StartupContextProbeResult } from "../domain/restore-check-service.js";
 import { deriveRelayEvents } from "../domain/claude-activity-hooks.js";
 import { getNodeInventory } from "../domain/node-inventory.js";
@@ -152,6 +153,7 @@ export function createRestoreCheckService(
   snapshotRepo: SnapshotRepository,
 ): RestoreCheckService {
   const serviceDeps: RestoreCheckDeps = {
+    stateDir: OPENRIG_HOME,
     substrateRoot: dirname(resolveLegacyTopologyRigsRoot()),
     probeQueueStore: () => {
       try {

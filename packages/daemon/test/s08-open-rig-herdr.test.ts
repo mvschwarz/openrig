@@ -95,13 +95,15 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
   it("17 live seats → workspace named after the rig, tabs of 16 then 1, each cell on its own seat, in order", async () => {
     const { transport, requests } = herdrTransport();
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "tok" }));
-    const res = await svc.openView({ view: `rig:${RIG}` });
+    const preview = await svc.previewView({ view: `rig:${RIG}` });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    const res = await svc.openView({ view: `rig:${RIG}`, expectedPlan: preview.planId });
     expect(res).toMatchObject({ provider: "herdr", ok: true, pages: 2, absent: [], degraded: [] });
     expect(res.opened).toEqual(rows.map((r) => r.canonicalSessionName));
     const create = requests.find((r) => r.method === "workspace.create")!;
     expect(create.params).toEqual({ focus: false, label: RIG });
     const applies = requests.filter((r) => r.method === "layout.apply");
-    expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#tok/1`, `openrig:rig:${RIG}#tok/2`]);
+    expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/1`, `openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/2`]);
     expect(applies.map((a) => cellSeats(a.params["root"]).length)).toEqual([16, 1]);
     expect([...cellSeats(applies[0]!.params["root"]), ...cellSeats(applies[1]!.params["root"])]).toEqual(rows.map((r) => r.canonicalSessionName));
   });
@@ -298,5 +300,15 @@ describe("S08 — cmux is unchanged", () => {
   it("the workspace name rule is Herdr-only: a mission/slice/saved view keeps its view id", () => {
     const view: ComposedView = { id: "mission:4.6", opened: [], absent: [], degraded: [], pages: [] };
     expect(planHerdrLayout(view, "t").workspaceLabel).toBe("mission:4.6");
+  });
+});
+
+describe("desktop Herdr endpoint", () => {
+  it.each([false, true])("retains the configured launch endpoint when socket alive=%s", async alive => {
+    const { transport } = herdrTransport();
+    transport.probe = async () => ({ alive });
+    const launch = { socketPath: "/fixture/daemon/herdr.sock", session: "fixture-daemon" };
+    const adapter = new HerdrAdapter({ transportFactory: () => transport, launch });
+    expect(await adapter.status()).toMatchObject({ available: alive, launch });
   });
 });

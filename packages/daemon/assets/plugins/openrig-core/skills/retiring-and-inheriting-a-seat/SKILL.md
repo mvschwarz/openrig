@@ -61,6 +61,9 @@ threshold you can see coming; fall back to compaction only when a transition was
    cadence, on which surface, and who will hold it after cutover. Carry each duty both in this
    packet and in durable seat state, because recurring duties are the content most often lost at
    a generation boundary while urgent one-off work carries cleanly.
+   **Write the seat's recap too:** run `rig context recap-write --rig <rig> --seat <seat> --file <draft>`
+   alongside updating `LEARNED.md`. A `rebuild` reads `RECAP.md` before anything else. The format
+   the store checks is in `seat-continuity-and-handover`, "Write the seat's recap before a handover".
 3. **Prime the fresh successor** — `rig walk` the packet into the seat (paced delivery lets the
    successor absorb it in order), or launch-with-packet. The successor reads it as
    *inheritance*, not *identity*. **The packet's first-read line MUST point the successor at

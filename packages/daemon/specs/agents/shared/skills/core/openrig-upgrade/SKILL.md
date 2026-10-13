@@ -239,6 +239,8 @@ host in front of you.
     mechanism; this skill does not rewrite launchers.
 11. Record the observed result, remaining local preservation decisions, and the
     exact rollback runtime and backup.
+12. Read what changed in the new version, `rig context get reference/whats-new.md`,
+    and tell your user anything in it that changes how they work.
 
 ## Stop and hand back when
 

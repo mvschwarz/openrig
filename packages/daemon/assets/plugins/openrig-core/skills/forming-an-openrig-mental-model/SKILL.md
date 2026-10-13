@@ -196,7 +196,7 @@ rig whoami --json         # know who you are
 rig send <session> "msg"  # talk to a peer
 rig capture <session>     # see a peer's terminal
 rig transcript <session>  # read a peer's history
-rig down <rigId>          # snapshot and tear down
+rig down <rigId>          # snapshot and stop every agent; check rig ps first, only when asked
 rig up <rig-name>         # restore from snapshot
 ```
 

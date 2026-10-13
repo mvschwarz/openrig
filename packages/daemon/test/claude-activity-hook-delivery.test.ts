@@ -15,12 +15,13 @@
 // path is preserved). Malformed settings are preserved (fail-closed). Missing
 // source produces NO dangling commands and NO false projected claim.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
+import { basename, dirname, resolve as pathResolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import type { RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
@@ -29,11 +30,12 @@ import { resolveAgentRef, type ResolvedAgentSpec } from "../src/domain/agent-res
 const CWD = "/project";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
 const MANIFEST_SRC = "/assets/plugins/openrig-core/hooks/claude.json";
-const RELAY_DEST = "/project/.openrig/hooks/scripts/activity-relay.cjs";
+const STATE_DIR = "/custom-instance/O'Brien";
+const RELAY_DEST = `${STATE_DIR}/state/claude-activity-hooks/activity-relay.cjs`;
 const SETTINGS = "/project/.claude/settings.local.json";
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
 const OWNED_CMD = `node ${shellQuote(RELAY_DEST)}`;
-const OWNED_MARKER = ".openrig/hooks/scripts/activity-relay.cjs";
+const OWNED_MARKER = "state/claude-activity-hooks/activity-relay.cjs";
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
 
 // A faithful subset of the canonical claude.json: the 4 relay events (unscoped
@@ -85,7 +87,7 @@ function mockTmux() {
 }
 
 function makeAdapter(fs: ClaudeAdapterFsOps, relayPath = RELAY_SRC, manifestPath = MANIFEST_SRC) {
-  return new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs, activityRelayPath: relayPath, claudeHooksManifestPath: manifestPath } as ConstructorParameters<typeof ClaudeCodeAdapter>[0]);
+  return new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs, stateDir: STATE_DIR, activityRelayPath: relayPath, claudeHooksManifestPath: manifestPath } as ConstructorParameters<typeof ClaudeCodeAdapter>[0]);
 }
 
 /** Enable-ready fs: relay asset (0755) + canonical manifest seeded. */
@@ -130,6 +132,18 @@ function seededOwned(): string {
   return JSON.stringify({ hooks });
 }
 
+/** The file's mode as recorded in the git index ("100755"), or null outside a git checkout. */
+function committedMode(filePath: string): string | null {
+  try {
+    const out = execFileSync("git", ["ls-files", "--stage", "--", basename(filePath)], {
+      cwd: dirname(filePath), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.trim().split(/\s+/)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 // Packaged contract (QA blocker 1f53796c): the projected relay must be 0755, and production
 // PRESERVES the source mode (no adapter chmod policy). So the SHIPPED asset itself must be
 // executable — this regression STATS the real committed asset, not a synthetic 0o755 fixture.
@@ -138,12 +152,42 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
     const assetPath = pathResolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
     const mode = statSync(assetPath).mode & 0o777;
     expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
-    expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+    // A git checkout's working-tree mode is the committed mode filtered by the checkout user's
+    // umask (umask 002, the default for user-private-group accounts on many Linux distributions,
+    // yields 0775). So in a git checkout the exact 0755 is asserted on the GIT INDEX entry, which
+    // is what this measures: not HEAD's tree, and not the mode a later package tarball will carry
+    // (that is the packaging step's to keep). Outside a checkout (e.g. an extracted package) it
+    // is asserted on the file itself.
+    const indexMode = committedMode(assetPath);
+    if (indexMode !== null) {
+      expect(indexMode, "committed relay mode").toBe("100755");
+      expect(mode & 0o755, `checkout relay mode is 0${mode.toString(8)}, expected at least 0755`).toBe(0o755);
+      expect(mode & 0o002, `checkout relay mode is 0${mode.toString(8)}, world-writable`).toBe(0);
+    } else {
+      expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+    }
   });
 });
 
 describe("Claude activity-hook delivery — ENABLE (entry present, source + manifest readable)", () => {
-  it("copies the relay to <cwd>/.openrig/hooks/scripts/ at mode 0755", async () => {
+  it("leaves identical shared relay bytes alone and refreshes a changed installed asset", async () => {
+    const fs = enableFs();
+    const copy = fs.copyFile;
+    let copies = 0;
+    fs.copyFile = (src, dest) => { copies++; copy(src, dest); };
+    const adapter = makeAdapter(fs);
+    await adapter.project(plan([activityEntry()]), binding());
+    expect(copies).toBe(1);
+    await adapter.project(plan([activityEntry()]), binding("/sibling-project"));
+    expect(copies).toBe(1);
+    fs._store[RELAY_SRC] = "// updated relay";
+    await adapter.project(plan([activityEntry()]), binding());
+    expect(copies).toBe(2);
+    expect(fs._store[RELAY_DEST]).toBe("// updated relay");
+    expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
+  });
+
+  it("copies the relay outside cwd into the configured instance at mode 0755", async () => {
     const fs = enableFs();
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     expect(fs._store[RELAY_DEST]).toBe("// relay");
@@ -205,6 +249,40 @@ describe("Claude activity-hook delivery — ENABLE (entry present, source + mani
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     const stopCmds = (readSettings(fs).hooks?.Stop ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
     expect(stopCmds.filter((c: string) => c.includes(OWNED_MARKER))).toEqual([OWNED_CMD]);
+  });
+});
+
+describe("Claude activity-hook delivery — instance path transition", () => {
+  it.each([true, false])("migrates or strips both owned forms while preserving user commands (enabled=%s)", async (enabled) => {
+    const oldPath = "/old/project/O'Brien/.openrig/hooks/scripts/activity-relay.cjs";
+    const priorInstance = "/old/instance/state/claude-activity-hooks/activity-relay.cjs";
+    const userCommands = [
+      `echo ${shellQuote(oldPath)}`,
+      `node 'user-arg' ${shellQuote(priorInstance)}`,
+      `node ${shellQuote(priorInstance + ".backup")}`,
+    ];
+    const seeded = JSON.stringify({ env: { USER_SETTING: "keep" }, hooks: { Stop: [{ hooks: [
+      ...[oldPath, priorInstance].map(p => ({ type: "command", command: `node ${shellQuote(p)}` })),
+      ...userCommands.map(command => ({ type: "command", command })),
+    ] }] } });
+    const fs = enableFs({ [SETTINGS]: seeded });
+    await makeAdapter(fs).project(plan(enabled ? [activityEntry()] : []), binding());
+    const settings = readSettings(fs);
+    expect(settings.env).toEqual({ USER_SETTING: "keep" });
+    expect(settings.hooks.Stop.flatMap((g: any) => g.hooks.map((h: any) => h.command)))
+      .toEqual(enabled ? [...userCommands, OWNED_CMD] : userCommands);
+  });
+
+  it("keeps different configured instances from overwriting each other's relay", async () => {
+    const fs = enableFs();
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    fs._store[RELAY_SRC] = "// second installed version";
+    const other = new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs, stateDir: "/other-instance",
+      activityRelayPath: RELAY_SRC, claudeHooksManifestPath: MANIFEST_SRC });
+    await other.project(plan([activityEntry()]), binding("/other-project"));
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    expect(fs._store["/other-instance/state/claude-activity-hooks/activity-relay.cjs"])
+      .toBe("// second installed version");
   });
 });
 
@@ -286,6 +364,31 @@ describe("Claude activity-hook delivery — hardening (guard r3 findings)", () =
   }
 });
 
+// #226: a seat whose cwd resolves to '/' has no project workspace. Delivery is still attempted there, as on
+// main (it works where '/' is writable, e.g. root in a container); when it fails, the warning says why.
+describe("Claude activity-hook delivery — cwd at the filesystem root", () => {
+  it("a writable root still gets the hooks delivered", async () => {
+    const fs = enableFs();
+    const res = await makeAdapter(fs).project(plan([activityEntry()]), binding("/"));
+    expect(res.projected).toContain("claude-activity-hooks");
+    expect(allCommands(JSON.parse(fs._store["/.claude/settings.local.json"]!)).length).toBeGreaterThan(0);
+  });
+
+  it("an unwritable root reports skipped and names the filesystem root as the reason", async () => {
+    const fs = enableFs();
+    fs.mkdirp = (p: string) => { if (p === "/.claude") throw new Error(`ENOENT: no such file or directory, mkdir '${p}'`); };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await makeAdapter(fs).project(plan([activityEntry()]), binding("/"));
+      expect(res.projected).not.toContain("claude-activity-hooks");
+      expect(res.skipped).toContain("claude-activity-hooks");
+      expect(log.mock.calls.flat().join("\n")).toMatch(/reconcile warning \(cwd '\/' resolves to the filesystem root, not a project workspace\): ENOENT/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
+
 // M1 (R1 verdict): ownership must ROUND-TRIP shellQuote. A cwd containing a legal apostrophe
 // (O'Brien) makes shellQuote escape ' as '"'"', which the naive quoted-arg matcher missed —
 // so owned hooks accumulated without bound on re-enable and dangled on disable.
@@ -293,7 +396,7 @@ describe("Claude activity-hook delivery — ownership round-trips shellQuote (ap
   it("cwd with an apostrophe (O'Brien): enable x2 keeps exactly one owned entry/event, disable strips all", async () => {
     const cwd = "/project/O'Brien";
     const settingsPath = `${cwd}/.claude/settings.local.json`;
-    const ownedCmd = `node ${shellQuote(`${cwd}/.openrig/hooks/scripts/activity-relay.cjs`)}`;
+    const ownedCmd = OWNED_CMD;
     const fs = enableFs();
     const adapter = makeAdapter(fs);
     await adapter.project(plan([activityEntry()]), binding(cwd));

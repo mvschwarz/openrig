@@ -176,6 +176,7 @@ export class BootstrapOrchestrator {
           const podSource = await this.deps.podBundleSourceResolver.resolve(sourceRef);
           const rawYaml = this.deps.fsOps.readFile(podSource.specPath);
           specDir = nodePath.dirname(podSource.specPath);
+          let installRoot: string | undefined;
           podBundleTempDir = podSource.tempDir;
           stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: podSource.manifest.name, source: "pod_bundle" } });
 
@@ -211,7 +212,7 @@ export class BootstrapOrchestrator {
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
             if (opts.mode === "apply" && opts.targetRoot) {
               const targetRoot = nodePath.resolve(opts.targetRoot);
-              const replacingOwnTarget = isExistingBundleTarget(context, targetRoot);
+              const replacingOwnTarget = isExistingBundleTarget(context, targetRoot, this.deps.db);
               const tmux = this.deps.podInstantiator?.["deps"]?.tmuxAdapter;
               if (replacingOwnTarget && tmux?.probeSession) {
                 // The instantiator repeats this under its name lock. This early
@@ -235,11 +236,12 @@ export class BootstrapOrchestrator {
                 return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
               }
               if (materialized.backupPath) warnings.push(`Existing target files were preserved at ${materialized.backupPath} before installing the replacement. Unrelated target files were kept.`);
+              installRoot = fs.realpathSync.native(targetRoot);
               specDir = nodePath.dirname(nodePath.join(targetRoot, podSource.manifest.rigSpec));
               warnings.push(`Bundle files are installed in ${targetRoot}; a later launch failure does not remove them.`);
             }
 
-            const result = await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
+            const result = await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings, installRoot);
             if (mode === "apply" && result.status === "failed") result.warnings.push(...context.resolutions);
             return { ...result, bundleInstall: { ...context, resolutions: mode === "apply" && result.status === "completed" ? [] : context.resolutions } };
           } finally {
@@ -647,6 +649,7 @@ export class BootstrapOrchestrator {
     stages: BootstrapStageResult[],
     errors: string[],
     warnings: string[],
+    installRoot?: string,
   ): Promise<BootstrapResult> {
     const { mode } = opts;
     const podInstantiator = this.deps.podInstantiator!;
@@ -728,8 +731,13 @@ export class BootstrapOrchestrator {
           return serviceResult.ok ? bundleHook() : serviceResult;
         }
       : serviceHook ?? bundleHook;
-    const nonInterruptive = opts.nonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
-    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, prelaunchHook });
+    let declaredNonInterruptive: boolean | undefined;
+    try {
+      const raw = RigSpecCodec.parse(rigSpecYaml) as Record<string, unknown> | null;
+      if (typeof raw?.["non_interruptive"] === "boolean") declaredNonInterruptive = raw["non_interruptive"];
+    } catch { /* The instantiator returns the existing structured validation failure. */ }
+    const nonInterruptive = opts.nonInterruptive ?? declaredNonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
+    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, prelaunchHook, installRoot });
     if ((outcome.ok || "rigId" in outcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
     const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
 

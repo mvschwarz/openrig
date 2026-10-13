@@ -4,6 +4,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
 import { runtimeProbeFailure } from "../adapters/preflight-exec.js";
+import { piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 
@@ -78,15 +79,16 @@ export class RigSpecPreflight {
     // cwd existence
     for (const node of spec.nodes) {
       if (node.cwd) {
-        if (!existsSync(node.cwd)) {
-          errors.push(`cwd '${node.cwd}' does not exist for node '${node.id}'`);
+        const cwd = resolveAuthoredCwd(node.cwd, null);
+        if (!existsSync(cwd)) {
+          errors.push(`cwd '${cwd}' does not exist for node '${node.id}'`);
         } else {
           try {
-            if (!statSync(node.cwd).isDirectory()) {
-              errors.push(`cwd '${node.cwd}' is not a directory for node '${node.id}'`);
+            if (!statSync(cwd).isDirectory()) {
+              errors.push(`cwd '${cwd}' is not a directory for node '${node.id}'`);
             }
           } catch {
-            errors.push(`cwd '${node.cwd}' is not accessible for node '${node.id}'`);
+            errors.push(`cwd '${cwd}' is not accessible for node '${node.id}'`);
           }
         }
       }
@@ -101,7 +103,8 @@ export class RigSpecPreflight {
       const cmd = RUNTIME_COMMANDS[node.runtime];
       if (cmd) {
         try {
-          await this.exec(cmd);
+          const output = await this.exec(cmd);
+          if (node.runtime === "pi") warnings.push(piVersionNotice(output));
         } catch (err) {
           if (node.runtime === "pi") errors.push(...piAvailabilityFailure(err, warnings));
           else errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
@@ -133,7 +136,7 @@ import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
-import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import {
@@ -425,7 +428,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
  * OPR.0.4.6.PI1 FR-1 — async post-preflight probe: when the spec declares any
  * `runtime: "pi"` member, verify the `pi` binary answers `pi --version`.
  * A daemon-side not-found is advisory: the pane may resolve Pi on its own PATH.
- * Other probe failures retain their bounded diagnostic.
+ * Version and probe failures are advisory, with bounded diagnostics.
  */
 export async function verifyPiRuntimeAvailable(
   rigSpec: PodRigSpec,
@@ -437,7 +440,7 @@ export async function verifyPiRuntimeAvailable(
   );
   if (!hasPiMember) return [];
   try {
-    await exec(RUNTIME_COMMANDS["pi"]!);
+    warnings.push(piVersionNotice(await exec(RUNTIME_COMMANDS["pi"]!)));
     return [];
   } catch (err) {
     return piAvailabilityFailure(err, warnings);
@@ -450,7 +453,8 @@ function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
     warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
     return [];
   }
-  return [`Runtime "pi" not available ('pi --version' failed: ${detail}). Availability could not be confirmed. If Pi is not installed, install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`];
+  warnings.push(`Pi version unknown ('pi --version' failed: ${detail}); launch continues. Check 'pi --version' in the pane's shell. If Pi is not installed, install @earendil-works/pi-coding-agent and ensure 'pi' is on PATH.`);
+  return [];
 }
 
 /** Probe only OMP seats. An OMP spec must never depend on the Pi binary. */

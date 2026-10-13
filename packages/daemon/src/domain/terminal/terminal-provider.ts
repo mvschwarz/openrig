@@ -56,6 +56,8 @@ export interface DegradedSeat {
  */
 export interface ComposedView {
   id: string;
+  /** Service-provided preview fingerprint, attached after composition for provider labels. */
+  planId?: string;
   opened: ComposedPane[];
   absent: AbsentSeat[];
   degraded: DegradedSeat[];
@@ -63,6 +65,8 @@ export interface ComposedView {
   pages: ComposedPane[][];
   /** Fixed columns for a composed layout; omitted views use the provider's auto-grid. */
   columns?: number;
+  /** A person-facing name for the view's space and tabs (the default kernel view). */
+  spaceLabel?: string;
 }
 
 /** Provider availability + version + capability map (from a version-adaptive probe). */
@@ -72,6 +76,8 @@ export interface ProviderStatus {
   /** Provider version when the probe could determine it; omitted when unknown. */
   version?: string;
   capabilities: Record<string, boolean>;
+  /** Herdr endpoint the local desktop client must attach to. */
+  launch?: { socketPath: string; session?: string };
 }
 
 /** Liveness of the provider surface itself (herdr: `herdr status`; NOT a daemon ping). */

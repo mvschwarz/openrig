@@ -9,14 +9,14 @@ applies-when: |
   source routing, bootstrap plan/apply, or the retained package install engine.
 siblings: [agent-spec-and-startup.md, plugin-agent-image-context-pack.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Packaging, bootstrap and bundles
 
 This module describes source at main commit
-`82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Source paths below are repository-relative.
+`e8f0ab340db773392ec8be75b072d1c0f3068a50`. Source paths below are repository-relative.
 An npm CLI artifact and a `.rigbundle` have different builders and consumers; neither
 source verification nor archive integrity establishes that a daemon has adopted an artifact.
 
@@ -99,7 +99,9 @@ A bundle folder may declare alternate team configurations in `configurations.yam
 `rig.yaml` (`packages/cli/src/lib/bundle-configuration.ts`). `rig bundle configurations
 <spec>` lists them. `rig bundle create --preset <name>` or `--seat <member=runtime>` resolves
 one and stages a copy of the rig folder in a temporary directory with the chosen runtimes and
-profiles, so the author's folder is never changed.
+profiles, so the author's folder is never changed. With a GitHub folder link, `rig up`,
+`rig bundle create`, `inspect` and `install` take the same two options and stage a copy of the
+whole checkout (`importGitHubBundle()` in `packages/cli/src/lib/bundle-source.ts`).
 
 `packages/daemon/src/domain/bundle-identity.ts` defines the two identity values:
 
@@ -140,9 +142,11 @@ content is written, literal outside addresses, needs, and what can't be known be
 A schema-1 archive gets `state: not_generated`. Posture comes from the member's or rig's
 `permission_policy`: `builtin:yolo` is full bypass and `builtin:auto` is auto, both by launch
 flag; `builtin:locked`, `builtin:standard` and `builtin:open` are configuration; a policy file
-is read from the archive or marked unresolved; no policy means the product default. The CLI
-prints the view before `rig bundle install` and `rig up` as diagnostics only; it never changes
-the request or the exit code.
+is read from the archive or marked unresolved; no policy means the product default. A rig-level
+`non_interruptive` boolean is reported on each full-bypass Claude Code or Codex seat as
+`nonInterruptiveDefault`, and `true` drops the Claude bypass first-run warning. The CLI prints
+the view before `rig bundle install` and `rig up` as diagnostics only; it never changes the
+request or the exit code.
 
 ## Source routing and bootstrap
 
@@ -172,7 +176,9 @@ Bootstrap distinguishes pod-aware and legacy specs, and inspects a bundle manife
 For pod-aware specs, plan mode validates and runs preflight probes; apply delegates to
 `PodRigInstantiator`. Plan mode still records a bootstrap run/result: it is not a pure
 file read. Apply reports partial completion when nodes fail or require attention, preserving
-the created rig identity rather than claiming every member launched.
+the created rig identity rather than claiming every member launched. Apply's non-interruptive
+choice is the request's, else the spec's top-level `non_interruptive`, else the
+`launch.non_interruptive` setting.
 
 ### Durable install target
 
@@ -184,6 +190,18 @@ default, so apply without `--target` gets a 400. For a pod bundle,
 instantiation, so local agent references and relative working directories survive removal
 of the extraction directory. It checks destination conflicts before copying, preserves
 identical files, and refuses differing files or incompatible destination types.
+
+When an unarchived or running team already has the bundle's rig name (`bundleInstallContext()`
+in `packages/daemon/src/domain/bundle-install-context.ts`), pod-bundle apply refuses before
+writing if any of them is running. If the target is that team's own install folder (its
+`bundle.yaml` names the offered schema-2 bundle, or `my-bundle` or `github-bundle`, the default
+names before 0.6.7, and it is the folder recorded in `rigs.install_root` when any of those teams
+recorded one; `isExistingBundleTarget()`), bootstrap first
+confirms the old sessions are stopped; materialization then copies each conflicting path to a
+`bundle-backups/reinstall-*` folder under the OpenRig home, with a `RESTORE.json`, before
+replacing it, and leaves unrelated files in place. Any other target keeps the conflict refusal.
+The instantiator archives the stopped earlier generation. Pod-bundle apply records the
+target's real path as the new rig's `install_root` (migration `096`).
 
 Pod bundles containing service definitions are refused by bootstrap; their service path
 requires a stable spec directory. Direct spec bootstrap has separate service prelaunch
@@ -217,8 +235,12 @@ reported as checked at launch (`host_resources`). Any finding sets exit code 1.
 
 The install handler in `packages/daemon/src/routes/bundles.ts` obtains a source-path
 lock, reads validated metadata, checks compatibility, and checks a declared rig name
-against the repository's rig list before bootstrap. The compatibility override
-`skipVersionCheck` and name-conflict override `force` are explicit request fields.
+against same-name rigs with running sessions before bootstrap; a stopped team of that name
+doesn't block it. A conflict returns a 400 with `status: "not_attempted"`, the installed team
+and the offered bundle, and three choices: use the existing team, stop it and retry to replace
+it, or cancel. The compatibility override `skipVersionCheck` and name-conflict override `force`
+are explicit request fields; neither skips the metadata pass, which always validates the
+manifest.
 
 `packages/daemon/src/domain/bundle-conflict-detector.ts` implements the rig-name check.
 It is not a complete agent, port or filesystem collision audit; a missing rig name supplies

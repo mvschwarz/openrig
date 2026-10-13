@@ -330,6 +330,7 @@ export class SeatActivityService {
       ...seat.arbitrated,
       activity: "unknown",
       needsInput: { count: 0, reason: null },
+      needsInputEvidence: null,
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
@@ -409,6 +410,7 @@ export class SeatActivityService {
           seatNodeId,
           activity: "unknown",
           needsInput: { count: 0, reason: null },
+          needsInputEvidence: null,
           decidedBy: null,
           seq: 0,
           changedAt: this.now().toISOString(),
@@ -602,25 +604,33 @@ export class SeatActivityService {
     // PermissionRequest-class event fired and the next turn boundary clears it. NOT
     // time-bounded like working/idle hook authority — an unanswered block persisting is
     // exactly the founder-observed park cause and must stay visible.
+    // The answer records which evidence supplied it: a default zero (no authoritative rung
+    // reported needs-input) is not an observed clear.
     const chrome = this.latestByRung(seat, "needs-input-chrome");
     const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
     const selfEv = this.latestByRung(seat, "self-report");
-    const needsInput: NeedsInputShape =
+    const decider =
       chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative"
-        ? chrome.needsInput
+        ? chrome
         : hooksEv?.needsInput && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
-          ? hooksEv.needsInput
+          ? hooksEv
           : selfEv?.needsInput && this.rungTrust(seat, "self-report") === "authoritative"
-            ? selfEv.needsInput
-            : { count: 0, reason: null };
+            ? selfEv
+            : null;
+    const needsInput: NeedsInputShape = decider?.needsInput ?? { count: 0, reason: null };
+    const needsInputEvidence = decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
 
+    // Which rung answers is part of the answer: default zero → observed zero changes what
+    // consumers may conclude, so it advances seq and pushes like a count change.
     const changed = nextActivity !== seat.arbitrated.activity
       || needsInput.count !== seat.arbitrated.needsInput.count
-      || needsInput.reason !== seat.arbitrated.needsInput.reason;
+      || needsInput.reason !== seat.arbitrated.needsInput.reason
+      || (needsInputEvidence?.rung ?? null) !== (seat.arbitrated.needsInputEvidence?.rung ?? null);
     seat.arbitrated = {
       ...seat.arbitrated,
       activity: nextActivity,
       needsInput,
+      needsInputEvidence,
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,

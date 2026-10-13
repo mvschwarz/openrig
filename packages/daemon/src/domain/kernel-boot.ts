@@ -25,6 +25,7 @@ import type { BootstrapOrchestrator } from "./bootstrap-orchestrator.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { KernelBootTracker } from "./kernel-boot-tracker.js";
+import { RigSpecCodec } from "./rigspec-codec.js";
 
 export type RuntimeAuthStatus = "ok" | "unavailable";
 
@@ -128,8 +129,29 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     autoApprove: true,
     cwdOverride: deps.cwdOverride,
   });
-  tracker.startBooting(variant, bootstrapPromise);
+  tracker.startBooting(variant, bootstrapPromise, expectedKernelSeats(specPath));
   return tracker;
+}
+
+/** The seats the selected kernel spec declares, as `pod.member` logical IDs, so a boot failure is treated as
+ *  recovered only when every one of them is ready. null when the spec can't be read as pods with members: the
+ *  tracker then keeps a failure current, because an unknown roster must never read as ready. */
+export function expectedKernelSeats(specPath: string): string[] | null {
+  try {
+    const raw = RigSpecCodec.parse(readFileSync(specPath, "utf-8")) as { pods?: unknown } | null;
+    if (!raw || !Array.isArray(raw.pods)) return null;
+    const seats: string[] = [];
+    for (const pod of raw.pods as Array<{ id?: unknown; members?: unknown } | null>) {
+      if (typeof pod?.id !== "string" || !Array.isArray(pod.members)) return null;
+      for (const member of pod.members as Array<{ id?: unknown } | null>) {
+        if (typeof member?.id !== "string") return null;
+        seats.push(`${pod.id}.${member.id}`);
+      }
+    }
+    return seats.length > 0 ? seats : null;
+  } catch {
+    return null;
+  }
 }
 
 /** True when a rig named `kernel` already exists in the DB. */

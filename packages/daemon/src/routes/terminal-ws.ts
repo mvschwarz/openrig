@@ -64,7 +64,7 @@ export function registerTerminalWs(
     terminalAuth,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (upgradeWebSocket as any)((c: any) => {
-      const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+      const sessionName = c.req.param("sessionName")!;
       let broker: TerminalSessionBroker | null = null;
       let subscriber: TerminalSubscriber | null = null;
       // The WebSocket can close DURING the async attach (before the broker
@@ -111,7 +111,19 @@ export function registerTerminalWs(
             close: (code: number, reason: string) => { try { ws.close(code, reason); } catch { /* already closed */ } },
           };
           subscriber = sub;
-          const b = await getRegistry(tmux as unknown as BrokerTmux).attach(sessionName, sub);
+          let b: TerminalSessionBroker;
+          try {
+            b = await getRegistry(tmux as unknown as BrokerTmux).attach(sessionName, sub);
+          } catch {
+            // The WebSocket adapter does not await onOpen. Contain attach failures
+            // here; the registry disposes the failed broker before rejecting.
+            closed = true;
+            earlyFrames.length = 0;
+            earlyFrameBytes = 0;
+            subscriber = null;
+            sub.close(1011, "terminal attach failed");
+            return;
+          }
           broker = b;
           // If the socket closed while attach was in flight, detach now so the
           // broker does not retain a dead subscriber (detach is idempotent).

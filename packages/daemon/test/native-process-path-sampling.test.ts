@@ -18,3 +18,12 @@ it("batches only unresolved version-named Claude candidates; healthy seats need 
   expect(rows.find(r => r.pid === 15)?.executablePath).toBe("/x/.local/share/claude/versions/2.1.289");
   expect(rows.find(r => r.pid === 16)?.executablePath).toBeUndefined();
 });
+it("reads the OS path for a Nix-wrapped Claude whose ucomm is the truncated `.claude-unwrapped`", async () => {
+  const listed = [line(20, ".claude-unwrapp", "claude --session-id token"), line(21, ".claude-wrapped", "/nix/store/x-claude-code-2.1.280/bin/claude"),
+    line(22, ".claude-unwrapp", "ugrep -G --hidden"), line(23, ".node-unwrapped", "claude")];
+  execute.mockResolvedValue({ stdout: "HEADER\n" + listed.join("\n") });
+  paths.mockResolvedValue(new Map([[20, "/nix/store/x-claude-code-2.1.280/bin/.claude-unwrapped"]]));
+  const rows = await listNativeProcesses();
+  expect(paths).toHaveBeenCalledExactlyOnceWith([20, 21]);
+  expect(rows.find(r => r.pid === 20)?.executablePath).toBe("/nix/store/x-claude-code-2.1.280/bin/.claude-unwrapped");
+});

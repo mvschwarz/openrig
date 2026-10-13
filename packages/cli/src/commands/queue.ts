@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
@@ -11,6 +11,7 @@ import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { omittedReadField, readView } from "../read-view.js";
+import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -34,41 +35,178 @@ export interface QueueDeps extends StatusDeps {
   deliveryVerify?: DeliveryVerifyDeps;
 }
 
-export interface VerifiedDeliveryResult {
+interface DeliveryResultBase {
+  /** human: a human-seat or @external address, or a row the gateway owns. agent: any other seat. */
+  destinationKind: "agent" | "human";
+  /** Human destinations only. No receipt can prove that a person read the message. */
+  humanReadership?: "unknown";
+  detail?: string;
+  nextAction: string | null;
+}
+
+/** The gateway (Slack connector) owns delivery; its ledger is the receipt. */
+export interface GatewayDeliveryResult extends DeliveryResultBase {
+  receiptSource: "gateway";
   outcome: "posted" | "transport-failed" | "never-posted" | "still-pending" | "indeterminate";
   /** null means no receipt can presently settle connector acceptance. */
   connectorAccepted: boolean | null;
-  /** A connector receipt can never prove that a person read the message. */
-  humanReadership: "unknown";
   /** #96: present for a --reply-to update once posted; false = it posted top-level instead. */
   threaded?: boolean;
-  detail?: string;
-  nextAction: string | null;
+}
+
+/** A terminal wake: the row's lastNudgeResult is the receipt, and a claim is the pickup. */
+export interface TerminalDeliveryResult extends DeliveryResultBase {
+  receiptSource: "terminal";
+  /** The class of wakeResult: verified; delivered-ack-pending; claimed (a claimed row whose wake wasn't confirmed);
+   *  retained:*; failed:* or unroutable:* (failed); indeterminate:* or an unrecognised value (indeterminate); none yet
+   *  (still-pending); or no wake requested by --no-nudge (not-requested). */
+  outcome: "verified" | "delivered-ack-pending" | "claimed" | "retained" | "failed" | "indeterminate" | "still-pending" | "not-requested";
+  /** The row's lastNudgeResult as recorded; null before any wake result. */
+  wakeResult: string | null;
+  /** A claim shows the seat took the item; it does not prove the body was read.
+   *  pickup is the daemon's derived pickup receipt state, as the row reports it. */
+  claim: { observed: boolean; claimedAt: string | null; pickup: string | null };
+}
+
+export type VerifiedDeliveryResult = GatewayDeliveryResult | TerminalDeliveryResult;
+
+export interface DeliveryVerifyTarget {
+  destinationSession?: string;
+  /** false when the create passed --no-nudge: no wake was requested, so none is awaited. */
+  nudge?: boolean;
+}
+
+type QueueRow = Record<string, unknown>;
+
+function stringField(row: QueueRow, key: string): string | null {
+  return typeof row[key] === "string" ? row[key] as string : null;
+}
+
+/** The row's own signals decide who owns delivery: a gateway receipt, then the recorded wake
+ *  result, then the daemon's destination class (present before any wake, e.g. --no-nudge). The
+ *  address pattern is only the fallback for a daemon that reports none of these. */
+function receiptSourceOf(destination: string | null, row: QueueRow): "gateway" | "terminal" {
+  if (stringField(row, "deliveryOutcome") !== null) return "gateway";
+  const wakeResult = stringField(row, "lastNudgeResult");
+  if (wakeResult !== null) return wakeResult.startsWith("gateway-owned:") ? "gateway" : "terminal";
+  const destinationClass = stringField(row, "destinationClass");
+  if (destinationClass !== null) return destinationClass === "gateway-routable" ? "gateway" : "terminal";
+  return destination !== null && isHumanSeatSessionRef(destination) ? "gateway" : "terminal";
+}
+
+function destinationKindOf(destination: string | null, source: "gateway" | "terminal"): "agent" | "human" {
+  return source === "gateway" || (destination !== null && isHumanSeatSessionRef(destination)) ? "human" : "agent";
+}
+
+function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
+  if (wakeResult === null) return "still-pending";
+  if (wakeResult === "verified" || wakeResult === "delivered-ack-pending" || wakeResult === "claimed") return wakeResult;
+  if (wakeResult.startsWith("failed:") || wakeResult.startsWith("unroutable:")) return "failed";
+  if (wakeResult.startsWith("retained:")) return "retained";
+  return "indeterminate";
+}
+
+/** Only these known states mean "not delivered yet, nothing went wrong". An unknown value never gets that label. */
+function isKnownUnconfirmed(wakeResult: string | null, outcome: TerminalDeliveryResult["outcome"]): boolean {
+  if (outcome === "not-requested" || wakeResult === null || wakeResult === "delivered-ack-pending") return true;
+  return wakeResult.startsWith("indeterminate:") || wakeResult.startsWith("retained:");
+}
+
+function terminalDeliveryResult(
+  qitemId: string,
+  destination: string | null,
+  row: QueueRow,
+  outcome: TerminalDeliveryResult["outcome"],
+  waitedMs: number | null,
+): TerminalDeliveryResult {
+  const wakeResult = stringField(row, "lastNudgeResult");
+  const claimedAt = stringField(row, "claimedAt");
+  const pickupState = typeof row.pickup === "object" && row.pickup !== null ? stringField(row.pickup as QueueRow, "state") : null;
+  const claim = { observed: claimedAt !== null, claimedAt, pickup: pickupState };
+  const seat = destination ?? "<destination>";
+  const receipt: Record<TerminalDeliveryResult["outcome"], string> = {
+    "verified": "Terminal receipt confirmed: the wake rendered in the destination pane.",
+    "delivered-ack-pending": "Terminal receipt unconfirmed (delivered-ack-pending): the wake was sent, but its render could not be confirmed.",
+    "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
+    "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
+    "failed": `The wake failed (${wakeResult}).`,
+    "indeterminate": `Terminal receipt unconfirmed (${wakeResult}).`,
+    "still-pending": waitedMs === null ? "No terminal receipt was recorded before the claim." : `No terminal receipt was recorded within ${waitedMs}ms.`,
+    "not-requested": "No terminal wake was requested (--no-nudge).",
+  };
+  const claimText = claim.observed
+    ? `Claimed at ${claimedAt}${pickupState ? ` (pickup ${pickupState})` : ""}. A claim shows the seat took the item; it does not prove the body was read.`
+    : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
+  const notFailed = !claim.observed && isKnownUnconfirmed(wakeResult, outcome) ? " This is not a failed handoff." : "";
+  const destinationKind = destinationKindOf(destination, "terminal");
+  return {
+    receiptSource: "terminal",
+    destinationKind,
+    ...(destinationKind === "human" ? { humanReadership: "unknown" as const } : {}),
+    outcome,
+    wakeResult,
+    claim,
+    detail: `The qitem is saved. ${receipt[outcome]} ${claimText}${notFailed}`,
+    nextAction: claim.observed ? null : outcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
+  };
+}
+
+/** The receipt could not be read or correlated: say which part is unknown, nothing more. */
+export function unreadableDeliveryResult(
+  qitemId: string | null,
+  destination: string | null,
+  row: QueueRow,
+  reason: string,
+): VerifiedDeliveryResult {
+  const nextAction = qitemId ? `rig queue show ${qitemId} --json` : null;
+  if (receiptSourceOf(destination, row) === "gateway") {
+    return {
+      receiptSource: "gateway",
+      destinationKind: "human",
+      humanReadership: "unknown",
+      outcome: "indeterminate",
+      connectorAccepted: null,
+      detail: reason,
+      nextAction,
+    };
+  }
+  return { ...terminalDeliveryResult(qitemId ?? "", destination, row, "indeterminate", null), detail: reason, nextAction };
 }
 
 export async function waitForDeliveryOutcome(
   client: Pick<DaemonClient, "get">,
   qitemId: string,
   deps: DeliveryVerifyDeps = {},
+  target: DeliveryVerifyTarget = {},
 ): Promise<VerifiedDeliveryResult> {
   const timeoutMs = deps.timeoutMs ?? 30_000;
   const intervalMs = deps.intervalMs ?? 500;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = deps.now ?? (() => Date.now());
   const started = now();
+  let row: QueueRow = {};
   for (;;) {
     try {
-      const response = await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`);
+      const response = await client.get<QueueRow>(`/api/queue/${encodeURIComponent(qitemId)}`);
       if (response.status !== 200) throw new Error(`receipt lookup returned HTTP ${response.status}`);
-      const outcome = response.data.deliveryOutcome;
+      row = response.data ?? {};
+    } catch (error) {
+      return unreadableDeliveryResult(qitemId, target.destinationSession ?? stringField(row, "destinationSession"), row,
+        `delivery receipt could not be read: ${(error as Error).message}`);
+    }
+    const destination = target.destinationSession ?? stringField(row, "destinationSession");
+    const timedOut = now() - started >= timeoutMs;
+    if (receiptSourceOf(destination, row) === "gateway") {
+      const outcome = row.deliveryOutcome;
+      const gateway = { receiptSource: "gateway" as const, destinationKind: "human" as const, humanReadership: "unknown" as const };
       if (outcome === "posted") {
         // #96: a --reply-to update reports whether it joined the earlier item's thread.
-        const replyTo = typeof response.data.replyTo === "string" ? response.data.replyTo : null;
-        const fallback = typeof response.data.replyToFallback === "string" ? response.data.replyToFallback : null;
+        const replyTo = stringField(row, "replyTo");
+        const fallback = stringField(row, "replyToFallback");
         return {
+          ...gateway,
           outcome,
           connectorAccepted: true,
-          humanReadership: "unknown",
           ...(replyTo ? { threaded: fallback === null } : {}),
           ...(replyTo && fallback ? { detail: `posted as a new top-level message, not in ${replyTo}'s thread: ${fallback}` } : {}),
           nextAction: null,
@@ -76,30 +214,34 @@ export async function waitForDeliveryOutcome(
       }
       if (outcome === "transport-failed" || outcome === "never-posted") {
         return {
+          ...gateway,
           outcome,
           connectorAccepted: false,
-          humanReadership: "unknown",
-          detail: typeof response.data.deliveryFailureDetail === "string" ? response.data.deliveryFailureDetail : undefined,
+          detail: stringField(row, "deliveryFailureDetail") ?? undefined,
           nextAction: `rig queue show ${qitemId} --json`,
         };
       }
-    } catch (error) {
-      return {
-        outcome: "indeterminate",
-        connectorAccepted: null,
-        humanReadership: "unknown",
-        detail: `delivery receipt could not be read: ${(error as Error).message}`,
-        nextAction: `rig queue show ${qitemId} --json`,
-      };
-    }
-    if (now() - started >= timeoutMs) {
-      return {
-        outcome: "still-pending",
-        connectorAccepted: null,
-        humanReadership: "unknown",
-        detail: `no terminal connector receipt within ${timeoutMs}ms; the durable qitem remains intact`,
-        nextAction: `rig queue show ${qitemId} --json`,
-      };
+      if (timedOut) {
+        return {
+          ...gateway,
+          outcome: "still-pending",
+          connectorAccepted: null,
+          detail: `no terminal connector receipt within ${timeoutMs}ms; the durable qitem remains intact`,
+          nextAction: `rig queue show ${qitemId} --json`,
+        };
+      }
+    } else {
+      // --no-nudge requested no wake: there is no terminal receipt to wait for.
+      if (target.nudge === false) return terminalDeliveryResult(qitemId, destination, row, "not-requested", null);
+      const wakeResult = stringField(row, "lastNudgeResult");
+      const outcome = terminalWakeOutcome(wakeResult);
+      // Any recorded wake result (or an existing claim) ends the wait: a later pickup is
+      // `rig queue show`'s to report. Only a missing wake result waits up to the bound.
+      // Nothing here re-sends the wake.
+      if (wakeResult !== null || stringField(row, "claimedAt") !== null) {
+        return terminalDeliveryResult(qitemId, destination, row, outcome, null);
+      }
+      if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs);
     }
     await sleep(intervalMs);
   }
@@ -163,6 +305,43 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+/** Slice 15: the receipt context when a write should print its receipt — the
+ *  `output.compact` switch is on and `--full` was not given — else null (today's
+ *  output). Error responses always print whole, whatever this returns. */
+function writeReceipt(full: boolean | undefined, ctx: ReceiptContext): ReceiptContext | null {
+  return !full && compactOutputEnabled() ? ctx : null;
+}
+
+/** A `--host` id that may name another daemon. Empty and `local` never do; one that
+ *  equals the selected daemon's own host id is settled by {@link settleReceiptHost}. */
+function remoteHostOf(hostId: string | undefined): string | undefined {
+  return hostId && hostId !== "local" ? hostId : undefined;
+}
+
+/** The daemon's own rule (`resolvesToLocalHost`): a `--host` naming the selected
+ *  daemon's selfHostId took the local path, so its receipt must not call the row
+ *  remote. Read only for a receipt; an unreadable id leaves the host unconfirmed. */
+async function settleReceiptHost(client: DaemonClient, receipt: ReceiptContext): Promise<ReceiptContext> {
+  if (!receipt.remoteHost) return receipt;
+  let selfHostId: string | undefined;
+  try {
+    const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
+    if (health.status === 200 && typeof health.data?.selfHostId === "string" && health.data.selfHostId.trim()) selfHostId = health.data.selfHostId;
+  } catch { /* An unreadable id must not change or fail the write's output. */ }
+  if (selfHostId === receipt.remoteHost) return { ...receipt, remoteHost: undefined };
+  return selfHostId === undefined ? { ...receipt, remoteHostUnconfirmed: true } : receipt;
+}
+
+async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
+  const settled = receipt && status < 400 ? await settleReceiptHost(client, receipt) : null;
+  const projected = settled ? buildWriteReceipt(body, settled) : null;
+  if (!projected) {
+    printResult(json, body, status);
+    return;
+  }
+  console.log(json ? JSON.stringify(projected.json) : projected.text);
+}
+
 // Recovery belongs to the selected daemon's reply; never infer a host from an ID.
 async function printQueueItemResult(
   client: DaemonClient,
@@ -170,6 +349,7 @@ async function printQueueItemResult(
   json: boolean,
   body: unknown,
   status: number,
+  receipt: ReceiptContext | null = null,
 ): Promise<void> {
   if (status >= 400 && body && typeof body === "object"
     && (body as { error?: unknown }).error === "qitem_not_found") {
@@ -187,7 +367,7 @@ async function printQueueItemResult(
         + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`,
     };
   }
-  printResult(json, body, status);
+  await printWriteResult(client, json, body, status, receipt);
 }
 
 // OPR.0.4.3.03 — `rig queue show` body preview.
@@ -198,13 +378,16 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
+// renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
+const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
 function wakeDurationSeconds(value: string): number {
   const match = /^(\d+)(s|m|h)?$/i.exec(value.trim());
-  if (!match) throw new Error("wake duration must be a positive integer with optional s, m, or h suffix");
+  if (!match) throw new InvalidArgumentError(`${WAKE_DURATION_FORMAT}; got '${value}'`);
   const amount = Number.parseInt(match[1]!, 10);
   const factor = match[2]?.toLowerCase() === "h" ? 3600 : match[2]?.toLowerCase() === "m" ? 60 : 1;
   const seconds = amount * factor;
-  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new Error("wake duration must be positive");
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new InvalidArgumentError(`${WAKE_DURATION_FORMAT}; got '${value}'`);
   return seconds;
 }
 
@@ -464,7 +647,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
-    .option("--verify", "Boundedly wait for the existing gateway delivery receipt after persistence; never retries the create and never claims human readership")
+    .option("--verify", "Boundedly wait after persistence for the existing receipt: the gateway receipt for a human destination, or the wake result and any claim for an agent. Never retries the create or the wake, and never claims the message was read")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
       source?: string;
@@ -491,6 +675,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       nudge?: boolean;
       verify?: boolean;
       json?: boolean;
+      full?: boolean;
     }) => {
       // OPR.0.4.6.MH3 D-3 (C3): resolve the host qualifier at the CLI edge —
       // the 3-part form never leaves the CLI; the request carries the 2-part
@@ -611,6 +796,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         // stderr survives an interrupted wait without adding a second JSON
         // document to stdout. This is a request identity, NOT a commit receipt.
         console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
+        const receipt = writeReceipt(opts.full, {
+          verb: "create", nudgeSuppressed: opts.nudge === false, idGiven: opts.id !== undefined, remoteHost: remoteHostOf(hostResolved.hostId),
+        });
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
           qitemId,
@@ -656,18 +844,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const created = res.data;
           const qitemId = typeof created.qitemId === "string" ? created.qitemId : null;
           const delivery = qitemId
-            ? await waitForDeliveryOutcome(client, qitemId, deps.deliveryVerify)
-            : {
-                outcome: "indeterminate" as const,
-                connectorAccepted: null,
-                humanReadership: "unknown" as const,
-                detail: "create response did not include a qitem id; delivery cannot be correlated",
-                nextAction: null,
-              };
-          printResult(opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status);
+            ? await waitForDeliveryOutcome(client, qitemId, deps.deliveryVerify, { destinationSession: hostResolved.destination, nudge: opts.nudge })
+            : unreadableDeliveryResult(null, hostResolved.destination, {}, "create response did not include a qitem id; delivery cannot be correlated");
+          await printWriteResult(client, opts.json ?? false, { ...created, qitemId, persisted: true, delivery }, res.status, receipt);
           return;
         }
-        printResult(opts.json ?? false, res.data, res.status);
+        await printWriteResult(client, opts.json ?? false, res.data, res.status, receipt);
       }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 
@@ -675,15 +857,16 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .command("claim <qitemId>")
     .description("Claim a qitem (pending → in-progress); computes closure_required_at from tier")
     .option("--destination <session>", "(deprecated, ignored) the claimant is derived from the seat env (X-OpenRig-Session); P21 I3 made the claim route derive it from the transport header")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination?: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; json?: boolean; full?: boolean }) => {
       // P21 I3 reconcile: the claimant is DERIVED from the seat env — --destination deprecated + ignored,
       // no body claim. Verify the env (the header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "destination")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "claim" }));
       });
     });
 
@@ -692,8 +875,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .description("Release a claimed qitem (in-progress → pending)")
     .option("--destination <session>", "(deprecated, ignored) the releaser is derived from the seat env (X-OpenRig-Session); the unclaim route derives it from the transport header")
     .option("--reason <text>", "Reason for unclaim", "manual")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean; full?: boolean }) => {
       // P21 I3 reconcile: the releaser is DERIVED from the seat env — --destination deprecated + ignored,
       // no body claim. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "destination")) return;
@@ -702,7 +886,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, {
           reason: opts.reason,
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "unclaim" }));
       });
     });
 
@@ -720,6 +904,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "OPR.0.4.4.19 FR-6: park-time summary persisted onto the item (human-seat parks only)")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-6: park-time durable-artifact pointer persisted onto the item (human-seat parks only)")
     .option("--note <text>", "Transition note for the audit log")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       actor?: string;
@@ -734,6 +919,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       evidenceRef?: string;
       note?: string;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
@@ -753,7 +939,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }));
       });
     });
 
@@ -775,6 +961,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--continuation <text>", "What resumes. Workspace deferred/not-imminent work belongs in a mission/slice")
     .option("--wake-watchdog <jobId>", "Attach an existing live watchdog id targeting the parked owner")
     .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 --on <blocker> is always required; a wake option does not replace it.
@@ -796,6 +983,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       wakeWatchdog?: string;
       wakeAfter?: number;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: actor DERIVED from the seat env (X-OpenRig-Session) — --actor deprecated +
       // ignored, no body actorSession. Verify the env, else the daemon returns 400 actor_required (no seat identity to record). Matches `resolve`.
@@ -811,7 +999,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           wakeAfterSeconds: opts.wakeAfter,
           transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "block" }));
       });
     });
 
@@ -875,6 +1063,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       from?: string;
@@ -892,6 +1081,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       host?: string;
       nudge?: boolean;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
       // --from deprecated + ignored, no body fromSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
@@ -947,7 +1137,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+          verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
+        }));
       });
     });
 
@@ -970,6 +1162,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
+    .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       from?: string;
@@ -987,6 +1180,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       host?: string;
       nudge?: boolean;
       json?: boolean;
+      full?: boolean;
     }) => {
       // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
       // --from deprecated + ignored, no body fromSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
@@ -1040,7 +1234,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
-        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
+          verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
+        }));
       });
     });
 
@@ -1049,8 +1245,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show the caller's queue position from the daemon's perspective")
     .option("--session <session>", "Caller's session name (defaults to OPENRIG_SESSION_NAME)")
     .option("--recent-limit <n>", "How many recent active qitems to include", "25")
+    .option("--work-candidates", "Also list labelled work candidates (tags, handoff ancestry, held and next work) for the refocus packet")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { session?: string; recentLimit: string; json?: boolean }) => {
+    .action(async (opts: { session?: string; recentLimit: string; workCandidates?: boolean; json?: boolean }) => {
       const session = resolveCurrentSession(opts.session, "session");
       if (!session) return;
       const deps = getDeps();
@@ -1058,6 +1255,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         session,
         recentLimit: opts.recentLimit,
       });
+      if (opts.workCandidates) params.set("candidates", "1");
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);

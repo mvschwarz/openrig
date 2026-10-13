@@ -1,6 +1,7 @@
 // OPR.0.4.6.02 C3 — the `rig terminal` CLI family. Pins arg parsing, the daemon
 // path/body each subcommand hits, the --json shape, and the open exit
-// semantics (partial-with-names = exit 0; zero-pane = non-zero).
+// semantics for explicit cmux (partial-with-names = exit 0; zero-pane = non-zero).
+// The default desktop path is exercised in terminal-open-window-default.test.ts.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { TerminalDeps } from "../src/commands/terminal.js";
@@ -66,6 +67,27 @@ describe("rig terminal CLI", () => {
     expect(cmd!.commands.map((c) => c.name()).sort()).toEqual(["open", "status", "views"]);
   });
 
+  it("--window uses local desktop handling and reports a headless refusal without a provider POST", async () => {
+    const previewPath = "/api/terminal/preview?view=saved%3Akernel&provider=herdr";
+    const pane = { seat: "operator", label: "operator", paneCommand: "tmux attach-session -t '=operator'" };
+    const { deps, calls } = makeDeps({ routes: { [`GET ${previewPath}`]: { status: 200, data: {
+      planId: "headless-plan", status: {}, composed: { opened: [pane], pages: [[pane]], absent: [], degraded: [] },
+    } } } });
+    const factory = deps.clientFactory;
+    deps.clientFactory = url => Object.assign(factory(url), { baseUrl: "http://localhost:7433" });
+    deps.windowDeps = { platform: "linux", env: {}, exists: () => false, exec: vi.fn(async () => { throw new Error("not installed"); }), launch: vi.fn(), sleep: vi.fn(), id: () => "unused" };
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "saved:kernel", "--window", "--json"]);
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, opened: [], code: "terminal_window_failed", windowAttempted: false });
+    expect(JSON.parse(logs[0]!).error).toContain("run: env -u TMUX tmux attach-session -t '=operator'");
+    expect(calls).toEqual([{ method: "GET", path: previewPath }]);
+    expect(calls.some(call => call.method === "POST")).toBe(false);
+    expect(deps.windowDeps.launch).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.windowDeps.exec).mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/usr/bin/open")).toBe(false);
+  });
+
   it("open POSTs /api/terminal/open with view + provider", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/terminal/open": { status: 200, data: opened(["a-seat"]) } },
@@ -88,7 +110,7 @@ describe("rig terminal CLI", () => {
     });
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
-    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build"]);
+    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "cmux"]);
     expect(process.exitCode).toBeUndefined(); // exit 0 (disclosure, not failure)
   });
 
@@ -100,7 +122,7 @@ describe("rig terminal CLI", () => {
     try {
       const program = createProgram({ terminalDeps: deps });
       program.exitOverride();
-      await program.parseAsync(["node", "rig", "terminal", "open", "acme-build"]);
+      await program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "cmux"]);
       expect(log.mock.calls.map((c) => String(c[0])).join("\n")).toContain('  note: A workspace named "acme-build" already exists, so this one is "acme-build (2)".');
     } finally { log.mockRestore(); }
   });
@@ -111,7 +133,7 @@ describe("rig terminal CLI", () => {
     });
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
-    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build"]);
+    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "cmux"]);
     expect(process.exitCode).toBe(1);
   });
 
@@ -121,7 +143,7 @@ describe("rig terminal CLI", () => {
     const { deps } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: result } } });
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
-    await program.parseAsync(["node", "rig", "terminal", "open", "saved:kernel", ...(json ? ["--json"] : [])]);
+    await program.parseAsync(["node", "rig", "terminal", "open", "saved:kernel", "--provider", "cmux", ...(json ? ["--json"] : [])]);
     expect(process.exitCode).toBe(1);
     if (json) expect(JSON.parse(logs[0]!)).toEqual(result);
     else expect(logs.join("\n")).toContain(command);
@@ -133,7 +155,7 @@ describe("rig terminal CLI", () => {
     });
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
-    await program.parseAsync(["node", "rig", "terminal", "open", "nope", "--json"]);
+    await program.parseAsync(["node", "rig", "terminal", "open", "nope", "--provider", "cmux", "--json"]);
     expect(process.exitCode).toBe(1);
     expect(logs.join("\n")).toContain("view_not_found");
   });
@@ -142,7 +164,7 @@ describe("rig terminal CLI", () => {
     const { deps } = makeDeps({ routes: { "POST /api/terminal/open": { status: 503, data: { error: "terminal_service_unavailable" } } } });
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
-    await expect(program.parseAsync(["node", "rig", "terminal", "open", "acme-build", ...(json ? ["--json"] : [])])).resolves.toBeDefined();
+    await expect(program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "cmux", ...(json ? ["--json"] : [])])).resolves.toBeDefined();
     expect(process.exitCode).toBe(2);
     const output = [...logs, ...vi.mocked(console.error).mock.calls.map(args => args.join(" "))].join("\n");
     expect(output).toContain("terminal_service_unavailable");
@@ -155,7 +177,7 @@ describe("rig terminal CLI", () => {
     });
     const program = createProgram({ terminalDeps: deps });
     program.exitOverride();
-    await program.parseAsync(["node", "rig", "terminal", "open", "nope"]);
+    await program.parseAsync(["node", "rig", "terminal", "open", "nope", "--provider", "cmux"]);
     expect(process.exitCode).toBe(1);
     expect(logs.join("\n")).toContain("provider: unknown view 'nope' (view_not_found)");
     expect(logs.join("\n")).not.toMatch(/^\s*\{/);

@@ -39,6 +39,28 @@ function probe(mode: string, runtime = "pi") {
 }
 
 describe("runtime version preflight cwd", () => {
+  it.each(["0.73.1", "pi 0.73.1"])("reports an old Pi version before launch (%s)", async output => {
+    const warnings: string[] = [];
+    const exec = vi.fn().mockResolvedValue(output);
+    const spec = { pods: [{ members: [{ runtime: "pi" }] }] } as RigSpec;
+    expect(await verifyPiRuntimeAvailable(spec, exec, warnings)).toEqual([]);
+    expect(warnings.join("\n")).toContain("older than OpenRig's tested baseline");
+    expect(warnings.join("\n")).toContain("npm install -g @earendil-works/pi-coding-agent");
+    expect(exec.mock.calls).toEqual([["pi --version"]]);
+  });
+
+  it("keeps an unknown Pi probe nonfatal without changing another runtime", async () => {
+    const warnings: string[] = [];
+    const exec = vi.fn().mockRejectedValue(Object.assign(new Error("private-output"), { code: "ETIMEDOUT" }));
+    const spec = { pods: [{ members: [{ runtime: "pi" }] }] } as RigSpec;
+    expect(await verifyPiRuntimeAvailable(spec, exec, warnings)).toEqual([]);
+    expect(warnings.join("\n")).toContain("version unknown");
+    expect(warnings.join("\n")).not.toContain("private-output");
+    exec.mockClear();
+    expect(await verifyPiRuntimeAvailable({ pods: [{ members: [{ runtime: "omp" }] }] } as RigSpec, exec, [])).toEqual([]);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
   it.each(["pi", "omp", "codex", "claude"])("preserves a healthy cwd for %s --version", (runtime) => {
     const cwd = runtimeVersionProbeCwd(`${runtime} --version`);
     expect(cwd).toBe(process.cwd());
@@ -117,9 +139,12 @@ describe("runtime version preflight cwd", () => {
     const detail = runtimeProbeFailure(failure);
     expect(detail).toBe("exit status 1; working-directory lookup failed");
     const spec = { pods: [{ members: [{ runtime: "pi" }] }] } as RigSpec;
-    const errors = await verifyPiRuntimeAvailable(spec, async () => { throw failure; });
-    expect(errors[0]).toContain(detail);
-    expect(errors[0]).not.toMatch(/private-output|secret-input/);
+    const warnings: string[] = [];
+    const errors = await verifyPiRuntimeAvailable(spec, async () => { throw failure; }, warnings);
+    expect(errors).toEqual([]);
+    expect(warnings[0]).toContain(detail);
+    expect(warnings[0]).toContain("launch continues");
+    expect(warnings[0]).not.toMatch(/private-output|secret-input/);
     expect(runtimeProbeFailure({ status: 127, stderr: Buffer.from("sh: pi: not found") })).toBe("exit status 127; executable not found on PATH");
     expect(runtimeProbeFailure({ code: "EACCES" })).toBe("EACCES");
     expect(runtimeProbeFailure({ code: "SECRET", message: "private-output" })).toBe("execution failed");

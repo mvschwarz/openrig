@@ -259,8 +259,8 @@ function Rail({
   // resolve `agents.advisor_session` / `agents.operator_session` from
   // ConfigStore (via useSettings). When configured: navigate to seat
   // detail. When unset: navigate to /settings#agents-{role}-session
-  // CTA. Defaults from universal-shell.md L83-L84 (advisor =
-  // advisor-lead@openrig-velocity; operator = empty/not configured).
+  // CTA. Defaults come from the daemon settings store (advisor =
+  // advisor-lead@kernel; operator = empty/not configured).
   const { data: settingsData } = useSettings();
   const advisorSession = readSettingString(settingsData, "agents.advisor_session");
   const operatorSession = readSettingString(settingsData, "agents.operator_session");

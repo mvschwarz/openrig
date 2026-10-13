@@ -127,6 +127,18 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
   });
 
+  it("HUMAN RUNG EXPLICIT-ONLY: a prompt-blocked seat still reaches a person, since only a person can clear it", async () => {
+    await refusal(); const posts: unknown[] = [];
+    await runWakeLadderTick({ db, queueRepo: repo, resolveOrchestrator: () => null,
+      readPromptState: () => state, retryIntervalSeconds: 1, now: new Date(Date.now() + 60_000), deliveryEngine: engine(posts),
+      humanRung: "explicit-only", loadHumanRegistry: () => ({ ok: true as const, entities: [] }),
+      attemptWake: async () => "failed:fixture", log: () => {},
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(posts).toHaveLength(1);
+    expect(JSON.stringify(posts)).toContain("assigned work");
+  });
+
   it("positive sink control: the existing production operator port posts and records the receipt", async () => {
     const row = await refusal(); const posts: unknown[] = [];
     const result = await engine(posts).dispatchEscalation(row, "interactive prompt blocks outstanding work");
@@ -220,22 +232,31 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     await tick(port); expect(posts).toHaveLength(1);
   });
 
-  it("only a newer arbitrated clear state can retire a positive refusal", () => {
+  it("only needs-input evidence observed after the refusal can retire a positive refusal", () => {
     const refusedAt = "2026-01-01T00:00:02.000Z";
-    const idle = { activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:01.000Z",
-      rungs: [{ rung: "needs-input-chrome" as const, sourceId: "fixture", trust: "authoritative" as const, lastEvidenceAt: "2026-01-01T00:00:03.000Z" }] };
+    const before = "2026-01-01T00:00:01.000Z";
+    const after = "2026-01-01T00:00:03.000Z";
+    const clearAt = (observedAt: string) => ({ rung: "needs-input-chrome" as const, observedAt });
+    // The chrome rung is declared authoritative throughout; only the evidence differs.
+    const idle = { activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, changedAt: before,
+      needsInputEvidence: clearAt(before),
+      rungs: [{ rung: "needs-input-chrome" as const, sourceId: "fixture", trust: "authoritative" as const, lastEvidenceAt: before }] };
     expect(classifyPromptAfterRefusal(idle, refusedAt)).toBe("unknown");
-    expect(classifyPromptAfterRefusal({ ...idle, changedAt: refusedAt }, refusedAt)).toBe("unknown");
-    expect(classifyPromptAfterRefusal({ ...idle, changedAt: "2026-01-01T00:00:03.000Z" }, refusedAt)).toBe("clear");
+    expect(classifyPromptAfterRefusal({ ...idle, changedAt: refusedAt, needsInputEvidence: clearAt(refusedAt) }, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal({ ...idle, changedAt: after, needsInputEvidence: clearAt(after) }, refusedAt)).toBe("clear");
+    // An older clear plus a newer busy/idle update is not a clear observed after the refusal.
+    expect(classifyPromptAfterRefusal({ ...idle, changedAt: after }, refusedAt)).toBe("unknown");
+    // A declared rung that never reported needs-input is not a clear either.
+    expect(classifyPromptAfterRefusal({ ...idle, changedAt: after, needsInputEvidence: null }, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal({ ...idle, needsInput: { count: 1, reason: "permission prompt" } }, refusedAt)).toBe("blocked");
-    expect(classifyPromptAfterRefusal({ ...idle, activity: "unknown", changedAt: "2026-01-01T00:00:03.000Z" }, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal({ ...idle, activity: "unknown", changedAt: after, needsInputEvidence: clearAt(after) }, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal(null, refusedAt)).toBe("unknown");
   });
 
   it("activity-only Codex and generic changes cannot clear a refused prompt", () => {
     const refusedAt = "2026-01-01T00:00:02.000Z";
     const sampling = { rung: "window-sampling" as const, sourceId: "tmux", trust: "authoritative" as const, lastEvidenceAt: "2026-01-01T00:00:03.000Z" };
-    const codex = { activity: "working" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:03.000Z",
+    const codex = { activity: "working" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:03.000Z", needsInputEvidence: null,
       rungs: [sampling, { rung: "lifecycle-hooks" as const, sourceId: "codex", trust: "trial" as const, lastEvidenceAt: "2026-01-01T00:00:03.000Z" }] };
     expect(classifyPromptAfterRefusal(codex, refusedAt)).toBe("unknown");
     const generic = { ...codex, rungs: [sampling] };

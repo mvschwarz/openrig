@@ -273,9 +273,9 @@ function makeBinding(): NodeBinding {
 }
 
 describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
-  it("builds claude --resume <parent> --fork-session for forkSource.kind=native_id and captures the NEW token", async () => {
+  it("builds claude --resume <parent> --fork-session --session-id <new> for forkSource.kind=native_id and returns the NEW id", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("NEW-POST-FORK-TOKEN-XYZ") });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs(), sessionIdFactory: () => "33333333-3333-4333-8333-333333333333" });
 
     const result = await adapter.launchHarness(makeBinding(), {
       name: "dev-impl@test-rig",
@@ -286,19 +286,31 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'PARENT-TOKEN-ABC' --fork-session --name dev-impl@test-rig",
+      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'PARENT-TOKEN-ABC' --fork-session --session-id 33333333-3333-4333-8333-333333333333 --name dev-impl@test-rig",
     );
     if (result.ok) {
-      // Captured token MUST be the new post-fork token, NOT the parent.
-      expect(result.resumeToken).toBe("NEW-POST-FORK-TOKEN-XYZ");
+      // The returned token MUST be the fork's own new id, NOT the parent.
+      expect(result.resumeToken).toBe("33333333-3333-4333-8333-333333333333");
       expect(result.resumeToken).not.toBe("PARENT-TOKEN-ABC");
       expect(result.resumeType).toBe("claude_id");
     }
   });
 
+  it("keeps the fork's own id when another same-name session file exists (an earlier occupant or another seat)", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("STALE-SAME-NAME-ID"), sessionIdFactory: () => "33333333-3333-4333-8333-333333333333" });
+
+    const result = await adapter.launchHarness(makeBinding(), {
+      name: "dev-impl@test-rig",
+      forkSource: { kind: "native_id", value: "PARENT-TOKEN-ABC" },
+    });
+
+    expect(result).toMatchObject({ ok: true, resumeToken: "33333333-3333-4333-8333-333333333333", resumeType: "claude_id" });
+  });
+
   it("quotes a hostile fork parent id so it cannot leave the --resume argument (the pane shell is the sink)", async () => {
     const tmux = mockTmux();
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs("NEW-POST-FORK-TOKEN-XYZ") });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockClaudeFs(), sessionIdFactory: () => "33333333-3333-4333-8333-333333333333" });
 
     const hostileParent = "ABC-123'; touch /tmp/OPENRIG_PWNED; '";
     const result = await adapter.launchHarness(makeBinding(), {
@@ -316,7 +328,7 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
     // shell would execute everything after the first quote terminator.
     expect(command).not.toContain("--resume ABC-123");
     if (result.ok) {
-      expect(result.resumeToken).toBe("NEW-POST-FORK-TOKEN-XYZ");
+      expect(result.resumeToken).toBe("33333333-3333-4333-8333-333333333333");
     }
   });
 
@@ -477,10 +489,8 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     const sentCmd = sendText.mock.calls[0]?.[1] as string;
-    // R2 LOW-4 reconciliation (truthful floor update, assertion intent unchanged): the
-    // no-profile floor now emits the explicit ` -s workspace-write` sandbox argument
-    // (OPR.0.4.8.2 posture helper) between the executable and the fork subcommand.
-    expect(sentCmd).toMatch(/^codex( -p [^ ]+| -s [a-z-]+)* fork/);
+    // The no-profile floor and managed update setting precede the fork subcommand.
+    expect(sentCmd).toMatch(/^codex -s workspace-write '-c' 'check_for_update_on_startup=false' fork/);
     expect(sentCmd).toContain("PARENT-THREAD-ABC");
     if (result.ok) {
       expect(result.resumeToken).toBe("NEW-CODEX-THREAD-XYZ");

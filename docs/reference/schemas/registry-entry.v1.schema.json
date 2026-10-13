@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openrig.dev/schemas/registry-entry.v1.json",
-  "title": "Registry entry (openrig-world/registry/<slug>.yaml)",
+  "title": "Registry entry (openrig-registry/registry/<slug>.yaml)",
   "type": "object",
   "required": [
     "schema",

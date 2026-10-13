@@ -110,7 +110,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
   // below \u2014 activity answers "is this agent working?", startup answers "did
   // this agent boot?". Two different questions, two different surfaces.
   const { state: activityState, source: activitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive, data.identityVerdict);
-  const activityLabel = getActivityLabel(activityState);
+  const activityLabel = getActivityLabel(activityState, data.agentActivity);
   const activityBgClass = getActivityBgClass(activityState);
   const activityAnimClass = getActivityAnimationClass(activityState);
   const activityIsStale = isActivityStale(data.agentActivity);

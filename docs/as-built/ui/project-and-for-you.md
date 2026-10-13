@@ -13,8 +13,8 @@ applies-when: |
   stamped commit.
 siblings: [shell-and-routing.md, ../architecture/mission-control.md]
 prerequisite-reads: [../README.md, shell-and-routing.md]
-last-verified-against-source: 104b78ee
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # UI Project Observability, For You, Dashboard
@@ -29,7 +29,7 @@ and the maintenance-notice dismissal (see
 [`shell-and-routing.md`](shell-and-routing.md)).
 
 > Paths are relative to `packages/ui/src/` unless prefixed `docs/` or
-> `packages/`. Verified at `104b78ee` (package version 0.6.6). The web UI
+> `packages/`. Verified at `e8f0ab34` (package version 0.6.7). The web UI
 > is in maintenance mode (`docs/reference/developing.md`); this page
 > records what ships, not a roadmap.
 

@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { writeFileSync, unlinkSync, mkdirSync, rmdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { WorkflowDeps } from "../src/commands/workflow.js";
 import { createProgram } from "../src/index.js";
@@ -154,6 +156,48 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(requests[0]?.body).toMatchObject({ missionPath: resolve("missions/release") });
   });
 
+  it.each(["validate", "instantiate", "run"])("%s resolves caller-relative file paths before transport", async (verb) => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", verb, "./workflows/selected.workflow.md", "--json",
+      ...(verb === "validate" ? [] : ["--root-objective", "ship", "--created-by", "orch@rig"])]);
+    const route = verb === "validate" ? "/api/workflow/validate" : "/api/workflow/instantiate";
+    expect(calls.find(call => call.path === route)?.body).toMatchObject({ specPath: resolve("workflows/selected.workflow.md") });
+  });
+
+  it.each(["instantiate", "run"])("%s preserves bare discovered names while resolving an existing extensionless caller file", async (verb) => {
+    const { deps, calls } = makeDeps();
+    const file = `.workflow-path-${randomUUID()}`;
+    writeFileSync(file, "owned fixture");
+    try {
+      for (const source of ["conveyor", "cached.workflow.md", file]) {
+        const program = createProgram({ workflowDeps: deps });
+        program.exitOverride();
+        await program.parseAsync(["node", "rig", "workflow", verb, source, "--json", "--root-objective", "ship", "--created-by", "orch@rig"]);
+      }
+      const requests = calls.filter(call => call.path === "/api/workflow/instantiate");
+      expect(requests[0]?.body).toMatchObject({ specPath: "conveyor" });
+      expect(requests[1]?.body).toMatchObject({ specPath: "cached.workflow.md" });
+      expect(requests[2]?.body).toMatchObject({ specPath: resolve(file) });
+    } finally {
+      unlinkSync(file);
+    }
+  });
+
+  it.each(["instantiate", "run"])("%s preserves a discovered name when a same-name directory exists", async (verb) => {
+    const { deps, calls } = makeDeps();
+    mkdirSync("conveyor");
+    try {
+      const program = createProgram({ workflowDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "workflow", verb, "conveyor", "--json", "--root-objective", "ship", "--created-by", "orch@rig"]);
+      expect(calls.find(call => call.path === "/api/workflow/instantiate")?.body).toMatchObject({ specPath: "conveyor" });
+    } finally {
+      rmdirSync("conveyor");
+    }
+  });
+
   it("instantiate POSTs /api/workflow/instantiate with required fields", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/workflow/instantiate": { status: 201, data: { instance: {}, entryQitemId: "q-1" } } },
@@ -197,6 +241,64 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(body.exit).toBe("handoff");
     expect(body.actorSession).toBe("producer@rig");
     expect(body.resultNote).toBe("produced");
+  });
+
+  it("instantiate summary names the instance and entry packet the daemon returned", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/instantiate": {
+          status: 201,
+          data: {
+            instance: { instanceId: "wf-1", status: "active", boundRig: "rig" },
+            entryQitemId: "q-1",
+            entryOwnerSession: "dev-a@rig",
+            advisories: [],
+          },
+        },
+      },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "instantiate", "/abs/spec.yaml",
+      "--root-objective", "test obj",
+      "--created-by", "ops@rig",
+    ]);
+    const out = logs.join("\n");
+    expect(out).toMatch(/what:\s+Instantiated workflow from \/abs\/spec\.yaml \(instance wf-1\)/);
+    expect(out).toMatch(/state:\s+active; bound to rig rig; entry packet q-1 owned by dev-a@rig/);
+    expect(out).toMatch(/next:\s+Inspect: rig workflow show wf-1 \| Open packet: rig queue show q-1/);
+  });
+
+  it("project summary names the packet the daemon projected and its owner", async () => {
+    const { deps } = makeDeps({
+      routes: {
+        "POST /api/workflow/project": {
+          status: 200,
+          data: {
+            instance: { instanceId: "inst-1", status: "active" },
+            closurePriorPacketId: "q-1",
+            closureReason: "handoff",
+            nextQitemId: "q-2",
+            nextOwnerSession: "dev-b@rig",
+            nextStepId: "two",
+          },
+        },
+      },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "project",
+      "--instance", "inst-1",
+      "--current-packet", "q-1",
+      "--exit", "handoff",
+      "--actor-session", "dev-a@rig",
+    ]);
+    const out = logs.join("\n");
+    expect(out).toMatch(/what:\s+Closed q-1 \(handoff\) and projected q-2 to dev-b@rig/);
+    expect(out).toMatch(/state:\s+instance inst-1 = active/);
+    expect(out).toMatch(/next:\s+Inspect: rig queue show q-2/);
   });
 
   it("list GETs /api/workflow/list optionally with status filter", async () => {

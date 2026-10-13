@@ -4,6 +4,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { resolveRigHandle } from "../rig-handle.js";
 
 interface TeardownResult {
   rigId: string;
@@ -15,81 +16,41 @@ interface TeardownResult {
   errors: string[];
 }
 
-const LONG_RUNNING_TIMEOUT_MS = 45_000;
-
-interface RigSummaryEntry {
-  id: string;
-  name: string;
-  archivedAt?: string | null;
-  lifecycleState?: string;
+interface DownAgentEntry {
+  nodeKind: string;
+  logicalId: string;
+  canonicalSessionName?: string | null;
+  sessionStatus: string | null;
+  activityState?: { display?: string } | null;
+  agentActivity?: { state?: string };
 }
 
-/**
- * Outcome of resolving a `rig down <rig>` handle (name OR id) to a concrete id.
- * The destructive teardown only ever runs on a `resolved`/`passthrough` id;
- * `ambiguous`/`not_found` halt BEFORE any `/api/down` POST.
- */
-type HandleResolution =
-  | { kind: "resolved"; id: string }
-  | { kind: "ambiguous"; name: string; ids: string[] }
-  | { kind: "not_found"; handle: string }
-  // Summary unavailable (non-200 / fetch error): fall back to today's id-only
-  // behavior - POST the raw handle as the id and let the daemon resolve it by
-  // exact id (404 if absent). Safe: the daemon matches a single exact id, so a
-  // name posted this way cannot tear down the wrong rig.
-  | { kind: "passthrough"; handle: string };
-
-/**
- * Resolve a `rig down` handle (rig name OR id) to a concrete rig id, mirroring
- * the `/api/rigs/summary` path `rig up` uses. Resolution is a PRE-STEP: the
- * existing teardown + guards downstream are unchanged; this only maps the
- * handle to an id.
- *
- * Safety order (destructive-op):
- *  1. id-exact-match FIRST, across ALL rigs incl. archived - an id is unique, so
- *     it is never ambiguous, and an archived rig's id must still reach the
- *     canonical teardown id path (AC-2 unchanged).
- *  2. else name-filter over ACTIVE (non-archived) rigs only:
- *     - exactly 1 active match -> resolve to that id;
- *     - >1 active matches      -> AMBIGUOUS: halt, never guess (load-bearing AC-3);
- *     - 0 active matches       -> NOT_FOUND: halt, honest error (AC-4).
- *
- * `/api/rigs/summary` defaults to ACTIVE-only and exposes `archivedAt`; we fetch
- * with `includeArchived=true` so an archived id still id-matches, then filter
- * names to active. So an active+archived same-name pair is NOT ambiguous (only
- * the active candidate counts), and an archived-only name does not resolve by
- * name (use the id, or the archive path).
- */
-async function resolveRigHandle(client: DaemonClient, handle: string): Promise<HandleResolution> {
-  let summaries: RigSummaryEntry[];
+/** Best-effort facts from the ordinary inventory, before teardown changes it. */
+async function showAgentsBeforeDown(rigId: string, readInventory: () => Promise<unknown>): Promise<void> {
+  let facts = "agent sessions unknown; work status unknown";
   try {
-    // includeArchived=true so an archived rig's id still id-matches below
-    // (preserving today's `rig down <id>` path); names are filtered to active.
-    const res = await client.get<RigSummaryEntry[]>("/api/rigs/summary?includeArchived=true");
-    if (res.status !== 200 || !Array.isArray(res.data)) {
-      return { kind: "passthrough", handle };
+    const inventory = await readInventory();
+    if (Array.isArray(inventory) && inventory.every(n => n && typeof n.nodeKind === "string"
+      && typeof n.logicalId === "string" && (n.sessionStatus === null || typeof n.sessionStatus === "string"))) {
+      const agents = (inventory as DownAgentEntry[]).filter(n => n.nodeKind === "agent"
+        && ["running", "idle", "unknown"].includes(n.sessionStatus ?? ""));
+      facts = agents.length === 0 ? "no agent sessions reported live" : "recorded agent sessions: " + agents.map(n => {
+        // A running process or an assigned queue row does not prove work in progress.
+        // Prefer the daemon's arbitrated activity; older daemons expose agentActivity.
+        const activity = n.activityState
+          ? n.activityState.display
+          : n.agentActivity?.state === "running" ? "working"
+          : n.agentActivity?.state === "idle" ? "idle"
+          : n.agentActivity?.state === "needs_input" ? "needs-input" : "unknown";
+        const work = ["working", "idle", "needs-input"].includes(activity ?? "") ? activity : "unknown";
+        return `${n.canonicalSessionName || n.logicalId} (activity: ${work})`;
+      }).join(", ");
     }
-    summaries = res.data;
-  } catch {
-    return { kind: "passthrough", handle };
-  }
-
-  // 1. id-exact-match first, across ALL rigs incl. archived (AC-2: down by id,
-  //    unchanged; ids are never ambiguous; archived ids still reach teardown).
-  if (summaries.some((r) => r.id === handle)) {
-    return { kind: "resolved", id: handle };
-  }
-
-  // 2. name-filter over ACTIVE (non-archived) rigs only, symmetric with `up`.
-  const activeNameMatches = summaries.filter((r) => r.name === handle && r.archivedAt == null);
-  if (activeNameMatches.length === 1) {
-    return { kind: "resolved", id: activeNameMatches[0]!.id };
-  }
-  if (activeNameMatches.length > 1) {
-    return { kind: "ambiguous", name: handle, ids: activeNameMatches.map((r) => r.id) };
-  }
-  return { kind: "not_found", handle };
+  } catch { /* Unavailable inventory is an unknown fact, never a teardown gate. */ }
+  console.error(`Before stopping ${rigId}: ${facts}.`);
 }
+
+const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
 /**
  * `rig down <rig>` - tear down a rig by name or id.
@@ -97,7 +58,13 @@ async function resolveRigHandle(client: DaemonClient, handle: string): Promise<H
  * @returns Commander command
  */
 export function downCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("down").description("Tear down a rig");
+  const cmd = new Command("down").description("Tear down a rig")
+    .addHelpText("after", `
+rig down stops every agent in the rig: their sessions end, and any work in progress stops with them.
+Before running it, check who is working (rig ps --nodes --rig <rig>) and that the person asked for it;
+don't stop a team you didn't start unless asked. OpenRig snapshots the rig first (best-effort), and
+rig up <rig> --existing brings it back, resuming each seat's conversation where its harness allows. With
+--delete the rig record is removed too, so it can't be brought back that way.`);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
@@ -123,6 +90,12 @@ export function downCommand(depsOverride?: StatusDeps): Command {
           process.exitCode = 1;
           return;
         }
+        if (!opts.json) {
+          await showAgentsBeforeDown(rigIdResult.rigId, async () => {
+            const inventory = await runRemoteHttpOp(opts.host!, "GET", `/api/rigs/${encodeURIComponent(rigIdResult.rigId)}/nodes`, undefined, deps, { timeoutMs: 2_000 });
+            return inventory.ok ? inventory.data : undefined;
+          });
+        }
         const result = await runRemoteHttpOp(opts.host, "POST", `/api/down`, { rigId: rigIdResult.rigId, delete: opts.delete, force: opts.force, snapshot: opts.snapshot }, deps, opts);
         if (opts.json) {
           console.log(JSON.stringify(result));
@@ -132,6 +105,10 @@ export function downCommand(depsOverride?: StatusDeps): Command {
         } else {
           console.error(`Error on host ${opts.host}: ${result.error}`);
           process.exitCode = 1;
+        }
+        if (result.ok) {
+          const teardown = result.data as Partial<TeardownResult> | undefined;
+          if (teardown?.errors && teardown.errors.length > 0) process.exitCode = 2;
         }
         return;
       }
@@ -180,6 +157,13 @@ export function downCommand(depsOverride?: StatusDeps): Command {
       // unavailable; daemon resolves by exact id, 404s if absent). Either way
       // the SAME existing teardown path + guards run below - no forked path.
       const rigId = resolution.kind === "resolved" ? resolution.id : resolution.handle;
+
+      if (!opts.json) {
+        await showAgentsBeforeDown(rigId, async () => {
+          const inventory = await client.get<unknown>(`/api/rigs/${encodeURIComponent(rigId)}/nodes`, { timeoutMs: 2_000 });
+          return inventory.status === 200 ? inventory.data : undefined;
+        });
+      }
 
       const res = await client.post<TeardownResult | { error: string }>("/api/down", {
         rigId,

@@ -20,7 +20,7 @@ Locally, `npm test` builds only the daemon, and `test:workspaces` and `test:ui` 
 |---|---|---|
 | Typecheck | `npm run lint` | daemon + **ui** + cli + tui tsconfigs — UI typecheck STAYS blocking |
 | Build | `npm run build` | all workspaces — the UI dist ships in the package, so its build STAYS blocking |
-| Repo scripts | `npm run test:repo` | daemon build, script self-tests, docs guard, skill mirror check, context-pack generation check |
+| Repo scripts | `npm run test:repo` | daemon build, script self-tests, first-run reference check, docs guard, skill mirror check, context-pack generation check |
 | Unit tests | `npm run test:workspaces` | `packages/daemon` + `packages/cli` + `packages/tui` |
 | UI unit tests | `npm run test:ui` | `packages/ui` vitest. NOT part of `npm test`, but every pull request runs it as `package-tests (ui)` (the `package-tests` matrix in `.github/workflows/tests.yml`) |
 | Installed-package scenario | CI only: `scripts/run-pr-scenarios.sh` | the installed package, a daemon restart and a seeded durability failure. The script refuses to run outside GitHub Actions unless given `--remote` with `DOCKER_HOST=ssh://…` |

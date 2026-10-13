@@ -83,21 +83,21 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; eff
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
   const modelArg = model ? ` -m ${quote(model)}` : "";
   const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
-  return `codex -s workspace-write${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
 }
 
 function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
   const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
-  return `codex -s workspace-write${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
+  return `codex -s workspace-write '-c' 'check_for_update_on_startup=false'${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -105,12 +105,12 @@ function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: str
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -p ${quote(profile)} -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
 function expectedProfileResumeCommand(profile: string, token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -p ${quote(profile)} resume ${queueDirArg}${quote(token)}`;
+  return `codex -p ${quote(profile)} '-c' 'check_for_update_on_startup=false' resume ${queueDirArg}${quote(token)}`;
 }
 
 beforeEach(() => {
@@ -1481,6 +1481,22 @@ describe("Codex runtime adapter", () => {
     expect(afterSecond.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)!.length).toBe(1);
     expect((parseToml(afterSecond) as Record<string, any>).mcp_servers.exa.url)
       .toBe("https://exa.internal.example/mcp");
+  });
+
+  it("keeps $ sequences in a fragment literal when it is re-projected", async () => {
+    const userConfig = '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n';
+    const fragment = '[mcp_servers.dollar]\ncommand = "echo $$ $& $` $\'"\n';
+    const { project, read } = await projectFragment(userConfig, fragment);
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterFirst = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterSecond = read();
+
+    expect(afterSecond).toBe(afterFirst);
+    expect(afterSecond.startsWith(userConfig)).toBe(true);
+    expect(afterSecond.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)!.length).toBe(1);
+    expect((parseToml(afterSecond) as Record<string, any>).mcp_servers.dollar.command).toBe("echo $$ $& $` $'");
   });
 
   it("does not mistake a header after an ESCAPED delimiter inside a multi-line string (r2 NOT-CLEAR, 09-01)", async () => {

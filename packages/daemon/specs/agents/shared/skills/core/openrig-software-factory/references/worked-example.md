@@ -86,8 +86,8 @@ permissions, supplies a missing product decision or authorizes more work.
 
 ## Permissions at the point of work
 
-Before the first task, ask the agent to configure your choice: keep prompts,
-remember selected commands, or deliberately select broader access. Use
+Before the first task, ask the agent to configure your choice: keep the team
+default, remember selected commands, or deliberately select broader access. Use
 `rig context get skills/applying-a-permission-policy/SKILL.md`, or the
 [compatible source/package paths](../SKILL.md#find-the-compatible-permission-guide).
 The agent handles setup and verifies the actual conversation; the user need not
@@ -120,25 +120,26 @@ rig grow --help
 
 Set `RIG_ID` to the `rigId` for the running `starter`, and `PROJECT_ROOT`
 to the absolute code repository. Verify its existing `dev` pod and choose unused
-member names. When the user has authorized the added capacity and cost, run:
+member names. Here `parser` owns CSV parsing and `cli` owns the command interface.
+When the user has authorized the added capacity and cost, run:
 
 ```sh
-rig grow "$RIG_ID" a b --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
+rig grow "$RIG_ID" parser cli --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
 rig ps --nodes --rig starter --json
 ```
 
-For one builder, omit `b`. The expected new logical IDs are `dev.a` and `dev.b`,
-with addresses `dev-a@starter` and `dev-b@starter`; use the actual
+For one builder, omit `cli`. The expected new logical IDs are `dev.parser` and `dev.cli`,
+with addresses `dev-parser@starter` and `dev-cli@starter`; use the actual
 returned identities. The command adds and launches the named seats.
 
 To put those seats in a **new** pod instead, choose this alternative once, with an
-unused pod ID; do not run both examples for the same desired capacity:
+unused domain pod such as `data`; do not run both examples for the same desired capacity:
 
 ```sh
-rig grow "$RIG_ID" a b --new-pod build --runtime codex --cwd "$PROJECT_ROOT" --json
+rig grow "$RIG_ID" parser cli --new-pod data --runtime codex --cwd "$PROJECT_ROOT" --json
 ```
 
-That alternative produces `build.a`/`build.b` and corresponding `build-...`
+That alternative produces `data.parser`/`data.cli` and corresponding `data-...`
 addresses. `--pod` and `--new-pod` are mutually exclusive. With one existing pod,
 `--pod` can be inferred; select it explicitly when the intended target matters.
 The runtime defaults to `claude-code` and cwd defaults to the caller's current
@@ -153,7 +154,7 @@ agent specs, use the optional Architect path below and `rig expand --help`.
 Inspect each node's status/error and native pane. Confirm existing seats and work
 remain present; a created node is not readiness. Partial results can leave nodes
 persisted. After a timeout, reconcile topology before retrying. Fix the reported
-cause, then use `rig launch "$RIG_ID" dev.a` only for an already-created seat that
+cause, then use `rig launch "$RIG_ID" dev.parser` only for an already-created seat that
 failed to start. That command does not create a missing seat.
 
 New seats do not inherit the owner's conversation or task. Record the agreed
@@ -163,8 +164,8 @@ checks, next owner and stopping condition. Then deliver the context instruction,
 for example for the first builder:
 
 ```sh
-rig send dev-a@starter "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
-rig capture dev-a@starter
+rig send dev-parser@starter "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
+rig capture dev-parser@starter
 ```
 
 Read the actual reply and pane; resolve startup/login/permission prompts under the
@@ -174,7 +175,7 @@ the coordinator creates the distinct agreed task (or hands off an existing owned
 task instead of duplicating it):
 
 ```sh
-rig queue create --destination dev-a@starter \
+rig queue create --destination dev-parser@starter \
   --body-file "$PROJECT_ROOT/.openrig/factory/TASK-A.md" \
   --summary 'Implement the agreed independent change A' --json
 ```
@@ -191,7 +192,7 @@ working agreement and assigned work, not the seat's name or default agent label.
 | Seat in this example | Deliberately agreed responsibility |
 | --- | --- |
 | `dev-build@starter` | Initially implements and coordinates; can become the dedicated orchestrator, selecting outcomes, separating tasks, owning integration and retaining next-work custody. |
-| `dev-a@starter`, `dev-b@starter` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
+| `dev-parser@starter`, `dev-cli@starter` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
 | `dev-review@starter` | Retains independent judgment under the project's review policy. The implementer does not count its own check as independent review. |
 
 This is one progression, not a required four-seat layout. One extra builder may
@@ -240,8 +241,8 @@ YAML authoring is optional; ordinary growth uses the commands above.
 ### Remove capacity deliberately
 
 When a seat is no longer needed, preserve its work and next owner first.
-`rig remove "$RIG_ID" dev.a` removes that seat; `rig shrink "$RIG_ID" build`
-removes the whole optional build pod. These end the affected sessions. Removal
+`rig remove "$RIG_ID" dev.parser` removes that seat; `rig shrink "$RIG_ID" data`
+removes the whole optional data pod. These end the affected sessions. Removal
 refuses active work unless you explicitly select a live `--fallback <live-seat>`
 to receive it. Check the exact targets, handoff and returned outcomes; do not use
 fallback to discard an obligation or remove seats merely because they look idle.

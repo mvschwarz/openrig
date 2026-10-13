@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { OPENRIG_HOME } from "../src/openrig-compat.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
@@ -334,7 +335,10 @@ describe("Restore check routes", () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-route-hook-cwd-"));
     const settingsDir = path.join(projectDir, ".claude");
     const settingsPath = path.join(settingsDir, "settings.local.json");
-    const relayPath = path.join(projectDir, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    // beforeEach changes the environment; delivery and this reader must retain the daemon root.
+    expect(openRigHome).not.toBe(OPENRIG_HOME);
+    const relayPath = path.join(OPENRIG_HOME, "state", "claude-activity-hooks", "activity-relay.cjs");
+    const previousRelay = fs.existsSync(relayPath) ? fs.readFileSync(relayPath) : null;
     fs.mkdirSync(settingsDir, { recursive: true });
     fs.mkdirSync(path.dirname(relayPath), { recursive: true });
     fs.writeFileSync(relayPath, "// test relay\n");
@@ -370,6 +374,8 @@ describe("Restore check routes", () => {
       expect(hook.evidence).toContain("hook execution is not verified");
     } finally {
       fs.rmSync(projectDir, { recursive: true, force: true });
+      if (previousRelay) fs.writeFileSync(relayPath, previousRelay);
+      else fs.rmSync(relayPath, { force: true });
     }
   });
 

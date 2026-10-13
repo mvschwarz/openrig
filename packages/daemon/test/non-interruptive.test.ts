@@ -1,4 +1,6 @@
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -135,7 +137,37 @@ describe("non-interruptive launch choice", () => {
     expect(fsOps.writeFile).not.toHaveBeenCalled();
     vi.mocked(tmux.sendShellCommand).mockClear();
     await adapter.launchHarness({ ...binding, nonInterruptive: false }, opts);
-    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]![1]).toBe(command.replace(/ '-c' '[^']*'/g, ""));
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]![1]).toBe(command.replace(/ '-c' 'notice\.[^']*'/g, ""));
+  });
+
+  it.each(["fresh", "resume", "fork"] as const)("Codex %s disables startup updates even without a non-interruptive choice", async mode => {
+    for (const choice of [
+      { launchPosture: "floor" as const },
+      { launchPosture: "floor" as const, codexConfigProfile: "custom" },
+      { launchPosture: "full_bypass" as const, kernelAuthority: true },
+    ]) {
+      const { tmux, fsOps, binding } = fixture("codex");
+      vi.mocked(tmux.sendShellCommand).mockResolvedValue({ ok: false, message: "inert transport" });
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps, resolveGitAddDirs: async () => [],
+        verifyProfilePreflight: async profile => ({ ok: true, profile }) });
+      await adapter.launchHarness({ ...binding, ...choice, nonInterruptive: false, model: "chosen-model", effort: "high" }, {
+        name: "dev@test",
+        ...(mode === "resume" ? { resumeToken: "old-id" } : {}),
+        ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "old-id" } } : {}),
+      });
+      const command = vi.mocked(tmux.sendShellCommand).mock.calls[0]![1];
+      expect(command.match(/check_for_update_on_startup=false/g)).toHaveLength(1);
+      expect(command).toContain("'-c' 'check_for_update_on_startup=false'");
+      expect(command).toContain("-m 'chosen-model' -c 'model_reasoning_effort=\"high\"'");
+      expect(command).toContain(choice.kernelAuthority ? "-s danger-full-access -a never"
+        : choice.codexConfigProfile ? "-p 'custom'" : "-s workspace-write");
+      if (mode !== "fresh") {
+        expect(command).toContain(` ${mode} `);
+        expect(command).toContain(" 'old-id'");
+      }
+      expect(fsOps.writeFile).not.toHaveBeenCalled();
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+    }
   });
 
   it.each(["fresh", "resume", "fork"] as const)("managed Claude %s keeps explicit native mode precedence", async mode => {
@@ -167,7 +199,12 @@ describe("non-interruptive launch choice", () => {
 
 
 describe("persisted choice at the launch boundary", () => {
-  it("persists before pod launch, keeps member posture and survives a later fresh startup", async () => {
+  it.each([
+    // A rig without an authored or requested choice must keep its export undeclared.
+    [undefined, undefined, false],
+    [undefined, true, true], [true, undefined, true], [true, false, false],
+    [false, true, true], [false, undefined, false],
+  ] as const)("authored %s / request %s persists %s before launch and restore", async (declared, request, expected) => {
     const db = createFullTestDb();
     const bindings: NodeBinding[] = [];
     const adapter = { runtime: "claude-code", listInstalled: async () => [],
@@ -183,7 +220,7 @@ describe("persisted choice at the launch boundary", () => {
     try {
       const spec = `version: "0.2"
 name: ni-pod
-permission_policy: builtin:yolo
+${declared === undefined ? "" : `non_interruptive: ${declared}\n`}permission_policy: builtin:yolo
 pods:
   - id: dev
     label: Dev
@@ -202,12 +239,18 @@ pods:
     edges: []
 edges: []
 `;
-      const result = await setup.podInstantiator.instantiate(spec, "/work/fixture", { nonInterruptive: true });
+      const result = await setup.podInstantiator.instantiate(spec, "/work/fixture", { nonInterruptive: request });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(bindings).toHaveLength(2);
-      expect(bindings.map(b => [b.nonInterruptive, b.launchPosture])).toEqual([[true, "full_bypass"], [true, "floor"]]);
+      expect(bindings.map(b => [b.nonInterruptive, b.launchPosture])).toEqual([[expected, "full_bypass"], [expected, "floor"]]);
       const rigId = (result as { ok: true; result: { rigId: string } }).result.rigId;
-      expect(setup.rigRepo.getRigNonInterruptive(rigId)).toBe(true);
+      expect(setup.rigRepo.getRigNonInterruptive(rigId)).toBe(expected);
+      const exported = setup.rigSpecExporter.exportRig(rigId);
+      if (expected) expect(exported).toMatchObject({ nonInterruptive: true });
+      else expect(exported).not.toHaveProperty("nonInterruptive");
+      const exportedYaml = RigSpecCodec.serialize(exported as import("../src/domain/types.js").RigSpec);
+      if (expected) expect(exportedYaml).toContain("non_interruptive: true");
+      else expect(exportedYaml).not.toContain("non_interruptive:");
       expect(nonInterruptiveArgs("claude-code", bindings[1]!)).toEqual([]);
       const rig = setup.rigRepo.getRig(rigId)!;
       const node = rig.nodes.find(n => n.logicalId === "dev.impl")!;
@@ -216,10 +259,26 @@ edges: []
         adapter, plan: { runtime: "claude-code", cwd: "/work/fixture", entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
         resolvedStartupFiles: [], startupActions: [], isRestore: true, resumeToken: "retained-history" };
       await setup.startupOrchestrator.startNode(replay);
-      expect(bindings.at(-1)!.nonInterruptive).toBe(true);
+      expect(bindings.at(-1)!.nonInterruptive).toBe(expected);
       setup.rigRepo.setRigNonInterruptive(rigId, false);
       await setup.startupOrchestrator.startNode({ ...replay, binding: { ...replay.binding, nonInterruptive: true } });
       expect(bindings.at(-1)!.nonInterruptive).toBe(false);
     } finally { db.close(); }
+  });
+});
+
+
+describe("authored non-interruptive schema and codec", () => {
+  const raw = { version: "0.2", name: "choice", pods: [{ id: "dev", label: "Dev", members: [{ id: "shell", runtime: "terminal", agent_ref: "builtin:terminal", profile: "none", cwd: "." }], edges: [] }], edges: [] };
+  it.each([true, false, undefined])("round-trips declaration %s without converting absence", choice => {
+    const spec = { ...raw, ...(choice !== undefined ? { non_interruptive: choice } : {}) };
+    expect(RigSpecSchema.validate(spec).valid).toBe(true);
+    const normalized = RigSpecSchema.normalize(spec);
+    expect(normalized.nonInterruptive).toBe(choice);
+    const output = RigSpecCodec.parse(RigSpecCodec.serialize(normalized)) as Record<string, unknown>;
+    expect(output.non_interruptive).toBe(choice);
+  });
+  it.each([null, "true", 1])("rejects non-boolean declaration %s", choice => {
+    expect(RigSpecSchema.validate({ ...raw, non_interruptive: choice }).errors).toContain("non_interruptive: must be a boolean");
   });
 });

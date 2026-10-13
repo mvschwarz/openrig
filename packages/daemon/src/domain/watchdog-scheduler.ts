@@ -1,5 +1,6 @@
 import type { WatchdogJob, WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import type { WatchdogPolicyEngine } from "./watchdog-policy-engine.js";
+import { nextDueAt } from "./watchdog-due.js";
 
 /**
  * Watchdog scheduler (PL-004 Phase C; daemon-native supervision tree
@@ -152,9 +153,6 @@ export class WatchdogScheduler {
  * is enforced one layer up by the policy engine, NOT here.
  */
 export function isDue(job: WatchdogJob, nowMs: number): boolean {
-  if (!job.lastEvaluationAt) return true;
-  const last = Date.parse(job.lastEvaluationAt);
-  if (Number.isNaN(last)) return true;
-  const cadenceSeconds = job.scanIntervalSeconds ?? job.intervalSeconds;
-  return nowMs - last >= cadenceSeconds * 1000;
+  const due = nextDueAt(job);
+  return due === null || nowMs >= due;
 }

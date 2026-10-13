@@ -33,7 +33,10 @@ it.skipIf(!nativeAvailable)("preserves the exact native trailing buffer and reco
     expect(captures).toBeLessThan(10);
     await run("send-keys", "-t", "seat", "-l", "new output γδ"); await run("send-keys", "-t", "seat", "Enter");
     const deadline = Date.now() + 9000;
-    while (Date.now() < deadline && !readFileSync(file, "utf8").includes("new output γδ")) await wait(50);
+    // The line lands twice: the tty echoes it as typed, then cat prints it after Enter. Wait for
+    // both, or a capture taken between them leaves the transcript one line behind the pane.
+    const landed = () => readFileSync(file, "utf8").split("new output γδ").length - 1 >= 2;
+    while (Date.now() < deadline && !landed()) await wait(50);
     const expected = await run("capture-pane", "-p", "-t", "seat", "-S", "-1000");
     expect(readFileSync(file, "utf8")).toBe(expected);
     expect(expected).toContain("new output γδ");

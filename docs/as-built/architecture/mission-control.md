@@ -11,8 +11,8 @@ applies-when: |
   coordination primitive's sources.
 siblings: [coordination-primitive.md, workflow-runtime.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, coordination-primitive.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Mission Control — Queue Observability + Verb Contract
@@ -25,7 +25,7 @@ seven views, eight verbs, a recent-ships cap of 10
 table. In the web UI the old `/mission-control` page now redirects to
 `/for-you`, and the For You feed carries the verb actions (§6).
 
-> Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. A bare file name such as
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. A bare file name such as
 > `mission-control-read-layer.ts:31` is in
 > `packages/daemon/src/domain/mission-control/`; `domain/…`, `routes/…`,
 > `middleware/…`, `db/…`, `index.ts`, `server.ts` and `startup.ts` are under
@@ -66,7 +66,7 @@ each view to its source:
   `mission-control-fleet-cli-capability.ts:109`), which walks the rig
   registry (`:110`), summarises each rig's `queue_items` (`:135`), and runs a
   per-rig CLI capability probe (`makeLocalCliCapabilityProbe`, `:77`, wired
-  at `startup.ts:1572`).
+  at `startup.ts:1597`).
 - `recently-active` delegates to the view projector's built-in
   `ViewProjector.show("recently-active")` (`mission-control-read-layer.ts:246`).
 - `recent-observations` reads the latest 50 `stream_items` via `StreamStore`
@@ -103,7 +103,7 @@ Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as cons
 | `hold` | `state="blocked"`, `closure_reason="blocked_on"` |
 | `drop` | `state="done"`, `closure_reason="canceled"` |
 | `handoff` | same closure and new destination item as `route`; the 4-step shape (see below) |
-| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:825`) |
+| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410–411`). After commit it sends a best-effort nudge with the decision text to the item's owner unless `notify: false` (`:450–467`); the CLI wrapper is `rig queue resolve <qitemId> --decision <text>` (`packages/cli/src/commands/queue.ts:828`) |
 
 `annotate` requires `annotation`, `hold` and `drop` require `reason`, `route`
 and `handoff` require `destinationSession`, and `resolve` requires a non-empty
@@ -118,7 +118,7 @@ a human seat. An unknown item returns 404 `qitem_not_found`
 (`routes/mission-control.ts:240–251`, `:330–341`).
 
 Each verb is one atomic daemon transaction: the queue mutation via
-`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2358`,
+`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2371`,
 which keeps the hot-potato closure validation — see
 `coordination-primitive.md` §3), an audit row in `mission_control_actions`
 (`mission-control-write-contract.ts:207`), and a persisted
@@ -134,7 +134,7 @@ created in the same transaction (`createWithinTransaction`, `:173`), along
 with the successor's wake intent (`stageWakeIntent`, `:195`, checked by
 `assertTerminalClosureHasIntent`, `:242`). The wake itself runs after commit
 (`deliverWakeForSuccessor`, `:264`). It is on unless the caller passes
-`notify: false` (`domain/queue-repository.ts:1174`), and a notify failure
+`notify: false` (`domain/queue-repository.ts:1182`), and a notify failure
 does NOT roll back durable mutations (`mission-control-write-contract.ts:272–275`).
 A failed destination create rolls back the source closure, the audit row and
 the new item together
@@ -190,14 +190,14 @@ in `audit_notes_json` (`domain/scope/scope-approve.ts:292`). The audit browse
   (`notification-adapter-ntfy.ts`, `notification-adapter-webhook.ts`) plus
   `notification-dispatcher.ts`. `OPENRIG_NOTIFICATIONS_MECHANISM` selects
   `ntfy`, `webhook` or `none`, and the default is `none`
-  (`startup.ts:1617`). A dispatcher starts only when
-  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1618`, `:1625`) and the
-  target URL passes validation (`:1636`); an unrecognized mechanism with a
-  target set throws during daemon startup (`:1631–1634`). The ntfy adapter
+  (`startup.ts:1642`). A dispatcher starts only when
+  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1643`, `:1650`) and the
+  target URL passes validation (`:1661`); an unrecognized mechanism with a
+  target set throws during daemon startup (`:1656–1659`). The ntfy adapter
   posts to a topic URL that the ntfy phone app subscribes to
   (`notification-adapter-ntfy.ts:1–6`). Notifications fire when a
   `human-gate` queue item is created, and also on each completed verb when
-  `OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1` (`startup.ts:1623–1624`);
+  `OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1` (`startup.ts:1648–1649`);
   each item, trigger and mechanism is sent at most once per daemon run
   (`notification-dispatcher.ts:119–134`, `:156–158`). `POST
   /notifications/test` returns 503 `notifications_unconfigured` when no

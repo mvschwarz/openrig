@@ -19,14 +19,14 @@ import { fetchWithTimeout } from "../fetch-with-timeout.js";
  *
  * Exit codes (arch n1 — outcome codes DISTINCT from error codes):
  *   0 = workflow completed
- *   3 = workflow FAILED (the outcome-as-exit-code kubectl default —
+ *   3 = workflow FAILED or aborted (the outcome-as-exit-code kubectl default —
  *       a workflow that fails is a command that fails; never collides
  *       with the shipped 1=4xx / 2=5xx transport codes)
  */
 export const EXIT_WORKFLOW_FAILED = 3;
 
 /** Terminal statuses a follow run resolves on. */
-const TERMINAL_STATUSES = new Set(["completed", "failed"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "aborted"]);
 
 export interface FollowInstanceView {
   instanceId: string;
@@ -95,6 +95,7 @@ export interface FollowOptions {
 const STATUS_GLYPH: Record<string, string> = {
   completed: "✔",
   failed: "✖",
+  aborted: "✖",
   active: "●",
   waiting: "◐",
 };
@@ -130,7 +131,7 @@ function renderEvent(event: WorkflowEvent): string | null {
 
 /** Outcome → process exit code, per the FR-1 contract. */
 export function outcomeExitCode(status: string): number {
-  if (status === "failed") return EXIT_WORKFLOW_FAILED;
+  if (status === "failed" || status === "aborted") return EXIT_WORKFLOW_FAILED;
   return 0;
 }
 

@@ -330,7 +330,9 @@ before relying on a policy or its default.
 
 Compatibility checks:
 - `rig down` accepts a rig name or id. An ambiguous name matching more than one
-  active rig is refused with matching ids; use the intended id.
+  active rig is refused with matching ids; use the intended id. It ends every
+  agent's session and any work in progress, so check `rig ps --nodes --rig <rig>`
+  and that the person asked; `rig up <rig> --existing` restores it.
 - For queue/view JSON or limit differences, compare the installed command's help,
   the running daemon version and the actual response. A wrapper mismatch is not
   by itself a daemon-health failure, and historical workarounds are not current
@@ -1300,13 +1302,19 @@ Node-granular managed partial restore (v0.3.4+):
 ### Add a member to an existing pod — v0.3.3+
 
 ```bash
-rig add <rig-id> <pod-namespace> <member-fragment-path> [--json]
+rig add <rig> <pod-namespace> <member-fragment-path> [--json]
 ```
 
 `rig add` is the top-level verb for the `add_member` converge op. It adds a
 single member to an existing pod from a YAML/JSON member fragment file. The
 daemon resolves the named pod, validates the member, runs preflight, and
 launches the member in place.
+
+`<rig>` is the rig id or its exact name (the `rigName` that `rig whoami --json`
+reports). A name shared by more than one rig is refused before anything is
+added, with the matching ids listed (`rig_ambiguous` under `--json`). `rig add`
+always targets the local daemon: while a remote host is selected it refuses to
+resolve a name (`remote_host_selected`); an exact local id still works.
 
 HTTP outcomes:
 - `201` — member added; per-node launch state included in the response.

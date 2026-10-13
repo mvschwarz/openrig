@@ -14,6 +14,7 @@ import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-read
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { precheckSwitch } from "./provider-policy.js";
 import { collectReactiveEventSignals } from "./reactive-tap.js";
+import type { CodexUsageWindows, UsageRefreshResult } from "./codex-usage-windows.js";
 import type {
   ProviderService,
   ProviderPrecheckInput,
@@ -34,6 +35,8 @@ export interface ProviderServiceImplDeps {
   warn?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
   now?: () => string;
+  /** Slice 01: Codex usage windows, served only while `enabled()` (provider.usage_windows) is true. */
+  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows };
 }
 
 export class ProviderServiceImpl implements ProviderService {
@@ -61,7 +64,7 @@ export class ProviderServiceImpl implements ProviderService {
       }
       return result.signals;
     };
-    return collectFourBlockReadModel({
+    const model = collectFourBlockReadModel({
       readCodexAuth: readAuth,
       listSeats,
       collectSignals: () => [
@@ -70,6 +73,30 @@ export class ProviderServiceImpl implements ProviderService {
       ],
       now: () => asOf,
     });
+    // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
+    const usage = this.usageWindowsEnabled() ? this.deps.usageWindows!.windows.project(asOf) : null;
+    if (!usage) return model;
+    // The read covers only the login active in the daemon's CODEX_HOME: say so whenever saved rig auth
+    // profiles exist, so a profile without a row never reads as fine.
+    const profiles = model.accounts.filter((a) => a.provider === "codex").map((a) => a.accountId);
+    const savedProfiles = profiles.length > 0
+      ? { names: profiles, note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" }
+      : null;
+    return { ...model, usage: savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage };
+  }
+
+  async refreshUsage(_provider: "codex"): Promise<UsageRefreshResult | { disabled: true }> {
+    if (!this.usageWindowsEnabled()) return { disabled: true };
+    return this.deps.usageWindows!.windows.refresh();
+  }
+
+  private usageWindowsEnabled(): boolean {
+    if (!this.deps.usageWindows) return false;
+    try {
+      return this.deps.usageWindows.enabled();
+    } catch {
+      return false;
+    }
   }
 
   private listSeats(): ProviderSeat[] {

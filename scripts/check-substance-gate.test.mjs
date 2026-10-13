@@ -344,6 +344,40 @@ test("derived archaeology terms do not block and the receipt records the exact a
   });
 });
 
+test("exact-line allowances reach content and derived scans and are recorded in the receipt", () => {
+  withFixture(({ repo, rules, review, receipt }) => {
+    const line = "Generic /Users/example/<project> placeholder";
+    const ruleSet = JSON.parse(readFileSync(rules, "utf8"));
+    ruleSet.allowed_context_lines = [line];
+    writeFileSync(rules, JSON.stringify(ruleSet));
+    const publicFile = join(repo, "public/guide.md");
+    write(publicFile, `${line}\n`);
+    write(join(repo, "dist/derived.js"), `${line}\n`);
+    commitAll(repo, "exact generic examples");
+    writeFileSync(review, JSON.stringify({
+      surfaces: [{
+        path: "public/guide.md", sha256: sha256(publicFile), verdict: "ship",
+        reason: "Generic placeholder.",
+        candidateDispositions: [{
+          kind: "absolute-path", line: 1, value: "/Users/example/<project>",
+          disposition: "Generic placeholder, not an instance path.",
+        }],
+      }],
+    }));
+    const result = runGate({ repo, rules, review, receipt, cutSha: gitHead(repo) });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(readFileSync(receipt, "utf8"));
+    assert.equal(output.activeRulesByClass.content.allowed_context_lines, 1);
+    assert.equal(output.activeRulesByClass.derived.allowed_context_lines, 1);
+
+    write(join(repo, "dist/derived.js"), `${line} extra\n`);
+    commitAll(repo, "modified example");
+    const rejected = runGate({ repo, rules, review, receipt, cutSha: gitHead(repo) });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /derived\.js/);
+  });
+});
+
 test("the release ceremony names the gate and its durable receipt", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   assert.equal(pkg.scripts["gate:substance"], "node scripts/check-substance-gate.mjs");

@@ -119,10 +119,11 @@ describe("complete human notifications", () => {
     expect(calls).toBe(landed ? 2 : 3);
   });
 
-  it("preflights every part: invalid supplemental content causes zero posts and a visible correction", async () => {
+  it("preflights every part: content that can't be posted causes zero posts and a visible correction", async () => {
+    // A long detail is now split into thread replies (#897); an oversized subject still can't be posted.
     const fetchImpl = vi.fn(); const failed = vi.fn();
     const deliver = subsystemSlackDeliver({ botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl, delivered: new SeenStore(join(home, "d")), attempted: new SeenStore(join(home, "a")), outboundSeen: new SeenStore(join(home, "s")), onTransportFailed: failed });
-    const result = await deliver({ kind: "outbound_decision", decisionId: "d", op: "post_message", entityBindingRef: request.destinationSession, payload: { ...request, qitemId: "q", humanDetail: "x".repeat(3001) } });
+    const result = await deliver({ kind: "outbound_decision", decisionId: "d", op: "post_message", entityBindingRef: request.destinationSession, payload: { ...request, qitemId: "q", summary: "x".repeat(3001), humanDetail: "Supplemental context." } });
     expect(result).toMatchObject({ ok: false, class: "human-message-unrenderable" });
     expect(fetchImpl).not.toHaveBeenCalled(); expect(failed).toHaveBeenCalledOnce();
   });

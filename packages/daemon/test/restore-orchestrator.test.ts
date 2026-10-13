@@ -31,9 +31,9 @@ import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
-import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 
 function setupDb(): Database.Database {
@@ -273,6 +273,91 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
+  // Backlog finding 5: a seat with no occupant at capture (stopped, or nothing running at a reboot)
+  // whose earlier occupant left a resume token is not silently fresh-primed.
+  describe("a seat with no occupant at capture", () => {
+    /** Capture an absent seat while retaining configurable resume-token history and policy. */
+    function absentSeat(opts: { resumeToken?: string | null; restorePolicy?: string } = {}) {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [],
+        resumeType: opts.resumeToken === null ? undefined : "claude_id",
+        resumeToken: opts.resumeToken === null ? undefined : (opts.resumeToken ?? "earlier-thread"),
+      });
+      const node = snap.data.nodes[0]!;
+      return updateSnapshotData(snap, (data) => {
+        data.sessions = data.sessions.map((session) => ({
+          ...session, status: "exited", ...(opts.restorePolicy ? { restorePolicy: opts.restorePolicy } : {}),
+        }));
+        data.activeOccupantsByNode = { [node.id]: { kind: "absent" } };
+      });
+    }
+
+    it("stops for a decision when an earlier occupant left a resume token", async () => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat().id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes).toEqual([
+        expect.objectContaining({ logicalId: "worker", status: "awaiting-decision", error: expect.stringContaining("rig seat launch 'worker@r99' --fresh --reason") }),
+      ]);
+      expect(result.result.nodes[0]!.error).toContain("no running occupant when this snapshot was taken");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["recorded history", {}, undefined, "awaiting-decision"],
+      ["explicit fresh", {}, ["worker"], "fresh"],
+      ["no token", { resumeToken: null }, undefined, "fresh"],
+      ["non-resume policy", { restorePolicy: "relaunch_fresh" }, undefined, "fresh"],
+    ] as const)("restoring continuity with %s preserves the absent-seat decision", async (_label, history, freshLogicalIds, status) => {
+      const original = absentSeat(history);
+      const node = original.data.nodes[0]!;
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("restoring-pod", original.rigId, "Dev");
+      db.prepare("UPDATE nodes SET pod_id = ? WHERE id = ?").run("restoring-pod", node.id);
+      const snap = updateSnapshotData(original, (data) => { data.nodes[0].podId = "restoring-pod"; });
+      db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES (?, ?, ?)").run("restoring-pod", node.id, "restoring");
+      db.prepare("UPDATE sessions SET status = ? WHERE node_id = ?").run("exited", node.id);
+      const sessionsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+      const continuityBefore = db.prepare("SELECT * FROM continuity_state").all();
+      const tmux = mockTmux();
+      if (status === "awaiting-decision") {
+        const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions);
+        expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+      }
+      const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: freshLogicalIds ? [...freshLogicalIds] : undefined });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).toBe(status);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
+      expect(db.prepare("SELECT * FROM continuity_state").all()).toEqual(continuityBefore);
+    });
+
+    it("--fresh still starts it fresh", async () => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat().id, { freshLogicalIds: ["worker"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("awaiting-decision");
+      expect(tmux.createSession).toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no earlier row carries a token", { resumeToken: null }],
+      ["the earlier occupant's policy is not to resume", { restorePolicy: "relaunch_fresh" }],
+    ] as const)("starts it fresh as before when %s", async (_label, opts) => {
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(absentSeat(opts).id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("awaiting-decision");
+      expect(tmux.createSession).toHaveBeenCalled();
+    });
+  });
+
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
     const otherRepo = new RigRepository(otherDb);
@@ -434,9 +519,13 @@ describe("RestoreOrchestrator", () => {
       undefined,
       node.id,
       "high",
+      false, // unchanged non-interruptive setting
+      false, // this is not the kernel
+      true, // derived team launch default
     );
 
-    // Codex forwards effort
+    // Codex forwards effort; the named profile remains authoritative.
+    db.prepare("UPDATE nodes SET codex_config_profile = 'profile1' WHERE id = ?").run(node.id);
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(
       node.id,
@@ -1009,9 +1098,10 @@ describe("RestoreOrchestrator", () => {
       if (failure === "bare") rows.pop();
       if (failure === "background") rows[2]!.pgid = 9000;
       if (failure === "unrelated") rows[2]!.ppid = 9000;
-      if (failure === "unstable" && calls > 1) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
+      // The launch's own record of its process (#1077) takes the first two samples; the A3 proof follows.
+      if (failure === "unstable" && calls > 3) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
       if (failure === "missing-metadata") rows[2]!.startedAt = "";
-      if (failure === "pane-changed") tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+      if (failure === "pane-changed" && calls > 2) tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
       return rows;
     };
     if (failure === "ambiguous-pane") tmux.listPanes = vi.fn(async () => ["%1", "%2"].map(id => ({ id, index: 0, cwd: "/", width: 80, height: 24, active: true })));
@@ -1097,7 +1187,8 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = buildCodexResumeCore(resumeToken, "resume", false, "--add-dir /tmp/openrig-state");
+    // The observer reads ps argv after the shell has removed launch quoting.
+    const codexCommand = ["codex", "-p", "resume", "resume", "--add-dir", "/tmp/openrig-state", resumeToken].join(" ");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
@@ -1128,7 +1219,7 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = `${buildCodexResumeCore("different-thread", "resume", false, "--add-dir /tmp/openrig-state")} resume ${resumeToken}`;
+    const codexCommand = ["codex", "-p", "resume", "resume", "--add-dir", "/tmp/openrig-state", "different-thread", "resume", resumeToken].join(" ");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
@@ -1844,18 +1935,25 @@ describe("RestoreOrchestrator", () => {
         expect(outcome.error).toContain("session metadata");
         if (mode !== "hook-join") expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
         else expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
+      } else if (mode === "error") {
+        expect(outcome.status).toBe("awaiting-decision");
+        expect(outcome.error).toContain("Original session unresumable");
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
         else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
         else expect(latest.resumeToken).toBeNull();
       }
-      expect(tmux.killSession).not.toHaveBeenCalled();
+      if (mode === "error") {
+        expect(tmux.killSession).toHaveBeenCalledTimes(1);
+      } else {
+        expect(tmux.killSession).not.toHaveBeenCalled();
+      }
       if (mode !== "missing-token") {
         expect(tmux.createSession).toHaveBeenCalledTimes(1);
-        if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
+        if (!lostOwnership && mode !== "error") expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
         expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
-        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume ${token}`));
+        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
         expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
       }
     });
@@ -2154,7 +2252,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Claude restore fails when resume launch proves the saved session is gone", async () => {
+  it("pod-aware Claude restore returns awaiting-decision when resume launch proves the saved session is gone", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
@@ -2184,10 +2282,20 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
+      expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
+
+      // Rollback assertions: launched session superseded, prior binding restored, no running session
+      const launchedSessions = db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC").all(node.id) as Array<{ id: string; status: string }>;
+      const runningSessions = launchedSessions.filter((s) => s.status === "running");
+      expect(runningSessions).toHaveLength(0);
+      const superseded = launchedSessions.filter((s) => s.status === "superseded");
+      expect(superseded.length).toBeGreaterThan(0);
+      const binding = sessionRegistry.getBindingForNode(node.id);
+      expect(binding?.tmuxSession).toBeUndefined();
     }
   });
 
@@ -2224,7 +2332,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Codex restore fails when resume launch proves the saved session is gone", async () => {
+  it("pod-aware Codex restore returns awaiting-decision when resume launch proves the saved session is gone", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-codex-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", podId: "pod-codex-retry" });
@@ -2254,8 +2362,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-codex-token");
     }
@@ -2291,15 +2399,15 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("failed");
-      expect(nodeResult!.error).toContain("Harness launch failed");
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
       expect(result.result.warnings).not.toContain("Node dev.impl: resume was unavailable; launched fresh instead.");
       expect(launchHarness).toHaveBeenCalledTimes(1);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stable-codex-token");
     }
   });
 
-  it("pod-aware Codex restore fails requested resume even when a checkpoint exists", async () => {
+  it("pod-aware Codex restore returns awaiting-decision for requested resume even when a checkpoint exists", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-codex-restore-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2335,8 +2443,8 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("failed");
-        expect(nodeResult!.error).toContain("Harness launch failed");
+        expect(nodeResult!.status).toBe("awaiting-decision");
+        expect(nodeResult!.error).toContain("Original session unresumable");
         expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
@@ -3291,6 +3399,34 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(seeded.nodeId)).toEqual({ verdict: "verified" });
       expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    // #1077 — the seat launched with --resume tok-abc-123 and Claude continued as a new id. The
+    // strict reconciler keeps main's exact current-token path and accepts the launch token only as
+    // the alternative a qualified rotation names: the launched process's own first hook, a resume.
+    it.each([
+      ["a resume from the launched process", "resume", "tok-abc-123", "tok-abc-123", true],
+      ["a /clear from the launched process", "clear", "tok-abc-123", "tok-abc-123", false],
+      ["a resume from a Claude started by hand in the pane (no marker)", "resume", null, "tok-abc-123", false],
+      ["a resume carrying another launch's marker", "resume", "tok-other-789", "tok-abc-123", false],
+      // An operator relaunched Claude on the stored token after a rotation was recorded: main's path.
+      ["argv on the current token after an old rotation record", "resume", "tok-abc-123", "tok-rotated-456", true],
+      ["argv on an unrelated token after a rotation record", "resume", "tok-abc-123", "tok-other-789", false],
+    ] as const)("reconciles Claude after %s", async (_label, source, resumeLaunch, argvToken, accepted) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("Claude Code v2.1.220\n ❯ accept edits on");
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+      const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(seeded.nodeId) as { id: string };
+      sessionRegistry.recordResumeLaunch(session.id, "tok-abc-123");
+      sessionRegistry.recordResumeLaunchProcess(session.id, "tok-abc-123", { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" });
+      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true, resumeLaunch, launchedProcess: { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" } });
+      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows(argvToken) }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(result.ok).toBe(accepted);
+      if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
       expect(tmux.sendKeys).not.toHaveBeenCalled();
       expect(tmux.sendText).not.toHaveBeenCalled();
     });

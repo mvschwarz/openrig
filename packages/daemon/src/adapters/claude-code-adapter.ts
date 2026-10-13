@@ -13,10 +13,12 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { observeClaudePaneProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { observeClaudePaneProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
+import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH } from "../domain/claude-activity-hooks.js";
+import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -41,13 +43,6 @@ export interface ClaudeAdapterFsOps {
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
-// Real Claude Code binary needs 1-3s to write the new fork session-name
-// file under ~/.claude/sessions/. Poll instead of single-shot lookup.
-// 12 × 500ms = 6s ceiling — comfortably above the observed cold-start
-// fork-file write window without making a bad-token error feel slow.
-const FORK_POLL_ATTEMPTS = 12;
-const FORK_POLL_DELAY_MS = 500;
-
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
  * and delivers startup files via guidance merge, skill install, or tmux send-text.
@@ -63,7 +58,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -152,7 +147,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     try {
       activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
     } catch (err) {
-      console.error(`[openrig] claude activity-hook reconcile warning: ${(err as Error).message}`);
+      // #226: delivery at '/' is still attempted (it works where '/' is writable); when it fails there, say why.
+      // A binding without a cwd (startup bootstraps the stored node's selection) gets the plain warning.
+      const atRoot = binding.cwd && isFilesystemRoot(binding.cwd)
+        ? ` (cwd '${binding.cwd}' resolves to the filesystem root, not a project workspace)`
+        : "";
+      console.error(`[openrig] claude activity-hook reconcile warning${atRoot}: ${(err as Error).message}`);
       activityOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
     }
     // Never claim a resource as PROJECTED when delivery could not happen (missing
@@ -276,9 +276,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const effort = binding.effort?.trim();
     const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
 
-    // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
-    // and capture the NEW post-fork session id. The parent token is NEVER
-    // persisted onto the new seat record (identity-honesty bedrock).
+    // Fork branch: `claude --resume <parent> --fork-session --session-id <fork> --name <seat>`
+    // (Claude Code 2.0.73 or later). The fork's own id is chosen here, like a fresh launch's,
+    // so the parent token is NEVER persisted onto the new seat record (identity-honesty
+    // bedrock) and the fork's argv names the conversation it runs.
     if (opts.forkSource) {
       if (opts.forkSource.kind !== "native_id") {
         return {
@@ -290,12 +291,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
+      const forkSessionId = this.sessionIdFactory();
       const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
-        "--resume", parentId, "--fork-session", "--name", opts.name])
+        "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
-        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(parentId)} --fork-session --name ${opts.name}`;
+        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : this.seatLaunchEnvironment
           ? await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime }), undefined, { sourceInPane: true })
@@ -307,25 +309,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
-      // claude needs 1-3s to write the new fork session-name file under
-      // ~/.claude/sessions/. The original implementation captured the
-      // token IMMEDIATELY after Enter, which always returned undefined
-      // against a real binary. Poll on the
-      // verifyResumeLaunch cadence (12 × 500ms = 6s ceiling).
-      const newToken = await this.pollForResumeToken(opts.name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY_MS, managed?.configDir);
-      if (!newToken) {
-        return {
-          ok: false,
-          error: `claude-code fork: could not capture new post-fork session id from claude session storage after ${FORK_POLL_ATTEMPTS} polls (${(FORK_POLL_ATTEMPTS * FORK_POLL_DELAY_MS) / 1000}s ceiling)`,
-        };
-      }
-      return { ok: true, resumeToken: newToken, resumeType: "claude_id", appliedLaunch };
+      // As with a fresh launch, nothing is read back from Claude's session files: a same-name
+      // file can belong to an earlier occupant or another seat sharing the config directory.
+      return { ok: true, resumeToken: forkSessionId, resumeType: "claude_id", appliedLaunch };
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
-      ? `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${opts.resumeToken} --name ${opts.name}`
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name],
+      opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
       : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
@@ -341,11 +334,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    this.autoLaunches.set(binding.nodeId, { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable });
+    const launch = { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable } as
+      { binding: NodeBinding; token: string; executable?: string; fingerprint?: string; process?: ClaudeLaunchedProcess };
+    this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
-      if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch };
+      // The process readiness pinned first, if it observed one: the caller records it, not a later read.
+      const launchedProcess = launch.process ? { launchedProcess: { ...launch.process } } : {};
+      if (!verification.ok) return { ...verification, ...launchedProcess };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch, ...launchedProcess };
     }
 
     // Fresh launches already have an explicit --session-id. A same-name file
@@ -404,8 +401,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable };
       const first = await observeClaudePaneProcess(observation);
       if (!first) return probe;
-      // Pin the first exact process for this launch; retries cannot adopt a replacement.
-      launch.fingerprint ??= first.fingerprint;
+      // Pin the first exact process for this launch; retries cannot adopt a replacement. It is also
+      // the launch's record of the process it started (#1077).
+      if (!launch.fingerprint) {
+        launch.fingerprint = first.fingerprint;
+        if (first.process.startedAt) launch.process = { pid: first.process.pid, startedAt: first.process.startedAt };
+      }
       if (first.fingerprint !== launch.fingerprint) return probe;
       const native = await observeClaudePaneProcess(observation);
       if (native?.fingerprint !== launch.fingerprint) return probe;
@@ -641,55 +642,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return true;
   }
 
-  /**
-   * Best-effort token capture from ~/.claude/sessions/*.json.
-   * Finds the session file whose name matches the expected session name.
-   * Returns the sessionId if found, undefined otherwise.
-   */
-  /**
-   * PL-016 hardening v0+1 — poll captureResumeToken on the
-   * verifyResumeLaunch cadence. Returns the token as soon as the
-   * session file appears, or undefined after attempts × delayMs ceiling.
-   * Used by the fork branch where the new session-name file appears
-   * 1-3s after the Enter key is sent (cold-start fork-file write).
-   */
-  private async pollForResumeToken(
-    expectedName: string,
-    attempts: number,
-    delayMs: number,
-    configDir?: string,
-  ): Promise<string | undefined> {
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      const token = this.captureResumeToken(expectedName, configDir);
-      if (token) return token;
-      if (attempt < attempts - 1) {
-        await this.sleep(delayMs);
-      }
-    }
-    return undefined;
-  }
-
-  private captureResumeToken(expectedName: string, configDir?: string): string | undefined {
-    try {
-      const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-      if ((!home && !configDir) || !this.fs.readdir) return undefined;
-      const sessDir = nodePath.join(configDir ?? nodePath.join(home!, ".claude"), "sessions");
-      if (!this.fs.exists(sessDir)) return undefined;
-      const files = this.fs.readdir(sessDir);
-      for (const file of files) {
-        if (!file.endsWith(".json")) continue;
-        try {
-          const content = this.fs.readFile(nodePath.join(sessDir, file));
-          const data = JSON.parse(content) as { sessionId?: string; name?: string };
-          if (data.name === expectedName && data.sessionId) {
-            return data.sessionId;
-          }
-        } catch { /* skip malformed files */ }
-      }
-    } catch { /* best-effort */ }
-    return undefined;
-  }
-
   private detectDeliveryHint(path: string, content: string): "guidance_merge" | "skill_install" | "send_text" {
     return resolveConcreteHint(path, content);
   }
@@ -857,7 +809,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
     // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
     // seats holding it will never be refreshed.
-    const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
+    const collectorCmd = `node ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
 
@@ -871,7 +823,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * to the desired `enabled` state, driven ONCE from the always-run `project()` seam.
    *
    * ENABLE (only when the relay SOURCE is readable): deliver `activity-relay.cjs` →
-   * `<cwd>/.openrig/hooks/scripts/` (mode preserved, 0755 from the source asset) and upsert
+   * the configured instance state directory (mode preserved, 0755 from the source asset) and upsert
    * the owned command for each relay event DERIVED from the canonical claude.json manifest
    * (compaction hooks excluded). If the source is missing, deliver NOTHING (no dangling
    * commands) and report `sourceMissing` so the caller can surface a warning + not claim
@@ -883,7 +835,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
-    const relayDest = nodePath.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
     const ownedCmd = `node ${shellQuote(relayDest)}`;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
@@ -940,7 +892,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     //    PREVALIDATED relay event (derived from the canonical manifest above).
     if (deliverable) {
       this.fs.mkdirp(nodePath.dirname(relayDest));
-      this.fs.copyFile(this.activityRelayPath!, relayDest);
+      // Sibling seats share this relay. Do not truncate identical bytes while a hook reads it.
+      if (!this.fs.exists(relayDest) || this.fs.readFile(relayDest) !== this.fs.readFile(this.activityRelayPath!)) {
+        this.fs.copyFile(this.activityRelayPath!, relayDest);
+      }
       this.preserveMode(this.activityRelayPath!, relayDest);
       for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
@@ -980,21 +935,26 @@ interface ActivityHookOutcome {
 // OpenRig-owned relay path suffix. Ownership is the EXACT `node <arg>` command whose single
 // argument ends with this path — a changed prefix still matches (replace, not duplicate); a
 // user command that merely contains the path (echo, or node with extra args) does NOT.
-const OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
+const LEGACY_OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
 
 function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
 }
 
-// OpenRig-owned context collector. provisionContextCollector writes exactly
-// `node <cwd>/.openrig/context-collector.cjs <contextDir> <providerUsageDir>`, unquoted; older
-// releases wrote the same command without `<providerUsageDir>`. Ownership is either shape with any
-// (possibly stale) paths, on one line. A command that merely contains the path, composed with `;`,
-// `&&`, a pipe or a newline, or naming another file such as `.cjs.backup`, is the user's.
+// OpenRig-owned collectors use canonical POSIX-quoted paths. Recognise older unquoted
+// three/four-token commands too, but preserve commands composed with shell operators or
+// extra arguments. Old unquoted paths containing spaces cannot be identified unambiguously.
 const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
 
 function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
+  const quoted = /^node ('(?:[^']|'"'"')*') ('(?:[^']|'"'"')*')(?: ('(?:[^']|'"'"')*'))?$/.exec(cmd.trim());
+  if (quoted) {
+    const tokens = quoted.slice(1).filter((token): token is string => token !== undefined);
+    const decoded = tokens.map(unquoteSingleShellToken);
+    if (decoded.some((value, index) => value === null || shellQuote(value) !== tokens[index])) return false;
+    return decoded[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+  }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
   if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
@@ -1015,7 +975,8 @@ function isOwnedRelayCommand(cmd: string | undefined): boolean {
   // args merely concatenate to text ending in the relay suffix (e.g. `node 'x' '<relay>'`), which
   // must never be recognised as owned and deleted.
   if (shellQuote(decoded) !== arg) return false;
-  return decoded.endsWith(OWNED_RELAY_SUFFIX);
+  return decoded.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
+    || decoded.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
 }
 
 /** Decode ONE POSIX single-quoted shell token as produced by shellQuote (outer `'…'` with an

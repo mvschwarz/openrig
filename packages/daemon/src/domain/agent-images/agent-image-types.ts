@@ -18,7 +18,7 @@ export interface AgentImageManifest {
   name: string;
   version: string;
   runtime: AgentImageRuntime;
-  /** Source seat's canonical session name, e.g. "velocity-driver@openrig-velocity". */
+  /** Source seat's canonical session name, e.g. "dev-build@starter". */
   sourceSeat: string;
   /** Native conversation id captured at snapshot time. Claude: the
    *  resume_token from the sessions table. Codex: the thread_id from

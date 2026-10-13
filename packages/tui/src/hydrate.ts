@@ -74,7 +74,7 @@ interface NodeInventoryRead {
     needsInput?: { count?: number; reason?: string | null } | null;
     decidedBy?: string | null;
   } | null;
-  identityVerdict?: { verdict?: string } | null;
+  identityVerdict?: { verdict?: string; reason?: string | null } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   cwd?: string | null;
@@ -214,7 +214,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
   const ctx = node.contextUsage;
   const known = ctx?.availability === "known";
   const identityDownranked = node.identityVerdict?.verdict === "mismatch"
-    || node.identityVerdict?.verdict === "pane_missing";
+    || (node.identityVerdict?.verdict === "pane_missing" && node.identityVerdict?.reason !== "session_missing");
   return {
     nodeId: node.nodeId,
     name: node.logicalId,
@@ -247,8 +247,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     },
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
-    status: node.startupStatus === "failed"
-      ? "failed"
+    status: node.identityVerdict?.reason === "session_missing" && node.sessionStatus === "detached" && node.lifecycleState !== "attention_required"
+      ? "detached"
+      : node.startupStatus === "failed"
+        ? "failed"
       : node.lifecycleState === "attention_required" || identityDownranked || node.startupStatus === "attention_required"
         ? "attention_required"
         // S19: the SERVED taxonomy display decides first (the daemon's one bridge);
@@ -348,7 +350,7 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * avoids re-reading every spec every refresh; the key rolls when the library
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
-export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen">;
+export type HydrateViewContext = Pick<ViewState, "project" | "section" | "viewTab" | "drill" | "file" | "externalUrl" | "terminalView" | "attentionOpen" | "pendingDrill">;
 
 export async function hydrateSnapshot(
   client: DaemonClient,
@@ -447,8 +449,12 @@ export async function hydrateSnapshot(
   const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
+  // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
+  const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
   const healthRequested = broadReads || viewContext?.viewTab === "health";
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
+  // A pending pod/agent address needs every rig's seats to resolve.
+  const pendingInventory = viewContext?.pendingDrill?.resource === "pod" || viewContext?.pendingDrill?.resource === "agent";
 
   const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead] = await Promise.all([
     safe<InstanceHealthRead>("health", () => client.health()),
@@ -459,11 +465,11 @@ export async function hydrateSnapshot(
     !broadReads ? Promise.resolve(null) : safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     !broadReads ? Promise.resolve(null) : safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
     // PULSE ▲ NEEDS YOU + ⧗ BLOCKED + ◌ PARKED — the shipped queue reads (increments 2/2b)
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
+    !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
     !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     !broadReads ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
     !broadReads ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
@@ -525,7 +531,7 @@ export async function hydrateSnapshot(
   const seatActivity: SeatActivitySummary[] = [];
   for (const rig of summaries ?? []) {
     const readInventory = wantsConnections ? connectionsRead?.configuration?.inboundDestination?.split("@")[1] === rig.name
-      : !focusedTopology || topologyLeaf?.kind === "host" || currentRigName === rig.name;
+      : !focusedTopology || topologyLeaf?.kind === "host" || currentRigName === rig.name || pendingInventory;
     const nodes = readInventory ? await safe<NodeInventoryRead[]>(`nodes(${rig.name})`, () => client.rigNodes(rig.id)) : null;
     for (const node of nodes ?? []) {
       if (node.nodeKind !== "agent" || !node.canonicalSessionName) continue;
@@ -749,6 +755,11 @@ export async function hydrateSnapshot(
         }
       : {}),
     attention: (attention ?? []).map(toQueueRead),
+    queueCoverage: !seatQueueReads ? undefined
+      : [attention, blocked, inProgress, pending].some(rows => rows === null) ? "unavailable"
+      // Existing /list defaults cap the first three reads at 100; pending requests 50.
+      : [attention, blocked, inProgress].some(rows => rows!.length >= 100) || pending!.length >= 50 ? "partial"
+      : "complete",
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),
     seatActivity,

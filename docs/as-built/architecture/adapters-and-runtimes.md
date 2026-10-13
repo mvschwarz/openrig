@@ -12,8 +12,8 @@ applies-when: |
   layer).
 siblings: [daemon-core.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Adapters and Runtimes
@@ -27,62 +27,62 @@ adapters (`ClaudeResumeAdapter`, `CodexResumeAdapter`, `PiResumeAdapter` and
 this harness *actually* resume, or did it silently fresh-launch?" truthfully
 rather than optimistically.
 
-> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
 ## 1. The five-method RuntimeAdapter contract
 
-`RuntimeAdapter` is `packages/daemon/src/domain/runtime-adapter.ts:141`
+`RuntimeAdapter` is `packages/daemon/src/domain/runtime-adapter.ts:143`
 (`interface RuntimeAdapter`). Every adapter declares a `readonly runtime`
-string (`runtime-adapter.ts:144`) and implements five required methods
-(`runtime-adapter.ts:150–174`; **5** =
+string (`runtime-adapter.ts:146`) and implements five required methods
+(`runtime-adapter.ts:152–176`; **5** =
 `sed -n '/^export interface RuntimeAdapter/,/^}/p' packages/daemon/src/domain/runtime-adapter.ts | grep -c -E '^  [a-zA-Z]+\('`):
 
 | Method | Signature (`runtime-adapter.ts`) | Responsibility |
 |---|---|---|
-| `listInstalled` | `(binding)` `:151` | List currently installed/projected resources for a node. |
-| `project` | `(plan, binding)` `:154` | Project resources from a `ProjectionPlan` to the runtime's target locations. |
-| `deliverStartup` | `(files, binding, sendInteractiveText?)` `:158` | Deliver resolved startup files to the runtime. The startup orchestrator passes the optional third argument for Claude Code only, so Claude's `send_text` files go through the checked send described in `agent-spec-and-startup.md`. |
-| `launchHarness` | `(binding, opts)` `:168` | Launch the harness inside the bound tmux session; return a resume token. |
-| `checkReady` | `(binding)` `:174` | Probe whether the harness is responsive and ready. |
+| `listInstalled` | `(binding)` `:153` | List currently installed/projected resources for a node. |
+| `project` | `(plan, binding)` `:156` | Project resources from a `ProjectionPlan` to the runtime's target locations. |
+| `deliverStartup` | `(files, binding, sendInteractiveText?)` `:160` | Deliver resolved startup files to the runtime. The startup orchestrator passes the optional third argument for Claude Code only, so Claude's `send_text` files go through the checked send described in `agent-spec-and-startup.md`. |
+| `launchHarness` | `(binding, opts)` `:170` | Launch the harness inside the bound tmux session; return a resume token. |
+| `checkReady` | `(binding)` `:176` | Probe whether the harness is responsive and ready. |
 
-The interface also has two optional members: `claudeManagedLaunch` (`:143`)
-and `skillTargetPath?()` (`:148`), implemented by `PiRuntimeAdapter`
+The interface also has two optional members: `claudeManagedLaunch` (`:145`)
+and `skillTargetPath?()` (`:150`), implemented by `PiRuntimeAdapter`
 (`pi-runtime-adapter.ts:118`) and overridden by `OmpRuntimeAdapter`
 (`omp-runtime-adapter.ts:12`).
 
 Startup *action* execution (`slash_command` / `send_text`) is explicitly **not**
-part of this contract — the contract docstring (`runtime-adapter.ts:135–140`)
+part of this contract — the contract docstring (`runtime-adapter.ts:137–142`)
 states actions belong to the `StartupOrchestrator` *after* `checkReady()`. The
 orchestrator delivery split is in `agent-spec-and-startup.md`.
 
 ### `launchHarness` opts and the fork seam
 
 `launchHarness` opts is `{ name: string; resumeToken?: string; forkSource?:
-ForkSource }` (`runtime-adapter.ts:170`).
+ForkSource }` (`runtime-adapter.ts:172`).
 
-Per the contract docstring (`runtime-adapter.ts:160–167`) `resumeToken` and
+Per the contract docstring (`runtime-adapter.ts:162–169`) `resumeToken` and
 `forkSource` are mutually exclusive — if both are provided the adapter **must
 refuse** with a clear error, not guess; `forkSource` triggers a fork and the
 captured token is the NEW post-fork token, never the parent. `ForkSource` is
-`runtime-adapter.ts:130` (`kind: "native_id" | "artifact_path" | "name" |
-"last"`, `:131`; v1 MVP accepts `native_id` only — other shapes rejected at
-schema validation, docstring `:120–129`, and by the Claude, Codex and Pi
+`runtime-adapter.ts:132` (`kind: "native_id" | "artifact_path" | "name" |
+"last"`, `:133`; v1 MVP accepts `native_id` only — other shapes rejected at
+schema validation, docstring `:122–131`, and by the Claude, Codex and Pi
 adapters themselves).
 
 ### `HarnessLaunchResult` is a discriminated union with an honest failure arm
 
-`HarnessLaunchResult` is a **discriminated union** (`runtime-adapter.ts:95–100`):
+`HarnessLaunchResult` is a **discriminated union** (`runtime-adapter.ts:97–102`):
 `| { ok: true; resumeToken?; resumeType?; appliedLaunch? }`
 `| { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence? }`.
 The failure arm carries a typed `recovery` hint
-(`HarnessLaunchRecovery = "retry_fresh" | "attention_required"`, `:93`) and
+(`HarnessLaunchRecovery = "retry_fresh" | "attention_required"`, `:95`) and
 optional `evidence` (last-N pane lines, flowed through to
 `RestoreNodeResult.attentionEvidence` for `attention_required` outcomes,
-`:97–100`). This is the honest-failure shape, not a smoothed optional `error`.
+`:99–102`). This is the honest-failure shape, not a smoothed optional `error`.
 
-Readiness has its own attention codes (`runtime-adapter.ts:72–85`):
+Readiness has its own attention codes (`runtime-adapter.ts:74–87`):
 `trust_gate`, `hook_trust_gate`, `update_gate`, `login_required`, `mcp_gate`,
 `bypass_consent_gate`, `codex_auth_refusal` and `codex_client_incompatible`.
 When `checkReady` reports one, the readiness wait returns at once and startup
@@ -98,7 +98,7 @@ ends `attention_required`.
 Hono, `git grep -l 'from "hono' -- packages/daemon/src/adapters | wc -l`).
 `OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
 **6** runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
-(`startup.ts:964`, and the same map at `:1234`;
+(`startup.ts:989`, and the same map at `:1259`;
 `grep 'adapters: {' packages/daemon/src/startup.ts | grep -o -E '"[a-z-]+": ' | wc -l`).
 
 ### Launch posture
@@ -110,12 +110,12 @@ member's or rig's `permission_policy`: `builtinLaunchPosture()`
 built-in (`locked`, `standard`, `open`) to `floor`.
 `resolvePermissionPolicyAttachment()` (`:172`) resolves the attachment, and
 `rigspec-instantiator.ts` binds the result: the member attachment
-(`resolveMemberPolicyAttachment`, `:1921`), then the persisted node or rig
-attachment (`:2006`), then the floor, set on the binding as `launchPosture`
-(`:2158`). `NativePermissionStore.apply()`
-(`native-permission-store.ts:236`) then overlays a seat's explicit
-`rig seat set-permissions` choice, or the kernel operational default described
-below. `bundle-behaviour.ts` is the read-only
+(`resolveMemberPolicyAttachment`, `:1922`), then the persisted node or rig
+attachment (`:2007`), then the floor, set on the binding as `launchPosture`
+(`:2159`). `NativePermissionStore.apply()`
+(`native-permission-store.ts:238`) then overlays a seat's explicit
+`rig seat set-permissions` choice, or the kernel operational or team default
+described below. `bundle-behaviour.ts` is the read-only
 preview of the same mapping for an unopened bundle (see
 `packaging-bootstrap-bundles.md`).
 
@@ -142,30 +142,54 @@ arguments only for a `full_bypass` seat whose rig has it on
 non-bypass `permissionMode` is set), and Codex gets
 `-c notice.hide_full_access_warning=true -c notice.hide_gpt5_1_migration_prompt=true`.
 It never changes permissions or native settings files. `rig up
---non-interruptive` and `--no-non-interruptive` save the choice; the setting
-`launch.non_interruptive` supplies the default.
+--non-interruptive` and `--no-non-interruptive` save the choice; otherwise the
+rig spec's `non_interruptive`, then the setting `launch.non_interruptive`,
+supplies the default (`packages/daemon/src/domain/bootstrap-orchestrator.ts:739`).
 
 **Kernel operational default.** `NativePermissionStore.launchOverride()`
-(`native-permission-store.ts:46`) gives a Claude Code or Codex seat in the
+(`native-permission-store.ts:47`) gives a Claude Code or Codex seat in the
 persisted rig named `kernel` operational launch arguments when the seat has no
 explicit permission choice, its member and rig declare no permission policy,
-and (for Codex) it has no `-p` profile (`hasKernelDefault`, `:28`). Fresh start,
+and (for Codex) it has no `-p` profile (`launchDefault`, `:28`). Fresh start,
 continue, restore and handover all take this decision per launch.
-`operationalLaunchArgs()` (`packages/daemon/src/adapters/kernel-authority.ts:19`)
+`operationalLaunchArgs()` (`packages/daemon/src/adapters/kernel-authority.ts:56`)
 then replaces the non-interruptive arguments for that seat:
 
 - Claude Code keeps the floor, `--permission-mode acceptEdits`, and gets
-  `--settings '{"permissions":{"allow":[…]}}'` with `KERNEL_CLAUDE_ALLOW`
-  (`:7`): `Skill`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `Bash(<command>:*)`
-  for 31 operational commands (`rig`, `tmux`, `node`, `npm`, `git`, `ssh` and
-  others), and `Read(~/**)` (`:13`). It is not the bypass flag, and the user's
-  own ask and deny rules still apply.
+  `--settings` whose `permissions.allow` is `KERNEL_CLAUDE_ALLOW`
+  (`:9`): `Skill`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `Bash(<command>:*)`
+  for 39 operational commands (`rig`, `tmux`, `node`, `npm`, `git`, `ssh`, `python3` and
+  others), `Bash(command -v:*)` (`:16`), two read-only provider login checks (`Bash(claude auth status:*)`,
+  `Bash(codex login status:*)`, `:18`), and `Read(~/**)` (`:19`), plus the `PreToolUse`
+  hook described under the team default. It is not
+  the bypass flag, and the user's own ask and deny rules still apply.
 - Codex gets the `full_bypass` posture, `-s danger-full-access -a never`, plus
   the two notice flags above.
 
 It writes no settings file. If the rig lookup fails, the seat keeps its floor.
 `rig seat status` reports the source as "kernel operational default"
-(`kernel_default`, `native-permission-store.ts:180`).
+(`kernel_default`, `native-permission-store.ts:182`).
+
+**Team default.** Under the same conditions, a Claude Code or Codex seat in any
+other rig gets `teamPermissionDefault` instead (`native-permission-store.ts:38`,
+`:56`), on the same launch paths. A Claude Code seat at the floor with no native
+permission mode keeps `--permission-mode acceptEdits` and gets
+`--settings` (`kernel-authority.ts:64–66`):
+`TEAM_CLAUDE_ALLOW` (`:25`) is `Skill`, `Read(./**)`, `Glob`, `Grep`,
+`Bash(rig:*)`, eight read-only shell commands and 17 test-runner commands, and
+`TEAM_CLAUDE_ASK` (`:32`) asks before 41 `rig` lifecycle commands such as `up`,
+`down`, `seat stop` and `bundle install`. The settings carry the allow list and a
+`PreToolUse` Bash hook, `packages/daemon/assets/claude-team-permissions.cjs`, that applies
+both lists (`kernel-authority.ts:43–53`): it asks before a lifecycle command unless the
+command only asks for `--help` or `-h`, allows a simple literal command that matches an
+allow rule, and otherwise leaves the decision to Claude (`claude-team-permissions.cjs:234`,
+`:240`). Without the hook file, the settings carry both lists as plain `allow` and `ask`
+rules (`kernel-authority.ts:46`). A Codex seat launching at
+`-s workspace-write` gets `--add-dir` for the workspace root (`workspace.root`)
+and its pod's state directory, each created first and skipped with a warning if
+it is the home directory or an ancestor of it
+(`packages/daemon/src/domain/codex-team-workspace.ts:18`), on fresh, fork and
+resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
 
 ### ClaudeCodeAdapter (`claude-code-adapter.ts:55`)
 
@@ -182,14 +206,16 @@ It writes no settings file. If the rig lookup fails, the seat keeps its floor.
   `<cwd>/.mcp.json` (`:597`).
 - **Launches**: fresh = `claude <posture> --session-id <generatedId> --name
   <name>` (`:329`); resume = `claude <posture> --resume <token> --name <name>`
-  (`:328`); fork = `claude <posture> --resume <parentId> --fork-session --name
-  <seat>` (`:298`). `<posture>` is the flag above plus any non-interruptive
-  or kernel operational argument. Each command may carry a `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`
+  (`:328`); fork = `claude <posture> --resume <parentId> --fork-session
+  --session-id <generatedId> --name <seat>`, which needs Claude Code 2.0.73 or
+  later. `<posture>` is the flag above plus any non-interruptive,
+  kernel operational or team default argument. Each command may carry a `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`
   env prefix (`yolo-mode.ts:101–103`; on by default, off with
   `OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0`), a `--model <model>` argument
-  (`:275`) and `--effort <effort>` (`:277`). A fresh launch returns the
-  generated `--session-id` as its `claude_id` token; a fork polls Claude's
-  session files for the new id.
+  (`:275`) and `--effort <effort>` (`:277`). A fresh launch and a fork both
+  return the generated `--session-id` as their `claude_id` token, so a forked
+  seat's process names its own conversation and strict proof can verify it.
+  Neither reads Claude's session files back.
 - **Managed launch.** When the binding selects a native permission mode, the
   command comes from `ClaudeManagedLaunch.prepare()`
   (`domain/claude-managed-launch.ts:97`), which resolves `claude` on the
@@ -201,7 +227,7 @@ It writes no settings file. If the rig lookup fails, the seat keeps its floor.
   directory as trusted and onboarding as completed in Claude's state file,
   writing only when a flag is missing (`provisionManagedBootstrap`, `:697`).
   It writes no permission settings. The Codex adapter does the same for
-  project trust in its `config.toml` (`codex-runtime-adapter.ts:734`).
+  project trust in its `config.toml` (`codex-runtime-adapter.ts:736`).
 - **Readiness** (`checkReady`, `:356`): verifies tmux session alive (`:361`),
   captures the pane command and 40 pane lines, and assesses them with
   `assessNativeResumeProbe` (§3) through `assessManagedProbe` (called `:368`,
@@ -216,28 +242,31 @@ It writes no settings file. If the rig lookup fails, the seat keeps its floor.
 
 - `readonly runtime = "codex"` (`:66`).
 - **Projects** to `.agents/` targets: `guidance_merge` → `<cwd>/AGENTS.md`
-  (`:306`, `:574`); `skill_install` → `<cwd>/.agents/skills/<name>/` (`:312`);
-  skills resolve under `.agents/skills/<id>` (`:662`); plugins go to
-  `.codex/plugins/<id>` (`:665`).
+  (`:309`, `:576`); `skill_install` → `<cwd>/.agents/skills/<name>/` (`:315`);
+  skills resolve under `.agents/skills/<id>` (`:664`); plugins go to
+  `.codex/plugins/<id>` (`:667`).
 - **Launches/resumes**: fresh = `codex[ --no-daemon]<posture>[<network>] -C
-  <cwd> …` (`:436`), then capture a fresh thread id (`:454`); resume is built
-  by `buildCodexResumeCore` (`:435`) as `codex<daemon><posture> resume
+  <cwd> …` (`:442`), then capture a fresh thread id (`:460`); resume is built
+  by `buildCodexResumeCore` (`:441`) as `codex<daemon><posture> resume
   [<queueStateDirArg>] <token>` (`native-resume-probe.ts:81`); fork =
-  `codex<posture> fork<queueStateDirArg> <parentId>` (`:405`). `--no-daemon`
-  (`:383`) comes first, and only when `codex --help` lists it
+  `codex<posture> fork<queueStateDirArg> <parentId>` (`:411`). `--no-daemon`
+  (`:389`) comes first, and only when `codex --help` lists it
   (`domain/codex-daemon-support.ts`; an unreadable answer refuses the launch).
-  `-m <model>` (`:353`) and `-c 'model_reasoning_effort="<effort>"'`
-  (`:355`) are added when selected. With a thread id it returns `{ ok: true,
-  resumeToken: threadId, resumeType: "codex_id" }` (`:422`, `:451`, `:457`); a
+  `-m <model>` (`:356`) and `-c 'model_reasoning_effort="<effort>"'`
+  (`:358`) are added when selected. With a thread id it returns `{ ok: true,
+  resumeToken: threadId, resumeType: "codex_id" }` (`:428`, `:457`, `:463`); a
   fresh launch whose thread id is not captured returns `{ ok: true }` with its
-  applied launch but no token (`:460`).
+  applied launch but no token (`:466`). Every Codex launch, fresh, fork or resume,
+  also carries `-c check_for_update_on_startup=false`, so a managed seat leaves Codex
+  upgrades to the operator (`kernel-authority.ts:60`, added to the posture at
+  `codex-runtime-adapter.ts:363`).
 - **Network default.** On the plain `-s workspace-write` floor,
   `domain/codex-network-default.ts` asks a one-shot `codex app-server` for the
   effective configuration; when it allows it, the launch adds
   `-c sandbox_workspace_write.network_access=true` (`:19`). Otherwise it adds
   nothing.
 - Refuses `resumeToken` + `forkSource` together with a clear error
-  (`:347–348`) — honors the mutual-exclusivity contract.
+  (`:350–351`) — honors the mutual-exclusivity contract.
 
 ### TerminalAdapter (`terminal-adapter.ts:19`)
 
@@ -248,7 +277,7 @@ It writes no settings file. If the rig lookup fails, the seat keeps its floor.
   returns ready unconditionally (`:47–48`). Used for infrastructure nodes. A
   terminal node cannot fork: `launchHarness` refuses a `forkSource` with a
   clear error (`:38–42`), as the runtime-adapter docstring requires of
-  adapters without fork (`runtime-adapter.ts:127–128`).
+  adapters without fork (`runtime-adapter.ts:129–130`).
 
 ### Pi, Oh My Pi and stub adapters
 
@@ -263,18 +292,21 @@ comments `pi-runtime-adapter.ts:1–10`, `stub-runtime-adapter.ts:1–14`). Pi
 and Oh My Pi support fork and report `pi_session_file` or `omp_session_file`
 resume tokens; the stub refuses fork and reports `stub_session`.
 
-`createDaemon` constructs the adapters (`startup.ts:772`, `:773`, `:776`,
-`:777`, `:782`) and creates the terminal adapter inline in the runtime adapter
-maps (`startup.ts:964`, `:1234`); see `daemon-core.md` §4 "Startup sequence".
+`createDaemon` constructs the adapters (`startup.ts:778`, `:779`, `:782`,
+`:783`, `:788`) and creates the terminal adapter inline in the runtime adapter
+maps (`startup.ts:989`, `:1259`); see `daemon-core.md` §4 "Startup sequence".
 
 ### Terminal providers
 
 Opening a seat in a terminal app goes through `TerminalProvider`s under
 `packages/daemon/src/domain/terminal/`, served by `/api/terminal`:
-`HerdrAdapter` (`herdr-adapter.ts:343`), the default
-(`terminal-service.ts:55–56`), and `CmuxProviderAdapter`
+`HerdrAdapter` (`herdr-adapter.ts:351`), the default
+(`terminal-service.ts:55–58`), and `CmuxProviderAdapter`
 (`cmux-provider-adapter.ts:52`), which is best effort and refuses with
-`cmux_unavailable` when cmux is not connected. These place existing tmux
+`cmux_unavailable` when cmux is not connected. A request that names no
+provider takes the first of Herdr, then cmux, that is available and alive,
+and stays on Herdr when neither is (`providerNameFor`,
+`terminal-service.ts:175`); a named provider is used as named. These place existing tmux
 sessions in views; they do not launch harnesses.
 
 ## 3. Resume honesty
@@ -318,7 +350,7 @@ never relaunches itself. Acting on that hint is the caller's choice:
 `StartupOrchestrator` retries once fresh on `retry_fresh` unless the caller
 passes `allowFreshFallback: false` (`startup-orchestrator.ts:319–330`), and the
 restore orchestrator passes `false` when a pod-aware node requested resume
-(`restore-orchestrator.ts:1217`).
+(`restore-orchestrator.ts:1224`).
 
 ### `resume-metadata-refresher.ts`
 
@@ -341,13 +373,13 @@ exactly. `refresh(sessions, opts?)` (`:124`) works in two modes:
 
 Codex thread-id extraction (`codex-thread-id.ts`). Reads the Codex thread id
 from the Codex *logs* SQLite databases in the Codex home (`CODEX_HOME` when
-set, else `~/.codex`, `:38`): `readCodexThreadIdFromCandidateHomes(...)`
-(`:32`) → `readCodexThreadIdFromLogs(...)` (`:242`) →
-`resolveCodexDbPaths(homeDir, kind)` (`:300`), which globs
-`logs_<N>.sqlite` (`:306`) and falls back to `logs_1.sqlite`. The logged
+set, else `~/.codex`, `:40`): `readCodexThreadIdFromCandidateHomes(...)`
+(`:34`) → `readCodexThreadIdFromLogs(...)` (`:244`) →
+`resolveCodexDbPaths(homeDir, kind)` (`:302`), which globs
+`logs_<N>.sqlite` (`:308`) and falls back to `logs_1.sqlite`. The logged
 thread ids are then checked against the `threads` table in `state_<N>.sqlite`
-(falling back to `state_5.sqlite`, `:318`; query `:267–278`); an id is
-returned only when exactly one CLI conversation matches (`:280`). Uses
+(falling back to `state_5.sqlite`, `:320`; query `:269–280`); an id is
+returned only when exactly one CLI conversation matches (`:282`). Uses
 `better-sqlite3` (`:6`). Resolves the home dir by the harness PID
 (`defaultResolveHomeDirByPid`, `:16`).
 
@@ -359,8 +391,8 @@ module.
 
 - **Rule 1** — §2: **0** files in `adapters/` import Hono.
 - **Rule 5** — restore picks a node's adapter by that node's own runtime: the
-  saved startup context's runtime, else the node's (`restore-orchestrator.ts:1108–1109`),
-  used to choose the replay adapter (`:1131`).
+  saved startup context's runtime, else the node's (`restore-orchestrator.ts:1115–1116`),
+  used to choose the replay adapter (`:1138`).
 - **Rule 13** — the readiness loop is `StartupOrchestrator.waitForReady`
   (`startup-orchestrator.ts:562`; 1 s doubling to a 16 s cap), which calls each
   adapter's `checkReady` (§2). The timeout comes from the
@@ -373,9 +405,9 @@ module.
   separate field that also allows `forked` (`startup-orchestrator.ts:101`).
 - **Rule 15** — adapters return `ok:false` and never relaunch (§2, §3);
   restore passes `allowFreshFallback: false` for pod-aware resume
-  (`restore-orchestrator.ts:1217`), and a resume that concludes failed rolls
-  back to zero sessions as `awaiting-decision` (`restore-orchestrator.ts:1048`,
-  `:1236`).
+  (`restore-orchestrator.ts:1224`), and a resume that concludes failed rolls
+  back to zero sessions as `awaiting-decision` (`restore-orchestrator.ts:1055`,
+  `:1243`).
 
 ## See also
 

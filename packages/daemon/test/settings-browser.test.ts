@@ -167,3 +167,14 @@ describe("passive CONFIG read view", () => {
     expect(read().sources.find((s) => s.id === "slack")?.detail).toContain("applied unverified");
   });
 });
+
+describe("#192 channel map in the CONFIG read view", () => {
+  it("is a default empty entry without a map, and one safe line per entry from the file", () => {
+    saveConfig({ ...DEFAULT_CONFIG, channel: "C0DEFAULT" }, home);
+    expect(entry("slack.channelMap")).toMatchObject({ value: "", defaultValue: "", source: "default", visibility: "shown" });
+    saveConfig({ ...DEFAULT_CONFIG, channel: "C0DEFAULT", channelMap: [
+      { match: "my-rig", channel: "C0EXAMPLE1" }, { match: "pr@my-rig", channel: "C0EXAMPLE2" },
+    ] }, home);
+    expect(entry("slack.channelMap")).toMatchObject({ value: "my-rig: C0EXAMPLE1, pr@my-rig: C0EXAMPLE2", source: "file", visibility: "shown" });
+  });
+});

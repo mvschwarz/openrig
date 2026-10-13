@@ -69,14 +69,14 @@ describe("scopes view (store-direct render, v4 mock contract)", () => {
     expect(proofBadge(gm)).toBe("proof: 2/9 paired"); // no del token, no unproven suffix — the count speaks
   });
 
-  it("m collapses mini-requirements; n shows PROGRESS.md as narrative DISPLAY (never feeding counts)", () => {
+  it("M collapses mini-requirements; N shows PROGRESS.md as narrative DISPLAY (never feeding counts)", () => {
     const { snap, view } = openGateway();
     view.dispatch(parseCommand("reqs"));
     let out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
-    expect(out).toContain("collapsed · m expands");
+    expect(out).toContain("collapsed · M expands");
     view.dispatch(parseCommand("narrative"));
     out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
-    expect(out).toContain("PROGRESS · narrative only · n closes");
+    expect(out).toContain("PROGRESS · narrative only · N closes");
     expect(out).toContain("A2 held on arch consult");
     // the data-path rule: the narrative panel does NOT change the store-derived counts
     expect(out).toContain("PROOF 2/9");

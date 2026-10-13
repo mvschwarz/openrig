@@ -1,7 +1,7 @@
 # Agent Startup Guide
 
 Last validated: 2026-10-05, against main `9b88b118`
-Applies to: OpenRig 0.6.6
+Applies to: OpenRig 0.6.8
 
 This guide teaches you how to think about what goes into an agent's startup experience — what files to write, where to put them, and how the layering model delivers them. It is an authoring guide, not a schema reference. For field-level details, see `rig-spec.md` and `agent-spec.md`.
 
@@ -236,6 +236,25 @@ post-launch files. If it needs them, first look at what that occupant has done; 
 `rig seat launch <seat> --fresh --reason <text>` starts a blank conversation for the seat. If the occupant is still
 live, the command refuses with `session_live` unless you also pass `--stop`, which replaces that occupant deliberately.
 
+**Preview before replacing a seat.** `rig seat launch <seat> --fresh --plan` inspects the selected
+seat without starting tmux, stopping or launching a process, projecting startup files, or changing
+lifecycle/queue records. Add `--json` for structured output. `--fresh` is still required;
+`--reason` is optional for the preview and required when executing. Pass `--stop` to preview the
+intended replacement of a live managed occupant. Adopted and unmanaged occupants remain blocked.
+
+The plan identifies the target, current occupant, stop requirements, blockers, startup counts,
+and each sibling seat's unchanged effect. Siblings stay attached and untouched. Launch composes
+a new command through the runtime adapter using current settings; it does not replay a stored
+wrapper command. The seat's launch environment and managed executable selection still apply.
+The plan does not construct or display the launch command.
+
+A preview is a snapshot, not a reservation or a native-readiness check. Unreadable tmux produces
+`complete: false` and `launchable: null` (unknown), unless a known blocker already proves
+`launchable: false`. A successful preview exits 0, including blocked or incomplete plans; scripts
+must inspect `launchable === true` before deciding to execute. Request failures still exit nonzero.
+Execution always resolves and checks the current state again. An older daemon without the preview
+endpoint refuses the request; the CLI never falls back to executing a launch.
+
 ### The `applies_on` Field
 
 Each startup file and action specifies when it applies:
@@ -291,7 +310,7 @@ run after the harness is ready: `after_files` (the default) after the post-launc
 | `send_text` delivery after ready | **Supported** | Reliable. Requires harness to be ready. |
 | Hooks | **Through plugins** | Declare a plugin under `resources.plugins[]`; `resources.hooks` is refused. |
 | Runtime resource projection | **Supported for recognized fragments** | `claude_settings_fragment`, `claude_mcp_fragment`, and `codex_config_fragment` are applied to provider config. Unknown types are copied to runtime extension directories. |
-| Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them; the `kernel` rig's seats get a wider operational default ([rig spec, "At launch"](rig-spec.md)). It does not add a global Claude `Bash(rig:*)` allowance. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
+| Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them; a seat with no policy, selection or named Codex profile also gets the per-launch [team default](rig-spec.md#team-launch-defaults), and the `kernel` rig's seats get a wider operational default ([rig spec, "At launch"](rig-spec.md)). Neither is written to a settings file. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
 | MCP installation | **Supported for Claude fragments** | A selected `claude_mcp_fragment` is merged into the project's `.mcp.json`. Claude asks to approve new servers found there; that prompt stops startup as `mcp_gate` until someone answers it and runs `rig seat continue`. Otherwise use `/mcp` or `claude mcp add`, or describe the servers in startup files for the agent to configure. |
 | System dependency installation | **Not deterministic** | Describe in startup files; agent handles via shell commands. |
 | Recurring tasks / wake timers | **Runtime-dependent** | Claude Code supports recurring tasks via the `/loop` command. Codex does not have a confirmed equivalent. Orchestrators should include `/loop` instructions in startup for Claude Code agents. |
@@ -325,6 +344,9 @@ OpenRig performs best-effort deterministic runtime configuration for managed ses
   Purpose: apply selected `claude_mcp_fragment` resources for Claude in that project.
 - Codex global config: `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when unset
   Purpose: pre-trust managed workspaces and apply selected `codex_config_fragment` resources. Codex currently has no equivalent project-local MCP config path for global profile settings.
+- Global skill folders: `~/.claude/skills` and `~/.agents/skills`
+  Purpose: daemon startup seeds the `openrig-skills` and `refocusing` skills and the person-facing `rigs` skill. Each
+  upgrade refreshes the `rigs` skill; a copy installed another way is left as it is.
 
 Two important caveats:
 - these writes are best-effort and should still be paired with startup guidance so the local agent can verify and repair them if needed
@@ -393,6 +415,8 @@ remain shared.
   timeout, error or unrecognized answer adds nothing. Named profiles and full
   bypass are not read. The read may write Codex's own state files in
   `CODEX_HOME`, read its login and fetch managed policy, as a Codex start does.
+- Managed launches pass `-c check_for_update_on_startup=false`, so Codex skips its startup update check; your Codex
+  config is not changed.
 - Can self-install dependencies from instructions but timer/recurring behavior is not reliably available
 
 **Pi and OMP:**

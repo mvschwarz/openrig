@@ -447,6 +447,7 @@ describe("SeatHandoverService", () => {
       // locked absence contract: the continuity edge binds the minimum floor explicitly —
       // ambient YOLO must not widen an attachment-less successor.
       expect(successorBinding.launchPosture).toBe("floor");
+      expect(successorBinding.teamPermissionDefault).toBe(true);
     } finally { vi.unstubAllEnvs(); }
   });
 

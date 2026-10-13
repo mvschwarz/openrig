@@ -85,6 +85,7 @@ A local success message alone does not establish remote persistence or pickup.
 | ssh-unreachable | SSH connection, target and transport diagnostics |
 | permission-gate | The configured SSH or HTTP credentials and target policy |
 | remote-daemon-unreachable | Target listener and actual running daemon identity |
+| remote-outcome-unknown | The request may have arrived (timeout, dropped connection, unreadable reply): check its effect, for a send the target pane, before any retry |
 | remote-command-not-found | Remote CLI installation and executable lookup |
 | remote-command-failed | The remote operation's own status and error |
 

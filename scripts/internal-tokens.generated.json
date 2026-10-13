@@ -66,5 +66,8 @@
     "defunct",
     "do not ship",
     "internal-only (example)"
+  ],
+  "allowed_context_lines": [
+    "   `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent"
   ]
 }

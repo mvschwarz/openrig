@@ -34,6 +34,7 @@ import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
+import { daemonTmuxServerArgs } from "../../adapters/tmux-server.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
 import type {
@@ -54,14 +55,18 @@ import type {
 /** The v1 provider name set (herdr = proof-gated primary; cmux = best-effort). */
 export type TerminalProviderName = "herdr" | "cmux";
 export const DEFAULT_PROVIDER: TerminalProviderName = "herdr";
+/** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. */
+const DEFAULT_PROVIDER_ORDER: readonly TerminalProviderName[] = ["herdr", "cmux"];
 
 export interface OpenViewRequest {
-  /** Provider name; defaults to herdr when omitted. */
+  /** Provider name. Omitted: the first of herdr, then cmux, that is available and alive; herdr when neither is. */
   provider?: string;
   /** The view argument: a rig name | `mission:<id>` | `slice:<id>` | a saved-view id. */
   view: string;
   /** Preview fingerprint. A changed membership/layout must be previewed again. */
   expectedPlan?: string;
+  /** Measured width of the viewing terminal; unknown widths keep the narrow default. */
+  viewportColumns?: number;
 }
 
 export interface TerminalPreview {
@@ -141,7 +146,10 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
   };
 }
 
-type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number } | { code: string; error: string };
+/** The default kernel view's space name in a terminal multiplexer such as Herdr. */
+export const KERNEL_SPACE_LABEL = "openrig kernel";
+
+type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
@@ -162,9 +170,27 @@ export class TerminalService {
     return this.localTmux;
   }
 
+  /** An omitted provider takes the first in DEFAULT_PROVIDER_ORDER that is available and alive. With neither, it stays
+   *  herdr, whose honest failure carries the direct attach commands. A named provider is used as named, errors and all.
+   *  This picks only which provider; choosing a herdr session belongs inside the herdr provider. */
+  private async providerNameFor(req: OpenViewRequest): Promise<{ name: string; fellBack: boolean }> {
+    const named = req.provider?.trim();
+    if (named) return { name: named, fellBack: false };
+    for (const name of DEFAULT_PROVIDER_ORDER) {
+      const candidate = this.deps.resolveProvider(name);
+      if (!candidate) continue;
+      try {
+        if ((await candidate.status()).available && (await candidate.liveness()).alive) return { name, fellBack: name !== DEFAULT_PROVIDER };
+      } catch {
+        // A probe that throws is not an available provider; try the next.
+      }
+    }
+    return { name: DEFAULT_PROVIDER, fellBack: false };
+  }
+
   /** Open a view in the chosen provider. Always returns the one shared result shape. */
   async openView(req: OpenViewRequest): Promise<OpenViewResult> {
-    const providerName = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    const { name: providerName, fellBack } = await this.providerNameFor(req);
     const provider = this.deps.resolveProvider(providerName);
     if (!provider) {
       return errorResult(
@@ -174,19 +200,21 @@ export class TerminalService {
       );
     }
 
-    const composed = await this.resolveComposed(req.view, provider.panesPerPage);
+    const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(providerName, composed)) {
+    const planId = this.planId(providerName, composed);
+    if (req.expectedPlan !== undefined && req.expectedPlan !== planId) {
       return errorResult(providerName, "preview_changed", "View membership or layout changed. Refresh the preview before Open; nothing was launched.");
     }
     const notes = composed.kernelLayout ? [`Default kernel view: ${composed.kernelLayout}.`] : [];
+    if (fellBack) notes.push(`Herdr isn't available here (not installed or not answering), so this view uses ${providerName}.`);
     if (composed.kernelLayout && composed.opened.length === 0) {
       return {
         ...errorResult(providerName, "kernel_seats_unavailable", `No kernel conversations are attachable: ${composed.absent.map(member => `${member.seat} (${member.reason})`).join("; ")}`),
         absent: composed.absent, degraded: composed.degraded, notes,
       };
     }
-    const result = await provider.openView(composed);
+    const result = await provider.openView({ ...composed, planId });
     if (result.opened.length === 0 && composed.opened.length > 0) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.paneCommand}`);
@@ -198,13 +226,20 @@ export class TerminalService {
     return notes.length ? { ...result, notes: [...notes, ...(result.notes ?? [])] } : result;
   }
 
-  private async resolveComposed(viewArg: string, panesPerPage?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
+  private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
     const view = (viewArg ?? "").trim();
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
-    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns } : composed;
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() });
+    if (resolved.kernelLayout && Number.isSafeInteger(viewportColumns) && viewportColumns! >= 120) {
+      // The default's members are operator, dashboard, advisor. Keep the advisor separate
+      // even when one of the other roles is unavailable; chunking two at a time would not.
+      const page = (indexes: number[]) => indexes.flatMap(index => composed.opened.filter(pane => pane.seat === resolved.members[index]?.seat));
+      const pages = [page([1, 0]), page([2])].filter(panes => panes.length > 0);
+      return { ...composed, opened: pages.flat(), pages, kernelLayout: resolved.kernelLayout, columns: 2, spaceLabel: KERNEL_SPACE_LABEL };
+    }
+    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns, spaceLabel: KERNEL_SPACE_LABEL } : composed;
   }
 
   private planId(provider: string, composed: ComposedView): string {
@@ -213,10 +248,10 @@ export class TerminalService {
 
   /** Passive: inventory, local has-session and provider probe only. Never openView. */
   async previewView(req: OpenViewRequest): Promise<TerminalPreview | OpenViewResult> {
-    const providerName = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    const { name: providerName } = await this.providerNameFor(req);
     const provider = this.deps.resolveProvider(providerName);
     if (!provider) return errorResult(providerName, "unknown_provider", `unknown provider '${providerName}'`);
-    const composed = await this.resolveComposed(req.view, provider.panesPerPage);
+    const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
     return { provider: providerName, view: req.view, composed, grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed), status: await provider.status() };
   }
@@ -243,7 +278,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux() })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });
@@ -340,7 +375,7 @@ export class TerminalService {
   }
 
   /** An in-memory default; a user's saved kernel view always takes precedence. */
-  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number } | null> {
+  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number; panesPerPage: number } | null> {
     const rows = await this.deps.listRigSeats("kernel");
     if (rows == null) return null;
     const advisor = rows.find(row => row.logicalId === "advisor.lead");
@@ -348,15 +383,17 @@ export class TerminalService {
     const runtimesKnown = !!advisor?.runtime && !!operator?.runtime;
     const singleRuntime = runtimesKnown && advisor!.runtime === operator!.runtime;
     const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; TUI, advisor and operator";
-    const roles = ["operator.human", "advisor.lead", "operator.agent"];
-    const members = roles.map(logicalId => {
+    // One full-width conversation per page; the operator is the first populated page when ready.
+    // Panes and tabs are named for what the person sees there, not by logical id.
+    const roles: Array<[string, string]> = [["operator.agent", "operator"], ["operator.human", "dashboard"], ["advisor.lead", "advisor"]];
+    const members = roles.map(([logicalId, label]) => {
       const row = rows.find(row => row.logicalId === logicalId);
       const bound = row && deriveViewMembers([row])[0];
       // An expected role is still visible when there is no attachable binding.
       // Its logical ID names the absence; it is never used as a tmux target.
-      return bound ?? { seat: logicalId, label: logicalId, tmuxSession: null, host: null, readOnly: false, alive: false };
+      return bound ? { ...bound, label } : { seat: logicalId, label, tmuxSession: null, host: null, readOnly: false, alive: false };
     });
-    return { id: "kernel", members, kernelLayout, columns: members.length };
+    return { id: "kernel", members, kernelLayout, columns: 1, panesPerPage: 1 };
   }
 
   /** Refine local members' liveness with a real has-session probe (a dead seat → absent, honest-partial). */

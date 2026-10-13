@@ -16,8 +16,11 @@ machine and have things happen.
   acts on behalf of the operator.human; ops decisions needing human
   approval escalate.
 - **operator.human** is the shared mission-control terminal. A fresh kernel
-  starts `rig tui` there. `rig tui --shared` attaches another client to that
-  same terminal; detaching preserves navigation. It is a screen, not proof a
+  starts `rig tui` there. When the person wants to see their agents or OpenRig in a terminal, run
+  `rig terminal open saved:kernel --window`: below 120 measured columns, operator first; from 120,
+  dashboard and operator equally side by side. The advisor keeps a separate tab or tmux window. Only if
+  the window cannot open, `rig tui --shared` is the dashboard-only fallback;
+  detaching preserves navigation. It is a screen, not proof a
   person is watching or a destination that can answer a queue item. Use the
   registered human delivery channel when a decision is required.
 - **queue.worker** classifies stream-to-queue substrate. New stream

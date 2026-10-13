@@ -233,6 +233,10 @@
           "nonInterruptive": {
             "const": "available",
             "description": "This declared full-bypass Claude/Codex seat can use --non-interruptive launch flags. Availability is not the operator choice or proof that no prompt will appear. Omitted for other postures, unresolved policies and runtimes with no such flags."
+          },
+          "nonInterruptiveDefault": {
+            "type": "boolean",
+            "description": "Optional authored rig-level default for supported full-bypass Claude/Codex launches. An explicit launch option overrides it; absent is not an off or on claim. Native effect remains unknown."
           }
         }
       }

@@ -40,7 +40,7 @@ Every member's `pod.member=runtime`, sorted by `pod.member` in UTF-16 code-unit 
 whitespace, and runtimes are spelled as in `rig.yaml`. For example:
 
 ```text
-build.impl=claude-code,build.lead=claude-code,check.qa=codex,check.review=codex
+dev.build=claude-code,dev.qa=claude-code,dev.review=codex,orch.lead=codex
 ```
 
 Preset names such as `recommended` or `all-claude` are aliases shown beside the ID, never part of it.
@@ -77,8 +77,8 @@ Shared test vectors are in `schemas/fixtures/identity-vectors.json`.
 | Declared configurations | `bundle-configurations.v1` | `configurations.yaml` beside `rig.yaml` | the bundle's author |
 | Before-install view | `bundle-behaviour.v1` (`openrig.bundle-behaviour/v1`) | the registry, one file per configuration and assembler version; never inside the archive | the daemon's inspect: `rig bundle inspect`, under `behaviour` with `--json` |
 | Run record | `run-record.v1` | beside its receipt, private | Fleet, Dev QA, and maintainers for community reports |
-| Public status | `bundle-status.v1` | `openrig-world` status, generated | the status generator only |
-| Registry entry | `registry-entry.v1` | `openrig-world/registry/<slug>.yaml` | maintainers, through review |
+| Public status | `bundle-status.v1` | `openrig-registry` status, generated | the status generator only |
+| Registry entry | `registry-entry.v1` | `openrig-registry/registry/<slug>.yaml` | maintainers, through review |
 
 ### Declared configurations
 
@@ -121,7 +121,9 @@ carries no tested status.
     `posture[].nonInterruptive: "available"` says a full-bypass Claude/Codex seat can use
     [non-interruptive launch flags](non-interruptive-mode.md). It does not select the option, read host acceptance
     state or prove a prompt-free launch. Both fields are omitted where inapplicable or unresolved; older v1 views
-    remain valid without them. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
+    remain valid without them. Optional `posture[].nonInterruptiveDefault` (boolean) carries the rig's authored
+    `non_interruptive` for those seats; an explicit launch choice overrides it. When it is `true`, `firstRunWarnings`
+    is omitted. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
   - An empty list means none are known. Something unknown goes in `unknownBeforeLaunch`.
   - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. It's required on
     `team` and `posture`. Elsewhere it's optional: bundle-wide facts (services, library and project writes, setup and

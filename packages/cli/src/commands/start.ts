@@ -23,6 +23,8 @@ interface RigSummary {
   name: string;
   nodeCount?: number;
   lifecycleState?: string;
+  // Includes intentional stops for restore selection; absent on older daemons.
+  restoreLifecycleState?: string;
 }
 
 interface PlanPreviewNode {
@@ -239,7 +241,11 @@ Examples:
       const kernelResult = await waitForKernelReady(baseUrl, KERNEL_WAIT_MS);
       if (!kernelResult.ok) {
         if (kernelResult.kernelState === "skipped") {
-          if (!opts.json) console.log("Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
+          // The daemon also skips its boot when a kernel rig already exists (kernel-boot.ts).
+          // That rig need not be running, after a reboot it is not, and this command does not restore it.
+          if (!opts.json) console.log(kernelResult.detail === "kernel rig already managed"
+            ? "Kernel auto-boot skipped (kernel rig already managed). If its seats are not running, for example after a reboot, bring it back with: rig up kernel --existing"
+            : "Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
         } else {
           const terminalFailure = ["auth_blocked", "spec_missing", "bootstrap_failed", "degraded"].includes(kernelResult.kernelState ?? "");
           console.error(`${terminalFailure ? "Kernel failed to start" : "Kernel did not report ready before the deadline"}: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
@@ -285,7 +291,8 @@ Examples:
       const previewErrors: Array<{ rigId: string; rigName: string; code: string; message: string }> = [];
       for (const rig of allSummaries) {
         if (rig.name === "kernel") continue;
-        if (rig.lifecycleState === "running") continue;
+        const lifecycleState = rig.restoreLifecycleState ?? rig.lifecycleState;
+        if (lifecycleState === "running") continue;
 
         try {
           const planRes = await client.post<Record<string, unknown>>(
@@ -306,7 +313,7 @@ Examples:
             candidates.push({
               rigId: rig.id,
               rigName: rig.name,
-              lifecycleState: rig.lifecycleState ?? "unknown",
+              lifecycleState: lifecycleState ?? "unknown",
               nodeCount: rig.nodeCount ?? 0,
               lastActivity,
               preview,
@@ -413,7 +420,7 @@ Examples:
         try {
           const freshSummary = await client.get<RigSummary[]>("/api/rigs/summary");
           const current = (freshSummary.data ?? []).find((r) => r.id === rigId);
-          if (current?.lifecycleState === "running") {
+          if ((current?.restoreLifecycleState ?? current?.lifecycleState) === "running") {
             if (!opts.json) console.log(`  ${rigName}: already running (skipping)`);
             results.push({ rigName, status: "already_running", nodes: [] });
             continue;

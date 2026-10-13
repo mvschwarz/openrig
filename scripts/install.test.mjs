@@ -70,7 +70,7 @@ test("dry run needs no tools and only prints the complete plan", t => {
   f.env.PATH = path.join(f.dir, "absent");
   const r = f.run("--dry-run");
   assert.equal(r.status, 0, r.stderr);
-  for (const text of ["[1/4]", "npm install -g @openrig/cli", "npm root -g", "scripts/check-abi.mjs", "even if npm skipped postinstall", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "setup may start cmux while configuring its control", "launch a team or open a kernel conversation", "Dry run:", ...nodeAdvice]) assert.ok(r.stdout.includes(text), text);
+  for (const text of ["[1/4]", "npm install -g @openrig/cli", "npm root -g", "scripts/check-abi.mjs", "even if npm skipped postinstall", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "rig setup installs herdr by default", "unavailable herdr install is a warning", "Existing cmux settings stay unchanged", "rig setup --ghostty attempts it after acceptance", "launch a team or open a kernel conversation", "Dry run:", ...nodeAdvice]) assert.ok(r.stdout.includes(text), text);
   assert.deepEqual(f.calls(), []);
 });
 

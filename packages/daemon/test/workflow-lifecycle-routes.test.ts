@@ -72,6 +72,74 @@ describe("S06 lifecycle HTTP surface", () => {
     ]));
   }
 
+  async function failedBranches(count = 1) {
+    const specPath = join(root, "occurrence-selection.yaml");
+    writeFileSync(specPath, PARALLEL_SPEC);
+    const created = await runtime.instantiate({ specPath, rootObjective: "owned branch recovery", createdBySession: "orch@rig" });
+    await runtime.project({ instanceId: created.instance.instanceId, currentPacketId: created.entryQitemId,
+      exit: "done", actorSession: "root@rig" });
+    const branches = runtime.inspect(created.instance.instanceId).frontier;
+    for (const branch of branches.slice(0, count)) await runtime.project({
+      instanceId: created.instance.instanceId, currentPacketId: branch.packetId,
+      exit: "failed", actorSession: branch.ownerSession! });
+    return { instanceId: created.instance.instanceId, occurrences: branches.slice(0, count).map(branch => branch.packetId) };
+  }
+
+  function recoveryRows() {
+    return Object.fromEntries(["workflow_instances", "workflow_failure_occurrences", "workflow_frontier_bindings",
+      "workflow_step_trails", "queue_items", "queue_transitions", "outbox_entries", "events", "watchdog_jobs"]
+      .map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+  }
+
+  it.each([1, 2])("refuses an unknown explicit occurrence with %s failed branches and preserves all recovery state", async count => {
+    const failed = await failedBranches(count);
+    const before = recoveryRows();
+    const response = await app.request(`/api/workflow/${failed.instanceId}/resume`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ occurrenceId: "owned-occurrence-does-not-exist", actorSession: "orch@rig" }),
+    });
+    const result = await response.json();
+    expect(response.status, JSON.stringify({ result, failures: runtime.inspect(failed.instanceId).failures })).toBe(409);
+    expect(result).toMatchObject({ error: "failure_occurrence_not_unresolved",
+      occurrenceId: "owned-occurrence-does-not-exist" });
+    expect(recoveryRows()).toEqual(before);
+  });
+
+  it("does not resume a local branch when the requested occurrence belongs to another instance", async () => {
+    const target = await failedBranches();
+    const other = await failedBranches();
+    const before = recoveryRows();
+    const response = await app.request(`/api/workflow/${target.instanceId}/resume`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ occurrenceId: other.occurrences[0], actorSession: "orch@rig" }),
+    });
+    const result = await response.json();
+    expect(response.status, JSON.stringify({ result, failures: runtime.inspect(target.instanceId).failures })).toBe(409);
+    expect(result).toMatchObject({ error: "failure_occurrence_not_unresolved", occurrenceId: other.occurrences[0] });
+    expect(recoveryRows()).toEqual(before);
+  });
+
+  it("still selects the sole omitted occurrence and absorbs its explicit replay", async () => {
+    const failed = await failedBranches();
+    const response = await app.request(`/api/workflow/${failed.instanceId}/resume`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ actorSession: "orch@rig", decision: "retry the sole failed branch" }),
+    });
+    expect(response.status).toBe(200);
+    const resumed = await response.json() as { newPacketId: string };
+    expect(runtime.inspect(failed.instanceId).failures).toMatchObject([
+      { occurrenceId: failed.occurrences[0], status: "resolved", redrivePacketId: resumed.newPacketId },
+    ]);
+    const before = recoveryRows();
+    const replay = await app.request(`/api/workflow/${failed.instanceId}/resume`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ occurrenceId: failed.occurrences[0], actorSession: "orch@rig", decision: "retry the sole failed branch" }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ newPacketId: resumed.newPacketId, absorbedReplay: true });
+    expect(recoveryRows()).toEqual(before);
+  });
+
   it("compiles read-only, instantiates once, replays once, and rejects changed source bytes", async () => {
     const beforeCompile = counts();
     const compile = await app.request("/api/workflow/compile", {

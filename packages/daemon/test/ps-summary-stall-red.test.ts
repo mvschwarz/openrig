@@ -124,18 +124,20 @@ describe("slice-04 ps/summary event-loop regression", () => {
 
       // fail-loud: a deterministic prepare throw at the ps boundary returns the EXISTING 500,
       // no partial/stale payload published; a subsequent call recovers fully.
-      const real = db.prepare.bind(db);
-      spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
-        if (String(sql).includes("running_count")) throw new Error("injected ps-boundary failure");
-        return real(sql);
-      }) as never);
+      const failPrepare = vi.fn(() => { throw new Error("injected ps-boundary failure"); });
+      spy = vi.spyOn(db, "prepare").mockImplementationOnce(failPrepare);
       const failRes = await app.request("/api/ps");
+      expect(failPrepare).toHaveBeenCalledOnce();
+      // Pin the boundary without depending on a computed column's SQL alias.
+      expect(failPrepare).toHaveBeenCalledWith(expect.stringMatching(/^\s*SELECT\s+r\.id\s+as\s+rig_id\b/i));
       expect(failRes.status).toBe(500);
       const body = await failRes.text();
       expect(body).not.toContain("runningCount"); // no partial ps payload
       spy.mockRestore();
       spy = null;
-      const rec = (await (await app.request("/api/ps")).json()) as unknown[];
+      const recRes = await app.request("/api/ps");
+      expect(recRes.status).toBe(200);
+      const rec = (await recRes.json()) as unknown[];
       expect(rec).toHaveLength(9); // no cached partial; full correct response
     } finally {
       if (spy) spy.mockRestore();

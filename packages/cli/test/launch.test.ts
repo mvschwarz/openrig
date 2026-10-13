@@ -128,16 +128,221 @@ describe("rig launch --seats", () => {
       },
     });
 
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
     await launchCommand(deps).parseAsync([
       "node", "rig", "rig-1", "--seats", "dev.driver", "--hold-reason", "operator hold", "--plan",
     ]);
 
+    expect(deps._client.get).toHaveBeenCalledWith("/api/health-summary/version");
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver"], holdReason: "operator hold", plan: true },
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
     expect(logs.join("\n")).toContain("dev.guard: operator hold");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([
+    ["an older daemon", { status: 200, data: { version: "0.5.8" } }],
+    ["a daemon without the version route", { status: 404, data: { error: "not found" } }],
+    ["a daemon reporting an unknown version", { status: 200, data: { version: "unknown" } }],
+  ])("refuses --plan against %s before sending anything", async (_label, versionAnswer) => {
+    const deps = makeDeps({ "launch-subset": { status: 201, data: { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }] } } });
+    deps._client.get.mockResolvedValue(versionAnswer);
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan", "--json"]);
+
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("0.5.9 or later");
+    expect(logs).toEqual([]);
+  });
+
+  it("allows --plan on a packaged daemon whose stamp is on /healthz while its version route says unknown", async () => {
+    // Packaged 0.5.9 to 0.6.5 answer "unknown" on /api/health-summary/version; /healthz carries the semver.
+    const deps = makeDeps({ "launch-subset": { status: 200, data: { ok: true, planOnly: true, nonTargetEffects: { mode: "unchanged", reason: null, affected: [] } } } });
+    deps._client.get.mockImplementation(async (path: string) => path === "/healthz"
+      ? { status: 200, data: { status: "ok", semver: "0.6.4-rc.1" } }
+      : { status: 200, data: { version: "unknown" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan"]);
+
+    expect(deps._client.post).toHaveBeenCalledOnce();
+    expect(logs.join("\n")).toContain("Plan only; no changes made.");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("names the version-read failure when it refuses --plan locally", async () => {
+    const deps = makeDeps({});
+    deps._client.get.mockRejectedValue(new Error("connect ECONNREFUSED 127.0.0.1:7433"));
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan"]);
+
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("(version read: connect ECONNREFUSED 127.0.0.1:7433)");
+  });
+
+  it("warns that the daemon may have acted when a --plan request gets a 409 launch answer", async () => {
+    const deps = makeDeps({ "launch-subset": { status: 409, data: { ok: false, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "attention_required" }] } } });
+    deps._client.get.mockResolvedValue({ status: 200, data: { status: "ok", semver: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("did not return a plan");
+  });
+
+  it("keeps a plan error's own message when the answer shows no action (unmatched seat)", async () => {
+    const deps = makeDeps({ "launch-subset": { status: 404, data: { ok: false, code: "no_matching_nodes", error: "no seats match dev.typo" } } });
+    deps._client.get.mockResolvedValue({ status: 200, data: { status: "ok", semver: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.typo", "--plan"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("no seats match dev.typo");
+    expect(errors.join("\n")).not.toContain("may have acted");
+  });
+
+  it.each([[["--json"]], [[]]])("exits non-zero when a --plan answer has no planOnly (%j)", async (extra) => {
+    // A daemon that reports a new version but launches anyway: the answer must not read as a plan.
+    const launched = { ok: true, launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }], held: [], alreadyRunning: [] };
+    const deps = makeDeps({ "launch-subset": { status: 201, data: launched } });
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--plan", ...extra]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("did not return a plan");
+    expect(logs.join("\n")).not.toContain("Launched");
+    expect(logs.join("\n")).not.toContain("Plan only");
+  });
+
+  it("passes --plan through on single-target nodeRef form and renders plan without claiming launch (#887)", async () => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 200,
+        data: {
+          ok: true,
+          planOnly: true,
+          snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          nonTargetEffects: {
+            mode: "unchanged",
+            reason: null,
+            affected: [],
+          },
+        },
+      },
+    });
+
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--plan",
+    ]);
+
+    expect(deps._client.get).toHaveBeenCalledWith("/api/health-summary/version");
+    expect(deps._client.post).toHaveBeenCalledWith(
+      "/api/rigs/rig-1/nodes/launch-subset",
+      { seats: ["dev.driver"], plan: true, nonTargetMode: "unchanged" },
+    );
+    expect(logs.join("\n")).toContain("Plan only; no changes made.");
+    expect(logs.join("\n")).toContain("Non-target effect: unchanged");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("refuses --hold-reason with single-target --plan form (#887)", async () => {
+    const deps = makeDeps({});
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--plan", "--hold-reason", "hold other seats",
+    ]);
+    expect(errors.join("\n")).toContain("single-seat launch never changes non-targets");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("allows --hold-reason when --seats is specified with --plan (#887)", async () => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 200,
+        data: {
+          ok: true,
+          planOnly: true,
+          snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          nonTargetEffects: { mode: "detach_and_hold", reason: "hold other seats", affected: [] },
+        },
+      },
+    });
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--seats", "dev.driver,dev.guard", "--plan", "--hold-reason", "hold other seats",
+    ]);
+
+    expect(errors.join("\n")).not.toContain("single-seat launch never changes non-targets");
+    expect(deps._client.post).toHaveBeenCalledWith(
+      "/api/rigs/rig-1/nodes/launch-subset",
+      { seats: ["dev.driver", "dev.guard"], plan: true, holdReason: "hold other seats" },
+    );
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([[["--json"]], [[]]])("exits non-zero when a single-seat --plan answer has mode detach_and_hold instead of unchanged (%j) (#887)", async (extra) => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 200,
+        data: {
+          ok: true,
+          planOnly: true,
+          snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          nonTargetEffects: {
+            mode: "detach_and_hold",
+            reason: "excluded_from_subset",
+            affected: [{ logicalId: "dev.guard", reason: "excluded_from_subset" }],
+          },
+        },
+      },
+    });
+    deps._client.get.mockResolvedValue({ status: 200, data: { version: "0.6.8" } });
+
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--plan", ...extra,
+    ]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("this daemon can't preview a single-seat launch; upgrade or restart it, or preview the subset with --seats <seat>");
+    expect(logs.join("\n")).not.toContain("Plan only; no changes made.");
+    expect(logs.join("\n")).not.toContain("Non-target effect: detach_and_hold");
+  });
+
+  it("refuses empty filtered --seats with --plan without sending requests (#887)", async () => {
+    const deps = makeDeps({});
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--seats", ",,,", "--plan",
+    ]);
+    expect(errors.join("\n")).toContain("--seats requires a non-empty comma-separated list of seat IDs");
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("allows empty --seats without --plan and falls through to single-seat launch (#887)", async () => {
+    const deps = makeDeps({
+      "dev.driver/launch": {
+        status: 200,
+        data: { ok: true, logicalId: "dev.driver", nodeId: "n1", alreadyRunning: [] },
+      },
+    });
+
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--seats", ",,,",
+    ]);
+
+    expect(deps._client.post).toHaveBeenCalledWith(
+      "/api/rigs/rig-1/nodes/dev.driver/launch",
+      {},
+    );
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("reports held and failedTargets honestly in human output", async () => {

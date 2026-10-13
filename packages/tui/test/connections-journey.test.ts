@@ -215,3 +215,20 @@ it("never resolves an external human blocker as a queue-item ID or poisons the p
   expect(observed.map(r => r.path)).not.toContain("/api/queue/alex%40external");
   expect(page.errors).toEqual([]);
 });
+
+describe("#192 channel map on the Connections page", () => {
+  it("shows each mapped rig or seat with its channel; an absent map shows nothing extra", async () => {
+    expect(connectionsLines(await hydrate(), 140).map((l) => l.text).join("\n")).not.toContain("channel map");
+    config = { ...config, channelMap: [{ match: "demo", channel: "C-FIXTURE-2" }, { match: "pr@demo", channel: "C-FIXTURE-3" }] };
+    saveConfig(config, home);
+    gateway.connector = { ...(gateway.connector as object), configurationDigest: channelStateDigest(config) };
+    const snap = await hydrate();
+    expect(snap.connections?.configuration?.channelMap).toEqual([
+      { match: "demo", channel: "C-FIXTURE-2" }, { match: "pr@demo", channel: "C-FIXTURE-3" },
+    ]);
+    const lines = connectionsLines(snap, 140).map((l) => l.text).join("\n");
+    expect(lines).toMatch(/channel map.*demo → C-FIXTURE-2/);
+    expect(lines).toMatch(/channel map.*pr@demo → C-FIXTURE-3/);
+    expect(external).not.toHaveBeenCalled();
+  });
+});

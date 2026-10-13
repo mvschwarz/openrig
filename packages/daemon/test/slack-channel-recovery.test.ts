@@ -9,6 +9,8 @@ import { ChannelRecovery } from "../src/domain/gateway/slack/channel-recovery.js
 import { ChannelCoverageStore, SeenStore, DeadLetterStore, InboundReceiptStore, slackMicros, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import { startSocketInbound, type WsLike } from "../src/domain/gateway/slack/socket-inbound.js";
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
+import { ThreadSeatMap } from "../src/domain/gateway/slack/thread-seat-map.js";
+import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); vi.useRealTimers(); });
@@ -56,21 +58,21 @@ function fixture() {
     respond: (fn?: typeof response) => { response = fn; }, down: (v: boolean) => { queueDown = v; } };
 }
 
-it("recovers on socket connect, repeated short wakes and periodic retry through the real queue", async () => {
+it.each([undefined, "thread_broadcast"])("recovers %s messages on connect, repeated wakes and periodic retry through the real queue", async subtype => {
   vi.useFakeTimers(); const f = fixture(); const recovery = f.recovery();
   const sockets: WsLike[] = [];
   const h = startSocketInbound("fixture-app", f.router, { fetchImpl: f.fetchImpl, recovery, retryIntervalMs: 100,
     wsFactory: () => { const ws: WsLike = { send: vi.fn(), close: () => {}, onopen: null, onclose: null, onmessage: null, onerror: null }; sockets.push(ws); return ws; } });
   closes.unshift(() => h.stop());
   for (let wake = 1; wake <= 4; wake++) {
-    f.history.push(event(`${1000 + wake}.000001`)); f.settledThrough((1001 + wake) * 1000);
+    f.history.push(event(`${1000 + wake}.000001`, { subtype, ...(subtype ? { thread_ts: "900.1" } : {}) })); f.settledThrough((1001 + wake) * 1000);
     await vi.advanceTimersByTimeAsync(wake === 1 ? 0 : 1000);
     sockets.at(-1)!.onopen?.(); await vi.advanceTimersByTimeAsync(0);
     expect(f.repo.list({ limit: 100 })).toHaveLength(wake);
     sockets.at(-1)!.onclose?.();
   }
   await vi.advanceTimersByTimeAsync(1000); sockets.at(-1)!.onopen?.(); await vi.advanceTimersByTimeAsync(0);
-  f.history.push(event("1006.000001")); f.settledThrough(1_007_000);
+  f.history.push(event("1006.000001", { subtype, ...(subtype ? { thread_ts: "900.1" } : {}) })); f.settledThrough(1_007_000);
   await vi.advanceTimersByTimeAsync(100);
   expect(f.repo.list({ limit: 100 })).toHaveLength(5);
   expect(recovery.status().coverage?.coveredThrough).toBe("1007.000000");
@@ -99,15 +101,72 @@ it("seeds newest accepted landing once, never newest received/live traffic, acro
   f.recovery("fixture", "C2"); expect(f.recovery().status().coverage?.coverageStart).toBe("950.000001");
 });
 
-it("persists short-page progress across restart without letting newer live traffic erase the gap", async () => {
+it.each([undefined, "thread_broadcast"])("persists %s short-page progress across restart despite newer live traffic", async subtype => {
   const f = fixture(); f.page(1); const r = f.recovery();
-  for (let i=1; i<=7; i++) f.history.push(event(`${1000+i}.000001`));
+  for (let i=1; i<=7; i++) f.history.push(event(`${1000+i}.000001`, { subtype, ...(subtype ? { thread_ts: "900.1" } : {}) }));
   f.settledThrough(1_010_000); await r.run(); expect(f.repo.list({ limit: 100 })).toHaveLength(4);
   expect(r.status().coverage).toMatchObject({ coveredThrough: "1000.000000", pending: { upper: "1010.000000", nextLatest: "1004.000001" } });
   await f.router.route(event("1050.000001")); r.stop(); f.settledThrough(1_060_000);
   const restart = f.recovery(); await restart.run();
   expect(f.repo.list({ limit: 100 })).toHaveLength(8); expect(restart.status().coverage?.coveredThrough).toBe("1010.000000");
   expect(f.queries[4]!.searchParams.get("latest")).toBe("1004.000001");
+});
+
+it.each(["open", "closed", "superseded", "unmapped"])("recovers broadcast replies through the real %s thread route and deduplicates live replay", async state => {
+  const f = fixture(); const map = new ThreadSeatMap(f.db);
+  if (state !== "unmapped") {
+    map.open({ threadTs: "900.1", channel: "C1", human: "human-fixture@external", seat: "asker@test", conversationId: "q-original" });
+    if (state === "closed") map.close("900.1");
+    if (state === "superseded") map.open({ threadTs: "950.1", channel: "C1", human: "human-fixture@external", seat: "asker@test", conversationId: "q-original" });
+  }
+  f.deps.resolveRoute = makeThreadRouteResolver({ map, unroutedDestination: "owner@test" });
+  const r = f.recovery(); const reply = event("1001.123456", { subtype: "thread_broadcast", thread_ts: "900.1", text: "Proceed with the plan" });
+  f.history.push(reply); f.settledThrough(1_002_000); await r.run();
+  const rows = f.repo.list({ limit: 100 }); expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ destinationSession: state === "unmapped" ? "owner@test" : "asker@test", sourceSession: "human-fixture@external" });
+  expect(rows[0]!.body).toContain("Recovered after a gap");
+  expect(rows[0]!.body).toContain("1970-01-01T00:16:41.123Z");
+  expect(rows[0]!.body).toContain("Proceed with the plan");
+  expect(rows[0]!.tags).toContain(state === "unmapped" ? "unrouted-signal" : "thread");
+  if (state === "open" || state === "closed") expect(rows[0]!.body).toContain("In reply to: q-original");
+  else expect(rows[0]!.body).not.toContain("In reply to:");
+  const live = await handleEnvelope({ envelope_id: "replay", type: "events_api", payload: { event: reply } }, () => {}, f.router);
+  expect(live).toMatchObject({ status: "ignored", reason: "dup" });
+  expect(f.repo.list({ limit: 100 })).toHaveLength(1);
+  expect(r.status().coverage?.coveredThrough).toBe("1002.000000");
+});
+
+it("recovers broadcast replies in page order around live duplicates without admitting ordinary replies or rejected senders", async () => {
+  const f = fixture(); const r = f.recovery();
+  const broadcast = (ts: string, extra: Partial<SlackEvent> = {}) => event(ts, { subtype: "thread_broadcast", thread_ts: "900.1", ...extra });
+  const live = broadcast("1002.1");
+  await handleEnvelope({ type: "events_api", payload: { event: live } }, () => {}, f.router);
+  f.history.push(broadcast("1003.1"), live, broadcast("1001.1"),
+    broadcast("1004.1", { bot_id: "B1" }), broadcast("1005.1", { user: "unknown" }),
+    broadcast("1006.1", { thread_ts: undefined }), broadcast("1007.1", { thread_ts: "1007.1" }),
+    event("1008.1", { thread_ts: "900.1" }));
+  const order: string[] = [];
+  f.deps.resolveRoute = ev => { order.push(ev.ts!); return { destination: "owner@test" }; };
+  f.settledThrough(1_010_000); await r.run();
+  expect(order).toEqual(["1001.1", "1003.1"]);
+  expect(f.repo.list({ limit: 100 })).toHaveLength(3); expect(f.dead.readAll()).toHaveLength(0);
+  expect(r.status()).toMatchObject({ acceptedThisProcess: 2, coverage: { coveredThrough: "1010.000000" } });
+});
+
+it("retains a failed broadcast reply's thread through checkpointed dead-letter recovery", async () => {
+  const f = fixture(); const map = new ThreadSeatMap(f.db);
+  map.open({ threadTs: "900.1", channel: "C1", human: "human-fixture@external", seat: "asker@test", conversationId: "q-original" });
+  f.deps.resolveRoute = makeThreadRouteResolver({ map, unroutedDestination: "owner@test" });
+  const r = f.recovery(); f.down(true);
+  f.history.push(event("1001.1", { subtype: "thread_broadcast", thread_ts: "900.1" })); f.settledThrough(1_002_000);
+  await r.run(); expect(f.repo.list({ limit: 100 })).toHaveLength(0);
+  expect(f.dead.readAll()).toHaveLength(1);
+  expect(r.status()).toMatchObject({ deadLetteredThisProcess: 1, coverage: { coveredThrough: "1002.000000" } });
+  f.down(false); await f.router.retryDeadLetters();
+  expect(f.repo.list({ limit: 100 })).toHaveLength(1);
+  expect(f.repo.list({ limit: 100 })[0]).toMatchObject({ destinationSession: "asker@test" });
+  expect(f.repo.list({ limit: 100 })[0]!.body).toContain("In reply to: q-original");
+  expect(f.dead.readAll()).toHaveLength(0);
 });
 
 it("retains Retry-After across restart and reports missing scope and unavailable token", async () => {
@@ -163,9 +222,10 @@ it.each([
   await r.run(); expect(r.status().state).toBe("incomplete"); expect(r.status().coverage?.coveredThrough).toBe("1000.000000");
 });
 
-it("honors cursor continuation even on a short page and yields at deadline mid-page without losing earlier work", async () => {
+it.each([undefined, "thread_broadcast"])("honors %s cursor continuation and yields mid-page without losing earlier work", async subtype => {
   const f=fixture(); const r=f.recovery(); f.settledThrough(1_010_000);
-  f.respond(u=>Response.json({ok:true, messages:u.searchParams.get("latest")==="1010.000000"?[event("1002.1")]:[event("1001.1")],
+  const reply = (ts: string) => event(ts, { subtype, ...(subtype ? { thread_ts: "900.1" } : {}) });
+  f.respond(u=>Response.json({ok:true, messages:u.searchParams.get("latest")==="1010.000000"?[reply("1002.1")]:[reply("1001.1")],
     response_metadata:{next_cursor:u.searchParams.get("latest")==="1010.000000"?"continued":""}}));
   await r.run(); expect(f.repo.list({limit:100})).toHaveLength(2);
   const g=fixture(); const mid=g.recovery(); g.history.push(event("1001.1",{files:[{}]}),event("1002.1")); g.settledThrough(1_010_000);

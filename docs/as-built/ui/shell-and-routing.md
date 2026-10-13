@@ -10,8 +10,8 @@ applies-when: |
   mounts, or how the shared detail drawer and event consumption work.
 siblings: [topology.md, project-and-for-you.md, library-specs-and-design-system.md]
 prerequisite-reads: [../README.md]
-last-verified-against-source: 104b78ee
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # UI Shell, Routing, Drawer System
@@ -21,7 +21,7 @@ operator surface. Brand/visual rules live in `docs/DESIGN.md` (pointer from
 `library-specs-and-design-system.md`); this module is how the shell is
 assembled and what routes it mounts.
 
-> Verified against source at `104b78ee`; package version 0.6.6. UI
+> Verified against source at `e8f0ab34`; package version 0.6.7. UI
 > footprint is **304** source files (`packages/ui/src`, `.ts`+`.tsx`,
 > non-test; 235 at the previous stamp `7eaf524c`). The web UI is in
 > maintenance mode (`docs/reference/developing.md`).
@@ -80,7 +80,7 @@ rather than acting as a generic file browser.
 ## 3. Route model
 
 > The route table below is derived from `packages/ui/src/routes.tsx` at
-> `104b78ee` (605 lines). Each line number is the route's
+> `e8f0ab34` (605 lines). Each line number is the route's
 > `createRoute(` line. The exported route tree is assembled at
 > `routes.tsx:539` (`export const routeTree = rootRoute.addChildren([`);
 > it holds 54 routes.

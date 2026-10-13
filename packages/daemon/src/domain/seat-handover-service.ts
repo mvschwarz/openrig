@@ -458,7 +458,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -640,7 +640,15 @@ export class SeatHandoverService {
         guidance: "Run discovery and list active discovered sessions before retrying.",
       });
     }
-    if (discovered.status !== "active") {
+    // #981: a composer-launched successor respawns into the seat's own pane, whose discovery row the
+    // previous handover claimed for this same node, and a rescan keeps that claim (#237). That claim is
+    // this seat's own, so commit re-claims it. A row claimed by any other node, or a discovered-source
+    // successor, still needs an active, unclaimed record.
+    const ownPaneClaim = input.reportedSource.mode !== "discovered"
+      && discovered.status === "claimed"
+      && discovered.claimedNodeId === input.node.id
+      && discovered.tmuxSession === input.latestSession.session_name;
+    if (discovered.status !== "active" && !ownPaneClaim) {
       return fail({
         ok: false,
         code: "discovered_not_active",

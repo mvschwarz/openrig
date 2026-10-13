@@ -149,7 +149,7 @@ export interface PulseLaneTarget {
 export function pulseLaneTargets(model: PulseModel): PulseLaneTarget[] {
   const exceptionLines = model.exceptions.reduce((n, s) => n + renderExceptionSection(s).length, 0);
   // renderPulseView layout: [tabStrip, blank] + exceptions + [blank, laneRule] + laneRows + footer
-  const laneStart = 2 + exceptionLines + 2;
+  const laneStart = 2 + (model.queueSampleNote ? 1 : 0) + exceptionLines + 2;
   const g = LANE_GUTTER.length;
   const starts = [0, COL[0] + g, COL[0] + g + COL[1] + g]; // text col where each lane's cell begins
   const widths = [COL[0], COL[1], UP_NEXT_WIDTH];
@@ -170,6 +170,7 @@ export function renderPulseFooter(f: PulseModel["footer"]): Line {
 /** The whole PULSE view (increment 1: static from demoPulseModel). REUSABLE parts above. */
 export function renderPulseView(model: PulseModel): Line[] {
   const out: Line[] = [renderPulseTabStrip(), { text: "" }];
+  if (model.queueSampleNote) out.push(line([{ text: model.queueSampleNote, token: "dim" }]));
   // EMPTY section is omitted entirely by the model (empty-strip-is-silence); we
   // render exactly the sections present.
   for (const section of model.exceptions) out.push(...renderExceptionSection(section));

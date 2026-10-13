@@ -155,6 +155,7 @@ describe("GitHub bundle source", () => {
     let assembledRigRoot = "";
     f.post.mockImplementation(async (_url, body) => {
       assembledRigRoot = body.rigRoot as string;
+      expect(body.bundleName).toBe("team");
       const result = assembler.assemble({ rigRoot: assembledRigRoot, rigSpecPath: body.specPath as string,
         outputDir: output, bundleName: "fixture", bundleVersion: "1.0.0" });
       expect(result.manifest.agents.map(agent => agent.name)).toEqual(["helper"]);

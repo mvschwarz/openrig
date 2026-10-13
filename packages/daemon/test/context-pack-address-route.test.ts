@@ -54,6 +54,23 @@ describe("GET /library/resolve-address — file-level span serving (Atom 4c)", (
   const resolve = (address: string) =>
     app.request(`/api/context-packs/library/resolve-address?address=${encodeURIComponent(address)}`);
 
+  it("serves a requested section after an inline triple-backtick span", async () => {
+    writeFileSync(join(tmp, "lib", "packs", "world", "walk.md"),
+      "## Welcome\n```literal ` backticks```\n## Reference\nreference instructions\n");
+    const res = await resolve("packs/world/walk.md#reference");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { text: string }).text).toBe("## Reference\nreference instructions\n");
+  });
+
+  it("does not serve unrelated instructions across an empty heading", async () => {
+    writeFileSync(join(tmp, "lib", "packs", "world", "walk.md"),
+      "## Welcome\nwelcome instructions\n##\nunrelated instructions\n### Child\nchild instructions\n");
+    const res = await resolve("packs/world/walk.md#welcome");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { text: string }).text).toBe("## Welcome\nwelcome instructions");
+    expect((await resolve("packs/world/walk.md#welcome/child")).status).toBe(422);
+  });
+
   it("resolves pack/file#H2 to the correct span (the mini-req 6 door shape)", async () => {
     const res = await resolve("packs/world/walk.md#welcome");
     expect(res.status).toBe(200);

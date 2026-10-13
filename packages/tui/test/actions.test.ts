@@ -71,7 +71,7 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     s.dispatch(parseCommand("agent dev50.driver"));
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 32 });
     expect(screen.lines.some((l) => l.includes("attach: "))).toBe(true);
-    const termLine = screen.lines.findIndex((l) => l.includes("term ▸"));
+    const termLine = screen.lines.findIndex((l) => l.includes("Open terminals"));
     const hit = hitAt(screen, 40, termLine + 1);
     expect(hit?.action).toEqual({ type: "act", act: "open-terminal", view: "pod:openrig-build/dev50" });
   });

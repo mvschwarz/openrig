@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -79,6 +80,24 @@ describe("ClaimService", () => {
   }
 
   // claim() method removed in bind consolidation — claim-specific tests deleted
+
+  it("an unresolved pane on claim applies to the newly registered occupant", async () => {
+    const rig = seedRig();
+    rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code" });
+    const discovered = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "orch-lead@host", tmuxPane: "", runtimeHint: "claude-code", confidence: "high" });
+    Object.assign(mockTmux, { listPanes: async () => [] });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // SQLite keeps its real clock; freeze registration safely after that floor.
+      vi.setSystemTime(Date.now() + 60_000);
+      const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
+      expect(result.ok).toBe(true);
+      expect(getNodeInventory(db, rig.id)[0]).toMatchObject({
+        storedStartupStatus: "ready", startupStatus: "attention_required",
+        identityVerdict: { verdict: "pane_missing", reason: "pane_pid_gone" },
+      });
+    } finally { vi.useRealTimers(); }
+  });
 
   it("bind attaches a discovered session to an existing node", async () => {
     const rig = seedRig();

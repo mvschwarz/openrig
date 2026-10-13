@@ -9,6 +9,8 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { createTestApp } from "./helpers/test-app.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { LegacyBundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
+import type { FsOps } from "../src/domain/package-resolver.js";
 import * as tar from "tar";
 import { createHash } from "node:crypto";
 
@@ -41,6 +43,86 @@ exports:
       default_scope: project_shared
 `.trim();
 
+// Writes a real .rigbundle (+ .sha256 sibling) whose bundle.yaml is a valid
+// manifest (v1 by default, or pod-aware v2), optionally with a hostile project
+// block. Used by install-route tests that must pass (or deliberately fail) the
+// always-on manifest safety pre-check. The archive mirrors the create route's
+// layout closely enough for plan mode to succeed on the valid cases.
+async function writeBundleArchive(dir: string, name: string, projectBlock: string | null, schemaVersion: 1 | 2 = 1): Promise<string> {
+  const staging = path.join(dir, `${name}-staging`);
+  let contentFiles: Array<{ rel: string; body: string }>;
+  let manifestLines: string[];
+  if (schemaVersion === 2) {
+    const agentBody = [
+      'name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []',
+      'profiles:', '  default:', '    uses:', '      skills: []',
+    ].join("\n") + "\n";
+    const rigBody = [
+      'version: "0.2"', `name: ${name}`, 'pods:', '  - id: dev', '    label: Dev',
+      '    members:', '      - id: impl', '        agent_ref: "local:agents/impl"',
+      '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '    edges: []', 'edges: []',
+    ].join("\n") + "\n";
+    contentFiles = [
+      { rel: "rig.yaml", body: rigBody },
+      { rel: "agents/impl/agent.yaml", body: agentBody },
+    ];
+    manifestLines = [
+      "schema_version: 2",
+      `name: ${name}`,
+      'version: "0.1.0"',
+      'created_at: "2026-10-06T00:00:00.000Z"',
+      "rig_spec: rig.yaml",
+      "agents:",
+      "  - name: impl-agent",
+      "    path: agents/impl/agent.yaml",
+      `    hash: ${createHash("sha256").update(agentBody).digest("hex")}`,
+    ];
+  } else {
+    fs.mkdirSync(path.join(staging, "test-pkg", "skills", "h"), { recursive: true });
+    fs.writeFileSync(path.join(staging, "test-pkg", "package.yaml"), VALID_PKG, "utf-8");
+    fs.writeFileSync(path.join(staging, "test-pkg", "skills", "h", "SKILL.md"), "# H");
+    contentFiles = [
+      { rel: "rig.yaml", body: VALID_SPEC },
+      { rel: "test-pkg/package.yaml", body: VALID_PKG },
+      { rel: "test-pkg/skills/h/SKILL.md", body: "# H" },
+    ];
+    manifestLines = [
+      "schema_version: 1",
+      `name: ${name}`,
+      'version: "0.1.0"',
+      'created_at: "2026-10-06T00:00:00.000Z"',
+      "rig_spec: rig.yaml",
+      "packages:",
+      "  - name: test-pkg",
+      '    version: "1.0.0"',
+      "    path: test-pkg",
+      "    original_source: ./test-pkg",
+    ];
+  }
+  for (const f of contentFiles) {
+    fs.mkdirSync(path.join(staging, path.dirname(f.rel)), { recursive: true });
+    fs.writeFileSync(path.join(staging, f.rel), f.body, "utf-8");
+  }
+  const bundleYaml = [
+    ...manifestLines,
+    ...(projectBlock ? ["project:", projectBlock] : []),
+    // unpack() requires the integrity section; bundle.yaml itself is a control
+    // file excluded from it, mirroring computeIntegrity (keys use forward
+    // slashes, matching walkFilesSync).
+    "integrity:",
+    "  algorithm: sha256",
+    "  files:",
+    ...contentFiles.map((f) => `    ${f.rel}: ${createHash("sha256").update(f.body).digest("hex")}`),
+  ].join("\n") + "\n";
+  fs.writeFileSync(path.join(staging, "bundle.yaml"), bundleYaml, "utf-8");
+  const archivePath = path.join(dir, `${name}.rigbundle`);
+  await tar.create({ gzip: true, file: archivePath, cwd: staging, portable: true }, ["bundle.yaml", ...contentFiles.map((f) => f.rel)]);
+  const digest = createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+  fs.writeFileSync(`${archivePath}.sha256`, digest, "utf-8");
+  return archivePath;
+}
+
 describe("Bundle API routes", () => {
   let db: Database.Database;
   let setup: ReturnType<typeof createTestApp>;
@@ -53,6 +135,27 @@ describe("Bundle API routes", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-routes-"));
     setup = createTestApp(db);
     app = setup.app;
+    // The harness leaves the v1 bundle source resolver unwired; the valid-
+    // manifest install test needs a real plan-mode run, so give the
+    // orchestrator the real resolver over the real filesystem.
+    const resolverFs: FsOps = {
+      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      exists: (p: string) => fs.existsSync(p),
+      listFiles: (dir: string) => {
+        const out: string[] = [];
+        const walk = (d: string, prefix: string): void => {
+          for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+            const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) walk(path.join(d, entry.name), rel);
+            else out.push(rel);
+          }
+        };
+        walk(dir, "");
+        return out;
+      },
+    };
+    (setup.bootstrapOrchestrator as unknown as { deps: { bundleSourceResolver: LegacyBundleSourceResolver } })
+      .deps.bundleSourceResolver = new LegacyBundleSourceResolver({ fsOps: resolverFs });
   });
 
   afterEach(() => {
@@ -930,6 +1033,67 @@ describe("Bundle API routes", () => {
       const body = await installRes.json();
       expect(body.error).not.toBe("Bundle compatibility check failed");
     }
+  });
+
+  // The manifest safety pre-check (unpack + manifest validation) is the FIRST
+  // place a bundle.yaml's rig_spec/project fields are validated on the install
+  // path; the bundle source resolver validates them again later in the install.
+  // --skip-version-check and --force override the Item-2 compat check and the
+  // Item-3 conflict check (their documented CLI contract); they must not also
+  // disable the safety validation, or a hostile manifest installs unvalidated.
+  it("POST /api/bundles/install refuses a hostile project block even with skipVersionCheck and force", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "hostile-project-flags", "  id: evilproj\n  path: ../../outside");
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true, skipVersionCheck: true, force: true }),
+    });
+    expect(installRes.status).toBe(400);
+    const body = await installRes.json();
+    expect(body.error).toBe("Bundle install pre-check could not run (extraction failed)");
+    expect(String(body.detail)).toContain("Invalid v1 bundle manifest");
+    expect(String(body.detail)).toContain("project.path");
+  });
+
+  it("POST /api/bundles/install already refuses the same hostile project block without flags", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "hostile-project-noflags", "  id: evilproj\n  path: ../../outside");
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true }),
+    });
+    expect(installRes.status).toBe(400);
+    const body = await installRes.json();
+    expect(body.error).toBe("Bundle install pre-check could not run (extraction failed)");
+    expect(String(body.detail)).toContain("Invalid v1 bundle manifest");
+  });
+
+  it("POST /api/bundles/install with skipVersionCheck and force still pre-checks a valid manifest through", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "valid-project-flags", null);
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true, skipVersionCheck: true, force: true }),
+    });
+    // The valid bundle must not merely pass the always-on safety pre-check;
+    // the plan-mode request itself has to succeed.
+    expect(installRes.status).toBe(200);
+    const body = await installRes.json();
+    expect(body.status).toBe("planned");
+  });
+
+  it("POST /api/bundles/install refuses a hostile v2 project block even with skipVersionCheck and force", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "hostile-project-flags-v2", "  id: evilproj\n  path: ../../outside", 2);
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true, skipVersionCheck: true, force: true }),
+    });
+    expect(installRes.status).toBe(400);
+    const body = await installRes.json();
+    expect(body.error).toBe("Bundle install pre-check could not run (extraction failed)");
+    expect(String(body.detail)).toContain("Invalid v2 bundle manifest");
+    expect(String(body.detail)).toContain("project.path");
   });
 
   it("POST /api/bundles/install fails with 3-part error when min_cli_version exceeds the CLI version sent in body", async () => {
@@ -3215,13 +3379,17 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
   let home: string;
   let origHome: string | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-install-routing-"));
     origHome = process.env.OPENRIG_HOME;
     process.env.OPENRIG_HOME = home;
     setup = createTestApp(db);
+    // A real, manifest-valid archive: the install route's manifest safety
+    // pre-check always runs, so the stubbed bootstrap needs a bundle that
+    // passes it.
+    await writeBundleArchive(home, "b", null);
   });
 
   afterEach(() => {
@@ -3235,7 +3403,9 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
     return setup.app.request("/api/bundles/install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // skipVersionCheck + force: no pre-check extraction, so the stubbed bootstrap is the whole install
+      // skipVersionCheck + force: skip the compat and conflict checks; the
+      // manifest safety pre-check still runs on the real archive above, and
+      // the stubbed bootstrap is the rest of the install.
       body: JSON.stringify({ bundlePath: path.join(home, "b.rigbundle"), targetRoot: home, autoApprove: true, skipVersionCheck: true, force: true, ...body }),
     });
   }

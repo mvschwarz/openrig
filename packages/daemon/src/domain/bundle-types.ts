@@ -60,7 +60,7 @@ export interface BundleProvenance {
   createdAt?: string;
   /** os.hostname() of the host that ran rig bundle create. */
   sourceHost?: string;
-  /** Canonical session name of the creator (e.g. velocity-driver@openrig-velocity). */
+  /** Canonical session name of the creator (e.g. dev-build@starter). */
   authorSession?: string;
   /** ULID of the source rig, if creating from a live rig. */
   sourceRigId?: string;

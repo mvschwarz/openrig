@@ -1001,13 +1001,22 @@ export class WorkflowProjector {
 
     const mappedTarget = currentStep.next_hop?.on?.[input.exit];
     const completesPrerequisite = input.exit === "done" || input.exit === "handoff";
-    const trail = this.trailLog.listForInstance(instance.instanceId, 100_000);
+    // Rank by append order, not closed_at, so a clock step-back cannot reorder completions.
+    // A higher rank is a later done or handoff closure.
+    const trail = this.trailLog.listForInstanceInAppendOrder(instance.instanceId);
+    const latestCompletion = new Map<string, number>();
+    trail.forEach((entry, index) => {
+      if (entry.closureReason === "done" || entry.closureReason === "handoff") latestCompletion.set(entry.stepId, index + 1);
+    });
+    if (completesPrerequisite) latestCompletion.set(currentStep.id, trail.length + 1);
+    // A completion older than a prerequisite's latest completion no longer counts, so a step
+    // re-run through a routed exit sends the steps that depend on it round again.
     const completed = new Set(
-      trail
-        .filter((entry) => entry.closureReason === "done" || entry.closureReason === "handoff")
-        .map((entry) => entry.stepId),
+      [...latestCompletion]
+        .filter(([stepId, rank]) => (spec.steps.find((step) => step.id === stepId)?.depends_on ?? [])
+          .every((dependency) => (latestCompletion.get(dependency) ?? 0) < rank))
+        .map(([stepId]) => stepId),
     );
-    if (completesPrerequisite) completed.add(currentStep.id);
 
     const liveBindings = this.instanceStore.listFrontierBindings(instance.instanceId);
     const liveStepIds = new Set(liveBindings.map((binding) => binding.stepId));

@@ -358,6 +358,69 @@ describe("RunnerCore assistant reply mirror", () => {
   });
 });
 
+describe.each(["pi", "omp"] as const)("%s terminal diagnostic fallbacks", runtime => {
+  const notice = (detail: string) => `[${runtime}-runner] ERROR ${detail}`;
+  const unusable = ["", " \n\t ", "\u001b[2J\u001b]0;title\u0007\u202e", null, undefined, {}, 7];
+  const failure = (errorMessage: unknown, error: unknown, eventError: unknown) => ({
+    type: "message_end", error: eventError,
+    message: { role: "assistant", stopReason: "error", errorMessage, error },
+  });
+
+  it.each(unusable)(
+    "skips unusable diagnostic %j before later message and event details", detail => {
+      expect(mapPiEvent(failure(detail, "message detail", "event detail"), runtime).errorNotice)
+        .toBe(notice("message detail"));
+      expect(mapPiEvent(failure(detail, detail, "event detail"), runtime).errorNotice)
+        .toBe(notice("event detail"));
+      expect(mapPiEvent(failure(detail, detail, detail), runtime).errorNotice)
+        .toBe(notice("request failed"));
+    },
+  );
+
+  it.each(unusable)("skips unusable finalError %j before a later retry detail", detail => {
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: detail, error: "retry detail" }, runtime).errorNotice)
+      .toBe(notice("retry detail"));
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: detail, error: detail }, runtime).errorNotice)
+      .toBe(notice("request failed"));
+  });
+
+  it("keeps the first usable detail and ignores errors on successful events", () => {
+    expect(mapPiEvent(failure("first detail", "message detail", "event detail"), runtime).errorNotice)
+      .toBe(notice("first detail"));
+    expect(mapPiEvent(failure("request failed", "message detail", "event detail"), runtime).errorNotice)
+      .toBe(notice("request failed"));
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: "final detail", error: "retry detail" }, runtime).errorNotice)
+      .toBe(notice("final detail"));
+    expect(mapPiEvent({ type: "auto_retry_end", success: true, finalError: "", error: "retry detail" }, runtime).errorNotice)
+      .toBeUndefined();
+    const event = failure("", "message detail", "event detail");
+    expect(mapPiEvent({ ...event, message: { ...event.message, stopReason: "stop" } }, runtime).errorNotice)
+      .toBeUndefined();
+    expect(mapPiEvent({ ...event, type: "turn_end" }, runtime).errorNotice)
+      .toBe(runtime === "omp" ? notice("message detail") : undefined);
+  });
+
+  it("cleans and bounds the selected fallback just like the primary detail", () => {
+    const detail = "\u001b[2J\u001b]0;title\u0007bad\r\nrequest\u0000\u202e" + "x".repeat(1000);
+    const expected = notice(("bad request " + "x".repeat(1000)).slice(0, 400));
+    expect(mapPiEvent(failure("", detail, "event detail"), runtime).errorNotice).toBe(expected);
+    expect(mapPiEvent({ type: "auto_retry_end", success: false, finalError: "", error: detail }, runtime).errorNotice)
+      .toBe(expected);
+  });
+
+  it("coalesces fallback failures and resets for a later turn", () => {
+    const { io, lines } = fakeIo();
+    const core = new RunnerCore(io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, { runtime });
+    const event = failure("", "message detail", "event detail");
+    const retry = { type: "auto_retry_end", success: false, finalError: "", error: "retry detail" };
+    for (const next of [event, { ...event, type: "turn_end" }, retry, retry]) core.handlePiLine(JSON.stringify(next));
+    expect(lines.filter(line => line.startsWith(notice("")))).toEqual([notice("message detail")]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify(retry));
+    expect(lines.filter(line => line.startsWith(notice("")))).toEqual([notice("message detail"), notice("retry detail")]);
+  });
+});
+
 describe("RunnerCore terminal assistant failures", () => {
   const failure = (errorMessage?: unknown, content: unknown[] = []) => ({
     type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage, content },
@@ -423,6 +486,34 @@ describe("RunnerCore terminal assistant failures", () => {
     const { core, lines } = readyCore();
     core.handlePiLine(JSON.stringify(failure(detail)));
     expect(errors(lines)).toEqual(["[pi-runner] ERROR request failed"]);
+  });
+
+  it("extracts fallback error detail from message.error or event.error when errorMessage is missing", () => {
+    const { core, lines } = readyCore();
+    // Fallback to message.error
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", error: "backend stream broke" },
+    }));
+    // Fallback to event.error
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_end",
+      error: "upstream service unavailable",
+      message: { role: "assistant", stopReason: "error" },
+    }));
+    // auto_retry_end fallback to event.error
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({
+      type: "auto_retry_end",
+      success: false,
+      error: "retry limit reached",
+    }));
+    expect(errors(lines)).toEqual([
+      "[pi-runner] ERROR backend stream broke",
+      "[pi-runner] ERROR upstream service unavailable",
+      "[pi-runner] ERROR retry limit reached",
+    ]);
   });
 
   it("ignores malformed message envelopes and does not dump thinking or tool arguments", () => {

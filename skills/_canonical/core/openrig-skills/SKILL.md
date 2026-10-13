@@ -1,6 +1,6 @@
 ---
 name: openrig-skills
-description: "Use when you're operating OpenRig and need the right skill or context for fleet recovery, seat handover, new-seat orientation, a watchdog wake, cross-host reach to an agent on another machine, rig packaging, an OpenRig upgrade, systematic debugging, queue triage, or implementation planning; also use when you don't know what applies or nothing is projected on cold boot."
+description: "Use when an agent running inside OpenRig needs the right skill or context for fleet recovery, seat handover, new-seat orientation, a watchdog wake, cross-host reach to an agent on another machine, rig packaging, an OpenRig upgrade, systematic debugging, queue triage, or implementation planning; also when the agent doesn't know what applies or nothing is projected on cold boot. Installing, starting or updating OpenRig, getting back to a team or bringing a stopped one back from a person's own session is the rigs skill."
 allowed-tools: Bash(rig:*)
 metadata:
   openrig:
@@ -57,7 +57,7 @@ These are auto-delivered to every rig; their name+description are already in you
 - **loading-addressable-markdown** — a task names Markdown as `path#h2-slug` or `path#h2-slug/h3-slug` outside the context-pack library.
 - **session-compaction-and-restore** — preparing for, or recovering from, compaction (any runtime). The write- and read-side protocol.
 - **queue-handoff** — you're passing durable work to another seat or ending your turn. The queue is the work ledger, not chat.
-- **refocusing** — a long-running seat may have lost the product outcome, crossed a major boundary, or compacted and needs a fresh path-based trace.
+- **refocusing** — invoke as `refocusing` when a long-running seat may have lost the product outcome, crossed a major boundary, or compacted and needs a fresh path-based trace.
 - **seat-continuity-and-handover** — handing your seat's work across a restart or to another owner.
 - **orienting-to-an-inherited-seat** — you just inherited an existing seat through a planned handover and need to verify its identity, state, and testimony.
 - **retiring-and-inheriting-a-seat** — you're planning a seat transition and need to retire the current occupant into a fresh successor without losing continuity.

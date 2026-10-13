@@ -20,6 +20,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { setSelfHostId, getSelfHostId } from "../src/domain/hosts/fanout-contract.js";
+import { expectLimitParsing } from "./helpers/limit-query-cases.js";
 
 function buildApp(opts: {
   eventBus: EventBus;
@@ -109,8 +110,9 @@ describe("queue routes", () => {
     `);
   }
 
-  it.each(["missing", "unrelated", "wrong-owner", "remote-qualified"] as const)(
-    "records generic handoff with unverified custody advice (%s) without creating work", async (mode) => {
+  it.each((["done", "handed-off"] as const).flatMap(state =>
+    (["missing", "unrelated", "wrong-owner", "remote-qualified"] as const).map(mode => ({ state, mode }))))(
+    "records generic handoff with unverified custody advice ($state / $mode) without creating work", async ({ state, mode }) => {
       const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "continue", nudge: false });
       queueRepo.claim({ qitemId: source.qitemId, destinationSession: "b@r" });
       const successor = mode === "missing" ? null : await queueRepo.create({
@@ -123,13 +125,13 @@ describe("queue routes", () => {
       const closureTarget = mode === "remote-qualified" ? `${successor!.qitemId}@remote` : "next@r";
       const res = await app.request(`/api/queue/${source.qitemId}/update`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-        body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget,
+        body: JSON.stringify({ state, closureReason: "handed_off_to", closureTarget,
           transitionNote: "handoff" }),
       });
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ state: "done", closureTarget,
+      expect(await res.json()).toMatchObject({ state, closureTarget, handedOffTo: null,
         handoffAdvisory: { status: "unverified", target: closureTarget } });
-      expect(queueRepo.getById(source.qitemId)).toMatchObject({ state: "done",
+      expect(queueRepo.getById(source.qitemId)).toMatchObject({ state,
         handoffAdvisory: { status: "unverified" } });
       expect(queueRepo.list({ limit: 100 })).toHaveLength(successor ? 2 : 1);
       expect(queueRepo.listTransitions(source.qitemId)).toHaveLength(transitions.length + 1);
@@ -137,19 +139,23 @@ describe("queue routes", () => {
     },
   );
 
-  it.each(["seat", "qitem"] as const)("accepts an existing successor with source lineage targeted by %s", async (targetKind) => {
-    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "continue", nudge: false });
-    const successor = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "follow-on",
-      chainOfRecord: [source.qitemId], nudge: false });
-    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
-      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-      body: JSON.stringify({ state: "done", closureReason: "handed_off_to",
-        closureTarget: targetKind === "seat" ? "next@r" : successor.qitemId }),
-    });
-    expect(res.status).toBe(200);
-    expect(queueRepo.getById(source.qitemId)).toMatchObject({ state: "done", closureTarget: targetKind === "seat" ? "next@r" : successor.qitemId });
-    expect(queueRepo.getById(successor.qitemId)).toMatchObject({ state: "pending", chainOfRecord: [source.qitemId] });
-  });
+  it.each((["done", "handed-off"] as const).flatMap(state =>
+    (["seat", "qitem"] as const).map(targetKind => ({ state, targetKind }))))(
+    "accepts a linked successor targeted by $targetKind ($state)", async ({ state, targetKind }) => {
+      const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "continue", nudge: false });
+      const successor = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "follow-on",
+        chainOfRecord: [source.qitemId], nudge: false });
+      const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+        body: JSON.stringify({ state, closureReason: "handed_off_to",
+          closureTarget: targetKind === "seat" ? "next@r" : successor.qitemId }),
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).handoffAdvisory).toBeUndefined();
+      expect(queueRepo.getById(source.qitemId)).toMatchObject({ state, closureTarget: targetKind === "seat" ? "next@r" : successor.qitemId });
+      expect(queueRepo.getById(successor.qitemId)).toMatchObject({ state: "pending", chainOfRecord: [source.qitemId] });
+    },
+  );
 
   it("does not infer lost custody when a linked successor has handed on to a third owner", async () => {
     const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "continue", nudge: false });
@@ -163,8 +169,9 @@ describe("queue routes", () => {
     expect(queueRepo.list({ limit: 100 })).toHaveLength(3);
   });
 
-  it.each([{ states: ["failed"] }, { states: ["denied"] }, { states: ["canceled"] }, { states: ["done"] }, { states: ["done", "failed"] }] as const)(
-    "does not infer custody from linked local successor states $states", async ({ states }) => {
+  it.each((["done", "handed-off"] as const).flatMap(closureState =>
+    ([{ states: ["failed"] }, { states: ["denied"] }, { states: ["canceled"] }, { states: ["done"] }, { states: ["done", "failed"] }] as const).map(test => ({ ...test, closureState }))))(
+    "does not infer custody from linked successor states $states ($closureState)", async ({ states, closureState }) => {
       const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "continue", nudge: false });
       for (const state of states) {
         const successor = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "follow-on",
@@ -175,7 +182,7 @@ describe("queue routes", () => {
       const count = queueRepo.list({ limit: 100 }).length;
       const res = await app.request(`/api/queue/${source.qitemId}/update`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-        body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+        body: JSON.stringify({ state: closureState, closureReason: "handed_off_to", closureTarget: "next@r" }),
       });
       expect(res.status).toBe(200);
       expect((await res.json()).handoffAdvisory).toBeUndefined();
@@ -184,7 +191,7 @@ describe("queue routes", () => {
     },
   );
 
-  it("keeps a saved generic close successful when the optional custody lookup is unavailable", async () => {
+  it.each(["done", "handed-off"] as const)("keeps a saved %s close successful when custody lookup is unavailable", async (state) => {
     const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "continue", nudge: false });
     const nativePrepare = db.prepare.bind(db);
     const prepare = vi.spyOn(db, "prepare").mockImplementation((sql) => {
@@ -196,14 +203,14 @@ describe("queue routes", () => {
     try {
       const res = await app.request(`/api/queue/${source.qitemId}/update`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-        body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+        body: JSON.stringify({ state, closureReason: "handed_off_to", closureTarget: "next@r" }),
       });
       expect(res.status).toBe(200);
       const row = await res.json();
-      expect(row.state).toBe("done");
+      expect(row.state).toBe(state);
       expect(row.handoffAdvisory).toBeUndefined();
       expect(nativePrepare("SELECT state, closure_reason, closure_target FROM queue_items WHERE qitem_id = ?").get(source.qitemId))
-        .toEqual({ state: "done", closure_reason: "handed_off_to", closure_target: "next@r" });
+        .toEqual({ state, closure_reason: "handed_off_to", closure_target: "next@r" });
       expect(nativePrepare("SELECT COUNT(*) AS n FROM queue_items").get()).toEqual({ n: 1 });
     } finally { prepare.mockRestore(); }
     expect(queueRepo.getById(source.qitemId)?.handoffAdvisory?.status).toBe("unverified");
@@ -979,6 +986,19 @@ describe("queue routes", () => {
     expect(data[0]!.body).toBe("fyi");
   });
 
+  it("queue, inbox and outbox list refuse only a non-numeric or unbindable limit (#586)", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    await expectLimitParsing(app, "/api/queue/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/inbox/list?destinationSession=b@r");
+    await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
@@ -1646,6 +1666,57 @@ describe("queue routes", () => {
       expect(body.asDestination.inProgress).toBe(1);
       expect(body.asDestination.recent).toHaveLength(2);
       expect(body.asSource.total).toBe(0);
+    });
+
+    // OPR.0.7.0.12 — work candidates ride only an explicit request, and the read writes nothing.
+    it("GET /api/queue/whoami adds workCandidates only with candidates=1, read-only", async () => {
+      const created = await app.request("/api/queue/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+        body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "x", tags: ["mission:m"] }),
+      });
+      expect(created.status).toBe(201);
+      const counts = () => ({
+        items: (db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n,
+        transitions: (db.prepare("SELECT COUNT(*) AS n FROM queue_transitions").get() as { n: number }).n,
+      });
+      const before = counts();
+      const plain = (await (await app.request("/api/queue/whoami?session=bob@r")).json()) as Record<string, unknown>;
+      expect(plain).not.toHaveProperty("workCandidates");
+      const asked = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      expect(asked.status).toBe(200);
+      const body = (await asked.json()) as { workCandidates: { next: Array<{ missions: string[] }>; candidates: unknown[]; held: unknown[] } };
+      expect(body.workCandidates.next).toEqual([expect.objectContaining({ missions: ["m"] })]);
+      expect(body.workCandidates.candidates).toEqual([]);
+      expect(counts()).toEqual(before);
+    });
+
+    // A set-aside row must stay in "held" however many newer pending rows the seat has: the two
+    // lists are bounded separately, so a full next list can't push it out.
+    it("GET /api/queue/whoami?candidates=1 keeps an older blocked row in held past 50 newer pending rows", async () => {
+      const create = async (body: string) => {
+        const res = await app.request("/api/queue/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
+          body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body }),
+        });
+        return ((await res.json()) as { qitemId: string }).qitemId;
+      };
+      const parked = await create("parked");
+      db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = 'external:gate', ts_created = ? WHERE qitem_id = ?")
+        .run("2020-01-01T00:00:00.000Z", parked);
+      for (let i = 0; i < 51; i++) await create(`pending ${i}`);
+
+      const res = await app.request("/api/queue/whoami?session=bob@r&candidates=1");
+      expect(res.status).toBe(200);
+      const { workCandidates } = (await res.json()) as { workCandidates: {
+        held: Array<{ qitemId: string; blockedOn: string }>; next: unknown[];
+        heldTruncated: boolean; nextTruncated: boolean; heldAndNextTruncated: boolean } };
+      expect(workCandidates.held).toEqual([expect.objectContaining({ qitemId: parked, blockedOn: "external:gate" })]);
+      expect(workCandidates.next).toHaveLength(50);
+      expect(workCandidates.heldTruncated).toBe(false);
+      expect(workCandidates.nextTruncated).toBe(true);
+      expect(workCandidates.heldAndNextTruncated).toBe(true);
     });
 
     it("GET /api/queue/whoami returns 400 without session query param", async () => {

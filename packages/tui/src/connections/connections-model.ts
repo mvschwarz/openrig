@@ -9,8 +9,11 @@ export interface ConnectionsRead {
   settings: Array<{ key: string; value: string | null; source: string }>;
   configSource: { state: string; path: string | null };
   configuration: null | { enabled: boolean; channel: string | null; inboundDestination: string | null;
-    outboundDestinations: Array<string | null>; postLevel: string; interruptLevel: string; botToken: string; appToken: string };
-  running: { state: string; activatedAt: string | null; outboundReady: boolean | null; inboundReady: boolean | null; inboundState: string; applied: string };
+    outboundDestinations: Array<string | null>; postLevel: string; interruptLevel: string; botToken: string; appToken: string;
+    /** #192: absent from daemons that predate the channel map. */
+    channelMap?: Array<{ match: string | null; channel: string | null }> };
+  running: { state: string; activatedAt: string | null; outboundReady: boolean | null; inboundReady: boolean | null; inboundState: string; applied: string;
+    inboundDelivery?: string | null; inboundEventsMissingSince?: string | null };
   state: string; nextAction: string;
   verification: { state: string; at: string | null; actor: string | null };
   registry: { state: string; path: string | null };
@@ -85,9 +88,10 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
   if (cfg) {
     lines.push(fieldLine({ label: "enabled", value: String(cfg.enabled) }),
       fieldLine({ label: "channel", value: cfg.channel ?? "missing" }),
+      ...(cfg.channelMap ?? []).map((e) => fieldLine({ label: "channel map", value: `${e.match ?? "withheld"} → ${e.channel ?? "withheld"}` })),
       fieldLine({ label: "credentials", value: `bot ${cfg.botToken}; Socket Mode app ${cfg.appToken} (values hidden)` }),
       fieldLine({ label: "outbound", value: c.running.outboundReady === null ? "unreported" : `${c.running.outboundReady ? "configured at activation" : "not configured at activation"}; posting >= ${cfg.postLevel}, interrupting >= ${cfg.interruptLevel} (current config)` }),
-      fieldLine({ label: "inbound", value: c.running.inboundState }));
+      fieldLine({ label: "inbound", value: inboundValue(c.running) }));
     let inboundAction: ContentLine["action"];
     for (const host of snap.hosts) for (const rig of host.rigs) for (const pod of rig.pods) {
       const a = pod.agents.find((a) => a.session === cfg.inboundDestination);
@@ -122,4 +126,15 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
   }
   lines.push(listItem("Open work and workflows", { type: "jump", section: "scopes" }), listItem("Human requests and waits", { type: "jump", section: "needs" }), listItem("Return to previous view", { type: "back" }));
   return wrapDetailLines(lines, width);
+}
+
+/** An open socket is not proof that events arrive, so the delivery word is named beside the state.
+ *  A daemon too old to report delivery leaves the bare state. */
+export function inboundValue(r: ConnectionsRead["running"]): string {
+  if (r.inboundDelivery === "events-missing") return `${r.inboundState}; events missing since ${r.inboundEventsMissingSince ?? "unknown"}`;
+  if (r.inboundDelivery === "no-server-pings") return `${r.inboundState}; no server pings`;
+  if (r.inboundDelivery === "socket-mode-disabled") return `${r.inboundState}; Socket Mode disabled in the Slack app settings`;
+  if (r.inboundState === "connected" && r.inboundDelivery === "delivering") return "connected; delivering";
+  if (r.inboundState === "connected" && r.inboundDelivery === "unknown") return "connected; delivery not yet confirmed";
+  return r.inboundState;
 }

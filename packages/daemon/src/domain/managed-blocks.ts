@@ -71,13 +71,16 @@ export function mergeManagedBlock(
       const candidateBegin = MANAGED_BLOCK_START(id);
       const candidateEnd = MANAGED_BLOCK_END(id);
       const regex = new RegExp(`${escapeRegex(candidateBegin)}[\\s\\S]*?${escapeRegex(candidateEnd)}`, "g");
-      updated = updated.replace(regex, id === blockId ? block : "");
+      // A replacer function inserts the block literally; a replacement string
+      // would expand `$$`, `$&`, `` $` `` and `$'` in the authored content.
+      const replacement = id === blockId ? block : "";
+      updated = updated.replace(regex, () => replacement);
       // Legacy marker variant from prior installs — replace with the
       // OpenRig form (or strip when not the active block id).
       const legacyBegin = LEGACY_BLOCK_START(id);
       const legacyEnd = LEGACY_BLOCK_END(id);
       const legacyRegex = new RegExp(`${escapeRegex(legacyBegin)}[\\s\\S]*?${escapeRegex(legacyEnd)}`, "g");
-      updated = updated.replace(legacyRegex, id === blockId ? block : "");
+      updated = updated.replace(legacyRegex, () => replacement);
     }
     if (!updated.includes(begin) || !updated.includes(end)) {
       updated = `${updated.trim()}\n\n${block}`.trim();

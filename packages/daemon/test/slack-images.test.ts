@@ -256,11 +256,13 @@ describe("#47 — a non-image https evidenceRef never becomes a Block Kit image 
   it.each([
     { name: "evidence context", evidenceRef: "https://example.invalid/" + "a".repeat(3000), body: "b", error: /evidence context/ },
     { name: "escaped evidence context", evidenceRef: "https://example.invalid/?" + "&".repeat(600), body: "b", error: /evidence context/ },
-    { name: "complete fallback", evidenceRef: "https://example.invalid/" + "a".repeat(1500), body: "b".repeat(2500), error: /complete fallback/ },
-  ])("rejects an oversized $name in preflight before any Slack request", async ({ evidenceRef, body, error }) => {
+    // A long body alone is now split into thread replies (#897); a subject plus evidence over the
+    // fallback budget leaves no room in any part.
+    { name: "complete fallback", evidenceRef: "https://example.invalid/" + "a".repeat(1500), summary: "s".repeat(2500), body: "b", error: /complete fallback/ },
+  ])("rejects an oversized $name in preflight before any Slack request", async ({ evidenceRef, body, error, ...rest }) => {
     const { fetchImpl, calls } = slackFetch();
     const outbound = decision(evidenceRef);
-    outbound.payload = { ...(outbound.payload as Record<string, unknown>), body };
+    outbound.payload = { ...(outbound.payload as Record<string, unknown>), body, ...("summary" in rest ? { summary: rest.summary } : {}) };
     const out = await makeDeliver(fetchImpl)(outbound);
     expect(out).toMatchObject({ ok: false, class: "human-message-unrenderable", detail: expect.stringMatching(error) });
     expect(calls).toHaveLength(0);

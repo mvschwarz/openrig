@@ -252,9 +252,14 @@ export interface HerdrLayoutPlan {
   pages: HerdrPagePlan[];
 }
 
+/** A named view's tab: its panes' names in reading order, such as "dashboard · operator". */
+export function namedTabLabel(page: ComposedPane[]): string {
+  return page.map((pane) => pane.label).join(" · ");
+}
+
 /**
  * Build the herdr socket plan for a composed view. PURE — no I/O. Each page
- * gets a fresh tab labeled `${tabPrefix}:${view.id}#${launchToken}/<pageIndex>`;
+ * gets a fresh tab labeled `${tabPrefix}:${view.id}#<plan>#${launchToken}/<pageIndex>`;
  * two calls with different `launchToken`s produce DIFFERENT labels, which is
  * exactly the fresh-tab-on-relaunch (not-replace) invariant.
  */
@@ -263,14 +268,16 @@ export function planHerdrLayout(
   launchToken: string,
   tabPrefix: string = "openrig",
 ): HerdrLayoutPlan {
-  const base = `${tabPrefix}:${view.id}#${launchToken}`;
-  // The workspace is named for people: the rig name for a rig view, else the view id.
-  // Tab labels keep the launch token, so every open is still a fresh, distinct space.
-  const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;
+  // Older callers without a preview fingerprint still get fresh, non-reusable tabs.
+  const base = `${tabPrefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
+  // The workspace is named for people: a named view's own label, the rig name for a rig view, else the view id.
+  // Tab labels keep the launch token, so every open is still a fresh, distinct space. A named view's
+  // tabs carry their panes' names instead; the CLI confirms reuse by live attachments, not labels.
+  const workspaceLabel = view.spaceLabel ?? (view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id);
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
     const grid = buildGridRoot(page, view.columns);
     return {
-      tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
+      tabLabel: view.spaceLabel ? namedTabLabel(page) : view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
       root: grid.root,
       blanks: grid.blanks,
     };
@@ -305,6 +312,7 @@ export function extractWorkspaceId(result: HerdrResult): string | null {
 
 export interface HerdrAdapterDeps {
   transportFactory: HerdrTransportFactory;
+  launch?: ProviderStatus["launch"];
   /**
    * Mint a fresh launch token per `openView` so a relaunch creates a new tab
    * (BR-5). Injectable for deterministic tests. Default: a per-instance
@@ -360,6 +368,7 @@ export class HerdrAdapter implements TerminalProvider {
       const probe = await this.transport.probe();
       return {
         provider: this.name,
+        ...(this.deps.launch ? { launch: this.deps.launch } : {}),
         available: probe.alive,
         ...(probe.version ? { version: probe.version } : {}),
         // The socket answering ping IS the capability surface: layout.apply is
@@ -369,7 +378,7 @@ export class HerdrAdapter implements TerminalProvider {
       };
     } catch {
       // An unreachable socket (herdr not running) = honestly unavailable.
-      return { provider: this.name, available: false, capabilities: {} };
+      return { provider: this.name, available: false, capabilities: {}, ...(this.deps.launch ? { launch: this.deps.launch } : {}) };
     }
   }
 

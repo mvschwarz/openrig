@@ -3,7 +3,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { Command } from "commander";
 import { runProgram } from "../src/cli-error.js";
-import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 
 let server: http.Server | undefined;
 afterEach(async () => {
@@ -50,6 +50,29 @@ function observedFetch() {
 }
 
 describe("DaemonClient response body deadline", () => {
+  it.each(["json", "text"])("honors caller cancellation during a %s body read", async (kind) => {
+    const endpoint = await slowBodyServer(500);
+    const observed = observedFetch();
+    const client = new DaemonClient(endpoint.url, { fetchImpl: observed.fetchImpl });
+    const controller = new AbortController();
+    const request = kind === "json" ? client.get("/read", { signal: controller.signal }) : client.getText("/read", { signal: controller.signal });
+    const result = request.then(() => null, (error: unknown) => error);
+    await observed.headersReceived;
+    controller.abort(new Error("Owned caller deadline"));
+    expect(await result).toBeInstanceOf(DaemonResponseError);
+    expect(endpoint.requests()).toBe(1);
+    await expect.poll(endpoint.closedBeforeEnd).toBe(1);
+  });
+
+  it("does not dispatch a request whose caller signal is already aborted", async () => {
+    const endpoint = await slowBodyServer(0);
+    const client = new DaemonClient(endpoint.url);
+    const controller = new AbortController();
+    controller.abort(new Error("Owned caller deadline"));
+    await expect(client.get("/read", { signal: controller.signal })).rejects.toBeInstanceOf(DaemonConnectionError);
+    expect(endpoint.requests()).toBe(0);
+  });
+
   it.each(["json", "text", "write"])("bounds %s body reads after headers arrive", async (kind) => {
     const endpoint = await slowBodyServer(4_000);
     const observed = observedFetch();

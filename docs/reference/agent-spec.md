@@ -1,8 +1,8 @@
 # AgentSpec Reference
 
 Version: 1.0
-Last validated against code: 2026-10-05, at main `fcaf1f8e`
-Source of truth: `packages/daemon/src/domain/agent-manifest.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/agent-resolver.ts`, `packages/daemon/src/domain/profile-resolver.ts`
+Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; changes to its sources and the shipped agent specs since then checked)
+Source of truth: `packages/daemon/src/domain/agent-manifest.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/agent-resolver.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/skill-catalog.ts`
 
 This is the canonical reference for the AgentSpec YAML format (`agent.yaml`). Every field, validation rule, and default documented here was traced from the actual parser and validator code.
 
@@ -35,7 +35,7 @@ startup:
 ```yaml
 name: implementer
 version: "1.0"
-description: Implementation agent — writes code following TDD discipline
+description: Implementation agent — implements and verifies coherent changes
 
 defaults:
   runtime: claude-code
@@ -46,7 +46,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [development-team, test-driven-development, systematic-debugging, verification-before-completion]
+      skills: [development-team, systematic-debugging, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]
@@ -369,7 +369,7 @@ version.
 | `skills` | `id`, `path` | Skill directories containing a SKILL.md. Projected by the runtime adapter: Claude to `<cwd>/.claude/skills/<id>`, Codex to `<cwd>/.agents/skills/<id>`, Pi and OMP to the seat's own agent directory under OpenRig's state. |
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
 | `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
-| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Neither Claude Code nor Codex reads skills from that plugin folder, so when a seat is instantiated a selected plugin's skills are also projected into the seat's skill folder (`.claude/skills/<name>` or `.agents/skills/<name>`) under their plain names. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone, with a `plugin_skill_kept` warning. Hooks ship inside plugins. |
+| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Neither Claude Code nor Codex reads skills from that plugin folder, so when a seat is instantiated a selected plugin's skills are also projected into the seat's skill folder (`.claude/skills/<name>` or `.agents/skills/<name>`) under their plain names. A folder already there with the same name, ignoring letter case, that OpenRig doesn't own is left alone; unless it already holds the same bytes, launch warns `plugin_skill_kept`. A skill the seat already selects by that name (from its profile, the System World or the project) keeps that source, an edited OpenRig-owned copy is kept with `plugin_skill_kept`, a retained plugin copy whose remembered source can no longer be projected is also kept with `plugin_skill_kept` (a seat selecting that plugin refreshes it at its next launch), and if the plugin skills can't be projected the seat launches without them and warns `plugin_skills_not_projected`. Hooks ship inside plugins. |
 | `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. |
 
 *Fields marked with `*` are optional.
@@ -526,13 +526,13 @@ Every agent below except `shared` imports `shared` and selects `plugins: [shared
 | Agent | Location | Default runtime | Profile skills | Purpose |
 |-------|----------|-----------------|----------------|---------|
 | `shared` | `shared/` | — | — (resource pool only) | Shared skills, the `openrig-core` plugin and runtime resources |
-| `implementer` | `development/implementer/` | claude-code | development-team, test-driven-development, systematic-debugging, verification-before-completion | TDD implementation agent |
-| `qa` | `development/qa/` | codex | test-driven-development, development-team, systematic-debugging, verification-before-completion, agent-browser, dogfood | Quality assurance agent |
+| `implementer` | `development/implementer/` | claude-code | development-team, systematic-debugging, verification-before-completion | Implementation agent |
+| `qa` | `development/qa/` | codex | development-team, systematic-debugging, verification-before-completion, agent-browser, dogfood | Quality assurance agent |
 | `orchestrator` | `orchestration/orchestrator/` | claude-code | orchestration-team, systematic-debugging, verification-before-completion | Rig orchestration lead |
 | `independent-reviewer` | `review/independent-reviewer/` | claude-code | review-team, systematic-debugging, verification-before-completion | Independent code reviewer |
 | `vault-specialist` | `apps/vault-specialist/` | claude-code | systematic-debugging, verification-before-completion, vault-user | Vault domain specialist |
 | `product-designer` | `design/product-designer/` | claude-code | development-team, frontend-design, verification-before-completion | Product designer |
-| `pm` | `product-management/pm/` | claude-code | office-hours, context-builder, requirements-writer, ui-mockup, plan-review, exec-summary, backlog-capture | Product manager |
+| `pm` | `product-management/pm/` | claude-code | office-hours, context-builder, requirements-writer, ui-mockup, plan-review, exec-summary, backlog-capture; `advisor` profile: orchestration-team | Product manager; its `advisor` profile is the factory's advisor |
 | `analyst`, `synthesizer` | `research/analyst/`, `research/synthesizer/` | claude-code, codex | — | Research team |
-| `conveyor-lead`, `-planner`, `-builder`, `-reviewer` | `conveyor/` | claude-code, codex, claude-code, codex | per role | Conveyor team |
-| `factory-rsi-release-manager`, `factory-rsi-dogfood` | `factory-rsi/` | claude-code | per role | Factory team |
+| `conveyor-lead`, `-planner`, `-builder`, `-reviewer` | `conveyor/` | claude-code, codex, claude-code, codex | per role | Kept for the `factory-rsi` world bundle (its planner); no built-in team uses them |
+| `factory-rsi-release-manager`, `factory-rsi-dogfood` | `factory-rsi/` | claude-code | per role | Used by the `factory-rsi` world bundle (not a built-in team) |

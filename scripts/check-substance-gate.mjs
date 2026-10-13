@@ -29,6 +29,7 @@ const RULE_FIELDS = [
   "charged_terms",
   "internal_path_globs",
   "allowed_context_substrings",
+  "allowed_context_lines",
 ];
 
 function main(argv = process.argv.slice(2)) {
@@ -191,6 +192,7 @@ function selectDerivedRules(rules) {
     charged_terms: [],
     internal_path_globs: [...(rules.internal_path_globs ?? [])],
     allowed_context_substrings: [...(rules.allowed_context_substrings ?? [])],
+    allowed_context_lines: [...(rules.allowed_context_lines ?? [])],
   };
 }
 

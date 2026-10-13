@@ -269,6 +269,50 @@ describe("rig start (OPR.0.3.4.1)", () => {
 
   // ---- IDEMPOTENT RERUN ----
 
+  describe.each([
+    { flag: "--last", args: ["--last"] },
+    { flag: "--rigs", args: ["--rigs", "on-demand"] },
+  ])("intentional stop with $flag", ({ args }) => {
+    it("lists the rig and reports rig_not_stopped even when its display is healthy", async () => {
+      setupCandidateRig("on-demand");
+      routes["/api/rigs/summary"] = () => [{
+        id: "rig-1", name: "on-demand", nodeCount: 2,
+        lifecycleState: "running", restoreLifecycleState: "degraded",
+      }];
+      const preview = routes["/api/rigs/:id/up"]!;
+      routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? preview(req, body) : {
+        _httpStatus: 409, code: "rig_not_stopped", error: "Rig still has live sessions",
+      };
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "start", ...args, "--json"]);
+      });
+      expect(exitCode).toBe(1);
+      const result = JSON.parse(logs.find((line) => line.startsWith("{"))!);
+      expect(result.candidates).toEqual([{ rigName: "on-demand", lifecycleState: "degraded" }]);
+      expect(result.restoredRigs).toEqual([{ rigName: "on-demand", status: "rig_not_stopped", nodes: [] }]);
+      expect(upBodies.map((body) => body.plan)).toEqual([true, false]);
+    });
+
+    it("still skips a rig that becomes fully running after the preview", async () => {
+      setupCandidateRig("on-demand");
+      let reads = 0;
+      routes["/api/rigs/summary"] = () => [{
+        id: "rig-1", name: "on-demand", nodeCount: 2, lifecycleState: "running",
+        restoreLifecycleState: ++reads === 1 ? "degraded" : "running",
+      }];
+
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "start", ...args, "--json"]);
+      });
+      expect(exitCode ?? 0).toBe(0);
+      const result = JSON.parse(logs.find((line) => line.startsWith("{"))!);
+      expect(result.candidates).toEqual([{ rigName: "on-demand", lifecycleState: "degraded" }]);
+      expect(result.restoredRigs).toEqual([{ rigName: "on-demand", status: "already_running", nodes: [] }]);
+      expect(upBodies.map((body) => body.plan)).toEqual([true]);
+    });
+  });
+
   it("already-running rig is SKIPPED (not relaunched)", async () => {
     routes["/api/rigs/summary"] = () => [
       { id: "rig-1", name: "live-rig", nodeCount: 2, lifecycleState: "running" },

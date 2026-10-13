@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, join, resolve, dirname } from "node:path";
 import { sha256Hex } from "./files/file-write-service.js";
 import type { SkillProvenanceEntry } from "./skill-discovery.js";
 
@@ -15,6 +15,8 @@ export interface SkillAuditEntry {
   state: "active" | "stale" | "legacy" | "exempt";
   owner: string | null;
   sourceRef: string | null;
+  /** The installed plugin this copy is byte-identical to, when it is one of OpenRig's bundled skills. */
+  bundledFrom: { plugin: string; version: string } | null;
   findings: AuditFinding[];
 }
 
@@ -22,7 +24,16 @@ export type VerifiedStatus =
   | { status: "verified"; date: string; source: string }
   | { status: "bare_verified"; date: string }
   | { status: "missing_verified" }
-  | { status: "stale_verified"; date: string; source: string };
+  | { status: "stale_verified"; date: string; source: string }
+  // A bundled copy is verified by the plugin release that shipped it; it has no date to expire.
+  | { status: "bundled"; plugin: string; version: string };
+
+/** One installed plugin's skills directory, with the plugin version that the projected copies came from. */
+export interface BundledSkillSource {
+  plugin: string;
+  version: string;
+  skillsDir: string;
+}
 
 export interface AuditFinding {
   class: "missing_provenance" | "missing_verified" | "bare_verified" | "stale_verified" | "mirror_drift";
@@ -145,6 +156,66 @@ function hashSkillFolder(skillPath: string): string {
   return sha256Hex(parts.join("\n"));
 }
 
+const PLUGIN_MANIFESTS = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"];
+
+/** The installed plugins under pluginsDir (OPENRIG_HOME/plugins) that ship skills. The daemon projects
+ *  bundled skills from these directories, so they are the reference for a projected copy's bytes. */
+export function listBundledSkillSources(pluginsDir: string): BundledSkillSource[] {
+  let plugins: string[];
+  try { plugins = readdirSync(pluginsDir).sort(); } catch { return []; }
+  const sources: BundledSkillSource[] = [];
+  for (const plugin of plugins) {
+    const skillsDir = join(pluginsDir, plugin, "skills");
+    if (!existsSync(skillsDir)) continue;
+    const version = PLUGIN_MANIFESTS.map((rel) => {
+      try {
+        const parsed = JSON.parse(readFileSync(join(pluginsDir, plugin, rel), "utf8")) as { version?: unknown };
+        return typeof parsed.version === "string" ? parsed.version : null;
+      } catch { return null; }
+    }).find((v) => v !== null);
+    if (version) sources.push({ plugin, version, skillsDir });
+  }
+  return sources;
+}
+
+/** Every file under dir, relative to it; dir itself may be a symlink. A symlinked directory inside it is
+ *  listed as an entry but never walked, so a link cycle (`a -> .`) can't run away, and a copy holding one
+ *  can't match a plugin's plain files. */
+function listFilesRecursive(dir: string, prefix = ""): string[] {
+  let entries: string[];
+  try { entries = readdirSync(dir).sort(); } catch { return []; }
+  const files: string[] = [];
+  for (const entry of entries) {
+    const full = join(dir, entry);
+    let stat;
+    try { stat = statSync(full); } catch { continue; }
+    if (stat.isDirectory() && !lstatSync(full).isSymbolicLink()) files.push(...listFilesRecursive(full, join(prefix, entry)));
+    else if (stat.isDirectory() || stat.isFile()) files.push(join(prefix, entry));
+  }
+  return files;
+}
+
+// The projection writes this marker beside the plugin's files (plugin-vendor-service GLOBAL_VENDOR_VERSION).
+const PROJECTION_MARKER = ".openrig-vendor-version";
+
+/** A copy is bundled when the same-named skill in an installed plugin exists, the copy holds exactly the
+ *  plugin's files (plus the projection's version marker), and every one has identical bytes. An edited,
+ *  added or missing file means the copy is audited like any other skill. */
+function matchBundledSource(skillPath: string, sources: BundledSkillSource[]): BundledSkillSource | null {
+  for (const source of sources) {
+    const pluginSkill = join(source.skillsDir, basename(skillPath));
+    const files = listFilesRecursive(pluginSkill);
+    if (!files.includes("SKILL.md")) continue;
+    if (listFilesRecursive(skillPath).some((rel) => rel !== PROJECTION_MARKER && !files.includes(rel))) continue;
+    const identical = files.every((rel) => {
+      try { return readFileSync(join(pluginSkill, rel)).equals(readFileSync(join(skillPath, rel))); }
+      catch { return false; }
+    });
+    if (identical) return source;
+  }
+  return null;
+}
+
 export interface MirrorDriftResult {
   stale: boolean;
   changes: string[];
@@ -155,7 +226,10 @@ export interface SkillAuditResult {
   mirrorDriftFindings: AuditFinding[];
 }
 
-export function auditSkills(entries: SkillProvenanceEntry[], opts?: { mirrorDrift?: MirrorDriftResult }): SkillAuditResult {
+export function auditSkills(
+  entries: SkillProvenanceEntry[],
+  opts?: { mirrorDrift?: MirrorDriftResult; bundledSources?: BundledSkillSource[] },
+): SkillAuditResult {
   const mirrorDriftFindings: AuditFinding[] = [];
   if (opts?.mirrorDrift?.stale) {
     for (const change of opts.mirrorDrift.changes) {
@@ -173,9 +247,16 @@ export function auditSkills(entries: SkillProvenanceEntry[], opts?: { mirrorDrif
     const openrig = meta?.openrig as Record<string, unknown> | undefined;
 
     const stage = openrig?.stage ? String(openrig.stage) : null;
-    const owner = openrig?.owner ? String(openrig.owner) : null;
-    const sourceRef = openrig?.source_ref ?? openrig?.version ? String(openrig.source_ref ?? openrig?.version) : null;
-    const verified = extractVerified(fm, entry.path);
+    const bundled = matchBundledSource(entry.path, opts?.bundledSources ?? []);
+    const bundledFrom = bundled ? { plugin: bundled.plugin, version: bundled.version } : null;
+    // A bundled copy's provenance is the plugin that shipped it; frontmatter values still win where present.
+    const owner = openrig?.owner ? String(openrig.owner) : bundled ? bundled.plugin : null;
+    const sourceRef = openrig?.source_ref ?? openrig?.version
+      ? String(openrig.source_ref ?? openrig?.version)
+      : bundled ? `${bundled.plugin}@${bundled.version}` : null;
+    const verified: VerifiedStatus = bundled
+      ? { status: "bundled", plugin: bundled.plugin, version: bundled.version }
+      : extractVerified(fm, entry.path);
     const contentHash = hashSkillFolder(entry.path);
     const exempt = isExempt(fm, entry.body);
 
@@ -243,6 +324,7 @@ export function auditSkills(entries: SkillProvenanceEntry[], opts?: { mirrorDrif
       state,
       owner,
       sourceRef,
+      bundledFrom,
       findings,
     };
   });

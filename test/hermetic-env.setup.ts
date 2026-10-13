@@ -40,6 +40,10 @@ for (const key of [
   "WORKSPACE_CATALOG_PATH", "TOPOLOGY_ROOT", "CONTEXT_ROOT", "CONTEXT_PACKS_ROOT",
   "SKILLS_ROOT", "SHARED_DOCS_ROOT", "FILES_ALLOWLIST", "PROGRESS_SCAN_ROOTS",
   "SESSION_NAME", "NODE_ID", "RIG_ID", "AUTH_BEARER_TOKEN", "TERMINAL_BEARER_TOKEN",
+  // Slice 15: a seat with compact output on must not change what the suite prints.
+  "OUTPUT_COMPACT",
+  // Slice 01: a seat with usage windows on must not change what the suite reads.
+  "PROVIDER_USAGE_WINDOWS",
 ]) {
   delete process.env[`OPENRIG_${key}`];
   delete process.env[`RIGGED_${key}`];

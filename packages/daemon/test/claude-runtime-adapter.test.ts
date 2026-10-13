@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
@@ -89,7 +90,7 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
   it("absent model → the resume command is exact bytes (no --model, posture intact)", async () => {
     const tmux = mockTmux();
     await adapterWith(tmux).launchHarness(withModel(undefined), { name: "seat", resumeToken: "tok-123" });
-    expect(lastCmd(tmux)).toBe(`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude ${POSTURE} --resume tok-123 --name seat`);
+    expect(lastCmd(tmux)).toBe(`OPENRIG_RESUME_LAUNCH='tok-123' CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude ${POSTURE} --resume 'tok-123' --name seat`);
   });
 
   // D1 pin — posture BYTE-UNCHANGED both directions: the ONLY delta with/without model is the
@@ -176,7 +177,7 @@ describe("launchHarness — classic-renderer env prefix (OPR.0.5.3.1 scrollback 
   it("RESUME launch carries the prefix", async () => {
     const tmux = mockTmux();
     await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", resumeToken: "tok-123" });
-    expect(lastCmd(tmux)).toBe(`${PREFIX}claude ${POSTURE} --resume tok-123 --name seat`);
+    expect(lastCmd(tmux)).toBe(`OPENRIG_RESUME_LAUNCH='tok-123' ${PREFIX}claude ${POSTURE} --resume 'tok-123' --name seat`);
   });
 
   it("FORK launch carries the prefix", async () => {
@@ -185,11 +186,40 @@ describe("launchHarness — classic-renderer env prefix (OPR.0.5.3.1 scrollback 
     expect(lastCmd(tmux).startsWith(PREFIX + "claude ")).toBe(true);
   });
 
-  it("override OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 omits the prefix (byte-identical to pre-change)", async () => {
+  it("override OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 omits the renderer prefix; the resume keeps its launch marker (#1077)", async () => {
     process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN = "0";
     const tmux = mockTmux();
     await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", resumeToken: "tok-123" });
-    expect(lastCmd(tmux)).toBe(`claude ${POSTURE} --resume tok-123 --name seat`);
+    expect(lastCmd(tmux)).toBe(`OPENRIG_RESUME_LAUNCH='tok-123' claude ${POSTURE} --resume 'tok-123' --name seat`);
+  });
+});
+
+// The non-managed launch command is parsed by the pane shell, so the resume token must stay one
+// argument whatever it contains — the same quoting as the restore path (claude-resume.ts).
+describe("launchHarness — the resume token is one shell argument", () => {
+  const adapterWith = (tmux: TmuxAdapter) => new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+  // Parse the command with a real shell; `claude` is a function that prints its argv, one per line.
+  const argvOf = (cmd: string): string[] =>
+    execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${cmd}`], { encoding: "utf8" }).split("\n").slice(0, -1);
+
+  it.each(["tok; echo injected", "$(echo injected)", "two words", "it's"])("keeps %j after --resume as one argument", async (token) => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", resumeToken: token });
+    const argv = argvOf(lastCmd(tmux));
+    expect(argv.slice(argv.indexOf("--resume"))).toEqual(["--resume", token, "--name", "seat"]);
+  });
+
+  it("gives a UUID token the same argv as the unquoted form", async () => {
+    const token = "11111111-1111-4111-8111-111111111111";
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", resumeToken: token });
+    const cmd = lastCmd(tmux);
+    expect(argvOf(cmd)).toEqual(argvOf(cmd.replace(`'${token}'`, token)));
+    expect(argvOf(cmd).slice(-4)).toEqual(["--resume", token, "--name", "seat"]);
   });
 });
 
@@ -559,7 +589,7 @@ describe("Claude Code runtime adapter", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume abc-123 --name dev-impl@test-rig"
+      "OPENRIG_RESUME_LAUNCH='abc-123' CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'abc-123' --name dev-impl@test-rig"
     );
   });
 

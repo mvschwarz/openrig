@@ -157,6 +157,13 @@ describe("RigSpecPreflight", () => {
     expect(result.errors.some((e) => e.includes("claude-code"))).toBe(true);
   });
 
+  it("reports old Pi versions in legacy preflight without blocking", async () => {
+    const pf = createPreflight({ exec: async () => "0.73.1" });
+    const result = await pf.check(validSpec({ nodes: [{ id: "worker", runtime: "pi", cwd: "/" }] }));
+    expect(result.ready).toBe(true);
+    expect(result.warnings.join("\n")).toContain("older than OpenRig's tested baseline");
+  });
+
   it("cwd points to a file -> error", async () => {
     // /etc/hosts is a file, not a directory
     const spec = validSpec({

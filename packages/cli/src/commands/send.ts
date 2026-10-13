@@ -16,6 +16,11 @@ import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
+// A cross-host send waits for the remote to deliver, and the remote has no fixed deadline of its own (its tmux
+// calls run without a timeout), so no client budget is exact. This one sits well above a normal send, and above
+// fetch's 10 s connect timeout, so a host that never accepts the connection still reads as unreachable. A send
+// that outlasts it reads as unconfirmed, never as failed.
+const CROSS_HOST_SEND_TIMEOUT_MS = 30_000;
 
 /** The shared composer glyph set (Claude `❯`, Codex `›`, Codex 0.153 `»`) from the daemon's
  * composer-prompts surface, so the CLI staged check can never disagree with the daemon guard. */
@@ -816,8 +821,8 @@ async function runCrossHostSend(
  * sender verbatim — honest provenance; unknown on the remote it degrades to
  * the shipped non-blocking advisory, never a refusal. `--verify` prints the
  * REMOTE route's verified/outcome verbatim (remote-authoritative, never
- * locally synthesized). Deadline: the read-class client default, or
- * waitForIdleMs + overhead when --wait-for-idle (the local path's math).
+ * locally synthesized). Deadline: CROSS_HOST_SEND_TIMEOUT_MS, plus waitForIdleMs
+ * when --wait-for-idle. A send that may have arrived reads as unconfirmed.
  *
  * Auth posture (named, v0): runRemoteHttpOp presents the REGISTRY bearer
  * WHEN ONE IS CONFIGURED; for a URL-only anonymous host the Authorization
@@ -853,12 +858,22 @@ async function runHttpHostSend(
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
     session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
-  }, deps, waitForIdleMs !== undefined ? { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS } : {});
+  }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
+
+  // A send that may have reached the remote is unconfirmed, not unreachable: it may have been delivered, and a
+  // resend without checking risks a duplicate.
+  const unconfirmed = !result.ok && result.outcomeUnknown === true;
+  const shown = unconfirmed ? { ...result, failedStep: "remote-outcome-unknown" as const } : result;
+  const unconfirmedGuidance = {
+    consequence: "Delivery UNCONFIRMED — the remote daemon may have received and delivered the message.",
+    action: `Check the target before any resend: rig capture ${session} --host ${host.id}. A resend without checking risks a duplicate.`,
+  };
 
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
-      result,
+      result: shown,
+      ...(unconfirmed ? { error: { fact: result.error, ...unconfirmedGuidance } } : {}),
       // S3 wave-1 fix (r2 F2): the origin host cannot run the pane-effect
       // check on a remote seat — say so, never imply effect verification.
       ...(opts.verify ? { effectCheck: { checked: false, why: "cross-host http — the pane-effect check does not run cross-host" } } : {}),
@@ -869,7 +884,11 @@ async function runHttpHostSend(
   }
 
   if (!result.ok) {
-    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, hint);
+    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), shown, false, hint);
+    if (unconfirmed) {
+      console.error(`  ${unconfirmedGuidance.consequence}`);
+      console.error(`  ${unconfirmedGuidance.action}`);
+    }
     return;
   }
 

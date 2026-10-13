@@ -153,7 +153,8 @@ export class NodeLauncher {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
     }
 
-    const launchWarnings: string[] = [];
+    // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
+    const launchWarnings: string[] = [...(tmuxResult.warnings ?? [])];
 
     // Observe the pane before the DB transaction. A concrete pane is committed
     // with session+binding; an unresolved pane gets a durable named verdict in
@@ -210,6 +211,7 @@ export class NodeLauncher {
         if (!paneObservation.ok) {
           new SeatIdentityStore(this.db).upsert(paneObservationVerdict({
             nodeId: node.id,
+            sessionId: session.id,
             sessionName,
             observation: paneObservation,
           }));

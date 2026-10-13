@@ -14,3 +14,6 @@ files:
   - path: rig-spec.md
     role: reference
     summary: "The rig specification format."
+  - path: whats-new.md
+    role: reference
+    summary: "What changed in the installed version, for an agent on an upgraded install."

@@ -42,6 +42,7 @@ export function enumArg(allowed: readonly string[]): (value: string) => string {
 export function wantsJsonOutput(argv: readonly string[]): boolean {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    if (a === "--") break;
     if (a === "--json") return true;
     if ((a === "-o" || a === "--output" || a === "--format") && argv[i + 1] === "json") return true;
     if (/^(?:-o|--output|--format)=json$/.test(a)) return true;
@@ -158,9 +159,11 @@ export async function runProgram(program: Command, argv: string[], io: RunProgra
   applyExitOverride(program);
   // Suppress Commander's own plain-text stderr write when JSON was requested, so a
   // `--json` failure emits ONLY the JSON error object (below). Non-JSON keeps the
-  // familiar stderr text. Applied to the whole command tree.
+  // familiar stderr text. Applied to the whole command tree. `commanderWrote` records whether
+  // Commander itself wrote an error, so the catch below can tell what is still unprinted.
+  let commanderWrote = false;
   const suppressErr = (cmd: Command) => {
-    cmd.configureOutput({ writeErr: (str: string) => { if (!json) err(str.replace(/\n$/, "")); } });
+    cmd.configureOutput({ writeErr: (str: string) => { commanderWrote = true; if (!json) err(str.replace(/\n$/, "")); } });
     for (const sub of cmd.commands) suppressErr(sub);
   };
   suppressErr(program);
@@ -180,8 +183,13 @@ export async function runProgram(program: Command, argv: string[], io: RunProgra
     const code = (e as CommanderLikeError)?.exitCode ?? 1;
     if (json) {
       out(JSON.stringify(formatCliError(e)));
+    } else if (!commanderWrote) {
+      // Commander writes the errors it raises through configureOutput.writeErr above. Anything it
+      // did not write (a plain Error from an option parser, or any error an action throws, even a
+      // CommanderError such as InvalidArgumentError) reaches here unprinted; say it, so a human run
+      // never fails silently.
+      err(`error: ${formatCliError(e).error.message}`);
     }
-    // (non-JSON plain text was already emitted via configureOutput.writeErr above)
     exit(code || 1);
     return code || 1;
   }

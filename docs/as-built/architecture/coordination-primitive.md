@@ -10,8 +10,8 @@ applies-when: |
   transactional handoff guarantee, or where queue closure is enforced.
 siblings: [workflow-runtime.md, mission-control.md, daemon-core.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
-last-updated: 2026-10-05
+last-verified-against-source: e8f0ab340db773392ec8be75b072d1c0f3068a50
+last-updated: 2026-10-08
 ---
 
 # Coordination Primitive — Stream/Queue/Inbox/Outbox
@@ -24,7 +24,7 @@ filesystem path remains untouched, and the daemon-backed `rig queue` /
 only to SQLite (`packages/cli/src/commands/queue.ts:19`,
 `packages/cli/src/commands/stream.ts:11`).
 
-> Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. Each count below sits beside the
+> Verified against source at main `e8f0ab340db773392ec8be75b072d1c0f3068a50`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -44,7 +44,7 @@ Five host-scoped tables back the primitive, one per migration `023`–`027` in
   `archived_at` may be set, `stream-store.ts:217`).
 - **`queue_items`** (`024_queue_items.ts`) — L3 owned-work queue.
   Unless `--id` is supplied, the CLI generates the create request's `qitem_id` (TEXT PK) before sending as `qitem-<UTC YYYYMMDDHHMMSS>-<16 hex>` (64 random bits) and prints it to stderr as a request identity, not proof of persistence; reuse that ID with `--id` and the unchanged payload after an unknown outcome, while daemon callers without an ID still use `newQitemId()` and its `qitem-<UTC YYYYMMDDHHMMSS>-<8 hex>` form.
-  State enum (**8** values, `QUEUE_STATES` at `queue-repository.ts:32`;
+  State enum (**8** values, `QUEUE_STATES` at `queue-repository.ts:33`;
   `sed -n '/^export const QUEUE_STATES/,/] as const/p' packages/daemon/src/domain/queue-repository.ts | grep -c '^  "'`):
   `pending | in-progress | done | blocked | failed | denied | canceled |
   handed-off`. Carries `closure_reason`, `closure_target`,
@@ -70,9 +70,9 @@ Five host-scoped tables back the primitive, one per migration `023`–`027` in
   `pending | sending | delivered | failed | indeterminate | retained |
   retired`.
 
-These five are migrations `023`–`027` of the daemon's **94**
+These five are migrations `023`–`027` of the daemon's **96**
 (`git ls-files packages/daemon/src/db/migrations | wc -l`), applied in the
-order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:105`).
+order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:107`).
 Later migrations add columns to these tables; `daemon-core.md` covers the
 migration set.
 
@@ -89,23 +89,23 @@ Routes import these; services are Hono-free:
   every filter before taking the newest bounded page, then returns that page
   chronologically.
 - **`queue-repository.ts`** — L3 queue: create (`:1391`), claim/unclaim
-  (`:2186`, `:2268`), update (general state mutator with hot-potato
-  strict-rejection on `done`, `:2331`), transactional handoff (close source as
+  (`:2186`, `:2271`), update (general state mutator with hot-potato
+  strict-rejection on `done`, `:2334`), transactional handoff (close source as
   `handed-off` plus create new owned qitem in a single transaction, `:1656`;
   `handoffAndComplete`, `:1833`, closes the source as `done` instead),
-  pod-fallback rerouting (`routeToFallback`, `:3653`), overdue lookup
-  (`findOverdue`, `:3354`), nudge-result tracking (`recordNudgeAttempt`,
-  `:3638`). Nothing in the daemon writes the `last_heartbeat` column
+  pod-fallback rerouting (`routeToFallback`, `:3678`), overdue lookup
+  (`findOverdue`, `:3378`), nudge-result tracking (`recordNudgeAttempt`,
+  `:3663`). Nothing in the daemon writes the `last_heartbeat` column
   (`queue-pickup.ts:16`). Cross-rig validation hook exposed as `validateRig`
-  constructor option (`queue-repository.ts:711`).
+  constructor option (`queue-repository.ts:717`).
 - **`queue-transition-log.ts`** — append-only state-transition log; used by
   `queue-repository.ts`, exposed as the read-only property
-  `QueueRepository.transitionLog` (`queue-repository.ts:660`).
+  `QueueRepository.transitionLog` (`queue-repository.ts:666`).
 - **`hot-potato-enforcer.ts`** — pure validator for the load-bearing API
   contract (see §3).
 - **`inbox-handler.ts`** — mailbox handler: drop (idempotent on `inbox_id`,
-  `:99`), absorb (promotes a pending entry to a `queue_item`, idempotent,
-  `:154`), deny (records reason, `:214`). The handler has no auth hook
+  `:100`), absorb (promotes a pending entry to a `queue_item`, idempotent,
+  `:155`), deny (records reason, `:215`). The handler has no auth hook
   (`inbox-handler.ts:71`); identity comes from the route. `POST /inbox/drop`
   takes the sender only from the `X-OpenRig-Session` header through
   `requireSenderIdentity` (`routes/queue.ts:1094`) and answers 400
@@ -122,11 +122,11 @@ Routes import these; services are Hono-free:
 Create, handoff and handoff-and-complete return the committed row without
 waiting for terminal delivery. Each stages a deterministic
 `wake-intent-<qitem>` outbox row in its transaction and delivers it after
-commit (`queue-repository.ts:1404`–`1416`, `:1467`–`1475`). The returned
+commit (`queue-repository.ts:1412`–`1424`, `:1475`–`1483`). The returned
 `lastNudgeResult` is therefore normally null; `rig queue show <id>` reads the
 wake result later. If create cannot retain the intent, the task is still saved
 and the row records `failed:wake not retained: <reason>`. Startup reconciles
-and drains intents left pending by a crash once (`startup.ts:2334`–`2335`).
+and drains intents left pending by a crash once (`startup.ts:2361`–`2362`).
 `maybeNudge` remains only as the path for a repository with no outbox.
 
 The standing detector in `queue-stuck-sweep.ts` creates findings through the
@@ -167,19 +167,19 @@ canceled, no-follow-on, escalation, superseded}`. The reasons
 - `superseded` — the row was replaced by cancel-and-replace
   (`closure_target` = the successor qitem). The update path records it on
   `state=canceled` and refuses it there without a `closure_target`
-  (`queue-repository.ts:2597`).
+  (`queue-repository.ts:2629`).
 
 Tier→SLA mapping for `closure_required_at` also lives in
-`hot-potato-enforcer.ts` (`TIER_SLA_SECONDS`, `:114`). This validator is
+`hot-potato-enforcer.ts` (`TIER_SLA_SECONDS`, `:115`). This validator is
 invoked by `QueueRepository.update()` (and `updateWithinTransaction()`), both
-through the call at `queue-repository.ts:2505`, so closure is enforced at the
+through the call at `queue-repository.ts:2531`, so closure is enforced at the
 daemon transaction boundary — the workflow runtime *projects* on closure but
 does not otherwise gate it (see `workflow-runtime.md`). The one
 workflow-aware check is in the queue: `update()` refuses a terminal close of a
 live workflow frontier packet from a non-workflow verb
-(`workflow_frontier_packet`, `queue-repository.ts:2531`), through a predicate
+(`workflow_frontier_packet`, `queue-repository.ts:2557`), through a predicate
 startup injects. "Terminal" there is the queue's terminal set, `done` and
-`handed-off` (`queue-repository.ts:51`).
+`handed-off` (`queue-repository.ts:52`).
 
 Closure fields are stored only on `state=done`, the park record (`blocked`
 with `blocked_on`), the handoff close (`handed-off` with `handed_off_to`) and
@@ -190,10 +190,14 @@ note without a state change as an append-only transition; moving it to
 another state requires an explicit reopen with a note. A `qitem-` blocker must
 exist and be live on this daemon; when a blocker leaves the active states,
 each row parked on it follows the blocker's handoff successor or returns to
-`pending` with a durable wake (`queue-repository.ts:2384`–`2503`,
-`:2580`–`2624`, `:2903`–`2980`). `human-route-enforcer.ts` is a second pure
-validator at the same boundary: a `human-gate` row, a row addressed to a human
-seat, or a park on one must carry `summary` and `evidence_ref`.
+`pending` with a durable wake (`queue-repository.ts:2407`–`2529`,
+`:2612`–`2656`, `:2931`–`3008`). Claiming a parked row clears its
+`blocked_on`; the claim transition keeps the former gate as a `closure_target`
+audit pointer with no closure reason, which a re-park without `--blocked-on`
+reuses (`queue-repository.ts:2233`–`2254`, `:2571`–`2577`).
+`human-route-enforcer.ts` is a second pure validator at the same boundary: a
+`human-gate` row, a row addressed to a human seat, or a park on one must carry
+`summary` and `evidence_ref`.
 
 ## 3b. Cross-host queue routing
 
@@ -203,7 +207,7 @@ Three queue write routes are host-aware — `POST /create`,
 a write body may carry an out-of-band `hostId` envelope. The destination
 session stays `member@rig`; the 3-part `agent@rig@host` form is CLI input
 sugar that `resolveQueueHostDestination`
-(`packages/cli/src/commands/queue.ts:391`) splits into the destination and
+(`packages/cli/src/commands/queue.ts:394`) splits into the destination and
 `hostId` before the request leaves the CLI. The same split applies to
 `--host <id>`; queue verbs never follow `rig host select`, and naming two
 different hosts is refused with `host_qualifier_conflict`. The mechanism
@@ -228,7 +232,7 @@ message-passing closure (never 2PC).**
   commit (§2; the forwarded body carries the `nudge` flag) — the sending
   daemon never reaches across a host boundary. Before forwarding, the
   forwarding daemon stamps its own host id, when it has one, onto the source
-  session (`stampSelfHostSuffix`, `queue-repository.ts:542`; called at
+  session (`stampSelfHostSuffix`, `queue-repository.ts:548`; called at
   `routes/queue.ts:378` and `:509`), so the target row records the sender as
   `member@rig@<forwarding host>`.
 - **Idempotency.** On create, the forwarding daemon mints the `qitemId` before
@@ -239,21 +243,21 @@ message-passing closure (never 2PC).**
   conflict the origin returns the stored row when destination and source
   match (idempotent absorb) and a structured `qitem_id_reuse` error (409) when
   they differ (`QueueRepository.create()` catch path,
-  `queue-repository.ts:1423`–`1464`, with `isQitemPrimaryKeyConflict`,
-  `:455`). When destination and source match but the body differs, the stored
+  `queue-repository.ts:1431`–`1472`, with `isQitemPrimaryKeyConflict`,
+  `:461`). When destination and source match but the body differs, the stored
   row is returned unchanged with `createWarning: qitem_body_not_saved`; the
-  supplied body is not saved (`:1442`–`1446`).
+  supplied body is not saved (`:1450`–`1454`).
 - **Cross-host handoff choreography.** The local atomic close+create cannot
   span two DBs, so the route-layer choreography (`crossHostHandoff`,
   `routes/queue.ts:316`) runs: successor-create on the target host FIRST (via
   the one forward helper, `:397`), local source-close SECOND
-  (`QueueRepository.closeCrossHostHandoffSource`, `queue-repository.ts:2021`)
+  (`QueueRepository.closeCrossHostHandoffSource`, `queue-repository.ts:2031`)
   — never the reverse. A crash between the two leaves a live duplicate that
   the idempotent re-drive converges; the reverse order would leave a closed
   source pointing at a successor that does not exist (a dropped potato — the
   one forbidden outcome). The successor id is DERIVED, not minted:
   `deriveCrossHostSuccessorId(source, destination, host)`
-  (`queue-repository.ts:483`) → `qitem-xh-<sha256[:16]>` — a pure stateless
+  (`queue-repository.ts:489`) → `qitem-xh-<sha256[:16]>` — a pure stateless
   function, so a re-drive re-derives the same id across daemon restarts and
   absorbs on the target PK. *(Residual, inherent to at-least-once delivery
   without 2PC: a re-drive naming a DIFFERENT destination derives a different
@@ -270,7 +274,7 @@ message-passing closure (never 2PC).**
   host-qualified key appears only in the `closure_target` column on
   `queue_items` and its verbatim mirror on `queue_transitions`: the minted
   cross-host close note names the 2-part `toSession` only
-  (`queue-repository.ts:2077`), and `handed_off_to` and the
+  (`queue-repository.ts:2087`), and `handed_off_to` and the
   `queue.handed_off` event stay 2-part.
   Re-drive semantics: already-terminal + MATCHING `closure_target` = absorb;
   MISMATCH = structured `cross_host_close_conflict` (409), checked in the route
@@ -343,9 +347,10 @@ Every write route derives its actor through `requireSenderIdentity`
 (`routes/require-sender-identity.ts:76`): the `X-OpenRig-Session` header wins
 over a body actor. On a direct request from a known origin it is recorded as
 `transport:v1`; `resolveRecordedProvenance` (`:199`) instead records
-`origin-unknown:v1` when the origin-unknown marker is set, `relay:v1` for a
-relayed request that carried `transport:v1`, and `claimed:v1` for other relayed
-requests. Without the header, the
+`origin-unknown:v1` when the origin-unknown marker is set or a relayed request
+carried `origin-unknown:v1` (`:207`), `relay:v1` for a relayed request that
+carried `transport:v1`, and `claimed:v1` for other relayed requests. Without the
+header, the
 body actor is recorded as `claimed:v1`; with neither (or, for inbox drop,
 without the header) the route answers 400 `actor_required`. The stamp lands in
 `identity_provenance` on transitions, inbox, outbox and stream rows

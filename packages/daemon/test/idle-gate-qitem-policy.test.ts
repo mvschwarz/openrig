@@ -54,6 +54,8 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
       seatNodeId: "node-oracle",
       activity,
       needsInput,
+      // Hook-decided, as production records it; a stale (unknown) seat has no current answer.
+      needsInputEvidence: activity === "unknown" ? null : { rung: "lifecycle-hooks", observedAt: NOW.toISOString() },
       decidedBy: "lifecycle-hooks",
       seq: 1,
       changedAt: NOW.toISOString(),

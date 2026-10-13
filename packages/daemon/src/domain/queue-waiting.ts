@@ -3,6 +3,8 @@ import type Database from "better-sqlite3";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
+import { nextDueAt } from "./watchdog-due.js";
+import type { WatchdogJob } from "./watchdog-jobs-repository.js";
 
 export type WaitingActivityReader = (session: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "decidedBy"> | null;
 
@@ -93,14 +95,18 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
   }
   if (row.state === "blocked") {
     const hasTimers = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
-    const timer = hasTimers ? db.prepare(`SELECT j.job_id, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.spec_yaml
+    const timer = hasTimers ? db.prepare(`SELECT j.job_id, j.policy, j.last_evaluation_at, j.registered_at, j.interval_seconds, j.scan_interval_seconds, j.spec_yaml
       FROM queue_transition_wakes w JOIN watchdog_jobs j ON j.job_id = w.wake_ref
       WHERE w.qitem_id = ? AND w.phase = 'armed' AND j.state = 'active'
-      ORDER BY w.transition_id DESC LIMIT 1`).get(id) as { job_id: string; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; spec_yaml: string } | undefined : undefined;
+      ORDER BY w.transition_id DESC LIMIT 1`).get(id) as { job_id: string; policy: WatchdogJob["policy"]; last_evaluation_at: string | null; registered_at: string; interval_seconds: number; scan_interval_seconds: number | null; spec_yaml: string } | undefined : undefined;
+    // The scheduler's own due time: a never-evaluated reminder fires one interval after registration (#801),
+    // and the wake-now marker is due now (#860).
+    const timerDue = timer ? nextDueAt({ policy: timer.policy, specYaml: timer.spec_yaml, registeredAt: timer.registered_at,
+      intervalSeconds: timer.interval_seconds, scanIntervalSeconds: timer.scan_interval_seconds, lastEvaluationAt: timer.last_evaluation_at }) : null;
     view.nextBackstop = timer ? {
       owner: row.destination_session, mechanism: `watchdog:${timer.job_id}`, intervalSeconds: timer.interval_seconds,
-      dueAt: new Date(timer.last_evaluation_at ? Date.parse(timer.last_evaluation_at) + timer.interval_seconds * 1000 : Date.now()).toISOString(),
-    } : { owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : "UNVERIFIED: no timed backstop", dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
+      dueAt: new Date(timerDue ?? Date.now()).toISOString(),
+    } :{ owner: blocker?.destination_session ?? row.destination_session, mechanism: blocker ? "blocker-transition / queue-stuck-sweep" : "UNVERIFIED: no timed backstop", dueAt: null, intervalSeconds: blocker ? sweepInterval : null };
     if (timer) {
       let notice: { at: string; deliveryStatus: string } | undefined;
       try {

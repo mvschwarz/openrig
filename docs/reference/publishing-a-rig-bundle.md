@@ -11,7 +11,9 @@ For every flag, see the [rig bundle reference](rig-bundle.md); for the file form
 ## 1. Lay out the folder
 
 A shareable bundle is one folder, kept on GitHub: in its own repository, or as a subfolder of one you already have.
-The folder holds the rig spec (`rig.yaml`), the agents it uses, and a README. The rules are the bundle standard
+The folder holds the rig spec (`rig.yaml`), the agents it uses, and a README. Choose
+[names that describe the team, domains and roles](topology-naming.md) before wiring its references.
+The rules are the bundle standard
 (`openrig.bundle-standard/v1`), summarized under "Advisory author check" in the
 [rig bundle reference](rig-bundle.md#advisory-author-check).
 
@@ -35,9 +37,9 @@ Two optional files sit beside `rig.yaml`:
 rig bundle check ./my-team                     # checks the folder against the standard; launches nothing
 ```
 
-Fix what it reports, or say in your README why a finding doesn't apply. Any finding exits 1, and `--json` names the file
-each finding is about. It checks the folder on disk, including files you haven't committed, so check again at the
-commit you share. README completeness and embedded secrets always read `not_checked`: those are yours to review.
+Fix what it reports, or say in your README why a finding doesn't apply. Any finding exits 1, and the output names the
+file a finding is about when there is one. It checks the folder on disk, including files you haven't committed, so
+check again at the commit you share. README completeness and embedded secrets always read `not_checked`: those are yours to review.
 
 You can also build and look inside the archive:
 
@@ -77,18 +79,21 @@ ask.
 
 Links need `git`, a running local OpenRig daemon, and a public GitHub link without credentials; they don't work with
 `--host`. If the team uses `permission_policy: builtin:yolo` (no permission prompts), `--non-interruptive` lets OpenRig accept the harnesses'
-first-launch warnings for you (see [non-interruptive mode](non-interruptive-mode.md)).
+first-launch warnings for you (see [non-interruptive mode](non-interruptive-mode.md)). As the author, you can make that
+the install default by declaring `non_interruptive: true` in `rig.yaml`; `--no-non-interruptive` overrides it.
 
 Installing writes the bundle's files into the install target (`--target`, the current directory if you leave it
 out) and launches the team from there, with the seats working in `--cwd`. If the target already
-has a different file at the same path, install refuses and writes nothing, so use an empty or dedicated directory. The
-reference's "Install a bundle" section has the details.
+has a different file at the same path, install refuses and writes nothing, so use an empty or dedicated directory.
+Installing again over a stopped team of the same name replaces it, and in its own install folder the changed files are
+backed up first under `~/.openrig/bundle-backups/`. A running team of the same name is refused, so stop it with
+`rig down` first. The reference's "Install a bundle" section has the details.
 
 ## 5. Choose your harnesses (when a bundle offers configurations)
 
 ```sh
 rig up <link> --preset all-claude
-rig up <link> --seat build.lead=pi --seat check.qa=codex
+rig up <link> --seat orch.lead=pi --seat dev.qa=codex
 ```
 
 On openrig.dev/rigs, pick a configuration and the page gives you one command to paste, which fetches exactly that
@@ -99,14 +104,14 @@ or **"Not tested by OpenRig"**, which means exactly that. You're welcome to run 
 
 ## 6. Submit it to openrig.dev/rigs
 
-Open a pull request to [mvschwarz/openrig-world](https://github.com/mvschwarz/openrig-world) that adds one file,
+Open a pull request to [mvschwarz/openrig-registry](https://github.com/mvschwarz/openrig-registry) that adds one file,
 `registry/submissions/<your-team>.yaml`, with three fields: `repository` (your GitHub repository URL), `folder` (the
 folder holding `rig.yaml`, or `.` for the repository root) and `ref` (a branch, tag or commit). No pull requests? Open
 an issue there with the same three things. A maintainer then writes the full entry, in the `registry-entry.v1` format
 defined in the [bundle formats reference](bundle-formats.md), with the parts only a review can produce, such as the
 pinned commit and each configuration's package digest.
 
-Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, the check says the name is taken;
+Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, openrig-registry's registry check says the name is taken;
 choose a distinct one, for example `<taken-name>-<your-name>`.
 
 What happens next:

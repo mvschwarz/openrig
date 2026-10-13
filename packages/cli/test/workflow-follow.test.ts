@@ -182,6 +182,37 @@ describe("workflow-follow (WF3 FR-1)", () => {
     expect(code).toBe(EXIT_WORKFLOW_FAILED);
   });
 
+  it("attaches to an aborted instance with the same failure outcome as a live abort", async () => {
+    const h = makeHarness({
+      traceResponses: [{ status: 200, data: { instance: { instanceId: "WF1", status: "aborted" }, trail: [] } }],
+      streams: [droppedStream()],
+    });
+    let streamSignal: AbortSignal | undefined;
+    const fetchImpl = h.io.fetchImpl;
+    h.io.fetchImpl = ((input, init) => {
+      streamSignal = init?.signal as AbortSignal;
+      return fetchImpl(input, init);
+    }) as typeof fetch;
+    h.io.sleep = async () => { throw new Error("terminal snapshot must not wait"); };
+    expect(await followInstance(h.client, "WF1", { json: false, io: h.io, maxReconnects: 0 })).toBe(EXIT_WORKFLOW_FAILED);
+    expect(streamSignal?.aborted).toBe(true);
+    expect(h.outLines[0]).toContain("status=aborted");
+  });
+
+  it("stops polling when an active workflow becomes aborted", async () => {
+    const h = makeHarness({
+      traceResponses: [ACTIVE_SNAPSHOT, { status: 200, data: { instance: { instanceId: "WF1", status: "aborted" }, trail: [] } }],
+      streams: [droppedStream()],
+    });
+    let sleeps = 0;
+    h.io.sleep = async () => {
+      if (++sleeps > 1) throw new Error("aborted workflow must not poll again");
+    };
+    expect(await followInstance(h.client, "WF1", { json: true, io: h.io, maxReconnects: 0 })).toBe(EXIT_WORKFLOW_FAILED);
+    expect(sleeps).toBe(1);
+    expect(JSON.parse(h.outLines.at(-1)!).status).toBe("aborted");
+  });
+
   it("drop → announced reconnect; exhausted reconnects → announced poll fallback that resolves the outcome", async () => {
     const h = makeHarness({
       traceResponses: [

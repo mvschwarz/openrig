@@ -42,7 +42,8 @@ function seedDbWithStaleSessions(dbPath: string, rigs: { rigName: string; logica
     const rig = rigRepo.createRig(r.rigName);
     const node = rigRepo.addNode(rig.id, r.logicalId);
     const session = sessionRegistry.registerSession(node.id, r.sessionName);
-    sessionRegistry.updateStatus(session.id, "running");
+    // Seed the old schema directly; createDaemon must apply newer migrations.
+    db.prepare("UPDATE sessions SET status = 'running', last_seen_at = datetime('now') WHERE id = ?").run(session.id);
   }
 
   db.close();

@@ -69,6 +69,14 @@ describe("parseJsonlExchanges — claude-projects role/content shape", () => {
     expect(parseJsonlExchanges(join(tmpdir(), "does-not-exist-xyz.jsonl"), 5)).toEqual([]);
   });
 
+  it("keeps Codex block types scoped to Codex messages", () => {
+    const p = fixture([
+      { type: "assistant", message: { role: "assistant", content: [{ type: "output_text", text: "not a Claude text block" }] } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "legacy text" }, { type: "output_text", text: 42 }, { type: "tool_call", text: "not text" }] } },
+    ]);
+    expect(parseJsonlExchanges(p, 10)).toEqual([{ role: "assistant", content: "legacy text" }]);
+  });
+
   it("also reads the codex rollout shape (payload.type=message with role/content)", () => {
     const p = fixture([
       { payload: { type: "message", role: "user", content: "codex hello" } },

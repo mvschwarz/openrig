@@ -394,6 +394,47 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(nodeRow(node.id).handover_result).not.toBe("complete");
   });
+
+  // #981: each composer handover respawns into the seat's own pane (%9 here). The first commit claims
+  // that pane's discovery row for this node, and a rescan upsert keeps the claim (#237).
+  function liveSessionId(nodeId: string) {
+    const row = db.prepare("SELECT id FROM sessions WHERE node_id = ? AND status NOT IN ('superseded', 'detached', 'exited') ORDER BY id DESC").get(nodeId) as { id: unknown } | undefined;
+    return row?.id;
+  }
+  function seatPaneRows() {
+    return db.prepare("SELECT id, status, claimed_node_id FROM discovered_sessions WHERE tmux_session = ? AND tmux_pane = ?").all("dev-impl@seat-rig", "%9");
+  }
+
+  it.each(["rebuild", "fresh"] as const)("%s twice in a row: the second handover succeeds and the seat follows each new occupant (#981)", async (source) => {
+    const { node, sessionId } = seedSeat();
+
+    const first = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "a", source });
+    expect(first).toMatchObject({ ok: true, result: { mutated: true } });
+    const firstOccupant = liveSessionId(node.id);
+    expect(firstOccupant).not.toBe(sessionId);
+    expect(seatPaneRows()).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+
+    const second = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "b", source });
+    expect(second).toMatchObject({ ok: true, result: { mutated: true } });
+    const secondOccupant = liveSessionId(node.id);
+    expect(secondOccupant).not.toBe(firstOccupant);
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
+    expect(seatPaneRows()).toEqual([expect.objectContaining({ status: "claimed", claimed_node_id: node.id })]);
+    expect(respawnPane).toHaveBeenCalledTimes(2);
+  });
+
+  it("a seat-pane discovery row claimed by another node still refuses the handover (#237 holds)", async () => {
+    const { rig, node, sessionId } = seedSeat();
+    const other = rigRepo.addNode(rig.id, "dev.other", { runtime: "codex", cwd: "/project" });
+    const row = discoveryRepo.upsertDiscoveredSession({ tmuxSession: "dev-impl@seat-rig", tmuxPane: "%9", runtimeHint: "codex", confidence: "high" });
+    discoveryRepo.markClaimed(row.id, other.id);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "a", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: false, code: "discovered_not_active" });
+    expect(liveSessionId(node.id)).toBe(sessionId);
+    expect(discoveryRepo.getDiscoveredSession(row.id)).toMatchObject({ status: "claimed", claimedNodeId: other.id });
+  });
 });
 
 

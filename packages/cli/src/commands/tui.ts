@@ -42,9 +42,9 @@ export function tuiCommand(io: FrontDoorIo & {
   attachShared?: (target: string) => Promise<number>;
 } = {}): Command {
   const cmd = new Command("tui")
-    .description("open mission control (standalone by default; --shared joins the kernel terminal)")
-    .option("--shared", "join the kernel's existing shared terminal; detach with Ctrl-b d")
-    .addHelpText("after", "\nThe shared terminal keeps its view when you detach. On an older kernel, or after quitting the TUI, run rig tui in that terminal once. No agent or terminal is started by --shared.\nHerdr/cmux users can also open the kernel through rig terminal open kernel --provider herdr|cmux.");
+    .description("open the status dashboard, not agent chat (--shared is the OpenRig view fallback)")
+    .option("--shared", "dashboard-only fallback if the OpenRig view window cannot open; detach with Ctrl-b d")
+    .addHelpText("after", "\nThe dashboard shows status and navigation; it is not the operator's or advisor's conversation.\nTo show the person the OpenRig TUI and operator (after install, or whenever they want their agents): rig terminal open saved:kernel --window. The agent runs it on the daemon desktop; it opens a new terminal tab/window with herdr, otherwise plain tmux. Herdr needs a terminal the person can see; changing this dashboard to :terminals does not open one. Over headless SSH, give the exact connection/attach command for a new terminal/tab, as in the getting-started guide. Check the result and visible content, or say what cannot be verified; on a desktop, do not finish by printing a command for the person to type. Only if the window cannot open, rig tui --shared is the dashboard-only fallback. Explain the failure; not every failure prints an operator attach command. Use the getting-started guide to derive the current operator binding if the person chooses manual attachment. Existing herdr/cmux workspaces can still use --provider without --window.\nThe shared dashboard keeps its view when you detach. On an older kernel, or after quitting the TUI, run rig tui in that terminal once. No agent or terminal is started by --shared.");
 
   cmd
     .command("commands")
@@ -88,7 +88,7 @@ export function tuiCommand(io: FrontDoorIo & {
         const exit = io.exit ?? ((code: number) => process.exit(code));
         try {
           const target = await (io.sharedTarget ?? sharedTuiTarget)();
-          err("Joining the kernel terminal. Ctrl-b d detaches and preserves the view; if a shell is shown, run rig tui once.");
+          err("Joining the shared dashboard, not the operator conversation. For the OpenRig view: rig terminal open saved:kernel --window. This shared dashboard is the fallback if that window cannot open. Ctrl-b d detaches and preserves the view; if a shell is shown, run rig tui once.");
           const code = await (io.attachShared ?? attachSharedTui)(target);
           if (code !== 0) err("Could not attach the kernel terminal. Inspect rig ps --nodes --rig kernel and rig status; standalone: rig tui.");
           exit(code);

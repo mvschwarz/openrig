@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
-import { mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createDb } from "../src/db/connection.js";
@@ -8,6 +8,7 @@ import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
+import { UsageSamplesStore } from "../src/domain/usage-samples-store.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
 import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforcer.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
@@ -155,10 +156,10 @@ describe("ContextMonitor", () => {
     settings.set("policies.claude_compaction.threshold_percent", "80");
     const send = vi.fn(async (_session: string, text: string) => {
       const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
-      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
       if (marker && target) {
         const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+        writeFileSync(file, "# Completed fixture map\n" + marker + "\n");
       }
       return { ok: true };
     });
@@ -183,10 +184,9 @@ describe("ContextMonitor", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("prepares then compacts fresh usage, pauses pending restore on stale usage, and resumes on fresh usage", async () => {
-    const now = Date.parse("2026-10-02T12:00:00Z");
-    vi.spyOn(Date, "now").mockReturnValue(now);
-    const { sessionName } = seedClaudeNode();
+  // Bring a seat to the point just after /compact: fresh 80% usage sends the preparation prompt,
+  // then the next tick sends /compact, leaving the post-compact turn boundary pending.
+  async function compactFreshSeat(sessionName: string, now: number) {
     const send = installRealCompactionEnforcer();
     const writeUsage = (percentage: number, sampledAt: number) => writeSidecar(sessionName, {
       ...VALID_SIDECAR,
@@ -200,15 +200,62 @@ describe("ContextMonitor", () => {
     await monitor.pollOnce();
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[1]?.[1]).toContain("/compact");
+    return { send, writeUsage };
+  }
+
+  it("prepares then compacts fresh usage, then drains the pending restore on stale usage, one stage per tick", async () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { sessionName } = seedClaudeNode();
+    const { send, writeUsage } = await compactFreshSeat(sessionName, now);
+    // The seat takes no turn after /compact, so its sample stays stale.
     writeUsage(30, now - 600_001);
     await monitor.pollOnce();
-    expect(send).toHaveBeenCalledTimes(2);
-    writeUsage(30, now);
-    await monitor.pollOnce();
     expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[2]?.[1]).toContain("OpenRig post-compaction turn boundary.");
     await monitor.pollOnce();
     expect(send).toHaveBeenCalledTimes(4);
     expect(send.mock.calls[3]?.[1]).toContain("restoring this Claude session after compaction");
+    await monitor.pollOnce();
+    expect(send).toHaveBeenCalledTimes(5);
+    expect(send.mock.calls[4]?.[1]).toContain("Now audit your compaction restore");
+    // Nothing is pending any more, and a stale sample never starts a compaction.
+    await monitor.pollOnce();
+    expect(send).toHaveBeenCalledTimes(5);
+  });
+
+  it("drains the pending restore when the sample is unknown (no sidecar)", async () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { node, sessionName } = seedClaudeNode();
+    const { send } = await compactFreshSeat(sessionName, now);
+    rmSync(join(tmpDir, "state", "context-usage", `${sessionName}.json`));
+    await monitor.pollOnce();
+    expect(store.getForNode(node.id, sessionName).availability).toBe("unknown");
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send.mock.calls[2]?.[1]).toContain("OpenRig post-compaction turn boundary.");
+  });
+
+  it("a stale sample above the threshold drains the pending stage once and starts no new compaction", async () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { sessionName } = seedClaudeNode();
+    const { send, writeUsage } = await compactFreshSeat(sessionName, now);
+    writeUsage(90, now - 600_001); // the pre-compact reading, never refreshed
+    for (let i = 0; i < 4; i++) await monitor.pollOnce();
+    expect(send).toHaveBeenCalledTimes(5);
+    const texts = send.mock.calls.slice(2).map((call) => String(call[1]));
+    expect(texts[0]).toContain("OpenRig post-compaction turn boundary.");
+    expect(texts[1]).toContain("restoring this Claude session after compaction");
+    expect(texts[2]).toContain("Now audit your compaction restore");
+    expect(texts.some((text) => text.includes("preparation is now required") || text.startsWith("/compact"))).toBe(false);
+  });
+
+  it("an unknown sample with nothing pending triggers nothing", async () => {
+    seedClaudeNode();
+    const send = installRealCompactionEnforcer();
+    await monitor.pollOnce();
+    expect(send).not.toHaveBeenCalled();
   });
 
   // T1: pollOnce discovers running Claude sessions and persists usage
@@ -253,6 +300,42 @@ describe("ContextMonitor", () => {
     expect(usage.availability).toBe("known");
     expect(usage.source).toBe("codex_token_count_jsonl");
     expect(usage.usedPercentage).toBe(88);
+  });
+
+  it("does not capture archived Codex nodes, but resumes reads after unarchive", async () => {
+    const { node: codexNode, sessionName, threadId } = seedCodexNode("detached");
+    writeCodexTokenCount(threadId);
+    const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(codexNode.id) as { rig_id: string }).rig_id;
+    const samples = new UsageSamplesStore(db);
+    const nativeMonitor = new ContextMonitor(db, store, undefined, undefined, undefined, samples);
+    rigRepo.archiveRig(rigId);
+    await nativeMonitor.pollOnce();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM context_usage WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 0 });
+    rigRepo.unarchiveRig(rigId);
+    await nativeMonitor.pollOnce();
+    expect(store.getForNode(codexNode.id, sessionName).availability).toBe("known");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 1 });
+  });
+
+  it.each(["claude-code", "codex"])("still polls a running %s seat in an archived rig", async (runtime) => {
+    const { rig, node, sessionName } = runtime === "codex" ? seedCodexNode() : seedClaudeNode();
+    if (runtime === "codex") {
+      writeCodexTokenCount("thread-1");
+    } else {
+      writeSidecar(sessionName, { ...VALID_SIDECAR, sampled_at: new Date().toISOString() });
+    }
+    const samples = new UsageSamplesStore(db);
+    const maybeAutoCompact = vi.fn(async () => {});
+    const nativeMonitor = new ContextMonitor(db, store, undefined,
+      { maybeAutoCompact } as unknown as ClaudeCompactionEnforcer, undefined, samples);
+    rigRepo.archiveRig(rig.id);
+
+    await nativeMonitor.pollOnce();
+
+    expect(store.getForNode(node.id, sessionName).availability).toBe("known");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(node.id)).toEqual({ n: 1 });
+    expect(maybeAutoCompact).toHaveBeenCalledWith(expect.objectContaining({ sessionName, runtime }));
   });
 
   // STUB-A (51-01 GAP-1): running stub sessions with a context sidecar are polled and observed

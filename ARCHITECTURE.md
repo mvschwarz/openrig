@@ -305,6 +305,10 @@ packages.
 - **Generated files.** Do not hand-edit `scripts/*.generated.json` or anything under
   `packages/daemon/context-packs/`. The skill-edge digests are the one generated file a contributor
   refreshes, with `node scripts/regen-edge-digests.mjs` (see "A shipped skill").
+  The internal-token rules support optional `allowed_context_lines` for reviewed generic
+  examples: the complete line must match exactly, including indentation and case. Unlike
+  `allowed_context_substrings`, this does not exempt a line with added or substituted text;
+  internal-path checks and the substance gate's human-review dispositions still apply.
 - **Hosted CI** (`.github/workflows/tests.yml`): `build-and-package`, `typecheck`, `repo-checks`,
   `package-tests` (macOS; daemon, CLI, TUI and UI suites with no credentials and no external
   network) and `installed-scenario`.

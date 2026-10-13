@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vites
 import http from "node:http";
 import { Command } from "commander";
 import { chatroomCommand } from "../src/commands/chatroom.js";
-import { DaemonClient } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 import { ulid } from "ulid";
@@ -71,8 +71,13 @@ describe("Chatroom CLI", () => {
   // Mutable list for dynamic injection during wait tests
   const dynamicMessages: Array<typeof chatMessages[0]> = [];
   let historyFailure: { status: number; body: Record<string, unknown> | null } | null = null;
+  let historyDelayMs = 0;
+  let historyDelayStage: "headers" | "body" = "body";
+  let canceledHistoryResponses = 0;
+  // History requests to drop by destroying the socket, as a restarting daemon would.
+  let historyDrops = 0;
 
-  beforeEach(() => { historyFailure = null; });
+  beforeEach(() => { historyFailure = null; historyDelayMs = 0; canceledHistoryResponses = 0; historyDrops = 0; });
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -95,6 +100,11 @@ describe("Chatroom CLI", () => {
         }
 
         if (url.includes("/chat/history")) {
+          if (historyDrops > 0) {
+            historyDrops--;
+            req.socket.destroy();
+            return;
+          }
           if (historyFailure) {
             res.writeHead(historyFailure.status, { "Content-Type": "application/json" });
             res.end(JSON.stringify(historyFailure.body));
@@ -111,7 +121,14 @@ describe("Chatroom CLI", () => {
           if (senderFilter) {
             filtered = filtered.filter(m => m.sender === senderFilter);
           }
-          res.end(JSON.stringify(filtered));
+          if (historyDelayMs > 0) {
+            if (historyDelayStage === "body") res.flushHeaders();
+            const timer = setTimeout(() => res.end(JSON.stringify(filtered)), historyDelayMs);
+            res.once("close", () => {
+              if (!res.writableEnded) canceledHistoryResponses++;
+              clearTimeout(timer);
+            });
+          } else res.end(JSON.stringify(filtered));
           return;
         }
 
@@ -336,6 +353,18 @@ describe("Chatroom CLI", () => {
     expect(output).toContain("hello");
   });
 
+  it.each(["headers", "body"] as const)("chatroom wait cancels late %s instead of printing a message after its deadline", async (stage) => {
+    historyDelayMs = 600;
+    historyDelayStage = stage;
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
+      "node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "0.2",
+    ]));
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("Timed out after 0.2 seconds");
+    expect(logs.join("\n")).not.toContain("[alice] hello");
+    await expect.poll(() => canceledHistoryResponses).toBe(1);
+  });
+
   it.each(["30s", "30", "0.5", "0.5s", "1.5s", "1e2", "0x10"])("chatroom wait accepts timeout form %s", async (timeout) => {
     capturedUrls.length = 0;
     const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
@@ -347,15 +376,132 @@ describe("Chatroom CLI", () => {
   });
 
   it.each(["0.05", "0.05s"])("chatroom wait preserves the fractional deadline for %s", async (timeout) => {
-    capturedUrls.length = 0;
-    const started = Date.now();
-    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
-      "node", "rig", "chatroom", "wait", "my-rig", "--after", "ZZZ", "--timeout", timeout,
-    ]));
-    expect(exitCode).toBe(1);
-    expect(logs.join("\n")).toContain("Timed out");
-    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
-    expect(capturedUrls.filter(url => url.includes("/chat/history"))).toHaveLength(1);
+    // Isolate the deadline from HTTP latency and real timers, which can wake early.
+    vi.useFakeTimers();
+    const get = vi.spyOn(DaemonClient.prototype, "get")
+      .mockResolvedValueOnce({ status: 200, data: rigSummary })
+      .mockResolvedValue({ status: 200, data: [] });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const settled = vi.fn();
+      const wait = makeCmd().parseAsync([
+        "node", "rig", "chatroom", "wait", "my-rig", "--after", "ZZZ", "--timeout", timeout,
+      ]).then(settled);
+
+      await vi.advanceTimersByTimeAsync(49);
+      expect(get).toHaveBeenNthCalledWith(2, "/api/rigs/rig-1/chat/history?after=ZZZ", { signal: expect.any(AbortSignal) });
+      expect(settled).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledOnce();
+      await wait;
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenCalledWith(`Timed out after ${timeout} seconds — no new messages matching filters.`);
+      expect(get).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      get.mockRestore();
+      error.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  describe("chatroom wait across a slow or restarting daemon", () => {
+    // Polls are mocked and timers faked, so the 3 s cadence and the deadline are exact.
+    async function waitWithPolls(timeout: string, poll: () => Promise<unknown>, advanceMs: number) {
+      vi.useFakeTimers();
+      const get = vi.spyOn(DaemonClient.prototype, "get")
+        .mockResolvedValueOnce({ status: 200, data: rigSummary })
+        .mockImplementation(poll as never);
+      try {
+        const run = captureLogs(() => makeCmd().parseAsync([
+          "node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", timeout,
+        ]));
+        await vi.advanceTimersByTimeAsync(advanceMs);
+        const { logs, exitCode } = await run;
+        return { output: logs.join("\n"), exitCode, polls: get.mock.calls.length - 1 };
+      } finally {
+        vi.useRealTimers();
+        get.mockRestore();
+      }
+    }
+
+    it("retries a timed-out poll and returns what the next poll finds", async () => {
+      const results: Array<() => Promise<unknown>> = [
+        () => Promise.reject(new DaemonTimeoutError("The OpenRig daemon did not respond in time")),
+        () => Promise.resolve({ status: 200, data: [chatMessages[0]] }),
+      ];
+      const { output, exitCode, polls } = await waitWithPolls("3600", () => results.shift()!(), 3000);
+      expect(polls).toBe(2);
+      expect(output).toContain("A poll failed (The OpenRig daemon did not respond in time); retrying until the --timeout deadline.");
+      expect(output).toContain("[alice] hello");
+      expect(output).not.toContain("Timed out");
+      expect(exitCode).toBeUndefined();
+    });
+
+    it("keeps retrying timed-out, refused and dropped polls every 3 s until the deadline, and says the last one failed", async () => {
+      const failures = [
+        new DaemonTimeoutError("slow"),
+        new DaemonConnectionError("refused", "ECONNREFUSED"),
+        new DaemonConnectionError("reset", "ECONNRESET"),
+        new DaemonConnectionError("dropped", "UND_ERR_SOCKET"),
+      ];
+      let i = 0;
+      const { output, exitCode, polls } = await waitWithPolls("10", () => Promise.reject(failures[i++ % failures.length]), 10_000);
+      expect(polls).toBe(4); // at 0, 3, 6 and 9 s; the deadline ends the last sleep at 10 s
+      expect(output.match(/A poll failed/g)).toHaveLength(1);
+      expect(output).toContain("Timed out after 10 seconds — no new messages matching filters.");
+      expect(output).toContain("The last poll failed (dropped), so new messages may have arrived without being seen.");
+      expect(exitCode).toBe(1);
+    });
+
+    it("ends at the deadline without the failure note once a later poll succeeds", async () => {
+      let first = true;
+      const { output, exitCode, polls } = await waitWithPolls("7", () => {
+        if (first) { first = false; return Promise.reject(new DaemonTimeoutError("slow")); }
+        return Promise.resolve({ status: 200, data: [] });
+      }, 7000);
+      expect(polls).toBe(3);
+      expect(output).toContain("Timed out after 7 seconds — no new messages matching filters.");
+      expect(output).not.toContain("The last poll failed");
+      expect(exitCode).toBe(1);
+    });
+
+    it.each([
+      ["a connection this machine blocked", new DaemonConnectionError("Cannot connect to the OpenRig daemon (EPERM)", "EPERM")],
+      ["a connection error with no cause code", new DaemonConnectionError("Cannot connect to the OpenRig daemon")],
+      ["an unreadable response", new DaemonResponseError(200, "<html>")],
+      ["an unexpected error", new Error("boom")],
+    ])("ends at once on %s instead of retrying it", async (_label, failure) => {
+      const get = vi.spyOn(DaemonClient.prototype, "get")
+        .mockResolvedValueOnce({ status: 200, data: rigSummary })
+        .mockRejectedValue(failure);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(makeCmd().parseAsync([
+          "node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "3600",
+        ])).rejects.toBe(failure);
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(error).not.toHaveBeenCalledWith(expect.stringContaining("A poll failed"));
+      } finally {
+        get.mockRestore();
+        error.mockRestore();
+      }
+    });
+
+    it("retries a poll whose connection the daemon dropped", { timeout: 15000 }, async () => {
+      historyDrops = 1;
+      capturedUrls.length = 0;
+      const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
+        "node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "10",
+      ]));
+      expect(logs.join("\n")).toMatch(/A poll failed \(Cannot connect to the OpenRig daemon .*\); retrying until the --timeout deadline\./);
+      expect(logs.join("\n")).toContain("[alice] hello");
+      expect(exitCode).toBeUndefined();
+      expect(capturedUrls.filter((url) => url.includes("/chat/history"))).toHaveLength(2);
+    });
   });
 
   it.each(["abc", "NaN", "Infinity", "-Infinity", "", " ", "-1", "-1s", "1e309", "1e309s"])("chatroom wait rejects invalid timeout %s before requests", async (timeout) => {

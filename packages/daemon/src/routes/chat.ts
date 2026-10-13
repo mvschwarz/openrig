@@ -3,6 +3,15 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { ChatRepository } from "../domain/chat-repository.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
+import { queryLimit } from "./query-limit.js";
+
+/** Render control characters (newline, ESC, DEL and the C1 range, whose U+009B
+ *  is a single-byte CSI) as visible \x0a / \x1b / \x9b text so a rejected value
+ *  cannot smuggle line breaks or terminal escapes into a diagnostic the CLI
+ *  prints verbatim. */
+function escapeControlChars(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
 
 export function chatRoutes(): Hono {
   const app = new Hono();
@@ -20,7 +29,13 @@ export function chatRoutes(): Hono {
     const rigId = c.req.param("rigId");
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
-    const body = await c.req.json<{ sender?: string; body?: string }>().catch(() => ({} as { sender?: string; body?: string }));
+    const payload: unknown = await c.req.json().catch(() => null);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return c.json({ error: "Expected a JSON object" }, 400);
+    }
+    const body = payload as { sender?: unknown; body?: unknown };
+    if (body.sender != null && typeof body.sender !== "string") return c.json({ error: "sender must be a string" }, 400);
+    if (!Array.isArray(body.body) && body.body !== undefined && typeof body.body !== "string" && typeof body.body !== "number") return c.json({ error: "body must be a string or number" }, 400);
     if (!body.body) return c.json({ error: "Missing body" }, 400);
 
     // P21 I5: the chat sender is the transport-derived identity, never body.sender (the `?? "anonymous"`
@@ -32,7 +47,7 @@ export function chatRoutes(): Hono {
     const chatRepo = getChatRepo(c);
     const eventBus = getEventBus(c);
 
-    const msg = chatRepo.send(rigId, sender, body.body);
+    const msg = chatRepo.send(rigId, sender, body.body as string);
 
     eventBus.emit({
       type: "chat.message",
@@ -52,13 +67,21 @@ export function chatRoutes(): Hono {
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
     const topic = c.req.query("topic");
-    const limitStr = c.req.query("limit");
     const after = c.req.query("after");
     const since = c.req.query("since");
     const sender = c.req.query("sender");
-    const limit = limitStr ? parseInt(limitStr, 10) : undefined;
-
     const chatRepo = getChatRepo(c);
+    // An unparseable since silently matches no rows (julianday returns NULL),
+    // which reads as an empty room — refuse it instead. An empty value is not a
+    // cutoff: the repository treats a falsy since as no filter, so keep that.
+    if (since && !chatRepo.timestampParses(since)) {
+      return c.json({ error: `since must be a datetime SQLite can parse, such as 'YYYY-MM-DD HH:MM:SS'; got '${escapeControlChars(since)}'` }, 400);
+    }
+    // A topic that hasn't started answers [] before the limit is used.
+    const parsed = queryLimit(c, { used: !topic || chatRepo.topicStarted(rigId, topic) });
+    if (!parsed.ok) return parsed.response;
+    const limit = parsed.limit;
+
     const messages = chatRepo.history(rigId, { topic, limit, after, since, sender });
 
     return c.json(messages);
@@ -111,12 +134,14 @@ export function chatRoutes(): Hono {
         }
 
         // Flush any messages received during initial batch, dedup by ID
-        initialDone = true;
         for (const pending of pendingMessages) {
           if (!sentIds.has(pending.id)) {
             await stream.writeSSE(pending);
           }
         }
+        // Arrivals during an awaited flush must join its tail, not bypass
+        // older buffered messages through the live write path.
+        initialDone = true;
 
         await aborted;
       } finally {
@@ -130,7 +155,17 @@ export function chatRoutes(): Hono {
     const rigId = c.req.param("rigId");
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
-    const body = await c.req.json<{ sender?: string; topic?: string; body?: string }>().catch(() => ({} as { sender?: string; topic?: string; body?: string }));
+    const payload: unknown = await c.req.json().catch(() => null);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return c.json({ error: "Expected a JSON object" }, 400);
+    }
+    const body = payload as { sender?: unknown; topic?: unknown; body?: unknown };
+    if (body.sender != null && typeof body.sender !== "string") return c.json({ error: "sender must be a string" }, 400);
+    // Arrays retain the existing SQLite binding path, including combined topic/body arrays.
+    if (!Array.isArray(body.topic) && !Array.isArray(body.body)) {
+      if (body.topic !== undefined && typeof body.topic !== "string" && typeof body.topic !== "number") return c.json({ error: "topic must be a string or number" }, 400);
+      if (body.body != null && typeof body.body !== "string" && typeof body.body !== "number") return c.json({ error: "body must be a string or number" }, 400);
+    }
     if (!body.topic) return c.json({ error: "Missing topic" }, 400);
 
     // P21 I5: the topic sender is the transport-derived identity, never body.sender (P18 deliver-and-label:
@@ -141,7 +176,7 @@ export function chatRoutes(): Hono {
     const chatRepo = getChatRepo(c);
     const eventBus = getEventBus(c);
 
-    const msg = chatRepo.sendTopic(rigId, sender, body.topic, body.body);
+    const msg = chatRepo.sendTopic(rigId, sender, body.topic as string, body.body as string | undefined);
 
     eventBus.emit({
       type: "chat.message",

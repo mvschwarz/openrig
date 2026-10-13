@@ -150,17 +150,27 @@ export class RigRepository {
     this.db = db;
   }
 
-  createRig(name: string): Rig {
+  createRig(name: string, installRoot?: string): Rig {
     const id = ulid();
-    this.db
-      .prepare("INSERT INTO rigs (id, name) VALUES (?, ?)")
-      .run(id, name);
+    if (installRoot !== undefined) {
+      this.db.prepare("INSERT INTO rigs (id, name, install_root) VALUES (?, ?, ?)")
+        .run(id, name, installRoot);
+    } else {
+      this.db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run(id, name);
+    }
 
     const rig = this.rowToRig(
       this.db.prepare("SELECT * FROM rigs WHERE id = ?").get(id) as RigRow
     );
     this.onRigCreated?.(rig);
     return rig;
+  }
+
+  /** Canonical bundle materialization folder, independent of seats' working directories. */
+  getRigInstallRoot(rigId: string): string | null {
+    const row = this.db.prepare("SELECT * FROM rigs WHERE id = ?").get(rigId) as
+      { install_root?: string | null } | undefined;
+    return row?.install_root ?? null;
   }
 
   /**

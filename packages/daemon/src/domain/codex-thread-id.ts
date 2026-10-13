@@ -22,8 +22,10 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
       return stdout;
     })).trim();
     if (!output) return undefined;
-    const match = output.match(/(?:^|\s)HOME=([^\s]+)/);
-    return match?.[1];
+    // ps prints unquoted environment values; whitespace can belong to HOME.
+    // Stop at the next environment assignment rather than the first space.
+    const match = output.match(/(?:^|\s)HOME=(.*?)(?=\s[A-Za-z_][A-Za-z0-9_]*=|$)/);
+    return match?.[1] || undefined;
   } catch {
     return undefined;
   }

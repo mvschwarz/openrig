@@ -394,6 +394,9 @@ export interface FleetSnapshot {
   /** PULSE ▲ NEEDS YOU source — the shipped attention read (already the exact
    * human-facing set); empty array = the join ran and yielded zero (silence). */
   attention: QueueRead[];
+  /** Coverage of the four active queue lists, before filtering by rig/pod/seat.
+   * A cap is possible truncation; it does not prove an omitted row. */
+  queueCoverage?: "complete" | "partial" | "unavailable";
   /** PULSE ⧗ BLOCKED ON AGENTS source — the shipped state=blocked read (ALL
    * blocked qitems); the render filters to NON-human blockedOn. */
   blocked: QueueRead[];
@@ -440,6 +443,15 @@ export interface DrillSegment {
   specKind?: SpecKind;
 }
 
+/** A topology address typed on a page that reads no rigs; it resolves once
+ *  Topology's own read settles. `seq` gives every request a fresh page read. */
+export interface PendingDrill {
+  resource: "host" | "rig" | "pod" | "agent";
+  name: string;
+  target?: ResourceTarget;
+  seq: number;
+}
+
 export type ViewTab = "table" | "recent" | "overview" | "graph" | "health" | "topology" | "configuration" | "yaml" | "pulse";
 
 export type Action =
@@ -471,6 +483,8 @@ export type Action =
   | { type: "select"; delta?: number; index?: number; rowCount?: number; origin?: "refresh" }
   | { type: "activate" }
   | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget; specKind?: SpecKind }
+  /** Resolve `pendingDrill` against the current (settled Topology) snapshot. */
+  | { type: "resolve-pending" }
   | { type: "cross"; kind: "spec-of" | "running"; name: string; target?: ResourceTarget }
   | { type: "tab"; tab: ViewTab }
   | { type: "content-scroll"; delta: number }
@@ -484,7 +498,7 @@ export type Action =
   /** slice-17: the graph-render style dimension rides the command bar */
   | { type: "style"; name: string }
   /** REGISTRY I3 — the command palette (open/query/move/close ride dispatch like all state). */
-  /** SCOPES view: m collapse + n narrative toggles (dispatch-riding). */
+  /** SCOPES view: M collapse + N narrative toggles (dispatch-riding). */
   | { type: "project-select"; id: string }
   | { type: "project-source" }
   | { type: "scopes-mission-open"; mission: string }
@@ -532,6 +546,9 @@ export interface ViewState {
   history?: NavigationFrame[];
   configCategory?: string | null;
   configKey?: string | null;
+  pendingDrill?: PendingDrill | null;
+  /** Last PendingDrill seq handed out; never reused while this view lives. */
+  pendingSeq?: number;
   /** Canonical health finding opened from any instance/rig/seat surface. */
   healthOpen: string | null;
   /** SCOPES view: the mission whose execution story is open (null = selector only). */

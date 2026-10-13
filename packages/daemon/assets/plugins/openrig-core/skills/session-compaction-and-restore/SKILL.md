@@ -152,6 +152,12 @@ selected startup path, use `skills/core/agent-startup-and-context-ingestion/SKIL
 A packet or marker proves retained/delivered evidence, not successful provider
 restoration; measure the resumed seat against the proof standard above.
 
+Before a planned compaction, restart or long pause, write the seat's authored recap
+with `rig context recap-write --rig <rig> --seat <seat> --file <draft>`. Its format is
+in `seat-continuity-and-handover`, "Write the seat's recap before a handover". A
+rebuild reads it before `LEARNED.md`, and a profile source of `seat:RECAP.md` serves
+it after a restore.
+
 ## See also
 
 - `claude-compaction-restore` skill — the Claude Code restore SOP (PreCompact hook + JSONL restore script for post-compaction recovery)
