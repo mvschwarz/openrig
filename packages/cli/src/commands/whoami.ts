@@ -111,17 +111,21 @@ function projectCompactWhoami(data: Record<string, unknown>, bounded?: BoundedPe
 export interface BoundedPeers {
   peers: unknown[];
   omitted: number;
-  note: string;
+  /** The daemon's own note when every peer fits; otherwise what was left out and how to list it. */
+  note: unknown;
 }
 
 /**
  * Slice 15 (OPR.0.7.0.15) P5 — with `output.compact` on, compact `--json` lists at most `bound` peers so the
  * every-boot call stays small as a rig grows. Edge peers (either direction) come first, then peers in the
  * seat's own pod, then the rest, each in the daemon's roster order. Nothing is silently missing: the note
- * says how many were left out and the exact command that lists them all, and `edges` stays complete.
+ * says how many were left out and the exact command that lists them all, and `edges` stays complete. When
+ * every peer fits, the roster and the daemon's note pass through unchanged, so a small rig pays only for
+ * `peersOmitted: 0`.
  */
 export function boundPeers(data: Record<string, unknown>, bound: number, allPeersCommand: string): BoundedPeers {
   const peers = Array.isArray(data["peers"]) ? (data["peers"] as Array<Record<string, unknown> | null>) : [];
+  if (peers.length <= bound) return { peers, omitted: 0, note: data["peersNote"] };
   const id = (data["identity"] ?? {}) as Record<string, unknown>;
   const edges = (data["edges"] ?? {}) as { outgoing?: WhoamiEdge[]; incoming?: WhoamiEdge[] };
   const linked = new Set<unknown>([
@@ -137,12 +141,9 @@ export function boundPeers(data: Record<string, unknown>, bound: number, allPeer
   const ordered = [0, 1, 2].flatMap((t) => peers.filter((peer) => tier(peer) === t));
   const shown = ordered.slice(0, bound);
   const omitted = peers.length - shown.length;
-  const rest = "edges = directional relationships (always complete); use `rig ps --nodes` for node inventory including self + live state";
-  const note = omitted > 0
-    ? `peers = ${shown.length} of this rig's ${peers.length} (roster excluding self; edge peers first, then your pod, then roster order; `
-      + `bound output.whoami_peers=${bound}); ${omitted} not shown; all: ${allPeersCommand}; ${rest}`
-    : `peers = all ${peers.length} of this rig's roster excluding self (bound output.whoami_peers=${bound}; `
-      + `edge peers first, then your pod, then roster order); ${rest}`;
+  const note = `peers = ${shown.length} of this rig's ${peers.length} (roster excluding self; edge peers first, then your pod, then roster order; `
+    + `bound output.whoami_peers=${bound}); ${omitted} not shown; all: ${allPeersCommand}; `
+    + "edges = directional relationships (always complete); use `rig ps --nodes` for node inventory including self + live state";
   return { peers: shown, omitted, note };
 }
 

@@ -78,12 +78,13 @@ function todaysCompact(data: ReturnType<typeof response>): string {
 describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)", () => {
   let server: http.Server;
   let port: number;
-  let served: ReturnType<typeof response>;
+  let served: ReturnType<typeof response> | Record<string, unknown>;
+  let status = 200;
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       if ((req.url ?? "").includes("/api/whoami")) {
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(served));
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -97,6 +98,7 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
 
   beforeEach(() => {
     served = response(BIG_PEERS);
+    status = 200;
     vi.stubEnv("OPENRIG_NODE_ID", "");
     vi.stubEnv("OPENRIG_SESSION_NAME", "");
     vi.stubEnv("TMUX_PANE", "");
@@ -119,13 +121,13 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
   }
 
   it("switch off (default): today's compact output byte for byte, on a large and a small rig", async () => {
-    expect(await run("--json")).toBe(todaysCompact(served));
+    expect(await run("--json")).toBe(todaysCompact(served as ReturnType<typeof response>));
     served = response(SMALL_PEERS);
-    expect(await run("--json")).toBe(todaysCompact(served));
+    expect(await run("--json")).toBe(todaysCompact(served as ReturnType<typeof response>));
   });
 
   it("switch off: --all-peers changes nothing", async () => {
-    expect(await run("--json", "--all-peers")).toBe(todaysCompact(served));
+    expect(await run("--json", "--all-peers")).toBe(todaysCompact(served as ReturnType<typeof response>));
   });
 
   it("switch on, large rig: 8 peers, edge peers (both directions) first, then the seat's pod, then roster order", async () => {
@@ -142,22 +144,43 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
       + "edges = directional relationships (always complete); use `rig ps --nodes` for node inventory including self + live state",
     );
     // Identity, edges and transcript stay at today's paths, complete.
-    const today = JSON.parse(todaysCompact(served));
+    const today = JSON.parse(todaysCompact(served as ReturnType<typeof response>));
     expect(out.identity).toEqual(today.identity);
     expect(out.edges).toEqual(today.edges);
     expect(out.transcript).toEqual(today.transcript);
     expect(Object.keys(out)).toEqual(["resolvedBy", "identity", "peers", "peersNote", "peersOmitted", "edges", "transcript"]);
   });
 
-  it("switch on, small rig: every peer, peersOmitted 0, and the note says all are shown", async () => {
+  it("switch on, small rig: today's peers and note verbatim, plus only peersOmitted: 0", async () => {
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
     served = response(SMALL_PEERS);
+    const out = await run("--json");
+    const today = JSON.parse(todaysCompact(served as ReturnType<typeof response>));
+    expect(JSON.parse(out)).toEqual({ ...today, peersOmitted: 0 });
+    expect(Object.keys(JSON.parse(out))).toEqual(["resolvedBy", "identity", "peers", "peersNote", "peersOmitted", "edges", "transcript"]);
+    expect(Buffer.byteLength(out) - Buffer.byteLength(todaysCompact(served as ReturnType<typeof response>))).toBe('"peersOmitted":0,'.length);
+  });
+
+  it("a rig of exactly the bound is shown whole, unchanged", async () => {
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+    served = response(BIG_PEERS.slice(0, 8));
     const out = JSON.parse(await run("--json"));
-    // Edge peers first, in roster order (orch.lead was created before review.r1 here), then the seat's pod.
-    expect(out.peers.map((p: { logicalId: string }) => p.logicalId)).toEqual(["orch.lead", "review.r1", "dev.a"]);
+    expect(out.peers).toEqual(JSON.parse(todaysCompact(served as ReturnType<typeof response>)).peers);
+    expect(out.peersNote).toBe(DAEMON_NOTE);
     expect(out.peersOmitted).toBe(0);
-    expect(out.peersNote).toMatch(/^peers = all 3 of this rig's roster excluding self \(bound output\.whoami_peers=8;/);
-    expect(out.peersNote).not.toContain("not shown");
+  });
+
+  it("switch on: an error answer prints exactly as main does (no bounding, no rewritten note, no peersOmitted)", async () => {
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+    for (const code of [404, 409, 500]) {
+      status = code;
+      served = { error: "Session not found", peers: BIG_PEERS, peersNote: DAEMON_NOTE };
+      const out = await run("--json");
+      // Main's error path: the whole answer, pretty-printed; a 404 also gets its additive routing hint.
+      if (code === 404) expect(JSON.parse(out)).toEqual({ ...served, hint: expect.any(String) });
+      else expect(out).toBe(JSON.stringify(served, null, 2));
+      expect(out).not.toContain("peersOmitted");
+    }
   });
 
   it("the setting changes the bound", async () => {
@@ -169,13 +192,14 @@ describe("rig whoami --json: bounded peers (output.compact, output.whoami_peers)
     expect(out.peersNote).toContain("bound output.whoami_peers=3); 20 not shown");
     vi.stubEnv("OPENRIG_OUTPUT_WHOAMI_PEERS", "30");
     out = JSON.parse(await run("--json"));
-    expect(out.peers).toHaveLength(23);
+    expect(out.peers).toEqual(JSON.parse(todaysCompact(served as ReturnType<typeof response>)).peers);
+    expect(out.peersNote).toBe(DAEMON_NOTE);
     expect(out.peersOmitted).toBe(0);
   });
 
   it("switch on: --all-peers prints today's compact output byte for byte", async () => {
     vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
-    expect(await run("--json", "--all-peers")).toBe(todaysCompact(served));
+    expect(await run("--json", "--all-peers")).toBe(todaysCompact(served as ReturnType<typeof response>));
   });
 
   it("switch on: --full keeps today's whole payload", async () => {
