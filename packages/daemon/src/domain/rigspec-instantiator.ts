@@ -2153,7 +2153,9 @@ export class PodRigInstantiator {
       updatedAt: "",
       cwd: configResult.config.cwd,
       model: configResult.config.model,
-      effort: configResult.config.effort,
+      // The seat's saved effort choice wins over the authored value just written by
+      // updateNodeResolvedConfig; a seat without one launches with exactly that authored value.
+      effort: (readSeatEffort(this.deps.rigRepo.db, input.nodeId) ?? { effective: configResult.config.effort ?? null }).effective ?? undefined,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > FLOOR)
       // binds per-seat explicitly; adapters thread it into the yolo-mode helpers.
