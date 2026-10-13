@@ -194,7 +194,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         process.exitCode = 1;
         return;
       }
-      let refreshFailed = false;
+      let refreshExit = 0;
       if (opts.refresh) {
         // The daemon's worst case is a read's deadline (Codex 35 s, Claude 45 s) plus stopping the reader
         // (Codex: stdin EOF, TERM, KILL and reap, up to 2 s each: ~8 s), so ~45 s before it answers. Wait
@@ -210,14 +210,20 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
           process.exitCode = 1;
           return;
         }
+        // One provider's refusal or error (e.g. a daemon without a Claude reader) is printed, and the status
+        // is still read and printed for the other; the exit code then says the refresh didn't fully succeed.
         for (const refreshed of answers) {
-          if (handleHttpError(refreshed, "refresh usage windows")) return;
-          if ((refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed") refreshFailed = true;
+          if (handleHttpError(refreshed, "refresh usage windows")) {
+            refreshExit = Math.max(refreshExit, process.exitCode === 2 ? 2 : 1);
+            continue;
+          }
+          if ((refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed") refreshExit = Math.max(refreshExit, 1);
         }
+        process.exitCode = undefined;
       }
       const res = await client.get<Record<string, unknown>>("/api/provider/status");
-      if (refreshFailed) process.exitCode = 1;
       if (handleHttpError(res, "read provider status")) return;
+      if (refreshExit > 0) process.exitCode = refreshExit;
       if (opts.json) console.log(JSON.stringify(res.data));
       else renderStatusHuman(res.data);
     });

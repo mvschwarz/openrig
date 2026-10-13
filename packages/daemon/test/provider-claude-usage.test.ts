@@ -112,9 +112,12 @@ describe("LOW-4: a row a later read superseded ages to stale", () => {
 
 describe("claudeUsageReader against a fake claude in a private tmux server", () => {
   const home = () => fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-home-"));
+  // This file's readers make their private tmux dirs under their own root, so other test files reading
+  // Claude at the same time can't change what these cleanup assertions see.
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-root-"));
   const reader = (fake: ReturnType<typeof makeFakeClaude>, deadlineMs = 8_000, launchPath = `${fake.binDir}${path.delimiter}${process.env.PATH}`) =>
-    claudeUsageReader({ launchPath, home: home(), claudeConfigDir: fake.configDir, deadlineMs, pollMs: 100 });
-  const ownDirs = () => fs.readdirSync(os.tmpdir()).filter((d) => d.startsWith("openrig-claude-usage-")).sort();
+    claudeUsageReader({ launchPath, home: home(), claudeConfigDir: fake.configDir, deadlineMs, pollMs: 100, tmpRoot });
+  const ownDirs = () => fs.readdirSync(tmpRoot).filter((d) => d.startsWith("openrig-claude-usage-")).sort();
 
   it("reads identity and the screen; starts Claude safe-mode on /usage with the no-model guard; types only exit keys", async () => {
     const fake = makeFakeClaude();
@@ -155,6 +158,23 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "claude-reader-nobin-"));
     const r = await claudeUsageReader({ launchPath: empty, home: home(), deadlineMs: 2_000 })();
     expect(r).toMatchObject({ ok: false, reason: "binary_not_found", detail: "no claude executable on the daemon's PATH" });
+  });
+
+  it("the private tmux dir is made under tmpRoot while a read runs, and removed after", async () => {
+    const fake = makeFakeClaude();
+    fake.setPlan({ auth: [CLAUDE_AUTH], screen: "hang" });
+    const running = reader(fake, 1_500)();
+    await new Promise((r) => setTimeout(r, 700));
+    expect(ownDirs()).toHaveLength(1);
+    expect(await running).toMatchObject({ ok: false, reason: "timeout" });
+    expect(ownDirs()).toEqual([]);
+  });
+
+  it("an early exit says honestly what it may mean (no version probe)", async () => {
+    const fake = makeFakeClaude();
+    fake.setPlan({ auth: [CLAUDE_AUTH], screen: "exit" });
+    expect(await reader(fake)()).toMatchObject({ ok: false, reason: "child_exited",
+      detail: "claude exited before the usage screen rendered (a Claude Code without these flags, such as --safe-mode, exits this way)" });
   });
 
   it("a logged-out or API-key login is refused before the screen starts", async () => {

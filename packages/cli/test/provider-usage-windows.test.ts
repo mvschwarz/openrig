@@ -188,6 +188,23 @@ describe("rig provider status — usage windows", () => {
     expect(one.exitCode).toBe(1);
   });
 
+  it("one provider's HTTP error is printed, the status still prints, and the exit is 1", async () => {
+    model = { ...MODEL, usage: [READING] };
+    refreshByProvider = {
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } },
+      claude: { status: 400, body: { error: "claude usage windows are not available on this daemon" } },
+    };
+    const r = await run(["status", "--refresh"], port);
+    expect(r.err).toBe("claude usage windows are not available on this daemon");
+    expect(r.out).toContain("USAGE");
+    expect(r.exitCode).toBe(1);
+    refreshByProvider = { claude: { status: 503, body: { error: "provider_service_unavailable" } },
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } } };
+    const five = await run(["status", "--refresh"], port);
+    expect([five.err, five.exitCode]).toEqual(["provider_service_unavailable", 2]);
+    expect(five.out).toContain("USAGE");
+  });
+
   it("--provider takes codex or claude only", async () => {
     const r = await run(["status", "--refresh", "--provider", "gemini"], port);
     expect([r.err, r.exitCode]).toEqual(["--provider must be codex or claude (got gemini)", 1]);

@@ -57,6 +57,8 @@ export interface ClaudeUsageReaderOptions {
   deadlineMs?: number;
   pollMs?: number;
   now?: () => string;
+  /** Where the private tmux server's temp dir is made (default: the OS temp dir). */
+  tmpRoot?: string;
 }
 
 export const CLAUDE_USAGE_READ_DEADLINE_MS = 45_000;
@@ -151,7 +153,7 @@ export function claudeUsageReader(options: ClaudeUsageReaderOptions = {}): Claud
       return fail("not_subscription_login", `the login is not a claude.ai subscription (${before.facts.authMethod ?? "unknown method"})`);
     }
 
-    const screen = await readScreen(claude, env, cwd, left, pollMs, now);
+    const screen = await readScreen(claude, env, cwd, left, pollMs, now, options.tmpRoot ?? os.tmpdir());
     if (!screen.ok) return fail(screen.reason, screen.detail);
 
     const after = await authStatus();
@@ -171,8 +173,9 @@ async function readScreen(
   left: () => number,
   pollMs: number,
   now: () => string,
+  tmpRoot: string,
 ): Promise<{ ok: true; text: string; observedAt: string } | { ok: false; reason: ClaudeUsageFailureReason; detail: string }> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-claude-usage-"));
+  const dir = fs.mkdtempSync(path.join(tmpRoot, "openrig-claude-usage-"));
   const socket = path.join(dir, "s");
   const tmux = (args: string[]) => run("tmux", ["-S", socket, "-f", "/dev/null", ...args], env, cwd, Math.max(1, Math.min(5_000, left())));
   // tmux sets TMUX/TMUX_PANE inside its panes; unset them so Claude never thinks it's nested or in a seat.
@@ -187,7 +190,8 @@ async function readScreen(
     while (left() > 0) {
       const captured = await tmux(["capture-pane", "-p", "-t", "usage"]);
       if (captured.code !== 0) {
-        return { ok: false, reason: "child_exited", detail: "claude exited before the usage screen rendered" };
+        // A Claude Code without one of the start flags (such as --safe-mode) exits this way: a visible failure.
+        return { ok: false, reason: "child_exited", detail: "claude exited before the usage screen rendered (a Claude Code without these flags, such as --safe-mode, exits this way)" };
       }
       last = captured.stdout;
       if (PROMPTS.test(last)) return { ok: false, reason: "interaction_required", detail: "claude asked for input (trust, sign-in or a confirmation); nothing was answered" };
