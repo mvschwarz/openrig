@@ -12,6 +12,7 @@ import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import { PiUsageEntriesStore, hasPiUsageEntriesTable, validPiUsageFact } from "../domain/pi-usage-entries-store.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -58,6 +59,44 @@ function nextHookSeq(key: string): number {
 }
 
 export const activityRoutes = new Hono();
+
+// OPR.0.7.0.2 (cost reporting, Pi atom): a Pi runner started with --usage-facts (usage.pi_cost_facts on) posts the
+// usage facts of entries Pi has persisted. Same local hook token as /hooks. Each (Pi session, entry) is stored
+// once; facts for a seat that isn't a managed Pi seat are refused, never stored under another name.
+activityRoutes.post("/pi-usage", async (c) => {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const expectedToken = c.get("activityHookToken" as never) as string | undefined;
+  const sessionRegistry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+  if (!store || !expectedToken || !sessionRegistry || !hasPiUsageEntriesTable(sessionRegistry.db)) {
+    return c.json({ ok: false, code: "pi_usage_unconfigured", error: "Pi usage facts aren't accepted by this daemon." }, 503);
+  }
+  const authHeader = c.req.header("authorization");
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
+  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+    return c.json({ ok: false, code: "activity_hook_unauthorized", error: "Pi usage facts require the configured local hook token." }, 401);
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json() as Record<string, unknown>;
+  } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  const sessionName = stringOrNull(body.sessionName);
+  const piSessionId = stringOrNull(body.piSessionId);
+  if (!sessionName || !piSessionId || !Array.isArray(body.facts)) {
+    return c.json({ ok: false, code: "invalid_pi_usage", error: "pi-usage requires sessionName, piSessionId and facts[]" }, 400);
+  }
+  const resolved = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId), runtime: "pi" });
+  if (!resolved || resolved.runtime !== "pi") {
+    return c.json({ ok: false, code: "session_not_found", error: `No managed Pi seat named ${sessionName}` }, 404);
+  }
+  const facts = (body.facts as unknown[]).map(validPiUsageFact);
+  const valid = facts.filter((fact): fact is NonNullable<typeof fact> => fact !== null);
+  const result = new PiUsageEntriesStore(sessionRegistry.db).record({
+    seatSession: resolved.sessionName, nodeId: resolved.nodeId, generation: stringOrNull(body.generation), piSessionId, facts: valid,
+  }, new Date().toISOString());
+  return c.json({ ok: true, ...result, rejected: facts.length - valid.length });
+});
 
 activityRoutes.post("/hooks", async (c) => {
   const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;

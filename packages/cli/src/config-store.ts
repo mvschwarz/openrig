@@ -176,6 +176,11 @@ export interface RiggedConfig {
   provider: {
     usageWindows: boolean;
   };
+  // Slice 02 (OPR.0.7.0.2) — Pi seats report model-priced cost from persisted session entries
+  // (default off). Read by the daemon at Pi launch; the CLI key is the lockstep twin.
+  usage: {
+    piCostFacts: boolean;
+  };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -334,6 +339,10 @@ const DEFAULTS = {
   provider: {
     usageWindows: false,
   },
+  // Slice 02 — Pi cost facts OFF until the switch is on.
+  usage: {
+    piCostFacts: false,
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -452,6 +461,7 @@ export const VALID_KEYS = [
   "output.whoami_peers",
   // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
+  "usage.pi_cost_facts",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -551,6 +561,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
+  "usage.pi_cost_facts": { primary: "OPENRIG_USAGE_PI_COST_FACTS" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -633,6 +644,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
+  "usage.pi_cost_facts": ["usage", "piCostFacts"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -1174,6 +1186,9 @@ export class ConfigStore {
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,
+      },
+      usage: {
+        piCostFacts: v("usage.pi_cost_facts") as boolean,
       },
       retention: {
         enabled: v("retention.enabled") as boolean,

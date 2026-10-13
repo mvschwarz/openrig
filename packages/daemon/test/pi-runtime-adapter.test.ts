@@ -277,6 +277,23 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     expect(fs.dirs.has(piSeatPaths(STATE_ROOT, SESSION).sessionsDir)).toBe(true);
   });
 
+  it("OPR.0.7.0.2: --usage-facts only while usage.pi_cost_facts is on, read at each launch; off by default", async () => {
+    let enabled = false;
+    const commands: string[] = [];
+    for (const deps of [{}, { usageFactsEnabled: () => enabled }, { usageFactsEnabled: () => enabled }]) {
+      const fs = memFs();
+      const sendShellCommand = vi.fn(async (_t: string, text: string) => {
+        fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
+        commands.push(text);
+        return { ok: true as const };
+      });
+      const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
+      expect((await adapter.launchHarness(binding, { name: SESSION })).ok).toBe(true);
+      enabled = commands.length >= 2; // switched on before the third launch, which reads it again
+    }
+    expect(commands.map((c) => c.includes("--usage-facts"))).toEqual([false, false, true]);
+  });
+
   it("explicit approve posture is honored end-to-end", async () => {
     const fs = memFs();
     let cmd = "";

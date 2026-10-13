@@ -28,6 +28,7 @@ import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { piCredentialNotice } from "./pi-readiness.js";
+import { extractPiUsageFacts, parsePiSessionHeader, type PiSessionBoundary } from "../domain/pi-usage-facts.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -290,6 +291,10 @@ export interface RunnerIo {
   sessionFileExists?(path: string): boolean;
   /** Terminate OMP when get_state cannot establish a resumable seat. */
   stopChild?(): void;
+  /** OPR.0.7.0.2 (only with --usage-facts): POST usage facts from persisted entries to the daemon. Best-effort. */
+  postUsageFacts?(payload: Record<string, unknown>): void;
+  /** The first line of a Pi session file (its header), or null when it can't be read. */
+  readFirstLine?(path: string): string | null;
   now(): string;
 }
 
@@ -317,11 +322,15 @@ export class RunnerCore {
   /** Set once the daemon confirms it persisted the resume token. */
   private identityPersisted = false;
   private identityInFlight = false;
+  /** OPR.0.7.0.2: the session header boundary (undefined until read; null when unreadable). */
+  private usageBoundary: PiSessionBoundary | null | undefined;
+  /** Entry ids already posted by this process; the daemon stores each (session, entry) once regardless. */
+  private readonly postedUsageEntryIds = new Set<string>();
 
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime } = {},
+    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -453,8 +462,33 @@ export class RunnerCore {
         this.lastEntryId = lastId;
         this.writeSidecar({});
       }
+      this.reportUsageFacts(entries);
       return;
     }
+  }
+
+  /** OPR.0.7.0.2: report usage from the persisted entries a get_entries response returned (catch-up after a
+   *  restart, or the refresh after each agent_end). Pi only, and only with --usage-facts. Never live updates. */
+  private reportUsageFacts(entries: unknown[]): void {
+    if (!this.opts.usageFacts || this.runtime !== "pi" || !this.io.postUsageFacts) return;
+    if (this.usageBoundary === undefined) {
+      const firstLine = this.sessionFile && this.io.readFirstLine ? this.io.readFirstLine(this.sessionFile) : null;
+      this.usageBoundary = firstLine ? parsePiSessionHeader(firstLine) : null;
+    }
+    const { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
+    const fresh = facts.filter((fact) => !this.postedUsageEntryIds.has(fact.entryId));
+    if (fresh.length === 0 && malformed === 0) return;
+    for (const fact of fresh) this.postedUsageEntryIds.add(fact.entryId);
+    this.io.postUsageFacts({
+      sessionName: this.identity.sessionName,
+      nodeId: this.identity.nodeId,
+      generation: this.identity.generation,
+      piSessionId: this.sessionId,
+      sessionCreatedAt: this.usageBoundary?.createdAt ?? null,
+      forked: this.usageBoundary ? this.usageBoundary.parentSession !== null : null,
+      facts: fresh,
+      malformed,
+    });
   }
 
   private raiseAttention(subtype: "runtime_error" | "permission_prompt"): void {
@@ -611,6 +645,8 @@ interface RunnerArgs {
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
+  /** OPR.0.7.0.2: report usage facts from persisted entries (the daemon passes it when usage.pi_cost_facts is on). */
+  usageFacts?: boolean;
 }
 
 export function parseRunnerArgs(argv: string[]): RunnerArgs {
@@ -636,6 +672,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--model": args.model = next(); break;
       case "--session": args.sessionFile = next(); break;
       case "--fork": args.forkRef = next(); break;
+      case "--usage-facts": args.usageFacts = true; break;
       case "--approve": args.trust = "approve"; break;
       case "--no-approve": args.trust = "no-approve"; break;
       case "--approval-mode": {
@@ -910,13 +947,36 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     now: () => new Date().toISOString(),
     stopChild: () => { child.kill(); },
     sessionFileExists: (path) => fs.existsSync(path),
+    postUsageFacts: (payload) => {
+      if (!endpoint || typeof fetch !== "function") return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      fetch(new URL("/api/activity/pi-usage", endpoint.baseUrl).toString(), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      }).catch(() => { /* best-effort: a later refresh re-sends what wasn't stored */ }).finally(() => clearTimeout(timeout));
+    },
+    readFirstLine: (path) => {
+      try {
+        const fd = fs.openSync(path, "r");
+        try {
+          const buffer = Buffer.alloc(8192);
+          const read = fs.readSync(fd, buffer, 0, buffer.length, 0);
+          const text = buffer.subarray(0, read).toString("utf8");
+          const end = text.indexOf("\n");
+          return end >= 0 ? text.slice(0, end) : null;
+        } finally { fs.closeSync(fd); }
+      } catch { return null; }
+    },
   };
 
   const core = new RunnerCore(io, {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime });
+  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true });
 
   let transportUp = runtime === "pi";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

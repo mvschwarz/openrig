@@ -180,3 +180,21 @@ describe("rig usage cost: a tiny estimate never reads as zero (OPR.0.7.0.2)", ()
     expect(line).not.toContain("$0.00");
   });
 });
+
+describe("rig usage cost: Pi seats (OPR.0.7.0.2)", () => {
+  it("names the model-priced estimate, its session and what isn't in it", async () => {
+    const { costLine } = await import("../src/commands/usage.js");
+    const line = costLine({ seatSession: "devpi@r", runtime: "pi", status: "reported", costUsd: 0.0675,
+      window: { piSessionId: "fork-1", since: "2026-10-13T16:00:09.000Z", asOf: "2026-10-13T16:00:10.000Z" },
+      entries: { own: 2, ownWithoutCost: 1, errorOrAborted: 2, inherited: { count: 5, costUsd: 0.0175 }, unknownOrigin: { count: 0, costUsd: null } },
+      tokens: { input: 200, output: 40 } });
+    expect(line).toContain("$0.07 model-priced estimate (Pi persisted entries, 2 own entries) for Pi session fork-1");
+    expect(line).toContain("1 entry without a cost");
+    expect(line).toContain("2 error/aborted turns included");
+    expect(line).toContain("5 inherited from the fork, not counted ($0.02)");
+    const absent = costLine({ seatSession: "devpi@r", runtime: "pi", status: "absent", reason: "Pi recorded no cost on this session's own entries",
+      window: { piSessionId: "s" }, entries: { own: 1, ownWithoutCost: 1 }, tokens: { input: 1, output: 1 } });
+    expect(absent).toContain("cost: not reported (Pi recorded no cost on this session's own entries)");
+    expect(absent).not.toContain("$0.00");
+  });
+});

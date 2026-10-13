@@ -68,6 +68,7 @@ const LABELS: Record<string, string> = {
   "output.compact": "Compact command output",
   "output.whoami_peers": "Peers listed by whoami (compact)",
   "provider.usage_windows": "Codex and Claude usage windows",
+  "usage.pi_cost_facts": "Pi cost from persisted entries",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",
   "health.context_pressure.critical_percent": "Context critical threshold",

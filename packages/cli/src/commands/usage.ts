@@ -52,8 +52,27 @@ export function formatUsd(value: number): string {
   return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
 }
 
+/** A Pi seat: the model-priced estimate summed over its own persisted entries, with what isn't in it named. */
+function piCostLine(seat: CostPayload["seats"][number]): string {
+  const w = (seat["window"] ?? {}) as { piSessionId?: string; since?: string | null; asOf?: string | null };
+  const e = (seat["entries"] ?? {}) as { own?: number; ownWithoutCost?: number; errorOrAborted?: number;
+    inherited?: { count: number; costUsd: number | null }; unknownOrigin?: { count: number; costUsd: number | null } };
+  const t = (seat["tokens"] ?? {}) as { input?: number; output?: number };
+  const extras = [
+    e.ownWithoutCost ? `${e.ownWithoutCost} entr${e.ownWithoutCost === 1 ? "y" : "ies"} without a cost` : "",
+    e.errorOrAborted ? `${e.errorOrAborted} error/aborted turn${e.errorOrAborted === 1 ? "" : "s"} included` : "",
+    e.inherited?.count ? `${e.inherited.count} inherited from the fork, not counted${e.inherited.costUsd !== null ? ` (${formatUsd(e.inherited.costUsd)})` : ""}` : "",
+    e.unknownOrigin?.count ? `${e.unknownOrigin.count} of unknown origin, not counted${e.unknownOrigin.costUsd !== null ? ` (${formatUsd(e.unknownOrigin.costUsd)})` : ""}` : "",
+  ].filter(Boolean).join("; ");
+  const head = seat.status === "reported"
+    ? `${formatUsd(Number(seat["costUsd"]))} model-priced estimate (Pi persisted entries, ${e.own ?? 0} own entries) for Pi session ${w.piSessionId}${w.since ? ` since ${w.since}` : ""}${w.asOf ? `, last ${w.asOf}` : ""}`
+    : `cost: not reported (${seat["reason"]}) for Pi session ${w.piSessionId}`;
+  return `${seat.seatSession}  ${head}${extras ? `; ${extras}` : ""}  tokens in ${t.input ?? "?"} / out ${t.output ?? "?"}`;
+}
+
 /** One labelled line per seat. Never prints a dollar figure the route didn't report. */
 export function costLine(seat: CostPayload["seats"][number]): string {
+  if (seat["runtime"] === "pi") return piCostLine(seat);
   const w = (seat["window"] ?? {}) as { nativeSessionId?: string | null; since?: string; asOf?: string | null };
   if (seat.status === "reported") {
     const stale = seat["stale"] ? `, STALE (${seat["ageSeconds"] ?? "?"}s old; kept as history)` : "";
@@ -145,7 +164,10 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
 Claude seats show the statusline's cost.total_cost_usd: a client-side estimate, cumulative for one
 native session since its last reset (not an invoice). Codex seats show tokens and that the inspected
 method reports no cost. A missing figure reads as missing and an old one as stale, never as $0; no
-subscription window is shown in dollars. Earlier values stay in rig usage series --lane context.`)
+subscription window is shown in dollars. Earlier values stay in rig usage series --lane context.
+With usage.pi_cost_facts on (default off), Pi seats show Pi's model-priced estimate summed over
+their own persisted session entries, each counted once; entries a fork copied in are shown apart and
+not counted, and an entry without a cost is named, not counted as zero.`)
     .action(async (opts: { seat?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);

@@ -14,6 +14,7 @@
 // any served shape.
 import type { Database } from "better-sqlite3";
 import { hasClientCostColumns } from "./usage-samples-store.js";
+import { hasPiUsageEntriesTable } from "./pi-usage-entries-store.js";
 
 export interface UsageSeriesQuery {
   seatSession?: string;
@@ -280,7 +281,38 @@ export type SeatCost =
       window: { nativeSessionId: string | null; asOf: string | null };
       tokens: { input: number | null; output: number | null };
     }
+  | PiSeatCost
   | { seatSession: string; runtime: null; status: "unknown"; reason: string };
+
+/** OPR.0.7.0.2 (Pi atom): a Pi seat's model-priced estimate from its persisted entries. */
+export type PiSeatCost = {
+  seatSession: string;
+  runtime: "pi";
+  status: "reported" | "absent";
+  kind: "model-priced estimate";
+  source: "Pi persisted session entries (usage.cost.total)";
+  /** The occupant's own entries in this Pi session that carried a cost, summed; absent when none did. */
+  costUsd?: number;
+  reason?: string;
+  window: { piSessionId: string; since: string | null; asOf: string | null };
+  coverage: string;
+  /** Own entries by kind (all the usage-bearing kinds Pi records). */
+  kinds: Record<"assistant" | "usage" | "tool_result" | "compaction" | "branch_summary", number>;
+  entries: {
+    own: number;
+    /** Own entries Pi recorded without a cost: not counted as zero, and named. */
+    ownWithoutCost: number;
+    /** Own assistant entries that ended in an error or abort; their reported usage is included. */
+    errorOrAborted: number;
+    /** Entries a fork or branch copied in from the parent session: history, not this occupant's spend. */
+    inherited: { count: number; costUsd: number | null };
+    /** Entries whose origin couldn't be told (the session header wasn't readable): kept apart from the total. */
+    unknownOrigin: { count: number; costUsd: number | null };
+  };
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+};
+
+export const PI_COST_COVERAGE = "this Pi session's own persisted entries of every usage-bearing kind Pi records (assistant, usage, tool result, compaction, branch summary), each counted once; a model-priced estimate from catalog rates, not a provider charge (an OpenRouter actual charge isn't correlated here)";
 
 export interface CostViewResult {
   seats: SeatCost[];
@@ -358,5 +390,64 @@ export function computeCostView(db: Database, q: { nowIso: string; seatSession?:
       tokens: { input: last.total_input_tokens, output: last.total_output_tokens },
     });
   }
+  for (const pi of piSeatCosts(db, q.seatSession)) {
+    const at = seats.findIndex((seat) => seat.seatSession === pi.seatSession);
+    if (at >= 0) seats[at] = pi; else seats.push(pi);
+  }
   return { seats, note };
+}
+
+interface PiRow {
+  id: number; seat_session: string; pi_session_id: string; entry_timestamp: string; kind: PiSeatCost["kinds"] extends Record<infer K, number> ? K : never;
+  input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number; cost_total: number | null;
+  stop_reason: string | null; origin: "own" | "inherited" | "unknown";
+}
+
+/** Each Pi seat's latest Pi session, from the stored persisted-entry facts. Earlier sessions stay stored as history. */
+function piSeatCosts(db: Database, seatSession?: string): PiSeatCost[] {
+  if (!hasPiUsageEntriesTable(db)) return [];
+  const latest = db.prepare(
+    `SELECT seat_session, pi_session_id FROM pi_usage_entries p
+      WHERE id = (SELECT MAX(id) FROM pi_usage_entries q WHERE q.seat_session = p.seat_session)${seatSession ? " AND seat_session = ?" : ""}
+      ORDER BY seat_session ASC`,
+  ).all(...(seatSession ? [seatSession] : [])) as Array<{ seat_session: string; pi_session_id: string }>;
+  const sum = (rows: PiRow[]): number | null => {
+    const priced = rows.filter((r) => r.cost_total !== null);
+    return priced.length ? priced.reduce((total, r) => total + r.cost_total!, 0) : null;
+  };
+  return latest.map(({ seat_session: seat, pi_session_id: piSession }) => {
+    const rows = db.prepare(
+      `SELECT id, seat_session, pi_session_id, entry_timestamp, kind, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+              cost_total, stop_reason, origin
+         FROM pi_usage_entries WHERE seat_session = ? AND pi_session_id = ? ORDER BY entry_timestamp ASC, id ASC`,
+    ).all(seat, piSession) as PiRow[];
+    const own = rows.filter((r) => r.origin === "own");
+    const inherited = rows.filter((r) => r.origin === "inherited");
+    const unknown = rows.filter((r) => r.origin === "unknown");
+    const kinds = { assistant: 0, usage: 0, tool_result: 0, compaction: 0, branch_summary: 0 };
+    for (const r of own) kinds[r.kind] += 1;
+    const ownCost = sum(own);
+    return {
+      seatSession: seat, runtime: "pi" as const,
+      status: ownCost === null ? "absent" as const : "reported" as const,
+      kind: "model-priced estimate" as const, source: "Pi persisted session entries (usage.cost.total)" as const,
+      ...(ownCost === null
+        ? { reason: own.length === 0 ? "no own entries with usage are stored for this Pi session yet" : "Pi recorded no cost on this session's own entries" }
+        : { costUsd: ownCost }),
+      window: { piSessionId: piSession, since: own[0]?.entry_timestamp ?? null, asOf: own.at(-1)?.entry_timestamp ?? null },
+      coverage: PI_COST_COVERAGE,
+      kinds,
+      entries: {
+        own: own.length,
+        ownWithoutCost: own.filter((r) => r.cost_total === null).length,
+        errorOrAborted: own.filter((r) => r.kind === "assistant" && (r.stop_reason === "error" || r.stop_reason === "aborted")).length,
+        inherited: { count: inherited.length, costUsd: sum(inherited) },
+        unknownOrigin: { count: unknown.length, costUsd: sum(unknown) },
+      },
+      tokens: {
+        input: own.reduce((t, r) => t + r.input_tokens, 0), output: own.reduce((t, r) => t + r.output_tokens, 0),
+        cacheRead: own.reduce((t, r) => t + r.cache_read_tokens, 0), cacheWrite: own.reduce((t, r) => t + r.cache_write_tokens, 0),
+      },
+    };
+  });
 }
