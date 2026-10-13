@@ -184,6 +184,7 @@ export const SETTINGS_VALID_KEYS = [
   "terminal.status_bar",
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
+  "output.whoami_peers",
   // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view; daemon-read, twin of the CLI key.
   "provider.usage_windows",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
@@ -290,6 +291,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
+  "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
@@ -370,6 +372,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "output.compact": ["output", "compact"],
+  "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
@@ -645,6 +648,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // is redundant chrome). Operator flip is future-launches-only.
     case "terminal.status_bar": return false;
     case "output.compact": return false;
+    case "output.whoami_peers": return 8;
     case "provider.usage_windows": return false;
     // OPR.0.4.6.FS-1 W2 — retention defaults (arch D3 safe values: archive
     // terminal+aged transitions >30d; prune watchdog_history >14d keep-50/job;
@@ -816,6 +820,12 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   // cli/src/config-store.ts KEY_CONSTRAINTS twin so the daemon HTTP write
   // surface rejects exactly what the CLI rejects. `retention.enabled` is a
   // boolean (coerceValue enforces true/false) — no constraint entry needed.
+  // Slice 15 P5 — the whoami peer bound; lockstep with the CLI twin.
+  "output.whoami_peers": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);
+    }
+  },
   "retention.transitions_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.transitions_days: must be an integer >= 1, got "${raw}"`);

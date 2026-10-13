@@ -40,6 +40,8 @@ interface SidecarRaw {
    *  a canonical occupant from a retained predecessor whose launch-time --name aliases the seat. */
   occupant_generation?: string;
   transcript_path?: string;
+  /** Claude's statusline `cost.total_cost_usd`: a cumulative client-side estimate for the native session. */
+  cost?: { total_cost_usd?: number | null } | null;
   sampled_at?: string;
 }
 
@@ -221,6 +223,7 @@ export class ContextUsageStore {
       sessionName: raw.session_name ?? null,
       sampledAt,
       fresh,
+      clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
     };
   }
 

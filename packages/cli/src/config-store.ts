@@ -168,6 +168,8 @@ export interface RiggedConfig {
   // settings-store twin keeps the two registries in lockstep.
   output: {
     compact: boolean;
+    /** With compact on, how many peers `rig whoami --json` lists (edge peers first). */
+    whoamiPeers: number;
   };
   // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view (default
   // off). Read by the daemon; the CLI key is the lockstep twin.
@@ -326,6 +328,7 @@ const DEFAULTS = {
   // Slice 15 — compact command-output defaults OFF until the switch is on.
   output: {
     compact: false,
+    whoamiPeers: 8,
   },
   // Slice 01 — Codex usage windows OFF until the switch is on.
   provider: {
@@ -446,6 +449,7 @@ export const VALID_KEYS = [
   "terminal.status_bar",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
+  "output.whoami_peers",
   // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
@@ -545,6 +549,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
+  "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
@@ -626,6 +631,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
   "output.compact": ["output", "compact"],
+  "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
@@ -922,6 +928,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // OPR.0.4.6.FS-1 W2 — retention numeric bounds. Lockstep with the daemon
   // settings-store KEY_CONSTRAINTS twin (same messages/bounds). retention.enabled
   // is a boolean (coerceValue enforces true/false) — no constraint entry.
+  // Slice 15 P5 — the whoami peer bound; lockstep with the daemon twin.
+  "output.whoami_peers": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);
+    }
+  },
   "retention.transitions_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.transitions_days: must be an integer >= 1, got "${raw}"`);
@@ -1158,6 +1170,7 @@ export class ConfigStore {
       },
       output: {
         compact: v("output.compact") as boolean,
+        whoamiPeers: v("output.whoami_peers") as number,
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,

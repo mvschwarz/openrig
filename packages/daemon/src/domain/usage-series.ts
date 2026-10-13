@@ -13,6 +13,7 @@
 // OPTION-A BAR: rows carry seat/node identity only; no account field exists in
 // any served shape.
 import type { Database } from "better-sqlite3";
+import { hasClientCostColumns } from "./usage-samples-store.js";
 
 export interface UsageSeriesQuery {
   seatSession?: string;
@@ -36,6 +37,9 @@ export interface UsageSeriesRow {
   window: string | null;
   windowUsedPercent: number | null;
   resetsAt: string | null;
+  /** Present once the cost columns exist: the sample's native session and Claude's cost estimate for it (history). */
+  nativeSessionId?: string | null;
+  clientCostEstimateUsd?: number | null;
 }
 
 /** Captures are stored at millisecond precision in UTC. Keep the indexed column
@@ -72,11 +76,12 @@ function readUsageSeries(db: Database, q: UsageSeriesQuery, complete: boolean): 
   if (q.sinceIso) { where.push("captured_at >= ?"); params.push(capturedAtBound(q.sinceIso)); }
   if (q.untilIso) { where.push("captured_at < ?"); params.push(capturedAtBound(q.untilIso)); }
   const limit = q.limit && q.limit > 0 ? Math.floor(q.limit) : 10_000;
+  const withCost = hasClientCostColumns(db);
   const rows = db
     .prepare(
       `SELECT id, lane, seat_session, node_id, source, sampled_at, captured_at,
               total_input_tokens, total_output_tokens, used_percentage,
-              window, window_used_percent, resets_at
+              window, window_used_percent, resets_at${withCost ? ", native_session_id, client_cost_estimate_usd" : ""}
          FROM usage_samples
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY captured_at ASC, id ASC
@@ -97,6 +102,8 @@ function readUsageSeries(db: Database, q: UsageSeriesQuery, complete: boolean): 
     window: (r.window as string | null) ?? null,
     windowUsedPercent: (r.window_used_percent as number | null) ?? null,
     resetsAt: (r.resets_at as string | null) ?? null,
+    ...(withCost ? { nativeSessionId: (r.native_session_id as string | null) ?? null,
+      clientCostEstimateUsd: (r.client_cost_estimate_usd as number | null) ?? null } : {}),
   }));
 }
 
@@ -228,4 +235,128 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
   const totalRankedSeats = ranked.length;
   const capped = q.topN && q.topN > 0 ? ranked.slice(0, q.topN) : ranked;
   return { windowHours: q.windowHours, sinceIso, ranked: capped, unknown, totalRankedSeats };
+}
+
+// ---------------------------------------------------------------------------
+// OPR.0.7.0.2 (cost reporting, first atom): what each seat's harness reports about cost, beside its tokens.
+// Read from the context lane only. Every figure names its kind, source, window and coverage; a missing figure
+// is reported as missing and an old one as stale, never as zero. Nothing here is an invoice, and no
+// subscription window is ever turned into dollars.
+
+/** A Claude estimate older than this reads stale (it stays shown, as history). Matches context freshness. */
+export const COST_STALE_AFTER_MS = 10 * 60_000;
+
+export const CODEX_NO_COST_NOTE = "no cost reported by the inspected method (Codex token_count events carry tokens only)";
+
+export type SeatCost =
+  | {
+      seatSession: string;
+      runtime: "claude-code";
+      status: "reported";
+      kind: "client-side estimate";
+      source: "Claude statusline cost.total_cost_usd";
+      costUsd: number;
+      /** The estimate is cumulative for one native Claude session, since its last reset. */
+      window: { nativeSessionId: string; since: string; asOf: string };
+      coverage: string;
+      resets: number;
+      stale: boolean;
+      ageSeconds: number | null;
+      tokens: { input: number | null; output: number | null };
+    }
+  | {
+      seatSession: string;
+      runtime: "claude-code";
+      status: "absent";
+      reason: string;
+      window: { nativeSessionId: string | null; asOf: string | null };
+      tokens: { input: number | null; output: number | null };
+    }
+  | {
+      seatSession: string;
+      runtime: "codex";
+      status: "no-cost-method";
+      note: string;
+      window: { nativeSessionId: string | null; asOf: string | null };
+      tokens: { input: number | null; output: number | null };
+    }
+  | { seatSession: string; runtime: null; status: "unknown"; reason: string };
+
+export interface CostViewResult {
+  seats: SeatCost[];
+  note: string;
+}
+
+interface CostRow {
+  id: number;
+  seat_session: string;
+  source: string | null;
+  sampled_at: string | null;
+  captured_at: string;
+  total_input_tokens: number | null;
+  total_output_tokens: number | null;
+  native_session_id: string | null;
+  client_cost_estimate_usd: number | null;
+}
+
+export function computeCostView(db: Database, q: { nowIso: string; seatSession?: string; staleAfterMs?: number }): CostViewResult {
+  const note = "Costs are what each harness reports: a client-side estimate is not an invoice, and no subscription window is shown in dollars.";
+  const withCost = hasClientCostColumns(db);
+  const rows = db.prepare(
+    `SELECT id, seat_session, source, sampled_at, captured_at, total_input_tokens, total_output_tokens,
+            ${withCost ? "native_session_id, client_cost_estimate_usd" : "NULL AS native_session_id, NULL AS client_cost_estimate_usd"}
+       FROM usage_samples
+      WHERE lane = 'context'${q.seatSession ? " AND seat_session = ?" : ""}
+      ORDER BY seat_session ASC, id ASC`,
+  ).all(...(q.seatSession ? [q.seatSession] : [])) as CostRow[];
+  const bySeat = new Map<string, CostRow[]>();
+  for (const row of rows) bySeat.set(row.seat_session, [...(bySeat.get(row.seat_session) ?? []), row]);
+  const now = Date.parse(q.nowIso);
+  const staleAfter = q.staleAfterMs ?? COST_STALE_AFTER_MS;
+  const seats: SeatCost[] = [];
+  for (const [seatSession, seatRows] of bySeat) {
+    const latest = seatRows[seatRows.length - 1]!;
+    const tokens = { input: latest.total_input_tokens, output: latest.total_output_tokens };
+    const asOf = latest.sampled_at ?? latest.captured_at;
+    if (latest.source === "codex_token_count_jsonl") {
+      seats.push({ seatSession, runtime: "codex", status: "no-cost-method", note: CODEX_NO_COST_NOTE,
+        window: { nativeSessionId: latest.native_session_id, asOf }, tokens });
+      continue;
+    }
+    if (latest.source !== "claude_statusline_json") {
+      seats.push({ seatSession, runtime: null, status: "unknown", reason: `samples from source ${latest.source ?? "(none)"} carry no cost` });
+      continue;
+    }
+    // The latest native session's estimates, in order. A drop within the session is a reset: the window restarts.
+    const session = latest.native_session_id;
+    const estimates = session ? seatRows.filter((r) => r.native_session_id === session && r.client_cost_estimate_usd !== null) : [];
+    if (estimates.length === 0) {
+      seats.push({ seatSession, runtime: "claude-code", status: "absent",
+        reason: !withCost ? "this daemon's usage series has no cost columns yet"
+          : !session ? "the latest sample names no native session"
+          : "Claude's statusline has reported no cost for this session",
+        window: { nativeSessionId: session, asOf }, tokens });
+      continue;
+    }
+    let resets = 0;
+    let since = estimates[0]!.sampled_at ?? estimates[0]!.captured_at;
+    for (let i = 1; i < estimates.length; i += 1) {
+      if (estimates[i]!.client_cost_estimate_usd! < estimates[i - 1]!.client_cost_estimate_usd!) {
+        resets += 1;
+        since = estimates[i]!.sampled_at ?? estimates[i]!.captured_at;
+      }
+    }
+    const last = estimates[estimates.length - 1]!;
+    const lastAt = last.sampled_at ?? last.captured_at;
+    const age = Number.isNaN(now) || Number.isNaN(Date.parse(lastAt)) ? null : Math.max(0, Math.round((now - Date.parse(lastAt)) / 1000));
+    seats.push({
+      seatSession, runtime: "claude-code", status: "reported", kind: "client-side estimate", source: "Claude statusline cost.total_cost_usd",
+      costUsd: last.client_cost_estimate_usd!,
+      window: { nativeSessionId: session!, since, asOf: lastAt },
+      coverage: "this native Claude session since its last reset, as Claude's client estimates it; not an invoice, and not the seat's other sessions",
+      resets, stale: age === null ? true : age * 1000 > staleAfter, ageSeconds: age,
+      tokens: { input: last.total_input_tokens, output: last.total_output_tokens },
+    });
+  }
+  return { seats, note };
 }

@@ -37,6 +37,34 @@ interface TopPayload {
   windowHours: number;
 }
 
+interface CostPayload {
+  seats: Array<Record<string, unknown> & { seatSession: string; status: string }>;
+  note: string;
+}
+
+const tok = (t: unknown): string => {
+  const v = t as { input?: number | null; output?: number | null } | undefined;
+  return `tokens in ${v?.input ?? "?"} / out ${v?.output ?? "?"}`;
+};
+
+/** A real estimate below a cent prints as "<$0.01", never "$0.00" (which reads as zero); JSON keeps the exact value. */
+export function formatUsd(value: number): string {
+  return value > 0 && value < 0.005 ? "<$0.01" : `$${value.toFixed(2)}`;
+}
+
+/** One labelled line per seat. Never prints a dollar figure the route didn't report. */
+export function costLine(seat: CostPayload["seats"][number]): string {
+  const w = (seat["window"] ?? {}) as { nativeSessionId?: string | null; since?: string; asOf?: string | null };
+  if (seat.status === "reported") {
+    const stale = seat["stale"] ? `, STALE (${seat["ageSeconds"] ?? "?"}s old; kept as history)` : "";
+    const resets = Number(seat["resets"]) > 0 ? `, ${seat["resets"]} reset${seat["resets"] === 1 ? "" : "s"}` : "";
+    return `${seat.seatSession}  ${formatUsd(Number(seat["costUsd"]))} client-side estimate (Claude statusline) for session ${w.nativeSessionId} since ${w.since}, as of ${w.asOf}${resets}${stale}  ${tok(seat["tokens"])}`;
+  }
+  if (seat.status === "absent") return `${seat.seatSession}  cost: not reported (${seat["reason"]})  ${tok(seat["tokens"])}`;
+  if (seat.status === "no-cost-method") return `${seat.seatSession}  ${tok(seat["tokens"])}  cost: ${seat["note"]}`;
+  return `${seat.seatSession}  cost: unknown (${seat["reason"]})`;
+}
+
 export function usageCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("usage").description(
     "Per-seat token telemetry over time (series + top-N burn) — facts for the oversight detector",
@@ -106,6 +134,37 @@ export function usageCommand(depsOverride?: StatusDeps): Command {
       for (const u of body.unknown) {
         console.log(`?  ${u.seatSession}  unknown (${u.reason})`); // honest rail — never a 0 row
       }
+    });
+
+  cmd
+    .command("cost")
+    .description("what each seat's harness reports about cost, beside tokens: kind, source, window and coverage")
+    .option("--seat <session>", "one seat session")
+    .option("--json", "machine-readable (verbatim route payload)")
+    .addHelpText("after", `
+Claude seats show the statusline's cost.total_cost_usd: a client-side estimate, cumulative for one
+native session since its last reset (not an invoice). Codex seats show tokens and that the inspected
+method reports no cost. A missing figure reads as missing and an old one as stale, never as $0; no
+subscription window is shown in dollars. Earlier values stay in rig usage series --lane context.`)
+    .action(async (opts: { seat?: string; json?: boolean }) => {
+      const deps = getDeps();
+      const client = await getClient(deps);
+      if (!client) return;
+      const params = new URLSearchParams();
+      if (opts.seat) params.set("seat", opts.seat);
+      const res = await client.get<CostPayload>(`/api/telemetry/usage/cost${params.size ? `?${params.toString()}` : ""}`);
+      if (handleHttpError(res, "usage cost", opts.json)) return;
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+      const body = res.data;
+      if (body.seats.length === 0) {
+        console.log("no usage samples yet: no seat has reported tokens or cost");
+        return;
+      }
+      for (const seat of body.seats) console.log(costLine(seat));
+      console.log(body.note);
     });
 
   cmd

@@ -148,3 +148,35 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
     });
   });
 });
+
+describe("rig usage cost lines (OPR.0.7.0.2)", () => {
+  it("labels a Claude estimate, its window and staleness; never prints a dollar figure for absent or Codex seats", async () => {
+    const { costLine } = await import("../src/commands/usage.js");
+    const reported = costLine({ seatSession: "dev@r", status: "reported", costUsd: 1.5, resets: 1, stale: true, ageSeconds: 900,
+      window: { nativeSessionId: "s1", since: "2026-10-13T10:00:00.000Z", asOf: "2026-10-13T10:05:00.000Z" }, tokens: { input: 10, output: 2 } });
+    expect(reported).toContain("$1.50 client-side estimate (Claude statusline) for session s1 since 2026-10-13T10:00:00.000Z");
+    expect(reported).toContain("1 reset");
+    expect(reported).toContain("STALE (900s old; kept as history)");
+    const absent = costLine({ seatSession: "dev@r", status: "absent", reason: "Claude's statusline has reported no cost for this session", tokens: { input: 1, output: 1 } });
+    expect(absent).toContain("cost: not reported");
+    expect(absent).not.toContain("$");
+    const codex = costLine({ seatSession: "cx@r", status: "no-cost-method", note: "no cost reported by the inspected method (Codex token_count events carry tokens only)", tokens: { input: 5000, output: 400 } });
+    expect(codex).toContain("tokens in 5000 / out 400");
+    expect(codex).not.toContain("$");
+  });
+});
+
+describe("rig usage cost: a tiny estimate never reads as zero (OPR.0.7.0.2)", () => {
+  it("prints <$0.01 below half a cent, rounds normally above, and keeps an exact reported zero", async () => {
+    const { formatUsd, costLine } = await import("../src/commands/usage.js");
+    expect(formatUsd(0.0004)).toBe("<$0.01");
+    expect(formatUsd(0.0049)).toBe("<$0.01");
+    expect(formatUsd(0.005)).toBe("$0.01");
+    expect(formatUsd(1.234)).toBe("$1.23");
+    expect(formatUsd(0)).toBe("$0.00");
+    const line = costLine({ seatSession: "dev@r", status: "reported", costUsd: 0.0003, resets: 0, stale: false, ageSeconds: 5,
+      window: { nativeSessionId: "s1", since: "2026-10-13T10:00:00.000Z", asOf: "2026-10-13T10:00:05.000Z" }, tokens: { input: 1, output: 1 } });
+    expect(line).toContain("<$0.01 client-side estimate");
+    expect(line).not.toContain("$0.00");
+  });
+});

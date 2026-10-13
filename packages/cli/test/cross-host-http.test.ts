@@ -534,7 +534,7 @@ describe("capture --host (http branch)", () => {
     await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", "--lines", "5"], { from: "user" });
     expect(h.calls[0]!.body).toEqual({ lines: 5, session: "dev-impl@my-rig" });
     expect(captured.stdoutLines).toContain("row22\nrow23\nrow24\nrow25\nrow26\n");
-    expect(captured.stderrLines).toContain("[rig capture: dev-impl@my-rig: 21 earlier lines not shown; last 5 shown]");
+    expect(captured.stderrLines).toContain("[rig capture: dev-impl@my-rig: 21 earlier lines not shown; last 5 shown; activity unknown: rig ps --nodes]");
 
     captured.stdoutLines.length = 0;
     await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "dev-impl@my-rig", "--lines", "5", "--json"], { from: "user" });

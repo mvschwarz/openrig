@@ -30,8 +30,13 @@ been confirmed against a real creation run. Slack's form may ask for something t
 not fill in; if so, follow the form.
 
 1. Open the link from `rig slack manifest --url` in a browser.
+   > **Note on Slack's manifest dialog:** If opening the link results in an empty manifest `{}`
+   > or Slack reports an error translating the manifest, copy the output of `rig slack manifest`
+   > (run without flags) and paste it directly into the **YAML** tab in Slack's "Create an app from
+   > an app manifest" dialog.
 2. Sign in to Slack if asked, pick the workspace, review the prefilled manifest, and click
-   **Create**.
+   **Next**, then **Create**. (If **Create** stays disabled, go **Back** and check that a
+   development workspace is selected and the manifest step shows no error).
 3. Under **Socket Mode**, confirm it is enabled. Enable it if it is not.
 4. Under **Basic Information → App-Level Tokens**, generate a token with the
    `connections:write` scope and copy it (it starts with `xapp-`).

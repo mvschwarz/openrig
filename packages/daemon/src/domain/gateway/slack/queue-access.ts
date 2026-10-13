@@ -54,7 +54,7 @@ export interface CreateQitemInput {
   body: string;
   priority?: string;
   tags?: string[];
-  /** #822 — the item whose OpenRig thread this reply was typed in (the route's correlation). */
+  /** #822 — the ask whose OpenRig thread this message, answer, or reaction came from. */
   inReplyTo?: string;
 }
 
