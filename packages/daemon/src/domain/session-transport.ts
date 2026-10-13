@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { inspectStartupStagedText, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
+  composerNumberedChoicePattern,
   composerPromptClassForRuntime,
   composerPromptIsAmbiguous,
   composerSelectionPrefixPattern,
@@ -673,17 +674,22 @@ export function hasExpectedStagedText(pane: string | null, expected: string, run
  * numbered choice or a partial prefix. Unknown rendering is not consumption. */
 function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
   if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
+  // Fail closed for an unknown runtime: with no scoped glyph set there is no way to
+  // say which prompt line is the live input (the pre-shared-matcher check did the same).
+  if (runtime !== "codex" && runtime !== "claude-code") return false;
+  const promptClass = composerPromptClassForRuntime(runtime);
   const lines = pane.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const input = lines[i]!.trimStart();
-    if (!/^[❯›]/.test(input)) continue;
-    if (/^[❯›]\s*\d+[.)]/.test(input)) return false;
-    if (runtime === "codex" ? !input.startsWith("›") : runtime !== "claude-code" || !input.startsWith("❯")) return false;
-    const end = lines.findIndex((line, index) => index > i && (runtime === "codex"
-      ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
-    return end > i && lines.slice(i, end).join("\n").trimStart().slice(1).trim() === answer.trim();
-  }
-  return false;
+  // Only the LAST prompt line of this runtime's glyph set can be the current input;
+  // everything above it is transcript history, and another harness's glyph is not ours.
+  const inputIndex = findComposerInputLineIndex(lines, promptClass);
+  if (inputIndex < 0) return false;
+  const input = lines[inputIndex]!.trimStart();
+  // A numbered choice (`.` or `)`), e.g. `» 1)` or `❯ 1.`, is a menu selection, never the answer.
+  if (composerNumberedChoicePattern(promptClass).test(input)) return false;
+  // Where the input ends: Codex closes the composer on a blank line, Claude Code on a rule line.
+  const end = lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
+    ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
+  return end > inputIndex && lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim();
 }
 
 export interface SendOpts {

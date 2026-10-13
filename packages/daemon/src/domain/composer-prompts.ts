@@ -47,6 +47,15 @@ export const COMPOSER_SELECTION_SCAN_PATTERN = promptPattern(COMPOSER_PROMPT_CLA
 export function composerSelectionPrefixPattern(promptClass: string = COMPOSER_PROMPT_CLASS): RegExp {
   return promptPattern(promptClass, "\\s*\\d+\\.");
 }
+/**
+ * A numbered-option line with either separator (`❯ 1. Yes`, `› 1) No`, `» 2) Later`):
+ * a prompt selection, never the typed answer. The prompt-answer path accepts both
+ * `.` and `)` after the number, unlike the staged-input prefix exclusion above.
+ */
+export function composerNumberedChoicePattern(promptClass: string = COMPOSER_PROMPT_CLASS): RegExp {
+  return promptPattern(promptClass, "\\s*\\d+[.)]");
+}
+
 /** Empty composer: prompt glyph, optional whitespace, end of line. */
 export const COMPOSER_EMPTY_PATTERN = promptPattern(COMPOSER_PROMPT_CLASS, "\\s*$");
 /** Codex renders a fixed placeholder in its empty composer (`›` or 0.153's `»`). */
