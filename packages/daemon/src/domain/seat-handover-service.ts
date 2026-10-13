@@ -78,7 +78,7 @@ export interface SeatHandoverMutationResult {
    *  declared addresses were gaps, and (when the chain is empty) the named
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
 }
 
@@ -527,7 +527,12 @@ export class SeatHandoverService {
     // operator sees exactly what carried context (fork origin / primed set).
     let sourceOutcome: SeatHandoverMutationResult["sourceOutcome"];
     if (parsed.source.mode === "fork" && forkSource) {
-      sourceOutcome = { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name };
+      // A fork whose own conversation id wasn't captured at launch commits with no resume token and
+      // says so: its exact resumability isn't established until the id is recorded.
+      sourceOutcome = launch.resumeToken?.trim()
+        ? { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "captured" }
+        : { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "pending",
+            limit: "The fork's own conversation id wasn't captured at launch, so no resume token is recorded; until it is, this successor's exact resumability isn't established." };
     }
     if (parsed.source.mode === "rebuild") {
       // rebuild: the successor is a FRESH conversation primed from the seat's

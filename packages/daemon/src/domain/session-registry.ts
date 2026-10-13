@@ -464,6 +464,16 @@ export class SessionRegistry {
 
   /** Test durable identity without returning the stored credential or changing
    *  its provenance. An equal protected token needs no lower-ranked write. */
+  /** A forked occupant (nodes.continuity_outcome = 'forked') whose own id is still pending must never
+   *  record an id another session row already holds: in a fork's process that is its parent's
+   *  (or a predecessor's) conversation, not its own. */
+  isForkClaimingHeldToken(sessionId: string, type: string, token: string): boolean {
+    return Boolean(this.db.prepare(
+      "SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.id = ? AND n.continuity_outcome = 'forked' " +
+        "AND EXISTS (SELECT 1 FROM sessions o WHERE o.id != s.id AND o.resume_type = ? AND o.resume_token = ?)",
+    ).get(sessionId, type, token));
+  }
+
   resumeTokenMatches(sessionId: string, type: string, token: string): boolean {
     if (!type.trim() || !token.trim()) return false;
     return Boolean(this.db.prepare(

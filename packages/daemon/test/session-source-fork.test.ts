@@ -524,15 +524,16 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     }
   });
 
-  it("refuses fork when capture fails (identity-honesty: no token == no honest seat)", async () => {
+  it("a missed post-fork capture is pending metadata: ok with no token, never the parent's id (Root, 10-13)", async () => {
     const { adapter } = makeCodexAdapter(); // no thread id captured
     const result = await adapter.launchHarness(makeBinding(), {
       name: "dev-impl@test-rig",
       forkSource: { kind: "native_id", value: "PARENT-X" },
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error).toContain("could not capture new post-fork thread id");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.resumeToken).toBeUndefined();
+      expect(result.resumeType).toBeUndefined();
     }
   });
 
@@ -640,8 +641,9 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
       forkSource: { kind: "native_id", value: "PARENT-DELAYED" },
     });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("could not capture new post-fork thread id");
+    // The capture missed (pending, not failed); the hook-trust prompt was still not auto-answered.
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.resumeToken).toBeUndefined();
     expect(threadIdAvailable).toBe(false);
 
     const sendTextCalls = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls;

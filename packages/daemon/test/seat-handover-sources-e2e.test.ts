@@ -10,6 +10,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
+import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { createDb } from "../src/db/connection.js";
@@ -193,5 +194,105 @@ describe("seat-handover source execution e2e (isolated tmux)", () => {
       db.close();
     },
     60_000,
+  );
+
+  // Root's ruling (10-13, qitem-20261013071846-35cbc806): a fork whose own conversation id isn't captured at
+  // launch is pending metadata, not a failed launch. The ready successor commits with no resume token and the
+  // id PENDING; the existing late capture may fill it with the fork's own id, never its parent's; and launch,
+  // readiness and attention failures stay failures.
+  async function forkSeat(seat: string, launch: { ok: boolean; error?: string }, ready: { ready: boolean; code?: string; reason?: string }) {
+    const pane = await seedPane(seat);
+    const db = createDb(); db.pragma("foreign_keys = ON"); migrate(db, ALL_MIGRATIONS);
+    const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db);
+    const discoveryRepo = new DiscoveryRepository(db), eventBus = new EventBus(db);
+    const rig = rigRepo.createRig(seat.split("@")[1]!);
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/tmp" });
+    const session = sessionRegistry.registerSession(node.id, seat);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready", new Date("2026-08-07T09:00:00Z").toISOString());
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: pane });
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "parent-thread-0001", "scrape");
+    const generationBefore = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
+    const marker = {
+      runtime: "codex",
+      async launchHarness(binding: any) {
+        await tmux(`send-keys -t ${q(binding.tmuxSession)} -l -- ${q("printf '\\n=== FORK RUNNING, ID NOT YET CAPTURED ===\\n'; stty -echo 2>/dev/null; cat")}`);
+        await tmux(`send-keys -t ${q(binding.tmuxSession)} Enter`); await sleep(150);
+        // The adapter's capture missed: success carries no resumeToken (launch.ok) or the launch failed.
+        return launch.ok ? { ok: true } : { ok: false, error: launch.error ?? "launch failed" };
+      },
+      async checkReady() { return ready; },
+    };
+    const service = new SeatHandoverService({
+      db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: new TmuxAdapter(exec) as any, runtimeAdapters: { codex: marker as any },
+      readinessTimeoutMs: 1500, sleep,
+    });
+    const result: any = await service.handover({ seatRef: seat, reason: "context-wall", source: `fork:${seat}`, operator: "orch@e2e" });
+    const rows = () => db.prepare("SELECT id, status, resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? ORDER BY rowid")
+      .all(node.id) as Array<{ id: string; status: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null }>;
+    return { db, pane, node, session, sessionRegistry, result, rows, generationBefore };
+  }
+
+  it.runIf(tmuxAvailableSync())(
+    "FORK, id capture missed: the ready successor commits with the id PENDING, supersedes the old row, keeps the pane",
+    async () => {
+      const SEAT = "dev-impl@fork-pending-rig";
+      const w = await forkSeat(SEAT, { ok: true }, { ready: true });
+      expect(w.result.ok, JSON.stringify(w.result)).toBe(true);
+      expect(w.result.result.sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: SEAT, forkId: "pending" });
+      expect(w.result.result.sourceOutcome.limit).toContain("resumability isn't established");
+      const [old, current] = w.rows();
+      expect(old).toMatchObject({ id: w.session.id, status: "superseded", resume_token: "parent-thread-0001" });
+      expect(current!.status).not.toBe("superseded");
+      expect(current, "the parent's token is never copied onto the fork").toMatchObject({ resume_token: null, resume_type: null });
+      const generationAfter = w.sessionRegistry.currentOccupantTenure(w.node.id)?.generationUuid ?? null;
+      expect(generationAfter).not.toBeNull();
+      expect(generationAfter).not.toBe(w.generationBefore);
+      expect(w.sessionRegistry.getBindingForNode(w.node.id)?.tmuxPane, "bound to the same, live pane").toBe(w.pane);
+      expect((await tmux(`list-panes -t ${q(SEAT)} -F '#{pane_id} #{pane_dead}'`)).trim()).toBe(`${w.pane} 0`);
+      expect(w.result.result.currentStatus.continuityOutcome).toBe("forked");
+
+      // The existing late capture (snapshot refresh, fill-null) on the fork's pane.
+      const shellPid = Number((await tmux(`display-message -p -t ${q(w.pane)} '#{pane_pid}'`)).trim());
+      let nativeAnswer: string | undefined;
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry: w.sessionRegistry, tmuxAdapter: new TmuxAdapter(exec) as any,
+        listProcesses: () => [{ pid: 999_001, ppid: shellPid, command: "codex fork parent-thread-0001" }],
+        readCodexThreadIdByPid: () => nativeAnswer, sleep: async () => {},
+      });
+      const refresh = () => refresher.refresh([{ sessionId: current!.id, sessionName: SEAT, runtime: "codex", resumeType: null, resumeToken: null }], { fillNullOnly: true });
+      nativeAnswer = undefined;
+      await refresh();
+      expect(w.rows()[1], "never resolved: stays pending").toMatchObject({ resume_token: null });
+      nativeAnswer = "parent-thread-0001";
+      await refresh();
+      expect(w.rows()[1], "the parent's id is never adopted").toMatchObject({ resume_token: null });
+      nativeAnswer = "fork-own-thread-0002";
+      await refresh();
+      expect(w.rows()[1], "the fork's own id, delayed, reaches the new row").toMatchObject({ resume_type: "codex_id", resume_token: "fork-own-thread-0002", resume_provenance: "scrape" });
+      w.db.close();
+    },
+    60_000,
+  );
+
+  it.runIf(tmuxAvailableSync())(
+    "FORK, id capture missed: launch failure, readiness timeout and an attention gate stay failures, with nothing committed",
+    async () => {
+      const cases: Array<[string, { ok: boolean; error?: string }, { ready: boolean; code?: string; reason?: string }]> = [
+        ["dev-impl@fork-launchfail-rig", { ok: false, error: "Failed to send launch command: injected" }, { ready: true }],
+        ["dev-impl@fork-notready-rig", { ok: true }, { ready: false, reason: "still booting" }],
+        ["dev-impl@fork-attention-rig", { ok: true }, { ready: false, code: "login_required", reason: "sign in" }],
+      ];
+      for (const [seat, launch, ready] of cases) {
+        const w = await forkSeat(seat, launch, ready);
+        expect(w.result.ok, `${seat}: ${JSON.stringify(w.result)}`).toBe(false);
+        const rows = w.rows();
+        expect(rows, `${seat}: no successor row committed`).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ id: w.session.id, resume_token: "parent-thread-0001" });
+        w.db.close();
+      }
+    },
+    90_000,
   );
 });
