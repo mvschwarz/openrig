@@ -731,10 +731,14 @@ function executableBase(row: NativeProcessRow): string {
   return (name.split("/").pop() ?? name).replace(/^-/, "");
 }
 
+/** The shells `/bin/sh` can run as. macOS's /bin/sh is a shim that runs bash (or dash or zsh, if so
+ *  configured), so the OS names the staged script's process after that shell, not sh. */
+const SH_RUNS_AS = new Set(["sh", "bash", "dash", "zsh"]);
+
 /** `/bin/sh <path>` running a launch script that OpenRig's tmux adapter staged, and nothing else. */
 function isStagedLaunchScript(row: NativeProcessRow): boolean {
   const argv = processArgv(row.command);
-  return executableBase(row) === "sh" && argv.length === 2 && /^(?:\/bin\/)?sh$/.test(argv[0]!) && isStagedSendScriptPath(argv[1]!);
+  return SH_RUNS_AS.has(executableBase(row)) && argv.length === 2 && /^(?:\/bin\/)?sh$/.test(argv[0]!) && isStagedSendScriptPath(argv[1]!);
 }
 
 /** The Codex process and its Codex launcher ancestors, deepest first, up to the pane root. */

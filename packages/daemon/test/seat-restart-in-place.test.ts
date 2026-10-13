@@ -1,5 +1,6 @@
 // OPR.0.7.0.5 — in-place restart of one Codex seat: every gate and every outcome, driven through the
 // public SeatLifecycleService surface against a fake tmux, process table, Codex launcher and OS reads.
+import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -29,6 +30,8 @@ interface WorldOptions {
   /** Shell-backed only: the command line of a process between the pane shell and Codex (OpenRig's
    *  staged launch script, or something else). */
   between?: string;
+  /** The OS's name for that process (ps ucomm); defaults to argv[0]'s basename. */
+  betweenName?: string;
   activity?: ArbitratedSeatState | null;
   launch?: HarnessLaunchResult;
   codexIgnoresSignals?: boolean;
@@ -80,7 +83,7 @@ function world(options: WorldOptions = {}) {
   const runningArgs = options.runningArgs ?? `-m gpt-5.5 -s workspace-write resume ${TOKEN}`;
   let rows: NativeProcessRow[] = shape === "shell_backed"
     ? options.between
-      ? [shellRow(100, 150), { pid: 150, ppid: 100, pgid: 150, tpgid: 150, executableName: options.between.split(" ")[0]!.split("/").pop()!, command: options.between, startedAt: LSTART },
+      ? [shellRow(100, 150), { pid: 150, ppid: 100, pgid: 150, tpgid: 150, executableName: options.betweenName ?? options.between.split(" ")[0]!.split("/").pop()!, command: options.between, startedAt: LSTART },
         codexRow(200, 150, runningArgs, LSTART, 150)]
       : [shellRow(100, 200), codexRow(200, 100, runningArgs)]
     : [codexRow(100, 1, runningArgs, LSTART, 100)];
@@ -250,6 +253,12 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     const staged = "/bin/sh /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt";
     const w = world({ between: staged });
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, paneShape: "shell_backed" });
+    // macOS (measured on Build): /bin/sh is a shim that runs bash, so ps names the process bash.
+    const mac = world({ between: "/bin/sh /var/folders/7x/abc123/T/openrig-tmux-send-4242-5b249a92-40d6-40c4-b424-57b3b6980529.txt", betweenName: "bash" });
+    expect(await mac.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, paneShape: "shell_backed" });
+    // The real generator's names are what the matcher accepts.
+    const generated = defaultTmuxFileOps().tmpName();
+    expect(isStagedSendScriptPath(generated), generated).toBe(true);
     const done = await w.service.restartInPlace({ seatRef: SEAT, reason: "new account" });
     expect(done).toMatchObject({ ok: true, outcome: "restarted_account_unverified", paneShape: "shell_backed" });
     expect(w.calls).toContain("signalPid 200 TERM");
@@ -259,6 +268,8 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
       "/bin/sh -c /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
       "/usr/bin/script -q /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
       "/bin/sh tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
+      "/bin/sh /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt extra",
+      "/bin/bash /tmp/openrig-tmux-send-1128548-5b249a92-40d6-40c4-b424-57b3b6980529.txt",
     ]) {
       const refused = world({ between: other });
       expect(await refused.service.restartInPlace({ seatRef: SEAT, plan: true }), other).toMatchObject({ ok: false, code: "pane_shape_unknown" });
