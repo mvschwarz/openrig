@@ -27,7 +27,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
-import { judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
+import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import {
@@ -394,6 +394,8 @@ export class RunnerCore {
   private usageBoundary: PiSessionBoundary | null = null;
   /** OPR.0.7.0.2 K4: the last credential observation, and each entry's provenance judged when first observed. */
   private lastCredentialEvidence: PiCredentialEvidence | null = null;
+  /** Sticky for this process: what an observation showed Pi may have loaded (see credentialTaint). */
+  private credentialTainted: string | null = null;
   private readonly chargeProvenance = new Map<string, ChargeProvenance>();
   /** OPR.0.7.0.2: a fork parent read is under way (at most one at a time). */
   private parentReadInFlight = false;
@@ -406,7 +408,9 @@ export class RunnerCore {
   constructor(
     private io: RunnerIo,
     private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
-    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean } = {},
+    private opts: { catchUpSince?: string; runtime?: RunnerRuntime; usageFacts?: boolean; openRouterCharge?: boolean;
+      /** K4: the credential observation taken before Pi was spawned. */
+      launchCredentialEvidence?: PiCredentialEvidence } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
     // instance's own sidecar writes never regress it to undefined before a
@@ -420,7 +424,9 @@ export class RunnerCore {
   start(): void {
     // K4: the first credential observation, before Pi can make any request of this runner's.
     if (this.opts.openRouterCharge && this.runtime === "pi" && this.io.credentialEvidence) {
-      this.lastCredentialEvidence = this.io.credentialEvidence();
+      // The production runner observes before it spawns Pi (launchCredentialEvidence), so Pi loads after it.
+      this.lastCredentialEvidence = this.opts.launchCredentialEvidence ?? this.io.credentialEvidence();
+      this.credentialTainted = credentialTaint(this.lastCredentialEvidence);
     }
     // OMP's start is driven by the transport `ready` frame and must run once;
     // Pi keeps main's unconditional start.
@@ -560,9 +566,12 @@ export class RunnerCore {
     if (this.opts.openRouterCharge && this.io.credentialEvidence) {
       // Each entry's credential is judged once, from the observations before and after it was first seen.
       const now = this.io.credentialEvidence();
+      this.credentialTainted ??= credentialTaint(now);
       for (const fact of facts) {
         if (!this.chargeProvenance.has(fact.entryId)) {
-          this.chargeProvenance.set(fact.entryId, judgeChargeProvenance(this.lastCredentialEvidence, now, fact.entryTimestamp));
+          this.chargeProvenance.set(fact.entryId, this.credentialTainted
+            ? { ok: false, reason: this.credentialTainted }
+            : judgeChargeProvenance(this.lastCredentialEvidence, now, fact.entryTimestamp));
         }
       }
       this.lastCredentialEvidence = now;
@@ -1024,15 +1033,6 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     command = resolved.path;
   }
 
-  const child = spawn(command, childArgs, {
-    cwd: args.cwd,
-    env: childEnv,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  // The child may close its pipe before the first RPC write completes.
-  child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
-
   // OPR.0.7.0.2 K4: OpenRouter's charge, looked up with the key this runner forwarded to Pi, only for requests whose
   // credential is established as that key by the observations before and after them.
   const readMetadata = (file: string): string => {
@@ -1050,6 +1050,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       catch (error) { if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return []; throw error; }
     },
   });
+  // Observed before Pi is spawned, so whatever Pi loads at its start was there for this observation to see
+  // (or was added after it, and is then seen by the next one).
+  const launchCredentialEvidence = args.openRouterCharge === true && runtime === "pi" ? credentialEvidence() : undefined;
+
+  const child = spawn(command, childArgs, {
+    cwd: args.cwd,
+    env: childEnv,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  // The child may close its pipe before the first RPC write completes.
+  child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
+
   const chargeLookup = new OpenRouterChargeLookup({
     fetchGeneration: openRouterGenerationFetcher(() => childEnv["OPENROUTER_API_KEY"]),
     postCharges: async (piSessionId, charges) => {
@@ -1145,7 +1158,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
     // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
     generation: process.env.OPENRIG_OCCUPANT_GENERATION,
-  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true });
+  }, { catchUpSince, runtime, usageFacts: args.usageFacts === true, openRouterCharge: args.openRouterCharge === true, launchCredentialEvidence });
 
   let transportUp = runtime === "pi";
   readline.createInterface({ input: child.stdout }).on("line", (line) => {

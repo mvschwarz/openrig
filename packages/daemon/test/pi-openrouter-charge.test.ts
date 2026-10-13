@@ -203,8 +203,10 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
       const p = pipeline({ source: () => source });
       await p.refresh();
       expect(p.lookups).toEqual([]);
-      expect(p.charge()).toMatchObject({ status: "unavailable", requests: { unavailable: { count: 2, reasons: {
-        [`the generating credential isn't established: Pi's OpenRouter credential around the request was ${kind}, not the key OpenRig forwarded`]: 2 } } } });
+      const reason = kind === "models-key" // models.json is loaded at Pi's start: sticky for the process
+        ? `the generating credential isn't established: a models.json OpenRouter key was configured when observed at ${at(0)}, and Pi keeps what it loaded until it restarts`
+        : `the generating credential isn't established: Pi's OpenRouter credential around the request was ${kind}, not the key OpenRig forwarded`;
+      expect(p.charge()).toMatchObject({ status: "unavailable", requests: { unavailable: { count: 2, reasons: { [reason]: 2 } } } });
       expect(p.charge().accountContext.credentialSources).toEqual(["not established"]);
     }
   });
@@ -224,8 +226,8 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
 
   it("F1: an extension that could supply the credential, a file that changed, or a request before the runner observed: unavailable", async () => {
     const cases: Array<[Parameters<typeof pipeline>[0], string]> = [
-      [{ extensions: () => "present" }, "a Pi extension is configured and could have supplied the credential"],
-      [{ extensions: () => "unknown" }, "Pi's extension configuration couldn't be checked"],
+      [{ extensions: () => "present" }, `a Pi extension was configured when observed at ${at(0)}, and Pi keeps what it loaded until it restarts`],
+      [{ extensions: () => "unknown" }, `Pi's extension configuration couldn't be checked at ${at(0)}, and Pi keeps what it loaded until it restarts`],
       [{ fingerprint: (() => { let n = 0; return () => `v${n++}`; })() }, "Pi's credential or extension files changed around the request"],
     ];
     for (const [opts, reason] of cases) {
@@ -252,6 +254,49 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     expect(p.lookups).toEqual(["gen-x-1", "gen-x-2"]); // the stored-later outcome wasn't looked up twice
   });
 
+  it("R2-F1: an extension seen once taints the runner process: later entries stay unavailable even after its files are gone", async () => {
+    const seen: Array<PiCredentialEvidence["extensions"]> = ["none", "present", "none", "none"]; // launch, refresh 1, 2, 3
+    let i = 0;
+    const p = pipeline({ extensions: () => seen[Math.min(i++, seen.length - 1)]! });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" })]);
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" }),
+      turn("a3", 4, { cost: 0.01, responseId: "gen-x-3" })]);
+    expect(p.lookups).toEqual([]); // two clean observations later don't clear what the running Pi loaded
+    const reasons = Object.keys(p.charge().requests.unavailable.reasons);
+    expect(reasons.filter((reason) => reason.includes("a Pi extension was configured when observed at"))).toHaveLength(1);
+    expect(p.charge().requests.unavailable.count).toBe(3);
+  });
+
+  it("R2-F1: an extension or a models.json key seen at launch taints every entry of the process", async () => {
+    for (const [opts, words] of [
+      [{ extensions: (() => { let i = 0; return () => (i++ === 0 ? "present" : "none") as PiCredentialEvidence["extensions"]; })() }, "a Pi extension was configured"],
+      [{ source: (() => { let i = 0; return (): PiCredentialSource => (i++ === 0 ? { kind: "models-key", provider: "openrouter" } : MANAGED); })() }, "a models.json OpenRouter key was configured"],
+    ] as const) {
+      const p = pipeline(opts);
+      await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+      await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" })]);
+      expect(p.lookups).toEqual([]);
+      expect(Object.keys(p.charge().requests.unavailable.reasons).every((reason) => reason.includes(words))).toBe(true);
+    }
+  });
+
+  it("R2-F1: the production runner's first observation is the one taken before Pi was spawned", async () => {
+    const launch: PiCredentialEvidence = { at: Date.parse(at(0)), source: MANAGED, extensions: "present", fingerprint: "x" };
+    const posted: Array<{ fact: { entryId: string }; provenance: { ok: boolean } }> = [];
+    const io: RunnerIo = { sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, postActivity: () => {}, writeSidecar: () => {},
+      sessionFileExists: () => true, now: () => at(0), readFirstLine: () => JSON.stringify({ type: "session", version: 3, id: "s", timestamp: at(0), cwd: "/w" }),
+      postUsageFacts: async () => ({ charged: [] }), enqueueChargeLookups: (_s, items) => { posted.push(...items); },
+      credentialEvidence: () => ({ at: Date.parse(at(1)), source: MANAGED, extensions: "none", fingerprint: "x" }) };
+    const core = new RunnerCore(io, { sessionName: SESSION }, { usageFacts: true, runtime: "pi", openRouterCharge: true, launchCredentialEvidence: launch });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: true, data: { sessionFile: SESSION_FILE, sessionId: "s" } }));
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", success: true, command: "get_entries",
+      data: { entries: [turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })], leafId: null } }));
+    await settleAll();
+    expect(posted).toEqual([expect.objectContaining({ fact: expect.objectContaining({ entryId: "a1" }), provenance: expect.objectContaining({ ok: false }) })]);
+  });
+
   it("switch off: no lookup, and the cost view is the estimate alone, worded as before", async () => {
     const p = pipeline({ openRouterCharge: false });
     await p.refresh();
@@ -275,13 +320,35 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     expect(d.prepare("SELECT api, response_id, cost_total, origin FROM pi_usage_entries").get())
       .toEqual({ api: "openai-completions", response_id: "gen-x-1", cost_total: 0.01, origin: "own" });
     expect(p.rows()).toEqual([expect.objectContaining({ entry_id: "a1", status: "charged", total_cost_usd: 0.03 })]);
-    // A replay that doesn't match the stored entry (a different estimate) fills nothing.
+    // R2-F3: a replay that disagrees with any stored request fact (estimate, cache tokens, provider, model) fills nothing.
     const store = new PiUsageEntriesStore(d);
     d.prepare("UPDATE pi_usage_entries SET api = NULL, response_id = NULL").run();
-    const facts = [{ entryId: "a1", parentEntryId: null, entryTimestamp: at(2), kind: "assistant" as const, usageCategory: null, provider: "openrouter",
-      model: "m", input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costTotal: 0.99, stopReason: "stop", origin: "own" as const, api: "openai-completions", responseId: "gen-x-1" }];
-    store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts }, at(30));
-    expect(d.prepare("SELECT api, response_id FROM pi_usage_entries").get()).toEqual({ api: null, response_id: null });
+    const same = { entryId: "a1", parentEntryId: null, entryTimestamp: at(2), kind: "assistant" as const, usageCategory: null, provider: "openrouter",
+      model: "z-ai/glm-5.2", input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costTotal: 0.01, stopReason: "stop", origin: "own" as const, api: "openai-completions", responseId: "gen-y-1" };
+    for (const differ of [{ costTotal: 0.99 }, { cacheRead: 5 }, { cacheWrite: 5 }, { provider: "zai" }, { model: "other/model" }]) {
+      store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts: [{ ...same, ...differ }] }, at(30));
+      expect(d.prepare("SELECT api, response_id FROM pi_usage_entries").get()).toEqual({ api: null, response_id: null });
+    }
+    store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts: [same] }, at(30));
+    expect(d.prepare("SELECT response_id FROM pi_usage_entries").get()).toEqual({ response_id: "gen-y-1" });
+    store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts: [{ ...same, responseId: "gen-z-1" }] }, at(31));
+    expect(d.prepare("SELECT response_id FROM pi_usage_entries").get()).toEqual({ response_id: "gen-y-1" }); // never overwritten
+  });
+
+  it("R2-F2: an older unknown-origin row whose replay settles it to own gets its correlation in the same replay, then its charge", async () => {
+    const d = createDb();
+    dbs.push(d);
+    migrate(d, ALL_MIGRATIONS.filter((m) => m.name !== "108_pi_usage_charges.sql"));
+    const legacy = pipeline({ db: d, openRouterCharge: false, header: "not a header" }); // origin unknown under 107
+    await legacy.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(d.prepare("SELECT origin FROM pi_usage_entries").get()).toEqual({ origin: "unknown" });
+    migrate(d, ALL_MIGRATIONS);
+    const p = pipeline({ db: d });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(d.prepare("SELECT origin, api, response_id, cost_total FROM pi_usage_entries").get())
+      .toEqual({ origin: "own", api: "openai-completions", response_id: "gen-x-1", cost_total: 0.01 });
+    expect(p.rows()).toEqual([expect.objectContaining({ entry_id: "a1", status: "charged" })]);
+    expect(p.notices).toEqual([]);
   });
 
   it("F2: only what the daemon stored is acknowledged; a refused outcome is posted again a bounded number of times, then noticed", async () => {
@@ -295,7 +362,7 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
     for (let i = 0; i < 6; i += 1) await p.runTimers();
     expect(p.rows()).toEqual([]);
-    expect(p.notices.some((line) => line.includes("entry a1 wasn't stored by the daemon"))).toBe(true);
+    expect(p.notices.some((line) => line.includes("entry a1: the daemon didn't acknowledge storing it after 5 posts, so storage couldn't be confirmed"))).toBe(true);
     expect(p.timers).toEqual([]); // bounded: nothing left scheduled
   });
 

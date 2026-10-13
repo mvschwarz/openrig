@@ -319,6 +319,8 @@ export type PiSeatCost = {
 export type PiProviderChargeView = {
   kind: "provider charge";
   source: "OpenRouter GET /api/v1/generation (data.total_cost, USD)";
+  /** What the lookup covers and the case it can't observe. */
+  coverage: string;
   /** reported: every covered request charged; partial: some; pending: lookups not finished; unavailable: none
    *  could be charged; none: no lookups recorded; not-applicable: no OpenRouter requests in this session. */
   status: "reported" | "partial" | "pending" | "unavailable" | "none" | "not-applicable";
@@ -341,7 +343,7 @@ export type PiProviderChargeView = {
 
 export const PI_COST_COVERAGE_WITH_CHARGE = "this Pi session's own persisted entries of every usage-bearing kind Pi records (assistant, usage, tool result, compaction, branch summary), each counted once; a model-priced estimate from catalog rates, not a provider charge (OpenRouter's actual charge, where established, is in providerCharge beside it, never added)";
 
-export const PI_PROVIDER_CHARGE_COVERAGE = "OpenRouter requests Pi made through its openai-completions API with a recorded generation id, looked up with the key OpenRig forwarded when that is the credential Pi used; Anthropic-messages requests, other credentials, inherited and unknown-origin entries are not looked up";
+export const PI_PROVIDER_CHARGE_COVERAGE = "OpenRouter requests Pi made through its openai-completions API with a recorded generation id, looked up with the key OpenRig forwarded only when the runner's observations before and after the request show that key as Pi's credential, with no extension or models.json key seen at any point in the runner's life; Anthropic-messages requests, other credentials, inherited and unknown-origin entries are not looked up. Not observable: an extension or models.json key added after the runner's pre-launch observation and removed before its next one, while Pi loaded it in between (Pi records no per-request credential)";
 
 export const PI_COST_COVERAGE = "this Pi session's own persisted entries of every usage-bearing kind Pi records (assistant, usage, tool result, compaction, branch summary), each counted once; a model-priced estimate from catalog rates, not a provider charge (an OpenRouter actual charge isn't correlated here)";
 
@@ -467,6 +469,7 @@ function providerChargeView(db: Database, seat: string, piSession: string): PiPr
   return {
     kind: "provider charge",
     source: "OpenRouter GET /api/v1/generation (data.total_cost, USD)",
+    coverage: PI_PROVIDER_CHARGE_COVERAGE,
     status,
     ...(charged.length > 0 ? {
       costUsd: charged.reduce((t, row) => t + row.total_cost_usd!, 0),

@@ -170,7 +170,7 @@ export class OpenRouterChargeLookup {
         item.posts += 1;
         if (item.posts >= OPENROUTER_CHARGE_MAX_POSTS) {
           this.unposted.delete(key);
-          this.io.notice?.(`[pi-runner] OpenRouter charge outcome for entry ${item.charge.entryId} wasn't stored by the daemon after ${item.posts} posts; given up`);
+          this.io.notice?.(`[pi-runner] OpenRouter charge outcome for entry ${item.charge.entryId}: the daemon didn't acknowledge storing it after ${item.posts} posts, so storage couldn't be confirmed; no further posts`);
         }
       }
     }

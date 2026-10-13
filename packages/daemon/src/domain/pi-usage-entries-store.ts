@@ -148,12 +148,14 @@ export class PiUsageEntriesStore {
        ON CONFLICT(pi_session_id, entry_id) DO UPDATE SET origin = excluded.origin
          WHERE pi_usage_entries.origin = 'unknown' AND excluded.origin <> 'unknown'`,
     );
-    // K4 (rows stored before migration 108): a replay of the same entry (same seat, kind, time, tokens and
-    // estimate) fills the request correlation it didn't have. Cost and origin are never changed by this.
+    // K4 (rows stored before migration 108): a replay of the same entry fills the request correlation it didn't
+    // have. Same means every stored request fact agrees: seat, kind, time, all four token counts, estimate,
+    // provider and model. A value already there is never overwritten; cost and origin are never changed here.
     const backfill = this.chargeColumns ? this.db.prepare(
       `UPDATE pi_usage_entries SET api = COALESCE(api, ?), response_id = COALESCE(response_id, ?)
         WHERE pi_session_id = ? AND entry_id = ? AND seat_session = ? AND kind = ? AND entry_timestamp = ?
-          AND input_tokens = ? AND output_tokens = ? AND cost_total IS ?
+          AND input_tokens = ? AND output_tokens = ? AND cache_read_tokens = ? AND cache_write_tokens = ?
+          AND cost_total IS ? AND provider IS ? AND model IS ?
           AND ((api IS NULL AND ? IS NOT NULL) OR (response_id IS NULL AND ? IS NOT NULL))`,
     ) : null;
     let stored = 0;
@@ -164,9 +166,11 @@ export class PiUsageEntriesStore {
           fact.origin, input.seatSession, input.nodeId, input.generation, recordedAt,
           ...(this.chargeColumns ? [fact.api ?? null, fact.responseId ?? null] : [])).changes;
         stored += changes;
-        if (changes === 0 && backfill) {
+        // Also when this replay just settled the row's origin (a change of its own): correlation is separate.
+        if (backfill) {
           backfill.run(fact.api ?? null, fact.responseId ?? null, input.piSessionId, fact.entryId, input.seatSession, fact.kind,
-            fact.entryTimestamp, fact.input, fact.output, fact.costTotal, fact.api ?? null, fact.responseId ?? null);
+            fact.entryTimestamp, fact.input, fact.output, fact.cacheRead, fact.cacheWrite, fact.costTotal, fact.provider, fact.model,
+            fact.api ?? null, fact.responseId ?? null);
         }
       }
     })();

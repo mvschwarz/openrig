@@ -175,6 +175,18 @@ export function piCredentialEvidence(opts: {
   };
 }
 
+/** What, seen in any observation of this runner process, Pi may still hold until it restarts: an extension
+ *  (Pi 0.87.1 loads extensions at start and again only on an explicit /reload) or a models.json OpenRouter key
+ *  (Pi loads models.json at start and again only on an explicit refresh). Clean files later don't change what
+ *  the running Pi loaded, so once seen, this is sticky for the process. */
+export function credentialTaint(e: PiCredentialEvidence): string | null {
+  const when = new Date(e.at).toISOString();
+  if (e.extensions === "present") return `a Pi extension was configured when observed at ${when}, and Pi keeps what it loaded until it restarts`;
+  if (e.extensions === "unknown") return `Pi's extension configuration couldn't be checked at ${when}, and Pi keeps what it loaded until it restarts`;
+  if (e.source.kind === "models-key") return `a models.json OpenRouter key was configured when observed at ${when}, and Pi keeps what it loaded until it restarts`;
+  return null;
+}
+
 /** Whether a request's credential is established as the key OpenRig forwarded: it was persisted after `before`
  *  and observed by `after`, both show Pi's OpenRouter credential as that key with no extension able to replace
  *  it, and nothing changed in between. Otherwise the reason it isn't. */

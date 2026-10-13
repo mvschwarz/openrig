@@ -195,7 +195,8 @@ their own persisted session entries, each counted once; entries a fork copied in
 not counted, and an entry without a cost is named, not counted as zero.
 With usage.pi_openrouter_charge on as well (default off), OpenRouter's actual charge for those requests
 is shown beside the estimate (never added to it), when the seat's OpenRouter key is the one OpenRig
-forwarded; requests it can't charge are counted with the reason.`)
+forwarded; requests it can't charge are counted with the reason. Turning it off stops new lookups;
+outcomes recorded while it was on stay visible.`)
     .action(async (opts: { seat?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
