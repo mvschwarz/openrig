@@ -23,6 +23,11 @@ import { validateNativePermissionSelection, unresolvedClaudePermissionModes } fr
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
 import {
+  effortPrecedence, emittedEffortFromArgv, readNativeEffort, resolveSeatEffort,
+  type EffortResolution, type NativeEffortObservation,
+} from "./seat-effort.js";
+import { observeClaudePaneRuntime, observeCodexPaneProcess, processArgv } from "./native-process-lineage.js";
+import {
   CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
@@ -63,6 +68,8 @@ export interface SeatLifecycleDeps {
   inPlaceRestartIo?: Partial<InPlaceRestartIo>;
   inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
   inPlaceRestartDaemonStartedAt?: Date;
+  /** Where a session's native transcript is (the context-usage store); without it native effort is NOT VERIFIED. */
+  transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
 }
 
 interface ResolvedSeat {
@@ -121,13 +128,23 @@ export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
   | SeatRefusal;
 
-/** OPR.0.7.0.7: what a seat launches with when no flag is chosen: its explicit choice, else the
- *  authored/default resolution in nodes.effort, else no flag at all (the runtime's own default). */
-export interface EffortResolution {
-  choice: string | null;
-  authored: string | null;
-  effective: string | null;
-  source: "seat_choice" | "authored" | "runtime_default";
+/** OPR.0.7.0.7 — the four effort values for one seat, kept apart. */
+export interface EffortReport {
+  ok: true;
+  seat: SeatDescriptor;
+  runtime: string;
+  /** The last rig seat set-effort for this seat (null: never set, or cleared and never set since). */
+  requested: { value: string | null; at: string; reason: string; operator: string | null } | null;
+  /** What the seat's next managed continuation sends. */
+  saved: EffortResolution;
+  /** The effort flag on the running process's own command line: what its launch sent. */
+  emitted:
+    | { state: "observed"; value: string | null; pid: number; startedAt: string | null; matchesSaved: boolean }
+    | { state: "unknown"; detail: string };
+  /** What the native session recorded for a turn since that process started. */
+  observed: NativeEffortObservation & { matchesEmitted?: boolean };
+  precedence: { decided: boolean; detail: string };
+  summary: string;
 }
 
 export type SetEffortResult =
@@ -218,6 +235,7 @@ export class SeatLifecycleService {
   private readonly inPlaceRestartIo?: Partial<InPlaceRestartIo>;
   private readonly inPlaceRestartTiming?: Partial<PaneCutoverTiming>;
   private readonly inPlaceRestartDaemonStartedAt?: Date;
+  private readonly transcripts: SeatLifecycleDeps["transcripts"] | null;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -237,6 +255,7 @@ export class SeatLifecycleService {
     this.inPlaceRestartIo = deps.inPlaceRestartIo;
     this.inPlaceRestartTiming = deps.inPlaceRestartTiming;
     this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
+    this.transcripts = deps.transcripts ?? null;
   }
 
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -337,6 +356,74 @@ export class SeatLifecycleService {
     };
   }
 
+  /** OPR.0.7.0.7 — requested, saved, emitted at launch and observed in the native session, each from
+   *  its own source. Reads only. An unseen value is reported as unknown or NOT VERIFIED, never guessed. */
+  async effortReport(seatRef: string): Promise<EffortReport | SeatRefusal> {
+    const resolved = this.resolveSeat(seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const runtime = resolved.entry.runtime ?? "unknown";
+    if (runtime !== "claude-code" && runtime !== "codex") {
+      return { ok: false, code: "effort_unsupported_runtime", message: `Seat "${seatRef}" runs ${runtime}; reasoning effort applies to claude-code and codex seats only.` };
+    }
+    const saved = this.readEffort(seat.nodeId);
+    if (!saved) {
+      return { ok: false, code: "effort_unavailable", message: "This daemon's database has no per-seat effort choice (checked: nodes.effort_choice column)." };
+    }
+    const requested = this.lastRequestedEffort(seat.nodeId);
+    const precedence = { decided: effortPrecedence.decided, detail: effortPrecedence.detail };
+
+    let emitted: EffortReport["emitted"];
+    let observed: EffortReport["observed"];
+    const session = this.latestSession(seat.nodeId);
+    const binding = this.sessionRegistry.getBindingForNode(seat.nodeId);
+    const target = binding?.tmuxPane ?? binding?.tmuxSession ?? null;
+    if (!session || TERMINAL_SESSION_STATUSES.has(session.status) || !target) {
+      emitted = { state: "unknown", detail: "The seat has no running session, so no launch to read." };
+      observed = { state: "not_verified", detail: "The seat has no running session." };
+    } else {
+      const observe = runtime === "claude-code" ? observeClaudePaneRuntime : observeCodexPaneProcess;
+      const process = (await observe({ target, tmux: this.tmuxAdapter, ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) }))?.process;
+      if (!process) {
+        emitted = { state: "unknown", detail: `No single ${runtime === "claude-code" ? "Claude" : "Codex"} process could be read in the seat's pane.` };
+        observed = { state: "not_verified", detail: "The running process could not be read, so no turn can be tied to its launch." };
+      } else {
+        const flag = emittedEffortFromArgv(runtime, processArgv(process.command));
+        const value = flag.flag === "present" ? flag.value : null;
+        emitted = { state: "observed", value, pid: process.pid, startedAt: process.startedAt ?? null, matchesSaved: value === saved.effective };
+        const native = readNativeEffort(runtime, this.transcriptPath(runtime, session), process.startedAt ?? null);
+        observed = native.state === "observed" && value !== null ? { ...native, matchesEmitted: native.value === value } : native;
+      }
+    }
+    return { ok: true, seat, runtime, requested, saved, emitted, observed, precedence, summary: effortSummary(saved, emitted, observed) };
+  }
+
+  private lastRequestedEffort(nodeId: string): EffortReport["requested"] {
+    const row = this.db.prepare("SELECT payload, created_at FROM events WHERE node_id = ? AND type = 'node.effort_changed' ORDER BY seq DESC LIMIT 1")
+      .get(nodeId) as { payload: string; created_at: string } | undefined;
+    if (!row) return null;
+    try {
+      const payload = JSON.parse(row.payload) as { to?: string | null; reason?: string; operator?: string | null };
+      return { value: payload.to ?? null, at: row.created_at, reason: payload.reason ?? "", operator: payload.operator ?? null };
+    } catch {
+      return null;
+    }
+  }
+
+  private transcriptPath(runtime: "claude-code" | "codex", session: LatestSessionRow): string | null {
+    if (!this.transcripts) return null;
+    try {
+      if (runtime === "codex") {
+        const token = this.sessionResumeToken(session.id);
+        return token ? this.transcripts.readCodexTranscriptPath(token) : null;
+      }
+      const sidecar = this.transcripts.readSidecar(session.session_name);
+      return sidecar.ok ? sidecar.data.transcript_path ?? null : null;
+    } catch {
+      return null;
+    }
+  }
+
   private readEffort(nodeId: string): EffortResolution | null {
     let row: { effort: string | null; effort_choice: string | null } | undefined;
     try {
@@ -345,10 +432,7 @@ export class SeatLifecycleService {
       return null; // an older database without the columns
     }
     if (!row) return null;
-    const choice = row.effort_choice?.trim() || null;
-    const authored = row.effort?.trim() || null;
-    const effective = choice ?? authored;
-    return { choice, authored, effective, source: choice ? "seat_choice" : authored ? "authored" : "runtime_default" };
+    return resolveSeatEffort({ effort: row.effort, effortChoice: row.effort_choice });
   }
 
   /** Whether the seat's latest session is live now. Never a guess: an indeterminate probe is unknown. */
@@ -567,7 +651,7 @@ export class SeatLifecycleService {
       || !this.startupOrchestrator.canContinueFresh(node.id, session.id)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
     const result = await this.startupOrchestrator.startNode({
       rigId: seat.rigId, nodeId: node.id, sessionId: session.id,
-      binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: node.effort ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
+      binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
       adapter, plan: startup.context.plan, resolvedStartupFiles: startup.context.resolvedStartupFiles,
       startupActions: startup.context.startupActions, isRestore: false,
       sessionName: session.session_name, skipHarnessLaunch: true, continueFreshStartup: true, includeDurableObligations: true, allowFreshFallback: false,
@@ -912,7 +996,7 @@ export class SeatLifecycleService {
         newGeneration: null,
         startupPolicyHash: startup.hash,
         model: node.model,
-        effort: node.effort ?? null,
+        effort: resolveSeatEffort(node).effective,
         reason: input.reason,
         operator: input.operator,
         errors: ["new occupant generation was not persisted"],
@@ -934,7 +1018,7 @@ export class SeatLifecycleService {
         ...launch.binding,
         cwd: node.cwd ?? ".",
         model: node.model ?? undefined,
-        effort: node.effort ?? undefined,
+        effort: resolveSeatEffort(node).effective ?? undefined,
         codexConfigProfile: node.codexConfigProfile ?? undefined,
         launchPosture,
       },
@@ -957,7 +1041,7 @@ export class SeatLifecycleService {
         newGeneration: generation,
         startupPolicyHash: startup.hash,
         model: node.model,
-        effort: node.effort ?? null,
+        effort: resolveSeatEffort(node).effective,
         reason: input.reason,
         operator: input.operator,
         errors: startupResult.errors,
@@ -1020,7 +1104,7 @@ export class SeatLifecycleService {
         nativeSessionId,
         ...(nativeSessionId ? {} : { nativeSessionIdReason: "scrape_miss" }),
         model: node.model,
-        effort: node.effort ?? null,
+        effort: resolveSeatEffort(node).effective,
         startupPolicyHash: startup.hash,
         reason: input.reason.trim(),
         operator: input.operator ?? null,
@@ -1053,7 +1137,7 @@ export class SeatLifecycleService {
       sessionId: launch.session.id,
       generation,
       model: node.model,
-      effort: node.effort ?? undefined,
+      effort: resolveSeatEffort(node).effective ?? undefined,
       startupPolicyHash: startup.hash,
       supersededSessionIds,
       warnings: startupResult.warnings,
@@ -1153,13 +1237,15 @@ export class SeatLifecycleService {
       ?? this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture
       ?? "floor";
+    // OPR.0.7.0.7: an in-place restart is a managed continuation, so it relaunches with the seat's saved effort.
+    const savedEffort = resolveSeatEffort(node);
     return {
       seat, sessionId: session.id, sessionName: session.session_name,
-      saved: { model: node.model ?? null, effort: node.effort ?? null, codexConfigProfile: node.codexConfigProfile ?? null },
+      saved: { model: node.model ?? null, effort: savedEffort.effective, codexConfigProfile: node.codexConfigProfile ?? null },
       binding: {
         ...binding, cwd: node.cwd ?? ".",
         ...(node.model ? { model: node.model } : {}),
-        ...(node.effort ? { effort: node.effort } : {}),
+        ...(savedEffort.effective ? { effort: savedEffort.effective } : {}),
         ...(node.codexConfigProfile ? { codexConfigProfile: node.codexConfigProfile } : {}),
         launchPosture, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault,
         nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
@@ -1571,4 +1657,17 @@ function isOptionalOneOf<T extends string>(value: unknown, allowed: readonly T[]
 
 function isStringArrayOf<T extends string>(value: unknown, allowed: readonly T[]): value is T[] {
   return Array.isArray(value) && value.every((entry) => isOneOf(entry, allowed));
+}
+
+/** One line naming where the four values agree, and where they can't be seen. */
+function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"], observed: EffortReport["observed"]): string {
+  const savedText = saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "seat choice" : "authored"})` : "no flag (the runtime's own default)";
+  if (emitted.state !== "observed") return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: NOT VERIFIED.`;
+  const launch = emitted.value ?? "no flag";
+  const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
+  if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;
+  const native = observed.matchesEmitted === false
+    ? `${observed.value}, not the ${launch} the launch sent (capped, fallen back or overridden by the runtime)`
+    : observed.value;
+  return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native session: ${native}, from ${observed.source} at ${observed.at}.`;
 }

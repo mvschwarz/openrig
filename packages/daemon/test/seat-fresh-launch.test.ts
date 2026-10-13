@@ -845,6 +845,21 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
   });
 
+  it("OPR.0.7.0.7: a fresh launch sends the seat's saved effort choice over its authored effort, and records it", async () => {
+    const seat = seedSeat({ clean: true, runtime: "codex", model: "gpt-5.6-codex" });
+    rigRepo.setNodeEffort(seat.node.id, "medium");
+    rigRepo.setNodeEffortChoice(seat.node.id, "high");
+    harnessResult = { ok: true, resumeToken: "codex-fresh-uuid", resumeType: "codex_thread_id" };
+    paneCommand = "codex";
+
+    const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "apply effort" });
+
+    expect(result).toMatchObject({ ok: true, effort: "high" });
+    expect(launchBinding).toMatchObject({ effort: "high" });
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.fresh_launched' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ effort: "high" });
+  });
+
   it("launches a Codex seat through the same fresh-only path without a resume carrier", async () => {
     const seat = seedSeat({ clean: true, runtime: "codex", model: "gpt-5.6-codex" });
     harnessResult = { ok: true, resumeToken: "codex-fresh-uuid", resumeType: "codex_thread_id" };

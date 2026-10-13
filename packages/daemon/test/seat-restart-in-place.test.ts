@@ -26,6 +26,8 @@ interface WorldOptions {
   shape?: Shape;
   runningArgs?: string;
   savedModel?: string | null;
+  /** nodes.effort (authored) and nodes.effort_choice (rig seat set-effort). */
+  savedEffort?: { authored?: string; choice?: string };
   activity?: ArbitratedSeatState | null;
   launch?: HarnessLaunchResult;
   codexIgnoresSignals?: boolean;
@@ -69,6 +71,8 @@ function world(options: WorldOptions = {}) {
   const eventBus = new EventBus(db);
   const rig = rigRepo.createRig("r");
   const node = rigRepo.addNode(rig.id, "dev.codex", { runtime: "codex", cwd: "/work", ...(options.savedModel !== null ? { model: options.savedModel ?? "gpt-5.5" } : {}) });
+  if (options.savedEffort?.authored) rigRepo.setNodeEffort(node.id, options.savedEffort.authored);
+  if (options.savedEffort?.choice) rigRepo.setNodeEffortChoice(node.id, options.savedEffort.choice);
   const session = sessionRegistry.registerSession(node.id, SEAT);
   sessionRegistry.updateStatus(session.id, "running");
   sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: SEAT, tmuxPane: "%1" });
@@ -144,7 +148,8 @@ function world(options: WorldOptions = {}) {
     async buildResumeCommand(binding: NodeBinding, opts: { resumeToken: string; running?: { networkOverride: boolean; daemonOptOut: boolean; addDirs: string[] } }) {
       builds.push({ running: opts.running });
       const running = opts.running;
-      const core = `codex${running?.daemonOptOut ? " --no-daemon" : ""}${binding.model ? ` -m '${binding.model}'` : ""} -s workspace-write`
+      const core = `codex${running?.daemonOptOut ? " --no-daemon" : ""}${binding.model ? ` -m '${binding.model}'` : ""}`
+        + `${binding.effort ? ` -c 'model_reasoning_effort="${binding.effort}"'` : ""} -s workspace-write`
         + `${running?.networkOverride ? " -c 'sandbox_workspace_write.network_access=true'" : ""} resume`
         + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
       return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
@@ -230,9 +235,22 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     expect(w.calls).toEqual([]);
   });
 
-  it("refuses drift in effort, home and cwd, naming each", async () => {
-    const effort = world({ runningArgs: `-m gpt-5.5 -c model_reasoning_effort="high" -s workspace-write resume ${TOKEN}` });
-    expect(await effort.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ code: "settings_drift", detail: { differs: ["effort"] } });
+  it("applies the seat's saved effort as the one setting it changes (OPR.0.7.0.7)", async () => {
+    const chosen = world({ savedEffort: { authored: "medium", choice: "high" }, runningArgs: `-m gpt-5.5 -c model_reasoning_effort="medium" -s workspace-write resume ${TOKEN}` });
+    const plan = await chosen.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(plan).toMatchObject({ ok: true, settings: { saved: { effort: "high" }, effort: { running: "medium", relaunch: "high", changes: true } } });
+    expect((plan as { settings: { note: string } }).settings.note).toContain("except effort");
+    const done = await chosen.service.restartInPlace({ seatRef: SEAT, reason: "new account" });
+    expect(done).toMatchObject({ ok: true, outcome: "restarted_account_unverified" });
+    expect(chosen.launches[0]!.command).toContain(`-c 'model_reasoning_effort="high"'`);
+    // Cleared to the runtime's default: the relaunch sends no effort flag.
+    const cleared = world({ runningArgs: `-m gpt-5.5 -c model_reasoning_effort="high" -s workspace-write resume ${TOKEN}` });
+    expect(await cleared.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: null, changes: true } } });
+    const same = world({ savedEffort: { choice: "high" }, runningArgs: `-m gpt-5.5 -c model_reasoning_effort="high" -s workspace-write resume ${TOKEN}` });
+    expect(await same.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, settings: { effort: { running: "high", relaunch: "high", changes: false } } });
+  });
+
+  it("refuses drift in home and cwd, naming each", async () => {
     const home = world({ facts: { 200: facts({ env: { CODEX_HOME: "/other/.codex" } }), 100: facts() } });
     expect(await home.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ code: "settings_drift", detail: { differs: ["codex home"] } });
     const cwd = world({ facts: { 200: facts(), 100: facts({ cwd: "/elsewhere" }) } });

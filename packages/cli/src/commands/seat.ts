@@ -630,6 +630,38 @@ Examples:
     });
 
   cmd
+    .command("effort")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--json", "JSON output for agents")
+    .description("Show one seat's effort four ways: requested, saved, sent at launch, and what the native session records")
+    .addHelpText("after", `
+Read-only. The launch value is the flag on the running process's own command line.
+The native value is the effort the session recorded for a turn since that process
+started (Claude's transcript, Codex's rollout); until the seat takes a turn, or
+where it can't be read, it is NOT VERIFIED, never assumed from the flag.
+Examples:
+  rig seat effort dev-impl@my-rig
+  rig seat effort dev.impl --json`)
+    .action(async (seat: string, opts: { json?: boolean }) => {
+      const deps = getDeps();
+      const daemon = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(daemon)) return;
+      const client = deps.clientFactory(getDaemonUrl(daemon));
+      const res = await client.get<Record<string, unknown>>(`/api/seat/effort/${encodeURIComponent(seat)}`);
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      if (res.status >= 400) {
+        printSeatError(res.data as unknown as SeatStatusError, `Seat effort failed (HTTP ${res.status})`);
+        process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+      printEffortReport(res.data);
+    });
+
+  cmd
     .command("set-model")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--model <id>", "Target model id (e.g. the canonical id an alias pin migrates to)")
@@ -726,8 +758,10 @@ Examples:
     .description("Restart one Codex seat in place so it reads its Codex home's current account")
     .addHelpText("after", `
 The seat's own conversation resumes in its own pane with the settings the running
-Codex uses now (model, effort, profile, permissions, cwd, Codex home). A pending
-set-model or set-effort is not applied: a difference refuses as settings_drift.
+Codex uses now (model, profile, permissions, cwd, Codex home). Effort follows the
+seat's saved effort (rig seat set-effort), as at every managed continuation; --plan
+shows the change. A pending set-model is not applied: a difference refuses as
+settings_drift.
 This never switches an account (use rig auth switch first), never reads credentials,
 never launches fresh, forks or retries. Peers sharing the Codex home are reported,
 not restarted.
@@ -1008,6 +1042,22 @@ Examples:
     .action((seat: string, opts: HandoverActionOpts) => runSeatHandover(seat, opts, getDeps()));
 }
 
+function printEffortReport(data: Record<string, unknown>): void {
+  const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+  const requested = data["requested"] as { value: string | null; at: string; reason: string } | null;
+  const saved = data["saved"] as { effective: string | null; source: string };
+  const emitted = data["emitted"] as { state: string; value?: string | null; pid?: number; detail?: string };
+  const observed = data["observed"] as { state: string; value?: string; at?: string; source?: string; detail?: string };
+  const precedence = data["precedence"] as { decided: boolean; detail: string };
+  console.log(`Effort for ${seat?.logicalId}@${seat?.rigName} (${String(data["runtime"])}):`);
+  console.log(`  Requested: ${requested ? `${requested.value ?? "cleared"} at ${requested.at} ("${requested.reason}")` : "never set with rig seat set-effort"}`);
+  console.log(`  Saved:     ${saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "this seat's choice" : "authored"})` : "no effort flag (runtime default)"}`);
+  console.log(`  Launch:    ${emitted.state === "observed" ? `${emitted.value ?? "no effort flag"} (process ${emitted.pid})` : `unknown: ${emitted.detail}`}`);
+  console.log(`  Native:    ${observed.state === "observed" ? `${observed.value} (${observed.source}, ${observed.at})` : `NOT VERIFIED: ${observed.detail}`}`);
+  console.log(String(data["summary"]));
+  if (!precedence.decided) console.log(`Note: ${precedence.detail}`);
+}
+
 function printRestartReport(data: Record<string, unknown>): void {
   const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
   console.log(`${data["outcome"] ? String(data["outcome"]) : "preview"}: ${seat?.logicalId}@${seat?.rigName} (${String(data["sessionName"])}, pane ${String(data["pane"])}, ${String(data["paneShape"])}).`);
@@ -1017,6 +1067,8 @@ function printRestartReport(data: Record<string, unknown>): void {
   console.log(`Activity: ${activity.state}. ${activity.detail}`);
   const children = data["childProcesses"] as Array<{ pid: number; name: string }>;
   if (children.length > 0) console.log(`Child processes (stopped with Codex): ${children.map((child) => `${child.name} ${child.pid}`).join(", ")}.`);
+  const settings = data["settings"] as { note?: string } | undefined;
+  if (settings?.note) console.log(`Settings: ${settings.note}`);
   console.log(`Codex home: ${String(data["codexHome"])}.`);
   console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
   const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };

@@ -249,6 +249,46 @@ describe("rig seat set-effort", () => {
   });
 });
 
+describe("rig seat effort", () => {
+  const seat = { logicalId: "dev.impl", rigName: "seat-rig" };
+
+  it("reads /api/seat/effort/<seat> and prints the four values apart, with NOT VERIFIED where native can't be seen", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({
+      status: 200,
+      data: {
+        ok: true, seat, runtime: "codex",
+        requested: { value: "high", at: "2026-10-13 05:50:00", reason: "long refactor", operator: null },
+        saved: { choice: "high", authored: "medium", effective: "high", source: "seat_choice" },
+        emitted: { state: "observed", value: "medium", pid: 200, startedAt: null, matchesSaved: false },
+        observed: { state: "not_verified", detail: "The session has recorded no turn with an effort since this process started." },
+        precedence: { decided: false, detail: "Precedence is the founder's open decision." },
+        summary: "Saved: high (seat choice). Launch sent: medium.",
+      },
+    }, calls);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "effort", "dev-impl@seat-rig"]);
+    });
+    expect(calls[0]!.path).toBe("/api/seat/effort/dev-impl%40seat-rig");
+    expect(exitCode).toBeUndefined();
+    const out = logs.join("\n");
+    expect(out).toContain('Requested: high at 2026-10-13 05:50:00 ("long refactor")');
+    expect(out).toContain("Saved:     high (this seat's choice)");
+    expect(out).toContain("Launch:    medium (process 200)");
+    expect(out).toContain("Native:    NOT VERIFIED: The session has recorded no turn");
+    expect(out).toContain("Note: Precedence is the founder's open decision.");
+  });
+
+  it("prints a refusal and exits non-zero", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 409, data: { ok: false, code: "effort_unsupported_runtime", message: "Seat runs pi." } }, calls);
+    const { exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "effort", "dev.pi"]);
+    });
+    expect(exitCode).toBe(1);
+  });
+});
+
 describe("rig seat stop", () => {
   it("posts reason to /api/seat/stop/<seat> and prints the stopped summary", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];

@@ -240,6 +240,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
+    transcripts: (c.get("contextUsageStore" as never) as ContextUsageStore | undefined) ?? undefined,
   });
 }
 
@@ -291,6 +292,13 @@ seatRoutes.post("/set-effort/:seatRef", async (c) => {
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
   });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
+
+// OPR.0.7.0.7 — read one seat's effort four ways: requested, saved, emitted at launch, observed natively.
+seatRoutes.get("/effort/:seatRef", async (c) => {
+  const result = await seatLifecycleService(c).effortReport(c.req.param("seatRef")!);
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
 });
