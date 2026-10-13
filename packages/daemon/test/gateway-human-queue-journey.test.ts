@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -134,6 +134,22 @@ describe("public human registry -> queue admission journey", () => {
     });
     expect(handed.status).toBe(201);
     expect(await handed.json()).toMatchObject({ created: { destinationSession: "founder@external" } });
+  });
+
+  it("with nobody registered, a create to a person is refused with the same code, saying nobody is registered", async () => {
+    rmSync(home, { recursive: true, force: true });
+    mkdirSync(home);
+    const response = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "agent@known-rig" },
+      body: JSON.stringify(humanDestination),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toMatchObject({ error: "human_registry_unavailable", registryLoadError: true });
+    expect(String(body.registryError)).toBe("no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …");
+    expect(body).not.toHaveProperty("registryProjectionError");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toMatchObject({ count: 0 });
   });
 
   it("reports a malformed projection as human_registry_unavailable with its cause", async () => {

@@ -782,6 +782,11 @@ export function loadHumanRegistry(home: string = getOpenRigHome(), opts: { readO
   if (!proj.ok) return { ok: false, error: proj.error };
   const path = projectionPath(home);
   if (!existsSync(path)) {
+    // Nobody registered yet (no fragments, so nothing was ever projected) is not a broken registry: still refused,
+    // but the message says so and names the registration verb, not a projection repair.
+    if (proj.entities.length === 0) {
+      return { ok: false, error: `no human configured yet — register one: rig gateway human add <entityId> --display-name … --binding … --delivery-class …` };
+    }
     return { ok: false, error: `registry projection missing at ${path} — re-project from the fragments` };
   }
   const stored = readFileSync(path, "utf8");
