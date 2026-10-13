@@ -383,6 +383,114 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     ]);
   });
 
+  // A one-shot --wake-after timer whose wake is held back (a `retained` delivery, the typing guard) has not fired
+  // yet: it fires once more, then retires. Before this, the task's own timer repeated every interval while it
+  // stayed set aside, and a shared timer's attached task lost its wake.
+  function scriptedEngine(statuses: Array<"ok" | "retained" | "failed">) {
+    const deliveries: Array<{ targetSession: string; status: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs,
+      historyLog: new WatchdogHistoryLog(db),
+      eventBus: bus,
+      deliver: async (request) => {
+        const status = statuses[deliveries.length] ?? "ok";
+        deliveries.push({ targetSession: request.targetSession, status });
+        return { status };
+      },
+      resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+    });
+    // Evaluate as the scheduler would at each due time, until the job is no longer active (bounded here).
+    const runUntilRetired = async (jobId: string, max = 5) => {
+      const outcomes: string[] = [];
+      for (let i = 0; i < max && jobs.getById(jobId)?.state === "active"; i++) {
+        const result = await engine.evaluate(jobs.getByIdOrThrow(jobId));
+        outcomes.push(result.outcome.action);
+      }
+      return outcomes;
+    };
+    return { deliveries, runUntilRetired };
+  }
+
+  async function parkWithTimer(owner: string) {
+    const row = await item(owner);
+    repo.update({
+      qitemId: row.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: timer", wakeAfterSeconds: 90,
+    } as never);
+    const jobId = (db.prepare(
+      "SELECT wake_ref FROM queue_transition_wakes WHERE qitem_id = ? AND wake_kind = 'timer'",
+    ).get(row.qitemId) as { wake_ref: string }).wake_ref;
+    return { row, jobId };
+  }
+
+  it("a one-shot timer's own task: a retained wake fires once more, then the timer retires", async () => {
+    const { deliveries, runUntilRetired } = scriptedEngine(["retained", "ok"]);
+    const { row, jobId } = await parkWithTimer("own-owner@rig");
+
+    const outcomes = await runUntilRetired(jobId);
+
+    expect(deliveries.map((d) => d.status)).toEqual(["retained", "ok"]);
+    expect(outcomes).toEqual(["send", "send"]);
+    expect(jobs.getById(jobId)?.state).toBe("terminal");
+    expect(wakes(row.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "ok"]);
+  });
+
+  it("a one-shot timer's own task: after a retained wake the timer is still its live backstop, and leaving the park retires it", async () => {
+    const { runUntilRetired } = scriptedEngine(["retained"]);
+    const { row, jobId } = await parkWithTimer("own-owner@rig");
+    await runUntilRetired(jobId, 1);
+
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ kind: "timer", ref: jobId, live: true });
+    repo.update({ qitemId: row.qitemId, actorSession: "own-owner@rig", state: "in-progress", transitionNote: "resumed" } as never);
+    expect(jobs.getById(jobId)?.state).toBe("terminal");
+  });
+
+  it("a one-shot timer's own task: a delivered or a failed wake still retires the timer after one fire", async () => {
+    for (const status of ["ok", "failed"] as const) {
+      const { deliveries, runUntilRetired } = scriptedEngine([status]);
+      const { jobId } = await parkWithTimer(`own-${status}@rig`);
+      await runUntilRetired(jobId);
+      expect(deliveries.map((d) => d.status), status).toEqual([status]);
+      expect(jobs.getById(jobId)?.state, status).toBe("terminal");
+    }
+  });
+
+  async function sharedTimerWithOriginalStopped(owner: string) {
+    const { row: original, jobId } = await parkWithTimer(owner);
+    const attached = await item(owner);
+    repo.update({
+      qitemId: attached.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: attached", wakeWatchdogId: jobId,
+    } as never);
+    // The original task is stopped the normal way; the attachment keeps the shared job alive.
+    repo.update({ qitemId: original.qitemId, actorSession: owner, state: "canceled", transitionNote: "stop" } as never);
+    expect(jobs.getById(jobId)?.state).toBe("active");
+    return { attached, jobId };
+  }
+
+  it("a shared one-shot timer: when its one wake to the attached task is retained, it fires again for that task, then retires", async () => {
+    const { deliveries, runUntilRetired } = scriptedEngine(["retained", "ok"]);
+    const { attached, jobId } = await sharedTimerWithOriginalStopped("shared-owner@rig");
+
+    const outcomes = await runUntilRetired(jobId);
+
+    expect(deliveries.map((d) => d.status)).toEqual(["retained", "ok"]);
+    expect(outcomes).toEqual(["send", "send", "terminal"]);
+    expect(jobs.getById(jobId)?.state).toBe("terminal");
+    expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "ok"]);
+  });
+
+  it("a shared one-shot timer: a delivered wake to the attached task still retires it after one fire", async () => {
+    const { deliveries, runUntilRetired } = scriptedEngine(["ok"]);
+    const { jobId } = await sharedTimerWithOriginalStopped("shared-owner@rig");
+
+    const outcomes = await runUntilRetired(jobId);
+
+    expect(deliveries.map((d) => d.status)).toEqual(["ok"]);
+    expect(outcomes).toEqual(["send", "terminal"]);
+  });
+
   it("OPR.0.5.8.1 S1c — a solely-park-generated timer with a terminal row is still refused", async () => {
     // The other side of the ownership boundary: adding the watchdog check must
     // not disarm the guard S1c exists for. With no attachment sharing the job,
