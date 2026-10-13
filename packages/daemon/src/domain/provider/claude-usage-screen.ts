@@ -22,7 +22,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /**
  * A reset as Claude prints it in UTC: `3pm (UTC)`, `3:30pm (UTC)`, `Oct 14, 9am (UTC)` or `Oct 14 at 9am (UTC)`.
  * A bare time is its next occurrence; a dated reset more than 180 days past rolls to the next year.
- * Returns null for any other form.
+ * Returns null for any other form, and for a date that doesn't exist (`Apr 31`).
  */
 export function claudeResetUtc(raw: string, now: string): string | null {
   const m = raw.trim().match(/^(?:([A-Z][a-z]{2}) (\d{1,2})(?:,| at) )?(\d{1,2})(?::(\d{2}))?(am|pm) \(UTC\)$/);
@@ -38,6 +38,8 @@ export function claudeResetUtc(raw: string, now: string): string | null {
   const day = m[2] === undefined ? nowDate.getUTCDate() : Number(m[2]);
   if (day < 1 || day > 31) return null;
   const at = new Date(Date.UTC(nowDate.getUTCFullYear(), month, day, hour, minute));
+  // Date.UTC rolls an impossible day into the next month; refuse it rather than move the reset.
+  if (at.getUTCMonth() !== month || at.getUTCDate() !== day) return null;
   if (m[1] === undefined && at < nowDate) at.setUTCDate(at.getUTCDate() + 1);
   if (m[1] !== undefined && nowDate.getTime() - at.getTime() > 180 * 86_400_000) at.setUTCFullYear(at.getUTCFullYear() + 1);
   return at.toISOString();
@@ -71,8 +73,10 @@ export function parseClaudeUsageScreen(screen: string, now: string):
     let usedPercent: number | null = null;
     let resetsAt: string | null = null;
     for (const next of lines.slice(i + 1, i + 4)) {
-      const used = next.match(/(\d+(?:\.\d+)?)% used$/);
-      if (used && usedPercent === null) {
+      if (/% used$/.test(next) && usedPercent === null) {
+        // The number is its own token: unsigned, no "<" or ">", 0-100. Anything else (`<1%`, `-5%`) is not a value.
+        const used = next.match(/(?:^|\s)(\d{1,3}(?:\.\d+)?)% used$/);
+        if (!used) return { ok: false, detail: `unrecognized percentage under ${label}: ${next}` };
         usedPercent = Number(used[1]);
         continue;
       }

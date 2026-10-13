@@ -159,13 +159,17 @@ export interface UsageAllowanceIdentity {
   source: "account/rateLimits/read accountId" | "account/read workspace routing" | "unresolved";
 }
 
-/** Slice 01 — a Claude allowance's identity: the organisation `claude auth status` reports, with the
- *  bucket (the /usage screen's model group). Email is a label, never identity. */
+/** Slice 01 — a Claude allowance's identity: the organisation and email `claude auth status` reports,
+ *  with the bucket (the /usage screen's model group). Claude reports no per-account id, and members of
+ *  one organisation have their own limits, so the email is part of the identity here (unlike Codex). */
 export interface ClaudeUsageIdentity {
   orgId: string | null;
   limitId: string;
   email: string | null;
-  source: "claude auth status orgId" | "unresolved";
+  /** Labels only, never part of the key. */
+  orgName: string | null;
+  subscriptionType: string | null;
+  source: "claude auth status orgId and email" | "unresolved";
 }
 
 export interface UsageWindowRow {
