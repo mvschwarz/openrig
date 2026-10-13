@@ -607,6 +607,42 @@ describe("Claude Code runtime adapter", () => {
       ok: false,
       error: "Claude resume failed: no conversation found for the requested session",
       recovery: "retry_fresh",
+      missingConversation: true,
+    });
+  });
+
+  it("launchHarness marks a missing conversation that first shows on the read after the wait", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    const capture = tmux.capturePaneContent as ReturnType<typeof vi.fn>;
+    // The wait reads the pane 16 times; the report first appears on the final read after it.
+    for (let read = 0; read < 16; read++) capture.mockResolvedValueOnce("claude --resume abc-123\nuser@example.test %");
+    capture.mockResolvedValue("No conversation found with session ID: abc-123\nuser@example.test %");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(capture).toHaveBeenCalledTimes(17);
+    expect(result).toEqual({
+      ok: false,
+      error: "Claude resume failed: no conversation found for the requested session",
+      recovery: "retry_fresh",
+      missingConversation: true,
+    });
+  });
+
+  it("launchHarness leaves a pane that is back at its shell unmarked", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Error: Claude exited\nuser@example.test %");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Claude resume failed: pane returned to shell instead of entering Claude",
+      recovery: "retry_fresh",
     });
   });
 

@@ -4,9 +4,10 @@
 keeps, using today's queue commands.** The person speaks in sentences. They never see YAML, a job ID or a policy name
 unless they ask.
 
-> **Status (0.7.0, not on by default).** No agent's guidance points here yet, and no profile loads it. It's switched
-> on by adding one line to the kernel operator's role guidance, after a native run on a real install shows the
-> pattern holds. Until then, hand this page to an operator by hand (`docs/reference/keeping-a-watch.md`) to try it.
+> **Status (0.7.0).** The kernel operator's role guidance points here: when a person asks it to watch something or
+> remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. Every step below
+> was exercised with the CLI on an isolated private daemon: create, set aside, fire, re-arm, list, change, stop, a
+> daemon restart and a handover. A native run with a real operator, install and channel has **not** been run yet.
 
 ## The shape
 
@@ -146,11 +147,20 @@ under some conditions, with no delay guarantee. So:
 
 - **Re-arm promptly** after every fire.
 - **After a restart or handover, list your watches** (above) and re-arm any that show no timed backstop.
+- **Handing a watch to another session** (`rig queue handoff <task> --to <session>`) closes the old task and retires its
+  timer (unless another task shares that timer through `--wake-watchdog`; a watch set up as above never does). The new
+  task arrives pending, with its body and `watch` tag but no timer: the new owner sets it aside again with a fresh
+  timer, as in step 3.
 
 ## What not to use
 
 - **`rig watchdog register --policy periodic-reminder` for a person's watch.** It repeats every interval until it's
   stopped (the first fire comes one interval after you register it), and it stops when the agent that registered it
-  is replaced. It's fine for agent-to-agent reminders.
+  is replaced. It's fine for agent-to-agent reminders. Your own watch timers also show as `periodic-reminder` in
+  `rig watchdog list`: that's the one-shot timer `--wake-after` arms, not a registered repeating reminder. It's retired
+  when it fires or when the task stops being set aside. Two exceptions: a wake held back because you were typing (a
+  retained delivery) leaves the timer live, and it fires again after another interval; and a timer another task shares
+  through `--wake-watchdog` stays live for that task when this task is handed off or stopped; it still retires after
+  its one fire.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance.

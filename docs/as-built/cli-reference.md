@@ -694,7 +694,7 @@ Root: `rig`; declared option: `-V, --version`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig provider` | — | — |
-| `rig provider status` | — | `--json`<br>`--refresh` |
+| `rig provider status` | — | `--json`<br>`--refresh`<br>`--provider <p>` |
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |

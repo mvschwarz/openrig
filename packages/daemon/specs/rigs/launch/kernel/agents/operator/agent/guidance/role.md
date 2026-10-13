@@ -30,6 +30,9 @@ user's view unless the task calls for navigation, and use the registered human
 channel for decisions. If the TUI has exited, its shell remains; run `rig tui`
 there once.
 
+When a person asks you to watch something or remind them, in any words, read
+`$OPENRIG_HOME/reference/keeping-a-watch.md` first and follow it.
+
 You run OpenRig on behalf of the user. The operator pod's `operator.human`
 member holds their shared terminal view. Human decisions use the registered
 human channel; a terminal attachment is not a person's address.

@@ -29,7 +29,9 @@ const READING = {
 
 let model: Record<string, unknown> = MODEL;
 let refreshReply: { status: number; body: unknown } = { status: 200, body: {} };
+let refreshByProvider: Record<string, { status: number; body: unknown }> = {};
 const posts: unknown[] = [];
+const sortedPosts = () => [...posts].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 
 function deps(port: number): StatusDeps {
   const lifecycleDeps = {
@@ -68,7 +70,12 @@ describe("rig provider status — usage windows", () => {
       req.on("end", () => {
         const send = (status: number, data: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
         if (req.method === "GET" && req.url === "/api/provider/status") return send(200, model);
-        if (req.method === "POST" && req.url === "/api/provider/usage/refresh") { posts.push(JSON.parse(body || "{}")); return send(refreshReply.status, refreshReply.body); }
+        if (req.method === "POST" && req.url === "/api/provider/usage/refresh") {
+          const parsed = JSON.parse(body || "{}") as { provider: string };
+          posts.push(parsed);
+          const reply = refreshByProvider[parsed.provider] ?? refreshReply;
+          return send(reply.status, reply.body);
+        }
         send(404, { error: "not found" });
       });
     });
@@ -76,7 +83,7 @@ describe("rig provider status — usage windows", () => {
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
-  beforeEach(() => { model = MODEL; posts.length = 0; });
+  beforeEach(() => { model = MODEL; posts.length = 0; refreshByProvider = {}; });
 
   it("switch off (no usage key): no USAGE section", async () => {
     const { out } = await run(["status"], port);
@@ -121,7 +128,7 @@ describe("rig provider status — usage windows", () => {
     const { out } = await run(["status"], port);
     const heads = out.split("\n").filter((l) => l.startsWith("  codex  identity unresolved"));
     expect(heads).toEqual([
-      "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read]",
+      "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown  [from an earlier read; possibly this same login]",
       "  codex  identity unresolved · bucket codex · dev@example.test · plus · seats unknown",
     ]);
     expect(out).not.toContain("another account");
@@ -150,6 +157,145 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status"], port)).out).not.toContain("saved rig auth profiles");
   });
 
+  it("a Claude row: organisation (name and id), bucket, email, subscription, how identity and windows were joined, each window's seat", async () => {
+    const note = "identity: the daemon's Claude login (claude auth status) as of the refresh at 2026-10-12T20:05:00.000Z; windows: status-line readings from dev@rig at their own times; not proven to be the same login";
+    model = { ...MODEL, usage: [{
+      provider: "claude",
+      identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: "Example Org", subscriptionType: "team", source: "claude auth status orgId and email" },
+      source: { kind: "claude_statusline_samples", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown",
+      windows: [{ window: "weekly", durationMins: 10080, usedPercent: 85, remainingPercent: 15, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z", seatSession: "dev@rig", level: "nearing", levelReason: "80% or more used", freshness: "fresh" }],
+      limitEvidence: null, latestFromSource: true, lastRefresh: { at: "2026-10-12T20:05:00.000Z", outcome: "ok" }, currentAvailability: "known", identityNote: note,
+    }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "  claude  organisation Example Org (org-1) · bucket all models · d***@example.test · team · seats unknown",
+      `    ${note}`,
+      "    weekly (weekly)  15% left  nearing (80% or more used)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z by seat dev@rig (fresh)",
+      "    current availability: known",
+    ].join("\n"));
+  });
+
+  it("seats that disagree: each other seat's own numbers print under the window", async () => {
+    model = { ...MODEL, usage: [{
+      provider: "claude", identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: null, subscriptionType: null, source: "claude auth status orgId and email" },
+      source: { kind: "claude_statusline_samples", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown", limitEvidence: null, latestFromSource: true,
+      currentAvailability: "unknown", lastRefresh: null,
+      windows: [{ window: "weekly", durationMins: 10080, usedPercent: 10, remainingPercent: 90, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z",
+        seatSession: "a@rig", level: "unknown", levelReason: "Claude seats report different windows (possibly different logins): a@rig, b@rig", freshness: "fresh",
+        disagreeingSeats: [{ seatSession: "b@rig", usedPercent: 90, resetsAt: "2026-10-16T09:00:00.000Z", observedAt: "2026-10-12T19:59:00.000Z" }] }],
+    }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "    weekly (weekly)  90% left  unknown (Claude seats report different windows (possibly different logins): a@rig, b@rig)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z by seat a@rig (fresh)",
+      "      seat b@rig reports 10% left  resets 2026-10-16T09:00:00.000Z  observed 2026-10-12T19:59:00.000Z",
+    ].join("\n"));
+  });
+
+  it("a Claude identity refresh that failed says the identity is from the last refresh that worked; no seat yet says so", async () => {
+    model = { ...MODEL, usage: [{
+      provider: "claude", identity: null, source: { kind: "claude_statusline_samples", host: "local" }, observedAt: null, seats: "unknown", windows: [],
+      limitEvidence: null, latestFromSource: true, currentAvailability: "unknown", unavailableReason: "no Claude seat has reported status-line rate limits yet",
+      lastRefresh: { at: "2026-10-12T20:05:00.000Z", outcome: "failed", reason: "not_logged_in", detail: "claude auth status reports no login (exit 1)" },
+    }, {
+      provider: "claude", identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: null, subscriptionType: null, source: "claude auth status orgId and email" },
+      source: { kind: "claude_statusline_samples", host: "local" }, observedAt: null, seats: "unknown", windows: [], limitEvidence: null, latestFromSource: true,
+      currentAvailability: "unknown", unavailableReason: "no Claude seat has reported status-line rate limits yet",
+      lastRefresh: { at: "2026-10-12T20:05:00.000Z", outcome: "failed", reason: "not_logged_in", detail: "claude auth status reports no login (exit 1)" },
+    }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  claude  unavailable: no Claude seat has reported status-line rate limits yet");
+    expect(out).toContain([
+      "  claude  organisation org-1 · bucket all models · d***@example.test · seats unknown",
+      "    no Claude seat has reported status-line rate limits yet",
+      "    identity refresh failed at 2026-10-12T20:05:00.000Z: not_logged_in (claude auth status reports no login (exit 1)); the identity shown is from the last refresh that worked, if any",
+    ].join("\n"));
+  });
+
+  it("--refresh reads both providers in parallel; one failure exits 1 and the status still prints", async () => {
+    model = { ...MODEL, usage: [READING] };
+    refreshByProvider = {
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } },
+      claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "interaction_required", coalesced: false }, usage: [] } },
+    };
+    const r = await run(["status", "--refresh"], port);
+    // Sent together; which one the server finishes reading first isn't fixed.
+    expect(sortedPosts()).toEqual([{ provider: "claude" }, { provider: "codex" }]);
+    expect(r.exitCode).toBe(1);
+    expect(r.out).toContain("USAGE");
+    posts.length = 0;
+    const one = await run(["status", "--refresh", "--provider", "claude"], port);
+    expect(posts).toEqual([{ provider: "claude" }]);
+    expect(one.exitCode).toBe(1);
+  });
+
+  it("one provider's HTTP error is printed, the status still prints, and the exit is 1", async () => {
+    model = { ...MODEL, usage: [READING] };
+    refreshByProvider = {
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } },
+      claude: { status: 400, body: { error: "claude usage windows are not available on this daemon" } },
+    };
+    const r = await run(["status", "--refresh", "--provider", "claude"], port);
+    expect(r.err).toBe("claude usage windows are not available on this daemon");
+    expect(r.out).toContain("USAGE");
+    expect(r.exitCode).toBe(1);
+    refreshByProvider = { codex: { status: 500, body: { error: "boom" } }, claude: refreshByProvider.claude! };
+    const codexFails = await run(["status", "--refresh"], port);
+    expect(codexFails.exitCode).toBe(2);
+    expect(codexFails.out).toContain("USAGE");
+    refreshByProvider = { claude: { status: 503, body: { error: "provider_service_unavailable" } },
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } } };
+    const five = await run(["status", "--refresh"], port);
+    expect([five.err, five.exitCode]).toEqual(["provider_service_unavailable", 2]);
+    expect(five.out).toContain("USAGE");
+  });
+
+  it("bare --refresh keeps main's exit where Claude doesn't apply on this host: one note line, exit unchanged", async () => {
+    model = { ...MODEL, usage: [READING] };
+    const codexOk = { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } };
+    for (const reason of ["binary_not_found", "not_logged_in", "not_subscription_login"]) {
+      refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason, detail: "d", coalesced: false }, usage: [] } } };
+      const bare = await run(["status", "--refresh"], port);
+      expect([bare.exitCode, bare.err], reason).toEqual([undefined, `note: Claude usage not read on this host: ${reason} (d); exit unaffected (name --provider claude to require it)`]);
+      expect(bare.out).toContain("USAGE");
+      // Named, it counts.
+      expect((await run(["status", "--refresh", "--provider", "claude"], port)).exitCode, reason).toBe(1);
+    }
+    // A daemon without a Claude refresh (400, or 404 from an older route): a note, exit unchanged.
+    for (const status of [400, 404]) {
+      refreshByProvider = { codex: codexOk, claude: { status, body: { error: "no claude" } } };
+      const old = await run(["status", "--refresh"], port);
+      expect([old.exitCode, old.err], String(status)).toEqual([undefined, "note: this daemon has no Claude usage refresh; exit unaffected"]);
+    }
+    // Main's exit when the host has no claude and Codex fails: still 1, from Codex.
+    refreshByProvider = {
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "timeout", coalesced: false }, usage: [] } },
+      claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "binary_not_found", detail: "d", coalesced: false }, usage: [] } },
+    };
+    expect((await run(["status", "--refresh"], port)).exitCode).toBe(1);
+    // auth status failing unexpectedly (for example {"loggedIn": false} with exit 9) applies: the bare refresh fails.
+    refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "auth_status_failed", detail: "claude auth status failed (exit 9)", coalesced: false }, usage: [] } } };
+    const unexpected = await run(["status", "--refresh"], port);
+    expect([unexpected.exitCode, unexpected.err]).toEqual([1, ""]);
+    // A Claude failure that does apply (it's installed and logged in) still fails the bare refresh.
+    refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "timeout", coalesced: false }, usage: [] } } };
+    expect((await run(["status", "--refresh"], port)).exitCode).toBe(1);
+  });
+
+  it("an older daemon with the switch off (Codex 409, Claude 400): main's one off line, exit 1", async () => {
+    refreshByProvider = {
+      codex: { status: 409, body: { error: "usage_windows_disabled", message: "Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true" } },
+      claude: { status: 400, body: { error: "usage windows can be refreshed for codex only in this version (got claude)" } },
+    };
+    const r = await run(["status", "--refresh"], port);
+    expect([r.err, r.out, r.exitCode]).toEqual(["Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true", "", 1]);
+  });
+
+  it("--provider takes codex or claude only", async () => {
+    const r = await run(["status", "--refresh", "--provider", "gemini"], port);
+    expect([r.err, r.exitCode]).toEqual(["--provider must be codex or claude (got gemini)", 1]);
+    expect(posts).toEqual([]);
+  });
+
   it("--json stays verbatim", async () => {
     model = { ...MODEL, usage: [READING] };
     expect(JSON.parse((await run(["status", "--json"], port)).out)).toEqual(model);
@@ -161,6 +307,11 @@ describe("rig provider status — usage windows", () => {
     expect(r.err).toBe("Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true");
     expect(r.out).toBe("");
     expect(r.exitCode).toBe(1);
+    // Without --provider both are read; the switch-off line is printed once.
+    expect(sortedPosts()).toEqual([{ provider: "claude" }, { provider: "codex" }]);
+    posts.length = 0;
+    const codexOnly = await run(["status", "--refresh", "--provider", "codex"], port);
+    expect([codexOnly.err, codexOnly.out, codexOnly.exitCode]).toEqual([r.err, r.out, r.exitCode]);
     expect(posts).toEqual([{ provider: "codex" }]);
   });
 

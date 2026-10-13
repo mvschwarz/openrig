@@ -159,6 +159,19 @@ export interface UsageAllowanceIdentity {
   source: "account/rateLimits/read accountId" | "account/read workspace routing" | "unresolved";
 }
 
+/** Slice 01 — a Claude allowance's identity: the organisation and email `claude auth status` reports, with the
+ *  bucket (the status line's windows cover all models). Claude reports no per-account id, and members of one
+ *  organisation have their own limits, so the email is part of the identity here (unlike Codex). */
+export interface ClaudeUsageIdentity {
+  orgId: string | null;
+  limitId: string;
+  email: string | null;
+  /** Labels only, never part of the key. */
+  orgName: string | null;
+  subscriptionType: string | null;
+  source: "claude auth status orgId and email" | "unresolved";
+}
+
 export interface UsageWindowRow {
   /** The provider-native window name (Codex: primary / secondary). */
   window: string;
@@ -167,8 +180,13 @@ export interface UsageWindowRow {
   /** 100 − usedPercent: a percentage; the provider reports no absolute amount. */
   remainingPercent: number | null;
   resetsAt: string | null;
-  /** When the native read answered: freshness ages from this. */
+  /** When the native read answered (Claude: the status line's own time for the sample): freshness ages from this. */
   observedAt: string;
+  /** Claude: the seat whose status-line sample this window is. */
+  seatSession?: string;
+  /** Claude: other seats whose fresh readings of this window disagree (a reset more than 60 s apart), with their own
+   *  numbers, so which login is where can be read from the row. Present only when they disagree. */
+  disagreeingSeats?: Array<{ seatSession: string; usedPercent: number; resetsAt: string | null; observedAt: string }>;
   level: "ok" | "nearing" | "exhausted" | "unknown";
   levelReason?: string;
   freshness: "fresh" | "stale" | "unavailable";
@@ -185,19 +203,23 @@ export interface UsageRefreshOutcome {
 export interface ProviderUsageAllowance {
   provider: ProviderKind;
   /** Null only for the explicit row of a source never read since the daemon started. */
-  identity: UsageAllowanceIdentity | null;
-  source: { kind: "codex_app_server"; host: "local" };
+  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | null;
+  source: { kind: "codex_app_server" | "claude_statusline_samples"; host: "local" };
   observedAt: string | null;
   /** Seat links are not observed by this read. */
   seats: "unknown";
   windows: UsageWindowRow[];
   /** The bucket's provider-reported limit evidence (Codex `rateLimitReachedType`), shown once. */
   limitEvidence: string | null;
-  /** False when this row came from an earlier read than the latest one (kept; the latest read didn't match it). */
+  /** False when this row came from an earlier read than the latest one (kept; the latest read didn't match it;
+   *  its windows read stale: a later read exists). */
   latestFromSource: boolean;
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";
   unavailableReason?: string;
+  /** Claude: how the identity and the windows were joined (identity as of a refresh; windows from seats' samples at
+   *  their own times; not proven to be the same login). */
+  identityNote?: string;
   /** Present on an unresolved observation: never matched, merged or replaced; kept from the most recent reads. */
   unresolved?: { note: string; keptReads: number; droppedReads: number };
   /** Present when rig auth profiles exist: this read covers only the login active in the daemon's CODEX_HOME. */

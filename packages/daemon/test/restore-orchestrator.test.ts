@@ -2265,7 +2265,7 @@ describe("RestoreOrchestrator", () => {
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
     const launchHarness = vi.fn()
-      .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const })
       .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" });
     const mockAdapter = {
       runtime: "claude-code",
@@ -2345,7 +2345,7 @@ describe("RestoreOrchestrator", () => {
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
     const launchHarness = vi.fn()
-      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh", missingConversation: true as const })
       .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-codex-token", resumeType: "codex_id" });
     const mockAdapter = {
       runtime: "codex",
@@ -2382,7 +2382,7 @@ describe("RestoreOrchestrator", () => {
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
     const launchHarness = vi.fn()
-      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh" })
+      .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh", missingConversation: true as const })
       .mockResolvedValueOnce({ ok: true as const, resumeToken: "stable-codex-token", resumeType: "codex_id" });
     const mockAdapter = {
       runtime: "codex",
@@ -2426,7 +2426,7 @@ describe("RestoreOrchestrator", () => {
       db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
       const launchHarness = vi.fn()
-        .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh" })
+        .mockResolvedValueOnce({ ok: false as const, error: "Codex resume failed: no saved session found for the requested session", recovery: "retry_fresh", missingConversation: true as const })
         .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-codex-token", resumeType: "codex_id" });
       const mockAdapter = {
         runtime: "codex",

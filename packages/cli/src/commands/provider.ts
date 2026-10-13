@@ -128,18 +128,21 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         console.log(`  ${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
         continue;
       }
-      // Identity first (account, else the workspace account/read reported, else unresolved); email is a label.
+      // Identity first (Codex: account, else the workspace account/read reported; Claude: the organisation
+      // and email auth status reported at the last refresh; else unresolved); for Codex the email is a label.
       const identity = id["accountId"] ? `account ${id["accountId"]}`
         : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
-          : "identity unresolved";
-      const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], "seats unknown"]
+          : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
+            : "identity unresolved";
+      const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], "seats unknown"]
         .filter((x) => x !== null && x !== undefined);
       // Not from the latest read: say only that. A later read proves no other account (an unresolved read
       // may be this same login), so the label names the read, not an account.
       const earlier = r["latestFromSource"] ? ""
-        : id["source"] === "unresolved" ? "  [from an earlier read]"
+        : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
           : "  [from an earlier read; the latest read didn't match this row]";
       console.log(`  ${r["provider"]}  ${labels.join(" · ")}${earlier}`);
+      if (r["identityNote"]) console.log(`    ${r["identityNote"]}`);
       const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
       if (unresolved) {
         const dropped = Number(unresolved["droppedReads"] ?? 0);
@@ -149,12 +152,20 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         const left = w["remainingPercent"] === null ? "?% left" : `${w["remainingPercent"]}% left`;
         const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
         const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
-        console.log(`    ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]} (${fresh})`);
+        const seat = w["seatSession"] ? ` by seat ${w["seatSession"]}` : "";
+        console.log(`    ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})`);
+        for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
+          console.log(`      seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
+        }
       }
+      if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`    ${r["unavailableReason"]}`);
       if (r["limitEvidence"]) console.log(`    limit evidence: ${r["limitEvidence"]}`);
       const last = r["lastRefresh"] as Record<string, unknown> | null;
       if (last?.["outcome"] === "failed") {
-        console.log(`    refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); last reading kept, marked old`);
+        // Claude's refresh reads identity only; its windows keep coming from the seats' samples.
+        console.log(r["provider"] === "claude"
+          ? `    identity refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); the identity shown is from the last refresh that worked, if any`
+          : `    refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); last reading kept, marked old`);
       }
       console.log(`    current availability: ${r["currentAvailability"]}`);
     }
@@ -179,31 +190,69 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .option("--refresh", "First read the Codex login's usage windows natively (up to 35 s; needs provider.usage_windows on)")
-    .action(async (opts: { json?: boolean; refresh?: boolean }) => {
+    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s; needs provider.usage_windows on)")
+    .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
+    .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string }) => {
+      if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
+        console.error(`--provider must be codex or claude (got ${opts.provider})`);
+        process.exitCode = 1;
+        return;
+      }
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
-      let refreshFailed = false;
+      let refreshExit = 0;
       if (opts.refresh) {
-        // The daemon's worst case is the 35 s read deadline plus stopping the reader (stdin EOF, TERM,
-        // KILL and reap, up to 2 s each: ~8 s), so ~43 s before it answers. Wait 60 s so a slow-dying
-        // child never turns the daemon's answer into a transport error here.
-        const refreshed = await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider: "codex" }, { timeoutMs: 60_000 });
-        if (refreshed.status === 409) {
-          const p = (refreshed.data ?? {}) as { message?: unknown };
+        // The daemon's worst case is a read's deadline plus stopping what it started: Codex 35 s plus ~8 s
+        // (stdin EOF, TERM, KILL and reap, up to 2 s each); Claude's auth status 10 s plus ~3 s. Wait 60 s so
+        // a slow-dying child never turns the daemon's answer into a transport error here. Both providers are
+        // read in parallel unless --provider names one.
+        const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
+        const answered = await Promise.all(providers.map(async (provider) => ({
+          provider,
+          answer: await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider }, { timeoutMs: 60_000 }),
+        })));
+        // Bare --refresh keeps main's Codex exit: Claude is read too, but where it doesn't apply on this host
+        // (no claude, no login, not a subscription login), or the daemon has no Claude refresh (400/404, an
+        // older daemon), that is a note, not a failure. Naming --provider claude makes it count.
+        const implicit = opts.provider === undefined;
+        const notApplicable = ({ provider, answer }: (typeof answered)[number]): boolean => {
+          if (!implicit || provider !== "claude") return false;
+          if (answer.status === 400 || answer.status === 404) return true;
+          const reason = answer.status === 200 ? (answer.data?.["refresh"] as Record<string, unknown> | undefined)?.["reason"] : undefined;
+          return reason === "binary_not_found" || reason === "not_logged_in" || reason === "not_subscription_login";
+        };
+        const counted = answered.filter((a) => !notApplicable(a));
+        if (counted.length > 0 && counted.every((a) => a.answer.status === 409)) {
+          // The switch is off: one line naming it (the first provider's message).
+          const p = (counted[0]!.answer.data ?? {}) as { message?: unknown };
           console.error(p.message ?? "Codex usage windows are off (provider.usage_windows)");
           process.exitCode = 1;
           return;
         }
-        if (handleHttpError(refreshed, "refresh usage windows")) return;
-        refreshFailed = (refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed";
+        for (const a of answered) {
+          if (!notApplicable(a)) continue;
+          const refresh = a.answer.status === 200 ? (a.answer.data?.["refresh"] as Record<string, unknown> | undefined) : undefined;
+          console.error(refresh
+            ? `note: Claude usage not read on this host: ${refresh["reason"]} (${refresh["detail"]}); exit unaffected (name --provider claude to require it)`
+            : "note: this daemon has no Claude usage refresh; exit unaffected");
+        }
+        // A counted provider's refusal or error is printed, and the status is still read and printed for the
+        // other; the exit code then says the refresh didn't fully succeed.
+        for (const { answer } of counted) {
+          if (handleHttpError(answer, "refresh usage windows")) {
+            refreshExit = Math.max(refreshExit, process.exitCode === 2 ? 2 : 1);
+            continue;
+          }
+          if ((answer.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed") refreshExit = Math.max(refreshExit, 1);
+        }
+        process.exitCode = undefined;
       }
       const res = await client.get<Record<string, unknown>>("/api/provider/status");
-      if (refreshFailed) process.exitCode = 1;
       if (handleHttpError(res, "read provider status")) return;
+      if (refreshExit > 0) process.exitCode = refreshExit;
       if (opts.json) console.log(JSON.stringify(res.data));
       else renderStatusHuman(res.data);
     });

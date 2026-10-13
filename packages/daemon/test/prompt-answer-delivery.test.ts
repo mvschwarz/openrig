@@ -87,6 +87,28 @@ describe("explicit prompt answer delivery", () => {
     expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
   });
 
+  it("presses Enter for a Codex `»` prompt holding exactly the answer", async () => {
+    const f = fixture("text", "codex");
+    // Codex 0.153 draws `»`; the shared runtime-scoped set has to recognize it.
+    f.state.capture = "» green please\n\n  test-model · ~/example";
+    const result = await f.transport.send(f.name, "green please", { dangerouslyInteract: true, reason: "Codex 0.153 prompt glyph" });
+    expect(result.ok).toBe(true);
+    expect(result.promptInteraction).toBe("enter-sent");
+    expect(f.state.submitted).toEqual(["green please"]);
+    expect(f.state.commands.filter(a => a[1] === "send-keys")).toEqual([["tmux", "send-keys", "-t", f.name, "Enter"]]);
+  });
+
+  it.each([".", ")"]) ("withholds Enter for a Codex `»` numbered choice (%s)", async separator => {
+    const f = fixture("choice", "codex");
+    // The choice body equals the answer, so only the numbered-choice exclusion
+    // stops the shared matcher from treating the menu selection as typed text.
+    f.state.capture = `Choose a harmless colour\n» 1${separator} Blue\n  2${separator} Green\n  3${separator} No`;
+    const result = await f.transport.send(f.name, "1. Blue", { dangerouslyInteract: true, reason: "Codex 0.153 numbered choice" });
+    expect(result).toMatchObject({ ok: true, sent: true, verified: false, outcome: "rendered-unconfirmed" });
+    expect(result.promptInteraction).toBe("unverified");
+    expect(f.state.commands.some(a => a[1] === "send-keys")).toBe(false);
+  });
+
   it.each([null, "Working...", "❯ green\n────────────────────\nenter to submit",
     "❯ green please but not this\n────────────────────\nenter to submit"])("does not guess submission from unavailable, consumed or partial input (%#)", async capture => {
     const f = fixture("text"); f.state.capture = capture;
