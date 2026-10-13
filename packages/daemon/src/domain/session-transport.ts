@@ -33,8 +33,7 @@ import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObser
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 import type { NodeBinding, ReadinessResult } from "./runtime-adapter.js";
-import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
-import { hasPendingFreshStartup } from "./startup-orchestrator.js";
+import { normalizeStartupStatus } from "./context-monitor.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -1067,6 +1066,7 @@ export class SessionTransport {
   private captureObserver?: CaptureObserverSink;
   private listProcesses?: NativeProcessLister;
   private runtimeAdapters: Record<string, TransportReadinessChecker>;
+  private inFlightReconciliations = new Map<string, Promise<boolean>>();
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -2679,123 +2679,18 @@ export class SessionTransport {
   }
 
   /**
-   * Reconcile non-ready startup state after successful session interaction (#7).
+   * Reconcile non-ready startup state after successful session interaction (Refs #7).
    *
    * If an active session is in a non-ready startup state (`failed` or `attention_required`),
-   * re-check readiness via the runtime adapter. When responsive and no fresh startup context
-   * is pending, transition to `ready`, update `sessions.startup_completed_at`, and emit
-   * `node.startup_ready` (plus `seat.attention_cleared` when recovering from attention).
+   * re-check readiness via the runtime adapter with currentness verification and atomic commit.
    */
   async reconcileStartupReadiness(sessionName: string): Promise<boolean> {
-    const row = this.db.prepare(`
-      SELECT
-        s.id AS session_id,
-        s.status AS session_status,
-        s.startup_status AS startup_status,
-        n.id AS node_id,
-        n.rig_id AS rig_id,
-        n.runtime AS runtime,
-        n.cwd AS cwd,
-        n.model AS model,
-        n.codex_config_profile AS codex_config_profile,
-        b.tmux_session AS tmux_session,
-        b.tmux_pane AS tmux_pane
-      FROM sessions s
-      JOIN nodes n ON s.node_id = n.id
-      LEFT JOIN bindings b ON b.node_id = n.id
-      WHERE s.session_name = ?
-      ORDER BY s.id DESC
-      LIMIT 1
-    `).get(sessionName) as {
-      session_id: string;
-      session_status: string;
-      startup_status: string;
-      node_id: string;
-      rig_id: string;
-      runtime: string;
-      cwd: string | null;
-      model: string | null;
-      codex_config_profile: string | null;
-      tmux_session: string | null;
-      tmux_pane: string | null;
-    } | undefined;
-
-    if (!row) return false;
-    if (row.session_status !== "running") return false;
-    if (row.startup_status !== "failed" && row.startup_status !== "attention_required") return false;
-
-    const adapter = this.runtimeAdapters[row.runtime];
-    if (!adapter?.checkReady) return false;
-
-    if (hasPendingFreshStartup(this.db, row.node_id, row.session_id)) return false;
-
-    const binding: NodeBinding = {
-      id: `transport:${row.session_id}`,
-      nodeId: row.node_id,
-      attachmentType: "tmux",
-      tmuxSession: row.tmux_session ?? sessionName,
-      tmuxWindow: null,
-      tmuxPane: row.tmux_pane,
-      cmuxWorkspace: null,
-      cmuxSurface: null,
-      updatedAt: "",
-      cwd: row.cwd ?? "",
-      model: row.model ?? undefined,
-      codexConfigProfile: row.codex_config_profile ?? undefined,
-    };
-
-    let readiness: ReadinessResult;
-    try {
-      readiness = await adapter.checkReady(binding);
-    } catch {
-      return false;
-    }
-
-    if (!readiness.ready) {
-      if (isAttentionRequiredReadinessCode(readiness.code) && row.startup_status !== "attention_required") {
-        this.sessionRegistry.updateStartupStatus(row.session_id, "attention_required");
-      }
-      return false;
-    }
-
-    const completedAt = this.now().toISOString();
-    let reconciled = false;
-    const fromStatus = row.startup_status;
-
-    this.db.transaction(() => {
-      const current = this.db.prepare(`
-        SELECT startup_status, status FROM sessions WHERE id = ?
-      `).get(row.session_id) as { startup_status: string; status: string } | undefined;
-
-      if (!current || current.status !== "running") return;
-      if (current.startup_status !== "failed" && current.startup_status !== "attention_required") return;
-      if (hasPendingFreshStartup(this.db, row.node_id, row.session_id)) return;
-
-      this.sessionRegistry.updateStartupStatus(row.session_id, "ready", completedAt);
-      reconciled = true;
-    }).immediate();
-
-    if (reconciled) {
-      if (fromStatus === "attention_required") {
-        this.eventBus?.emit({
-          type: "seat.attention_cleared",
-          rigId: row.rig_id,
-          nodeId: row.node_id,
-          sessionName,
-          from: "attention_required",
-          to: "ready",
-          clearedBy: "evidence",
-          evidence: { kind: "session_interaction", state: "interactive" },
-          previousError: null,
-        });
-      }
-      this.eventBus?.emit({
-        type: "node.startup_ready",
-        rigId: row.rig_id,
-        nodeId: row.node_id,
-      });
-    }
-
-    return reconciled;
+    return normalizeStartupStatus({
+      db: this.db,
+      readinessCheckers: this.runtimeAdapters,
+      eventBus: this.eventBus,
+      target: { sessionName },
+      inFlightMap: this.inFlightReconciliations,
+    });
   }
 }

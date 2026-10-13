@@ -2753,18 +2753,18 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
 
-    // Record an initial startup_failed event in the events log with an error reason
+    // Record an initial startup_failed event in the events log with a recoverable timeout error reason
     db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
       rig.id,
       node.id,
       "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "transient auth delay" }),
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s — harness did not become interactive: transient auth delay" }),
     );
 
     // Initial inventory should reflect failed startup and latest error
     const initialInventory = getNodeInventory(db, rig.id);
     expect(initialInventory[0]?.startupStatus).toBe("failed");
-    expect(initialInventory[0]?.latestError).toBe("transient auth delay");
+    expect(initialInventory[0]?.latestError).toBe("Readiness timeout after 30s — harness did not become interactive: transient auth delay");
 
     const emittedEvents: unknown[] = [];
     eventBus.subscribe((evt) => {
@@ -2802,17 +2802,18 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     expect(updatedInventory[0]?.startupStatus).toBe("ready");
     expect(updatedInventory[0]?.latestError).toBeNull();
 
-    // Event bus should have received node.startup_ready
+    // Event bus should have received node.startup_ready carrying previousStatus: "failed"
     expect(emittedEvents).toEqual([
       expect.objectContaining({
         type: "node.startup_ready",
         rigId: rig.id,
         nodeId: node.id,
+        previousStatus: "failed",
       }),
     ]);
   });
 
-  it("reconciles attention_required startup status to ready and emits seat.attention_cleared", async () => {
+  it("reconciles attention_required startup status to ready without routing through attention-cleared path", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "attention_required");
 
@@ -2840,23 +2841,28 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("ready");
 
-    expect(emittedAttentionCleared).toEqual([
+    // Must NOT emit seat.attention_cleared on interaction-based reconciliation
+    expect(emittedAttentionCleared).toHaveLength(0);
+    expect(emittedReady).toEqual([
       expect.objectContaining({
-        type: "seat.attention_cleared",
+        type: "node.startup_ready",
         rigId: rig.id,
         nodeId: node.id,
-        sessionName: "worker-1@test-rig",
-        from: "attention_required",
-        to: "ready",
-        clearedBy: "evidence",
+        previousStatus: "attention_required",
       }),
     ]);
-    expect(emittedReady).toHaveLength(1);
   });
 
   it("reconciles failed startup status to ready on successful capture", async () => {
     const { rig, node, session } = seedRig("claude-code");
     sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
 
     const emittedReady: unknown[] = [];
     eventBus.subscribe((evt) => {
@@ -2881,7 +2887,365 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
 
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("ready");
-    expect(emittedReady).toHaveLength(1);
+    expect(emittedReady).toEqual([
+      expect.objectContaining({
+        type: "node.startup_ready",
+        rigId: rig.id,
+        nodeId: node.id,
+        previousStatus: "failed",
+      }),
+    ]);
+  });
+
+  it("does not reconcile non-recoverable startup failure even if prompt is responsive", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    // Record an unrecoverable failure (missing files / post-launch actions failed)
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Post-launch file delivery failed: /workspace/file.txt: write error" }),
+    );
+
+    const emittedReady: unknown[] = [];
+    eventBus.subscribe((evt) => {
+      if (evt.type === "node.startup_ready") emittedReady.push(evt);
+    });
+
+    const checkReadyMock = vi.fn().mockResolvedValue({ ready: true });
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    // Unrecoverable failures must not probe and must stay failed
+    expect(checkReadyMock).not.toHaveBeenCalled();
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("failed");
+    expect(emittedReady).toHaveLength(0);
+  });
+
+  it("does not reconcile if startup work is still pending (files or actions remaining)", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    // Node has pending startup work in node_startup_context
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'codex')").run(
+      node.id,
+      JSON.stringify([{ path: "instructions.md", deliveryHint: "send_text" }]),
+    );
+
+    const emittedReady: unknown[] = [];
+    eventBus.subscribe((evt) => {
+      if (evt.type === "node.startup_ready") emittedReady.push(evt);
+    });
+
+    const checkReadyMock = vi.fn().mockResolvedValue({ ready: true });
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("failed");
+    expect(emittedReady).toHaveLength(0);
+  });
+
+  it("seat rebound to another pane that sits at a trust gate while probe runs is not committed", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    const checkReadyMock = vi.fn().mockImplementation(async () => {
+      // Rebind seat to another pane while probe is running
+      sessionRegistry.updateBinding(node.id, { tmuxPane: "%99" });
+      return { ready: false, code: "update_gate" };
+    });
+
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    // Stale result must not be committed; status stays failed, not attention_required
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("failed");
+  });
+
+  it("newer ready written while probe runs stays ready and is not changed to attention", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    const checkReadyMock = vi.fn().mockImplementation(async () => {
+      // Newer ready written while probe is running
+      sessionRegistry.updateStartupStatus(session.id, "ready");
+      return { ready: false, code: "update_gate" };
+    });
+
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    // Must stay ready, not overwritten by attention_required
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("ready");
+  });
+
+  it("session exits while probe runs is not rewritten to ready", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    const checkReadyMock = vi.fn().mockImplementation(async () => {
+      // Session exits while probe runs
+      sessionRegistry.updateStatus(session.id, "exited");
+      return { ready: true };
+    });
+
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    // Must not be rewritten to ready
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("failed");
+  });
+
+  it("new occupant generation starts while probe runs is not committed", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    const currentMax = (db.prepare("SELECT MAX(generation_ordinal) as m FROM occupant_tenures WHERE node_id = ?").get(node.id) as { m: number | null }).m ?? 0;
+
+    const checkReadyMock = vi.fn().mockImplementation(async () => {
+      // New occupant generation starts while probe runs
+      db.prepare("INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind) VALUES (?, ?, ?, ?, ?)").run(
+        "g-next",
+        node.id,
+        currentMax + 1,
+        "uuid-gen-next",
+        "adopt",
+      );
+      return { ready: true };
+    });
+
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("failed");
+  });
+
+  it("new session starts while probe runs is not committed to old session", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    const checkReadyMock = vi.fn().mockImplementation(async () => {
+      // New session starts for the node while probe runs
+      sessionRegistry.registerSession(node.id, "worker-1-v2@test-rig");
+      return { ready: true };
+    });
+
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo ping");
+    expect(result.ok).toBe(true);
+
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("failed");
+  });
+
+  it("capture and send return normally when the readiness check itself fails or throws", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    const checkReadyMock = vi.fn().mockRejectedValue(new Error("tmux probe failure"));
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux({
+        capturePaneContent: async () => "output content\n",
+      }),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    // Send should complete normally without propagating probe error
+    const sendResult = await transport.send("worker-1@test-rig", "echo ping");
+    expect(sendResult.ok).toBe(true);
+
+    // Capture should also return normally without error
+    const captureResult = await transport.capture("worker-1@test-rig");
+    expect(captureResult.ok).toBe(true);
+    expect(captureResult.content).toBe("output content\n");
+  });
+
+  it("reuses in-flight readiness check across concurrent interactions", async () => {
+    const { rig, node, session } = seedRig("codex");
+    sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
+
+    let resolveProbe!: (value: { ready: boolean }) => void;
+    const probePromise = new Promise<{ ready: boolean }>((res) => {
+      resolveProbe = res;
+    });
+    const checkReadyMock = vi.fn().mockImplementation(() => probePromise);
+
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux({
+        capturePaneContent: async () => "prompt\n",
+      }),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: checkReadyMock },
+      },
+    });
+
+    // Trigger send and capture concurrently
+    const [sendPromise, capturePromise] = [
+      transport.send("worker-1@test-rig", "echo ping"),
+      transport.capture("worker-1@test-rig"),
+    ];
+
+    // Wait a brief moment to ensure both are in-flight
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // checkReadyMock should only be called once, because the second call reuses the in-flight check
+    expect(checkReadyMock).toHaveBeenCalledTimes(1);
+
+    resolveProbe({ ready: true });
+    await Promise.all([sendPromise, capturePromise]);
+
+    const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+    expect(sessionRow.startup_status).toBe("ready");
   });
 
   it("does not reconcile to ready if hasPendingFreshStartup is true", async () => {
@@ -2927,6 +3291,13 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("updates to attention_required if adapter checkReady returns attention code", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
+
+    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rig.id,
+      node.id,
+      "node.startup_failed",
+      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+    );
 
     const checkReadyMock = vi.fn().mockResolvedValue({ ready: false, code: "update_gate" });
     const transport = new SessionTransport({

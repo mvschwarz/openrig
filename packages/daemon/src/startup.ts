@@ -2461,7 +2461,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       undefined,
       legacyProviderUsageDirectory(OPENRIG_HOME),
     ),
-  ));
+  ), eventBus);
   deps.contextMonitor = contextMonitor;
   // OPR.0.4.3.14 — expose the SAME enforcer instance to routes for the manual
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
