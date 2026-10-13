@@ -1616,25 +1616,39 @@ describe("SessionTransport", () => {
       sessionName: "dev-impl@my-rig",
       hookEvent: "UserPromptSubmit",
     });
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
-      sendText: sendTextSpy,
-    });
-    const transport = createTransport(tmux, {
-      agentActivityStore,
-      waitForIdlePollMs: 1,
-    });
+    // This tests the classification of fresh hook evidence and expiry AFTER a running observation, not
+    // classification speed: freeze the deadline clock and its race timer, and advance only at the poll,
+    // as the 1 ms expiry tests above do. A real 1 ms wait discards a first observation that a slow runner
+    // can't finish in time, and then reads target_activity_unknown.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({
+        capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+        sendText: sendTextSpy,
+      });
+      const sleep = vi.fn(async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); });
+      const transport = createTransport(tmux, {
+        agentActivityStore,
+        sleep,
+        waitForIdlePollMs: 1,
+      });
 
-    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("wait_for_idle_timeout");
-    expect(result.sent).toBe(false);
-    expect(result.activity?.state).toBe("running");
-    expect(result.activity?.reason).toBe("user_prompt_submit");
-    expect(result.activity?.evidenceSource).toBe("runtime_hook");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("wait_for_idle_timeout");
+      expect(result.sent).toBe(false);
+      expect(result.activity?.state).toBe("running");
+      expect(result.activity?.reason).toBe("user_prompt_submit");
+      expect(result.activity?.evidenceSource).toBe("runtime_hook");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.attempts).toBe(2);
+      expect(result.waitedMs).toBe(1);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("send with wait-for-idle hard-stops on fresh permission prompt hook evidence", async () => {
