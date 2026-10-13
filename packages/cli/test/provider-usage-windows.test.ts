@@ -31,6 +31,7 @@ let model: Record<string, unknown> = MODEL;
 let refreshReply: { status: number; body: unknown } = { status: 200, body: {} };
 let refreshByProvider: Record<string, { status: number; body: unknown }> = {};
 const posts: unknown[] = [];
+const sortedPosts = () => [...posts].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 
 function deps(port: number): StatusDeps {
   const lifecycleDeps = {
@@ -179,7 +180,8 @@ describe("rig provider status — usage windows", () => {
       claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "interaction_required", coalesced: false }, usage: [] } },
     };
     const r = await run(["status", "--refresh"], port);
-    expect(posts).toEqual([{ provider: "codex" }, { provider: "claude" }]);
+    // Sent together; which one the server finishes reading first isn't fixed.
+    expect(sortedPosts()).toEqual([{ provider: "claude" }, { provider: "codex" }]);
     expect(r.exitCode).toBe(1);
     expect(r.out).toContain("USAGE");
     posts.length = 0;
@@ -264,7 +266,7 @@ describe("rig provider status — usage windows", () => {
     expect(r.out).toBe("");
     expect(r.exitCode).toBe(1);
     // Without --provider both are read; the switch-off line is printed once.
-    expect(posts).toEqual([{ provider: "codex" }, { provider: "claude" }]);
+    expect(sortedPosts()).toEqual([{ provider: "claude" }, { provider: "codex" }]);
     posts.length = 0;
     const codexOnly = await run(["status", "--refresh", "--provider", "codex"], port);
     expect([codexOnly.err, codexOnly.out, codexOnly.exitCode]).toEqual([r.err, r.out, r.exitCode]);

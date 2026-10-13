@@ -291,8 +291,11 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
 
   it("nothing a read started survives it: auth timeout, screen failure, timeout and success, with processes that ignore HUP and TERM", async () => {
     const fake = makeFakeClaude();
-    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-    const groupAlive = (pgid: number) => { try { process.kill(-pgid, 0); return true; } catch { return false; } };
+    // Running processes, from ps (Linux and macOS): a killed process its parent hasn't reaped yet (a zombie,
+    // state Z) still answers kill(pid, 0) but isn't running, so it doesn't count.
+    const running = () => execFileSync("ps", ["-A", "-o", "pid=,pgid=,stat="]).toString().trim().split("\n")
+      .map((l) => l.trim().split(/\s+/)).filter(([, , stat]) => stat !== undefined && !stat.startsWith("Z"))
+      .map(([pid, pgid, stat]) => ({ pid: Number(pid), pgid: Number(pgid), stat: stat! }));
     const cases: Array<[string, Parameters<typeof fake.setPlan>[0], string, number]> = [
       ["auth timeout", { auth: ["hang"], screen: usageScreen(), stubborn: true }, "auth_status_failed", 1],
       ["screen failure", { auth: [CLAUDE_AUTH], screen: "exit", stubborn: true }, "child_exited", 2],
@@ -307,9 +310,10 @@ describe("claudeUsageReader against a fake claude in a private tmux server", () 
       expect(r.ok ? "ok" : r.reason, name).toBe(outcome);
       const procs = fake.procs();
       expect(procs, name).toHaveLength(starts);
+      const now = running();
       for (const p of procs) {
-        expect(p.pids.filter(alive), `${name}: ${p.what} pids`).toEqual([]);
-        expect(groupAlive(p.pgid), `${name}: ${p.what} group`).toBe(false);
+        const survivors = now.filter((r) => p.pids.includes(r.pid) || r.pgid === p.pgid);
+        expect(survivors, `${name}: ${p.what} pids ${p.pids.join(",")} group ${p.pgid}`).toEqual([]);
       }
     }
     expect(ownDirs()).toEqual(before);
