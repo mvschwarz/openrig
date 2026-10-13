@@ -169,7 +169,8 @@ describe("System → Usage in the normal TUI journey", () => {
     const out = text();
     expect(out).toContain("System · Usage windows and seat accounts");
     expect(out).toContain("this host's daemon only · not fleet-wide · not proof of the login a running session uses");
-    expect(out).toContain("This view never refreshes. Read the logins now with: rig provider status --refresh");
+    expect(out).toContain("This view shows what this daemon already holds and never reads the logins itself. To read them now: rig provider status --refresh [--provider codex|claude]");
+    expect(out).not.toContain("never refreshes");
     // Fresh/nearing, exhausted, stale, failed refresh beside the kept reading, unavailable, unresolved, earlier rows.
     expect(out).toContain("codex  account acct-1 · bucket codex · a@x.example · plus · seats unknown");
     expect(out).toContain("5h (primary)  8% left");
@@ -232,6 +233,15 @@ describe("System → Usage in the normal TUI journey", () => {
     const out = text();
     expect(out).toContain("This daemon doesn't serve usage windows (it doesn't know the provider.usage_windows setting).");
     expect(out).not.toContain("are off");
+  });
+
+  it("the seats label is the served seats value: a served value shows as served, a missing one reads unknown", async () => {
+    const withoutSeats: Record<string, unknown> = { ...USAGE[1]! };
+    delete withoutSeats["seats"];
+    model = { ...BASE, usage: [{ ...USAGE[0]!, seats: "fixture-served-seats" }, withoutSeats] };
+    await openUsage();
+    expect(text()).toContain("codex  account acct-1 · bucket codex · a@x.example · plus · seats fixture-served-seats");
+    expect(text()).toContain("claude  identity unresolved · bucket all models · email not reported · seats unknown");
   });
 
   it("usage served without seat accounts (before seat accounts existed): the usage rows show, and the seats say so", async () => {

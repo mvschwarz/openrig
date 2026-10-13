@@ -19,7 +19,7 @@ export interface UsageRead {
 }
 
 export const USAGE_HEADER = "this host's daemon only · not fleet-wide · not proof of the login a running session uses";
-export const USAGE_REFRESH_HINT = "This view never refreshes. Read the logins now with: rig provider status --refresh [--provider codex|claude]";
+export const USAGE_REFRESH_HINT = "This view shows what this daemon already holds and never reads the logins itself. To read them now: rig provider status --refresh [--provider codex|claude]";
 
 const str = (v: unknown, fallback = "unknown"): string => (v === null || v === undefined || v === "" ? fallback : String(v));
 
@@ -42,7 +42,7 @@ function allowanceLines(r: Row): ContentLine[] {
     : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
       : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
         : "identity unresolved";
-  const labels = [identity, `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], "seats unknown"]
+  const labels = [identity, `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
     .filter((x) => x !== null && x !== undefined);
   const earlier = r["latestFromSource"] ? ""
     : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
