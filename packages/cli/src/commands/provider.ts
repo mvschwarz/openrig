@@ -129,7 +129,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         continue;
       }
       // Identity first (Codex: account, else the workspace account/read reported; Claude: the organisation
-      // and email auth status reported; else unresolved); for Codex the email is a label.
+      // and email auth status reported at the last refresh; else unresolved); for Codex the email is a label.
       const identity = id["accountId"] ? `account ${id["accountId"]}`
         : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
           : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
@@ -142,6 +142,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
           : "  [from an earlier read; the latest read didn't match this row]";
       console.log(`  ${r["provider"]}  ${labels.join(" · ")}${earlier}`);
+      if (r["identityNote"]) console.log(`    ${r["identityNote"]}`);
       const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
       if (unresolved) {
         const dropped = Number(unresolved["droppedReads"] ?? 0);
@@ -151,12 +152,17 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         const left = w["remainingPercent"] === null ? "?% left" : `${w["remainingPercent"]}% left`;
         const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
         const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
-        console.log(`    ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]} (${fresh})`);
+        const seat = w["seatSession"] ? ` by seat ${w["seatSession"]}` : "";
+        console.log(`    ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})`);
       }
+      if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`    ${r["unavailableReason"]}`);
       if (r["limitEvidence"]) console.log(`    limit evidence: ${r["limitEvidence"]}`);
       const last = r["lastRefresh"] as Record<string, unknown> | null;
       if (last?.["outcome"] === "failed") {
-        console.log(`    refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); last reading kept, marked old`);
+        // Claude's refresh reads identity only; its windows keep coming from the seats' samples.
+        console.log(r["provider"] === "claude"
+          ? `    identity refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); the identity shown is from the last refresh that worked, if any`
+          : `    refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); last reading kept, marked old`);
       }
       console.log(`    current availability: ${r["currentAvailability"]}`);
     }
@@ -181,7 +187,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .option("--refresh", "First read the Codex and Claude logins' usage windows natively (up to 45 s; needs provider.usage_windows on)")
+    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s; needs provider.usage_windows on)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
     .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
@@ -197,10 +203,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       let refreshExit = 0;
       if (opts.refresh) {
         // The daemon's worst case is a read's deadline plus stopping what it started: Codex 35 s plus ~8 s
-        // (stdin EOF, TERM, KILL and reap, up to 2 s each); Claude 45 s plus ~9 s (exit keys, the pane's
-        // process group TERM/KILL, the private server). Wait 60 s so a slow-dying child never turns the
-        // daemon's answer into a transport error here. Both providers are read in parallel unless
-        // --provider names one.
+        // (stdin EOF, TERM, KILL and reap, up to 2 s each); Claude's auth status 10 s plus ~3 s. Wait 60 s so
+        // a slow-dying child never turns the daemon's answer into a transport error here. Both providers are
+        // read in parallel unless --provider names one.
         const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
         const answered = await Promise.all(providers.map(async (provider) => ({
           provider,

@@ -157,19 +157,41 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status"], port)).out).not.toContain("saved rig auth profiles");
   });
 
-  it("a Claude row: organisation (name and id), bucket, email, subscription, its windows", async () => {
+  it("a Claude row: organisation (name and id), bucket, email, subscription, how identity and windows were joined, each window's seat", async () => {
+    const note = "identity: the daemon's Claude login (claude auth status) as of the refresh at 2026-10-12T20:05:00.000Z; windows: status-line readings from dev@rig at their own times; not proven to be the same login";
     model = { ...MODEL, usage: [{
       provider: "claude",
       identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: "Example Org", subscriptionType: "team", source: "claude auth status orgId and email" },
-      source: { kind: "claude_usage_screen", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown",
-      windows: [{ window: "current_week", durationMins: 10080, usedPercent: 85, remainingPercent: 15, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z", level: "nearing", levelReason: "80% or more used", freshness: "fresh" }],
-      limitEvidence: null, latestFromSource: true, lastRefresh: { at: "2026-10-12T20:00:00.000Z", outcome: "ok" }, currentAvailability: "known",
+      source: { kind: "claude_statusline_samples", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown",
+      windows: [{ window: "weekly", durationMins: 10080, usedPercent: 85, remainingPercent: 15, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z", seatSession: "dev@rig", level: "nearing", levelReason: "80% or more used", freshness: "fresh" }],
+      limitEvidence: null, latestFromSource: true, lastRefresh: { at: "2026-10-12T20:05:00.000Z", outcome: "ok" }, currentAvailability: "known", identityNote: note,
     }] };
     const { out } = await run(["status"], port);
     expect(out).toContain([
       "  claude  organisation Example Org (org-1) · bucket all models · d***@example.test · team · seats unknown",
-      "    weekly (current_week)  15% left  nearing (80% or more used)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z (fresh)",
+      `    ${note}`,
+      "    weekly (weekly)  15% left  nearing (80% or more used)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z by seat dev@rig (fresh)",
       "    current availability: known",
+    ].join("\n"));
+  });
+
+  it("a Claude identity refresh that failed says the identity is from the last refresh that worked; no seat yet says so", async () => {
+    model = { ...MODEL, usage: [{
+      provider: "claude", identity: null, source: { kind: "claude_statusline_samples", host: "local" }, observedAt: null, seats: "unknown", windows: [],
+      limitEvidence: null, latestFromSource: true, currentAvailability: "unknown", unavailableReason: "no Claude seat has reported status-line rate limits yet",
+      lastRefresh: { at: "2026-10-12T20:05:00.000Z", outcome: "failed", reason: "not_logged_in", detail: "claude auth status reports no login (exit 1)" },
+    }, {
+      provider: "claude", identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: null, subscriptionType: null, source: "claude auth status orgId and email" },
+      source: { kind: "claude_statusline_samples", host: "local" }, observedAt: null, seats: "unknown", windows: [], limitEvidence: null, latestFromSource: true,
+      currentAvailability: "unknown", unavailableReason: "no Claude seat has reported status-line rate limits yet",
+      lastRefresh: { at: "2026-10-12T20:05:00.000Z", outcome: "failed", reason: "not_logged_in", detail: "claude auth status reports no login (exit 1)" },
+    }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  claude  unavailable: no Claude seat has reported status-line rate limits yet");
+    expect(out).toContain([
+      "  claude  organisation org-1 · bucket all models · d***@example.test · seats unknown",
+      "    no Claude seat has reported status-line rate limits yet",
+      "    identity refresh failed at 2026-10-12T20:05:00.000Z: not_logged_in (claude auth status reports no login (exit 1)); the identity shown is from the last refresh that worked, if any",
     ].join("\n"));
   });
 
