@@ -158,9 +158,10 @@ under some conditions, with no delay guarantee. So:
   stopped (the first fire comes one interval after you register it), and it stops when the agent that registered it
   is replaced. It's fine for agent-to-agent reminders. Your own watch timers also show as `periodic-reminder` in
   `rig watchdog list`: that's the one-shot timer `--wake-after` arms, not a registered repeating reminder. It's retired
-  when it fires or when the task stops being set aside. Two exceptions: a wake held back because you were typing (a
-  retained delivery) leaves the timer live, and it fires again after another interval; and a timer another task shares
-  through `--wake-watchdog` stays live for that task when this task is handed off or stopped; it still retires after
-  its one fire.
+  when it fires or when the task stops being set aside. A wake held back because you were typing (a retained
+  delivery) wasn't delivered, so it doesn't use the timer up: it's tried again at each interval until an attempt goes
+  through (delivered or failed), which retires it. A timer another task shares through `--wake-watchdog` stays live
+  for that task when this task is handed off or stopped, and the same rule applies to its wake. None of this is a
+  delivery guarantee.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
   allowance.

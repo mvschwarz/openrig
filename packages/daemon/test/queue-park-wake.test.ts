@@ -15,7 +15,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository, type QueueNudgeTransport } from "../src/domain/queue-repository.js";
 import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
-import { isDue } from "../src/domain/watchdog-scheduler.js";
+import { isDue, WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
@@ -383,8 +383,9 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     ]);
   });
 
-  // A one-shot --wake-after timer whose wake is held back (a `retained` delivery, the typing guard) has not fired
-  // yet: it fires once more, then retires. Before this, the task's own timer repeated every interval while it
+  // A one-shot --wake-after timer whose wake is held back (a `retained` delivery, the typing guard) wasn't delivered,
+  // so it isn't consumed: it stays eligible at its interval, with no retry limit, until the first non-retained
+  // attempt (ok or failed) consumes it. Before this, the task's own timer kept delivering every interval while it
   // stayed set aside, and a shared timer's attached task lost its wake.
   function scriptedEngine(statuses: Array<"ok" | "retained" | "failed">) {
     const deliveries: Array<{ targetSession: string; status: string }> = [];
@@ -400,16 +401,22 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
       onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
     });
-    // Evaluate as the scheduler would at each due time, until the job is no longer active (bounded here).
-    const runUntilRetired = async (jobId: string, max = 5) => {
-      const outcomes: string[] = [];
+    // The real scheduler, on a test clock: each step moves past the 90 s interval and runs one tick, so only
+    // active, due jobs are evaluated. Steps stop once the job is no longer active (bounded here).
+    let clock = Date.now();
+    const scheduler = new WatchdogScheduler({ jobsRepo: jobs, policyEngine: engine, now: () => new Date(clock) });
+    const outcomesOf = (jobId: string) => (db.prepare(
+      "SELECT outcome FROM watchdog_history WHERE job_id = ? ORDER BY evaluated_at, history_id",
+    ).all(jobId) as Array<{ outcome: string }>).map((r) => r.outcome);
+    const runUntilRetired = async (jobId: string, max = 6) => {
       for (let i = 0; i < max && jobs.getById(jobId)?.state === "active"; i++) {
-        const result = await engine.evaluate(jobs.getByIdOrThrow(jobId));
-        outcomes.push(result.outcome.action);
+        clock += 91_000;
+        await scheduler.runTickNow();
       }
-      return outcomes;
+      return outcomesOf(jobId);
     };
-    return { deliveries, runUntilRetired };
+    const tick = async () => { clock += 91_000; await scheduler.runTickNow(); };
+    return { deliveries, runUntilRetired, tick };
   }
 
   async function parkWithTimer(owner: string) {
@@ -424,16 +431,57 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     return { row, jobId };
   }
 
-  it("a one-shot timer's own task: a retained wake fires once more, then the timer retires", async () => {
+  it("a one-shot timer's own task: a retained wake doesn't consume it; the next attempt delivers and retires it", async () => {
     const { deliveries, runUntilRetired } = scriptedEngine(["retained", "ok"]);
     const { row, jobId } = await parkWithTimer("own-owner@rig");
 
     const outcomes = await runUntilRetired(jobId);
 
+    // History keeps the held-back attempt (`skipped`: typing_guard_retained), then the delivery that consumed it.
     expect(deliveries.map((d) => d.status)).toEqual(["retained", "ok"]);
-    expect(outcomes).toEqual(["send", "send"]);
+    expect(outcomes).toEqual(["skipped", "sent"]);
     expect(jobs.getById(jobId)?.state).toBe("terminal");
     expect(wakes(row.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "ok"]);
+  });
+
+  it("a one-shot timer: repeated retained attempts stay eligible at the interval with no retry limit; then ok, or failed, consumes it", async () => {
+    for (const last of ["ok", "failed"] as const) {
+      const { deliveries, runUntilRetired, tick } = scriptedEngine(["retained", "retained", "retained", last]);
+      const { row, jobId } = await parkWithTimer(`own-repeat-${last}@rig`);
+      const outcomes = await runUntilRetired(jobId);
+      expect(deliveries.map((d) => d.status), last).toEqual(["retained", "retained", "retained", last]);
+      expect(outcomes, last).toEqual(["skipped", "skipped", "skipped", "sent"]);
+      expect(jobs.getById(jobId)?.state, last).toBe("terminal");
+      // No further one-shot attempt after consumption: later ticks deliver nothing.
+      await tick();
+      await tick();
+      expect(deliveries, last).toHaveLength(4);
+      expect(wakes(row.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status), last)
+        .toEqual(["retained", "retained", "retained", last]);
+    }
+  });
+
+  it("a one-shot timer: status after a retained attempt says not delivered, with a live backstop and the attempt in its history", async () => {
+    const { runUntilRetired } = scriptedEngine(["retained"]);
+    const { row, jobId } = await parkWithTimer("own-status@rig");
+    await runUntilRetired(jobId, 1);
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({
+      kind: "timer", ref: jobId, phase: "fired", deliveryStatus: "retained", live: true, unconsumed: false,
+    });
+  });
+
+  it("a one-shot timer superseded by a new park after a retained attempt: the old timer retires and never delivers again", async () => {
+    const { deliveries, tick } = scriptedEngine(["retained", "ok", "ok"]);
+    const { row, jobId: oldJob } = await parkWithTimer("own-super@rig");
+    await tick();
+    expect(deliveries).toHaveLength(1);
+    repo.update({
+      qitemId: row.qitemId, actorSession: "own-super@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: new park", wakeAfterSeconds: 300,
+    } as never);
+    expect(jobs.getById(oldJob)?.state).toBe("terminal");
+    await tick();
+    expect(deliveries).toHaveLength(1); // the new 300 s timer isn't due yet; the old one is gone
   });
 
   it("a one-shot timer's own task: after a retained wake the timer is still its live backstop, and leaving the park retires it", async () => {
@@ -476,7 +524,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const outcomes = await runUntilRetired(jobId);
 
     expect(deliveries.map((d) => d.status)).toEqual(["retained", "ok"]);
-    expect(outcomes).toEqual(["send", "send", "terminal"]);
+    expect(outcomes).toEqual(["skipped", "sent", "terminal"]);
     expect(jobs.getById(jobId)?.state).toBe("terminal");
     expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "ok"]);
   });
@@ -488,7 +536,32 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     const outcomes = await runUntilRetired(jobId);
 
     expect(deliveries.map((d) => d.status)).toEqual(["ok"]);
-    expect(outcomes).toEqual(["send", "terminal"]);
+    expect(outcomes).toEqual(["sent", "terminal"]);
+  });
+
+  it("a shared one-shot timer: repeated retained attempts to the attached task, then a failed one consumes it", async () => {
+    const { deliveries, runUntilRetired } = scriptedEngine(["retained", "retained", "failed"]);
+    const { attached, jobId } = await sharedTimerWithOriginalStopped("shared-repeat@rig");
+    const outcomes = await runUntilRetired(jobId);
+    expect(deliveries.map((d) => d.status)).toEqual(["retained", "retained", "failed"]);
+    expect(outcomes).toEqual(["skipped", "skipped", "sent", "terminal"]);
+    expect(wakes(attached.qitemId).filter((w) => w.phase === "fired").map((w) => w.delivery_status)).toEqual(["retained", "retained", "failed"]);
+  });
+
+  it("control: a standalone operator periodic watchdog keeps repeating after a retained delivery, as before", async () => {
+    const { deliveries, tick } = scriptedEngine(["retained", "ok", "ok"]);
+    const job = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: standalone@rig\nmessage: operator reminder\n",
+      targetSession: "standalone@rig",
+      intervalSeconds: 90,
+      registeredBySession: "operator@rig",
+    });
+    await tick();
+    await tick();
+    await tick();
+    expect(deliveries.map((d) => d.status)).toEqual(["retained", "ok", "ok"]);
+    expect(jobs.getById(job.jobId)?.state).toBe("active");
   });
 
   it("OPR.0.5.8.1 S1c — a solely-park-generated timer with a terminal row is still refused", async () => {
