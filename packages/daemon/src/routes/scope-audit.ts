@@ -12,6 +12,7 @@ import {
 } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { NOTES_FILE_PRECEDENCE, resolveNodeFile, resolveNotesFile } from "../domain/scope/node-file.js";
+import { isPathInsideRoot } from "../domain/cwd-resolution.js";
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
@@ -145,6 +146,15 @@ export function scopeAuditRoutes(): Hono {
 
     const missionsRoot = indexer.slicesRoot;
     const missionDir = path.join(missionsRoot, missionName);
+    // Content-surfaces discipline (parity with scope-approve.ts): the joined
+    // mission target must stay INSIDE the slices root. This is a lexical,
+    // separator-safe containment check: a name that leaves the root (`..`,
+    // `../outside`) is reported as not found, never read. An absolute or
+    // dot-prefixed name keeps today's meaning — `path.join` keeps it under the
+    // root — and a root that is itself `/` or a drive root is not over-refused.
+    if (!isPathInsideRoot(missionDir, missionsRoot)) {
+      return c.json({ error: "mission_not_found", mission: missionName }, 404);
+    }
     if (!fs.existsSync(missionDir)) {
       return c.json({ error: "mission_not_found", mission: missionName }, 404);
     }
