@@ -136,11 +136,11 @@ describe.skipIf(!nativeAvailable)("tmux shell and argv transports against a real
     expect(comparable(argv.result)).toEqual(comparable(shell.result));
   });
 
-  it("the shell transport starts /bin/sh for every call, the argv transport starts tmux itself by its path", () => {
+  it("the shell transport starts /bin/sh for every call, the argv transport starts tmux by its path, or /bin/sh when PATH leaves it to the shell", () => {
     const tmux = resolveOnPath("tmux", process.env.PATH);
-    expect(tmux).toMatch(/^\/.*\/tmux$/);
+    if (tmux) expect(tmux).toMatch(/^\/.*\/tmux$/);
     expect(shell.calls).toBeGreaterThan(15);
     expect(shell.files).toEqual(Array(shell.calls).fill("/bin/sh"));
-    expect(argv.files).toEqual(Array(argv.calls).fill(tmux));
+    expect(argv.files).toEqual(Array(argv.calls).fill(tmux ?? "/bin/sh"));
   });
 });

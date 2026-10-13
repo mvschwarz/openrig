@@ -49,7 +49,7 @@ describe.skipIf(process.platform === "win32")("tmux binary resolution", { timeou
     expect(await execArgvCommand(["tmux", "-V"])).toBe("run-b -V\n");
   });
 
-  it("looks the binary up again once when the cached one has gone", async () => {
+  it("falls back to the shell when the cached binary has gone, and the shell finds the next one", async () => {
     const a = dir("gone-a", "exec"), b = dir("gone-b", "exec");
     vi.stubEnv("PATH", `${a}:${b}`);
     expect(await execArgvCommand(["tmux", "-V"])).toBe("gone-a -V\n");
@@ -63,6 +63,33 @@ describe.skipIf(process.platform === "win32")("tmux binary resolution", { timeou
   it("fails like the shell transport when no PATH entry has the binary", async () => {
     vi.stubEnv("PATH", `${dir("none")}:/nonexistent`);
     await expect(execArgvCommand(["tmux", "-V"])).rejects.toMatchObject({ code: 127, message: expect.stringMatching(/tmux: .*not found/) });
+  });
+
+  it("runs a first tmux without a #! line as a script, as the shell transport does", async () => {
+    const plain = dir("noshebang"), later = dir("noshebang-later", "exec");
+    fs.writeFileSync(path.join(plain, "tmux"), `echo "noshebang $*"\n`, { mode: 0o755 });
+    vi.stubEnv("PATH", `${plain}:${later}:/usr/bin:/bin`);
+    expect(await execArgvCommand(["tmux", "-V"])).toBe("noshebang -V\n");
+  });
+
+  it("goes on to the next PATH entry when the first tmux's interpreter is missing, as the shell transport does", async () => {
+    const broken = dir("no-interpreter"), later = dir("interpreter-later", "exec");
+    fs.writeFileSync(path.join(broken, "tmux"), `#!${path.join(root, "missing-interpreter")}\necho broken\n`, { mode: 0o755 });
+    vi.stubEnv("PATH", `${broken}:${later}:/usr/bin:/bin`);
+    expect(await execArgvCommand(["tmux", "list-sessions", "-F", "#{session_name} x"])).toBe("interpreter-later list-sessions -F #{session_name} x\n");
+    expect(await execArgvCommand(["tmux", "-V"])).toBe("interpreter-later -V\n");
+  });
+
+  it("runs each command once: after a spawn error, and never again after tmux itself failed", async () => {
+    const broken = dir("once-broken"), counted = dir("once-counted"), log = path.join(root, "once.log");
+    fs.writeFileSync(path.join(broken, "tmux"), `#!${path.join(root, "missing-interpreter")}\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(counted, "tmux"), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1" = fail ] && { echo "tmux failed" >&2; exit 1; }\necho ok\n`, { mode: 0o755 });
+    vi.stubEnv("PATH", `${broken}:${counted}:/usr/bin:/bin`);
+    expect(await execArgvCommand(["tmux", "send-keys", "x"])).toBe("ok\n");
+    await expect(execArgvCommand(["tmux", "fail"])).rejects.toMatchObject({ code: 1 });
+    vi.stubEnv("PATH", `${counted}:/usr/bin:/bin`);
+    await expect(execArgvCommand(["tmux", "fail"])).rejects.toMatchObject({ code: 1 });
+    expect(fs.readFileSync(log, "utf8")).toBe("send-keys x\nfail\nfail\n");
   });
 
   // Accepted: a tmux installed earlier on PATH is seen when PATH changes, the cached one fails, or the daemon restarts.

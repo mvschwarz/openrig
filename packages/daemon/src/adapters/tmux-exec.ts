@@ -26,10 +26,15 @@ export function resolveOnPath(name: string, pathEnv: string | undefined): string
 
 // Looked up once per PATH value: a tmux installed earlier on PATH later is seen after a daemon restart.
 let resolved: { name: string; pathEnv: string | undefined; file: string | null } | undefined;
-function resolvedOnPath(name: string, fresh = false): string | null {
+function resolvedOnPath(name: string): string | null {
   const pathEnv = process.env.PATH;
-  if (fresh || resolved?.name !== name || resolved.pathEnv !== pathEnv) resolved = { name, pathEnv, file: resolveOnPath(name, pathEnv) };
+  if (resolved?.name !== name || resolved.pathEnv !== pathEnv) resolved = { name, pathEnv, file: resolveOnPath(name, pathEnv) };
   return resolved.file;
+}
+
+/** The file could not be started at all (missing, not executable, a missing interpreter, no `#!` line): nothing ran. */
+function isSpawnError(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.syscall?.startsWith("spawn") === true;
 }
 
 function extractExecOutput(err: unknown): string {
@@ -83,9 +88,11 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
     try {
       return (await run(file)).stdout;
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (!file || (code !== "ENOENT" && code !== "EACCES")) throw err;
-      return (await run(resolvedOnPath(bin, true))).stdout;
+      if (!file || !isSpawnError(err)) throw err;
+      // Nothing ran, so the shell runs it once and reaches tmux as the shell transport does. The next call looks up again,
+      // so a reinstalled tmux is started directly once it is back.
+      resolved = undefined;
+      return (await run(null)).stdout;
     }
   } catch (err) {
     throw withExecOutput(err);
