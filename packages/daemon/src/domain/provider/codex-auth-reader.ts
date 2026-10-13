@@ -18,10 +18,20 @@ export interface CodexSeatRow {
   updatedTs: string;
 }
 
+/** How the seat registry read went: absent (ENOENT), read, or unreadable (the error code only, never contents). */
+export interface CodexSeatRegistryRead {
+  status: "absent" | "read" | "unreadable";
+  code?: string;
+  /** Rows skipped because they don't have the six columns. */
+  malformedRows: number;
+}
+
 export interface CodexAuthMetadata {
   /** Profile NAMES (opaque, non-secret refs) — never file contents. */
   profiles: string[];
   seats: CodexSeatRow[];
+  /** Additive: lets a caller tell a supported absence from an unreadable or malformed registry. */
+  registry?: CodexSeatRegistryRead;
 }
 
 const SEAT_COLUMN_COUNT = 6;
@@ -50,32 +60,41 @@ function listProfiles(profileDir: string): string[] {
   }
 }
 
-function readSeats(registryPath: string): CodexSeatRow[] {
+function readSeats(registryPath: string): { seats: CodexSeatRow[]; registry: CodexSeatRegistryRead } {
   let raw: string;
   try {
     raw = fs.readFileSync(registryPath, "utf8");
-  } catch {
-    return [];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT"
+      ? { seats: [], registry: { status: "absent", malformedRows: 0 } }
+      : { seats: [], registry: { status: "unreadable", code: code ?? "unknown", malformedRows: 0 } };
   }
   const rows: CodexSeatRow[] = [];
+  let malformedRows = 0;
   for (const line of raw.split("\n")) {
     if (line.length === 0) continue;
     const cols = line.split("\t");
-    if (cols.length !== SEAT_COLUMN_COUNT) continue; // skip malformed rows — never fabricate fields
+    if (cols.length !== SEAT_COLUMN_COUNT) { // skip malformed rows — never fabricate fields
+      malformedRows += 1;
+      continue;
+    }
     // Length is exactly 6 above, so the tuple destructure is total (satisfies noUncheckedIndexedAccess).
     const [seat, rig, runtime, cwd, authProfile, updatedTs] = cols as [string, string, string, string, string, string];
     if (seat === "seat") continue; // the header row
     rows.push({ seat, rig, runtime, cwd, authProfile, updatedTs });
   }
-  return rows;
+  return { seats: rows, registry: { status: "read", malformedRows } };
 }
 
 /** Read the codex-auth on-disk METADATA (profile names + seat registry). Never throws; never
  *  surfaces token-class content. Absent home/files yield empty arrays. */
 export function readCodexAuthMetadata(env: NodeJS.ProcessEnv = process.env): CodexAuthMetadata {
   const { profileDir, registryPath } = resolveCodexHome(env);
+  const { seats, registry } = readSeats(registryPath);
   return {
     profiles: listProfiles(profileDir),
-    seats: readSeats(registryPath),
+    seats,
+    registry,
   };
 }

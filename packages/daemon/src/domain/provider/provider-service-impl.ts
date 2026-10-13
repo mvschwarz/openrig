@@ -95,6 +95,7 @@ export class ProviderServiceImpl implements ProviderService {
       seats: listSeats(),
       auth: readAuth(),
       usage: allUsage,
+      claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
       codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
       claudeConfigDir: env.CLAUDE_CONFIG_DIR,
       home: env.HOME ?? os.homedir(),

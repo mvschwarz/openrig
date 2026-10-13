@@ -9,6 +9,7 @@
 // which one the home holds now. Equal resets, a shared email or a matching spelling never link anything.
 
 import path from "node:path";
+import type { ClaudeWindowSample } from "./claude-usage-windows.js";
 import type { CodexAuthMetadata } from "./codex-auth-reader.js";
 import type { ProviderSeat } from "./provider-collect.js";
 import type { ProviderUsageAllowance, SeatConfiguredAccount } from "./provider-types.js";
@@ -17,6 +18,8 @@ export interface SeatAccountsInput {
   seats: ProviderSeat[];
   auth: CodexAuthMetadata;
   usage: ProviderUsageAllowance[];
+  /** Each Claude seat's own latest status-line samples (ClaudeUsageWindows.seatSamples()); null when not available. */
+  claudeSamples: ClaudeWindowSample[] | null;
   /** The CODEX_HOME every Codex seat on this daemon launches with. */
   codexHome: string;
   /** The daemon's CLAUDE_CONFIG_DIR as set (may be relative), and its HOME. */
@@ -35,7 +38,9 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
   const profiles = new Set(input.auth.profiles);
   const registryBySeat = new Map(input.auth.seats.map((row) => [row.seat, row]));
   const claudeHome = claudeConfigHome(input.claudeConfigDir, input.home);
-  const claudeObserved = claudeObservations(input.usage);
+  const claudeSampled = input.claudeSamples ? new Set(input.claudeSamples.map((s) => s.seatSession)) : null;
+  const claudeDiffers = currentDisagreements(input.usage);
+  const registryGap = codexRegistryGap(input.auth);
   const sharedBySession = new Map<string, number>();
   for (const seat of input.seats) sharedBySession.set(seat.seatSession, (sharedBySession.get(seat.seatSession) ?? 0) + 1);
 
@@ -63,6 +68,15 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
           observed: { note: "no per-seat observation for Codex" },
         };
       }
+      // No parsed row is a supported absence only when the registry was read whole (or isn't there).
+      if (registryGap) {
+        return {
+          ...base,
+          configured: { source: "unknown", reason: registryGap },
+          allowance: { linked: false, reason: "no configured account" },
+          observed: { note: "no per-seat observation for Codex" },
+        };
+      }
       return {
         ...base,
         configured: { source: "default_login", home: input.codexHome, homeNote: "the login active in the daemon's CODEX_HOME when this seat launched" },
@@ -72,7 +86,7 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
     }
 
     if (seat.runtime === "claude-code") {
-      const observed = claudeObserved.get(seat.seatSession);
+      const differs = claudeDiffers.get(seat.seatSession);
       return {
         ...base,
         configured: { source: "default_login", home: claudeHome.home, homeNote: claudeHome.note },
@@ -80,10 +94,12 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
         allowance: { linked: false, reason: DEFAULT_LOGIN_NOT_LINKED },
         observed: shared > 1
           ? { withheld: true, note: `observation withheld: ${shared} seats share session name ${seat.seatSession}; status-line samples are keyed by session name and cannot be attributed to one seat` }
-          : observed
+          : !claudeSampled
+          ? { note: "status-line samples were not available to this read" }
+          : claudeSampled.has(seat.seatSession)
           ? {
               windowsSampled: true,
-              ...(observed.size ? { differsFrom: [...observed].sort(), note: DIFFERS_NOTE } : {}),
+              ...(differs?.size ? { differsFrom: [...differs].sort(), note: DIFFERS_NOTE } : {}),
             }
           : { windowsSampled: false },
       };
@@ -100,8 +116,13 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
 
 function claudeConfigHome(configDir: string | undefined, home: string | undefined): { home: string | null; note: string } {
   const shared = "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon";
-  if (configDir === undefined || configDir === "") {
+  // As the launch resolver does (claude-managed-launch.ts:59, `CLAUDE_CONFIG_DIR ?? HOME/.claude`, resolved against
+  // the seat's cwd): only an unset value falls back to HOME; an empty one resolves to each seat's working directory.
+  if (configDir === undefined) {
     return home ? { home: path.join(home, ".claude"), note: shared } : { home: null, note: "the daemon's HOME is not set" };
+  }
+  if (configDir === "") {
+    return { home: null, note: "CLAUDE_CONFIG_DIR is set but empty: it resolves to each seat's working directory" };
   }
   if (!path.isAbsolute(configDir)) {
     return { home: null, note: `CLAUDE_CONFIG_DIR ${configDir} is relative: it resolves against each seat's working directory` };
@@ -109,8 +130,18 @@ function claudeConfigHome(configDir: string | undefined, home: string | undefine
   return { home: configDir, note: shared };
 }
 
-/** Seats whose own status-line samples appear in a Claude usage row, with the seats they disagree with. */
-function claudeObservations(usage: ProviderUsageAllowance[]): Map<string, Set<string>> {
+/** Why a Codex seat with no parsed registry row can't be called default login, or null when it can. */
+function codexRegistryGap(auth: CodexAuthMetadata): string | null {
+  const read = auth.registry;
+  if (!read) return null;
+  if (read.status === "unreadable") return `the seat registry exists but couldn't be read (${read.code ?? "unknown"})`;
+  if (read.malformedRows > 0) return `the registry has ${read.malformedRows} malformed row${read.malformedRows === 1 ? "" : "s"}; this seat may be among them`;
+  return null;
+}
+
+/** Disagreements on the CURRENT Claude row only: fresh windows of rows that are the latest from their source. A
+ *  frozen earlier row's disagreement stays in the usage history, labelled there, and never becomes a current one. */
+function currentDisagreements(usage: ProviderUsageAllowance[]): Map<string, Set<string>> {
   const seen = new Map<string, Set<string>>();
   const touch = (seat: string) => {
     let set = seen.get(seat);
@@ -118,9 +149,9 @@ function claudeObservations(usage: ProviderUsageAllowance[]): Map<string, Set<st
     return set;
   };
   for (const row of usage) {
-    if (row.provider !== "claude") continue;
+    if (row.provider !== "claude" || row.latestFromSource === false) continue;
     for (const window of row.windows) {
-      if (!window.seatSession) continue;
+      if (!window.seatSession || window.freshness !== "fresh") continue;
       const own = touch(window.seatSession);
       for (const other of window.disagreeingSeats ?? []) {
         own.add(other.seatSession);

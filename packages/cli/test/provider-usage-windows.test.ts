@@ -371,6 +371,25 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status"], port)).out).toContain(`    observed: ${note}`);
   });
 
+  it("review round 1 wordings: an unreadable registry, an empty CLAUDE_CONFIG_DIR, samples not available", async () => {
+    model = { ...MODEL, seatAccounts: [
+      { seatSession: "dev-cx@r", rigName: "r", runtime: "codex",
+        configured: { source: "unknown", reason: "the seat registry exists but couldn't be read (EACCES)" },
+        allowance: { linked: false, reason: "no configured account" }, observed: { note: "no per-seat observation for Codex" } },
+      { seatSession: "a@r", rigName: "r", runtime: "claude-code",
+        configured: { source: "default_login", home: null, homeNote: "CLAUDE_CONFIG_DIR is set but empty: it resolves to each seat's working directory" },
+        allowance: { linked: false, reason: "r" }, observed: { note: "status-line samples were not available to this read" } },
+    ] };
+    expect((await run(["status"], port)).out).toContain([
+      "  dev-cx@r  codex  configured: unknown (the seat registry exists but couldn't be read (EACCES)) · allowance not linked",
+      "    observed: no per-seat observation for Codex",
+      "    allowance not linked: no configured account",
+      "  a@r  claude-code  configured: default login · allowance not linked",
+      "    CLAUDE_CONFIG_DIR is set but empty: it resolves to each seat's working directory",
+      "    observed: status-line samples were not available to this read",
+    ].join("\n"));
+  });
+
   it("no seatAccounts key (switch off): no SEATS section", async () => {
     model = { ...MODEL, usage: [READING] };
     expect((await run(["status"], port)).out).not.toContain("SEATS");

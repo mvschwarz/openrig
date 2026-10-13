@@ -13,6 +13,12 @@ import { codexUsageReader } from "../src/domain/provider/codex-usage-reader.js";
 import { configuredSeatAccounts, type SeatAccountsInput } from "../src/domain/provider/provider-seat-accounts.js";
 import type { ProviderSeat } from "../src/domain/provider/provider-collect.js";
 import type { ProviderUsageAllowance, UsageWindowRow } from "../src/domain/provider/provider-types.js";
+import { ClaudeUsageWindows, latestClaudeWindowSamples, type ClaudeWindowSample } from "../src/domain/provider/claude-usage-windows.js";
+import type { ClaudeAuthAnswer } from "../src/domain/provider/claude-auth-status-reader.js";
+import type { UsageReadOutcome } from "../src/domain/provider/usage-windows.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { ACCOUNT_ANSWER, makeFakeCodex, rateLimitsAnswer } from "./helpers/fake-codex-usage.js";
 
 const ASOF = "2026-10-13T15:00:00.000Z";
@@ -21,7 +27,7 @@ const seat = (seatSession: string, runtime: string): ProviderSeat => ({ seatSess
 const reg = (seat: string, runtime: string, authProfile: string) => ({ seat, rig: "r", runtime, cwd: "/w", authProfile, updatedTs: "2026-10-12T10:00:00Z" });
 
 function input(over: Partial<SeatAccountsInput>): SeatAccountsInput {
-  return { seats: [], auth: { profiles: [], seats: [] }, usage: [], codexHome: "/h/.codex", claudeConfigDir: undefined, home: "/h", ...over };
+  return { seats: [], auth: { profiles: [], seats: [] }, usage: [], claudeSamples: [], codexHome: "/h/.codex", claudeConfigDir: undefined, home: "/h", ...over };
 }
 
 function claudeWindow(seatSession: string, resetsAt: string, disagreeing: string[] = []): UsageWindowRow {
@@ -31,6 +37,9 @@ function claudeWindow(seatSession: string, resetsAt: string, disagreeing: string
     level: "ok", freshness: "fresh",
   };
 }
+
+const sampleOf = (seatSession: string): ClaudeWindowSample =>
+  ({ seatSession, window: "five_hour", usedPercent: 40, resetsAt: "2026-10-13T18:00:00Z", sampledAt: ASOF });
 
 function claudeRow(windows: UsageWindowRow[], unresolved = false): ProviderUsageAllowance {
   return {
@@ -80,6 +89,8 @@ describe("configuredSeatAccounts — each state", () => {
     expect(configuredSeatAccounts(input({ seats: [seat("b@r", "claude-code")], claudeConfigDir: "/cfg" }))[0]!.configured).toMatchObject({ home: "/cfg" });
     expect(configuredSeatAccounts(input({ seats: [seat("b@r", "claude-code")], claudeConfigDir: "cfg" }))[0]!.configured)
       .toEqual({ source: "default_login", home: null, homeNote: "CLAUDE_CONFIG_DIR cfg is relative: it resolves against each seat's working directory" });
+    expect(configuredSeatAccounts(input({ seats: [seat("b@r", "claude-code")], claudeConfigDir: "" }))[0]!.configured)
+      .toEqual({ source: "default_login", home: null, homeNote: "CLAUDE_CONFIG_DIR is set but empty: it resolves to each seat's working directory" });
   });
 
   it("unknown: any other runtime says so, with nothing invented", () => {
@@ -101,6 +112,7 @@ describe("configuredSeatAccounts — each state", () => {
     const rows = configuredSeatAccounts(input({
       seats: [seat("a@r", "claude-code"), seat("b@r", "claude-code"), seat("c@r", "claude-code")],
       usage: [claudeRow([claudeWindow("a@r", "2026-10-13T18:00:00Z", ["b@r"])])],
+      claudeSamples: [sampleOf("a@r"), sampleOf("b@r")],
     }));
     expect(rows[0]!.observed).toEqual({ windowsSampled: true, differsFrom: ["b@r"], note: expect.stringMatching(/^possibly a different login: .*not a verdict$/) });
     expect(rows[1]!.observed).toMatchObject({ windowsSampled: true, differsFrom: ["a@r"] });
@@ -111,15 +123,9 @@ describe("configuredSeatAccounts — each state", () => {
     }
   });
 
-  it("equal resets never link: two seats reporting the same windows are just sampled, with no link and no difference", () => {
-    const rows = configuredSeatAccounts(input({
-      seats: [seat("a@r", "claude-code"), seat("b@r", "claude-code")],
-      usage: [claudeRow([claudeWindow("a@r", "2026-10-13T18:00:00Z"), claudeWindow("b@r", "2026-10-13T18:00:00Z")])],
-    }));
-    for (const row of rows) {
-      expect(row.observed).toEqual({ windowsSampled: true });
-      expect(row.allowance.linked).toBe(false);
-    }
+  it("samples not available to the read: no claim either way, said so", () => {
+    const [row] = configuredSeatAccounts(input({ seats: [seat("a@r", "claude-code")], claudeSamples: null }));
+    expect(row!.observed).toEqual({ note: "status-line samples were not available to this read" });
   });
 
   it("an unresolved allowance row is read for observations only and never linked or changed", () => {
@@ -141,7 +147,7 @@ describe("configuredSeatAccounts — each state", () => {
 
   it("two Claude seats with the same session name and rig: observations withheld, never attributed", () => {
     const usage = [claudeRow([claudeWindow("a@r", "2026-10-13T18:00:00Z", ["b@r"])])];
-    const rows = configuredSeatAccounts(input({ seats: [seat("a@r", "claude-code"), seat("a@r", "claude-code"), seat("b@r", "claude-code")], usage }));
+    const rows = configuredSeatAccounts(input({ seats: [seat("a@r", "claude-code"), seat("a@r", "claude-code"), seat("b@r", "claude-code")], usage, claudeSamples: [sampleOf("a@r"), sampleOf("b@r")] }));
     const withheld = {
       withheld: true,
       note: "observation withheld: 2 seats share session name a@r; status-line samples are keyed by session name and cannot be attributed to one seat",
@@ -247,5 +253,110 @@ describe("seatAccounts through the provider service", () => {
     for (let i = 0; i < 3; i++) await svc.getReadModel();
     expect(fake.spawns()).toBe(0);
     expect([tree(fake.codexHome), tree(home)]).toEqual(before);
+  });
+});
+
+// Review round 1: each finding through the production composition: real migrated SQLite samples →
+// latestClaudeWindowSamples → ClaudeUsageWindows → ProviderServiceImpl. Identity answers are inert fixtures.
+describe("seatAccounts on the production path (samples, registry reads, config dir)", () => {
+  const minutes = (m: number) => new Date(Date.parse(ASOF) + m * 60_000).toISOString();
+  const RESET = minutes(180);
+
+  function prod(opts: { seats: Array<{ id: string; session: string; runtime: string }>; registry?: { body: string; mode: number }; env?: Record<string, string> }) {
+    const db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    seedSeats(db, opts.seats);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "seat-accounts-prod-home-"));
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "seat-accounts-prod-codex-"));
+    if (opts.registry) fs.writeFileSync(path.join(codexHome, "auth-seat-registry.tsv"), opts.registry.body, { mode: opts.registry.mode });
+    let clock = ASOF;
+    let org = "org-1";
+    const insert = db.prepare(`INSERT INTO usage_samples (lane, seat_session, source, sampled_at, captured_at, window, window_used_percent, resets_at)
+      VALUES ('provider_window', ?, 'claude_statusline_json', ?, ?, ?, ?, ?)`);
+    const sample = (seatSession: string, sampledAt: string, resetsAt: string, used = 40) => {
+      for (const window of ["five_hour", "weekly"]) insert.run(seatSession, sampledAt, sampledAt, window, used, resetsAt);
+    };
+    const claude = new ClaudeUsageWindows({
+      now: () => clock,
+      readIdentity: async (): Promise<UsageReadOutcome<ClaudeAuthAnswer>> => ({ ok: true, observedAt: clock,
+        auth: { loggedIn: true, authMethod: "claude.ai", email: "d***@example.test", orgId: org, orgName: "Example Org", subscriptionType: "team" } as ClaudeAuthAnswer["auth"] }),
+      listSamples: () => latestClaudeWindowSamples(db),
+    });
+    const windows = new CodexUsageWindows({ now: () => clock, read: async () => { throw new Error("a read never starts the Codex reader"); } });
+    const svc = new ProviderServiceImpl({ db, listRigs: () => [{ id: "rig-1" }], now: () => clock,
+      env: { CODEX_HOME: codexHome, HOME: home, ...opts.env } as NodeJS.ProcessEnv,
+      usageWindows: { enabled: () => true, windows, claude } });
+    const bySeat = async () => new Map((await svc.getReadModel()).seatAccounts!.map((row) => [row.seatSession, row]));
+    return { svc, claude, sample, bySeat, home, setClock: (t: string) => { clock = t; }, setOrg: (o: string) => { org = o; } };
+  }
+  const claudeSeats = [
+    { id: "a", session: "a@r", runtime: "claude-code" },
+    { id: "b", session: "b@r", runtime: "claude-code" },
+    { id: "c", session: "c@r", runtime: "claude-code" },
+  ];
+
+  it("F1: a fresh seat whose sample isn't the one shown is still sampled; only a seat with no sample reads as none yet", async () => {
+    const p = prod({ seats: claudeSeats });
+    p.sample("a@r", minutes(-1 / 60), RESET);
+    p.sample("b@r", minutes(-2 / 60), RESET);
+    const rows = await p.bySeat();
+    // The served window keeps one sample per window: A's. B is not in it, but B did report.
+    const shown = (await p.svc.getReadModel()).usage!.find((r) => r.provider === "claude")!.windows.map((w) => w.seatSession);
+    expect(shown).toEqual(["a@r", "a@r"]);
+    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true });
+    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true });
+    expect(rows.get("c@r")!.observed).toEqual({ windowsSampled: false });
+  });
+
+  it("F2: a repaired disagreement: the earlier divergent row is history, and SEATS shows no current difference", async () => {
+    const p = prod({ seats: claudeSeats });
+    p.setClock(minutes(-10));
+    p.sample("a@r", minutes(-10.5), RESET);
+    p.sample("b@r", minutes(-10.6), minutes(300));
+    await p.claude.refresh();
+    p.setClock(ASOF);
+    p.sample("a@r", minutes(-0.5), RESET);
+    p.sample("b@r", minutes(-0.6), RESET);
+    p.setOrg("org-2");
+    await p.claude.refresh();
+    const usage = (await p.svc.getReadModel()).usage!.filter((r) => r.provider === "claude");
+    // The history still shows the old disagreement, labelled earlier; the current row has none.
+    expect(usage.map((r) => [r.latestFromSource, r.windows.some((w) => (w.disagreeingSeats ?? []).length > 0)])).toEqual([[true, false], [false, true]]);
+    const rows = await p.bySeat();
+    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true });
+    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true });
+  });
+
+  const codexSeats = [{ id: "qa", session: "dev-qa@r", runtime: "codex" }, { id: "cx", session: "dev-cx@r", runtime: "codex" }];
+  const HEADER = "seat\trig\truntime\tcwd\tauth_profile\tupdated_ts\n";
+  const ROW = "dev-cx@r\tr\tcodex\t/w\tsaved-work\t2026-10-12T10:00:00Z\n";
+
+  it.skipIf(process.getuid?.() === 0)("F3: an unreadable registry: each Codex seat without a parsed row is unknown, with the error code", async () => {
+    const p = prod({ seats: codexSeats, registry: { body: HEADER + ROW, mode: 0o000 } });
+    const rows = await p.bySeat();
+    for (const seat of ["dev-qa@r", "dev-cx@r"]) {
+      expect(rows.get(seat)!.configured).toEqual({ source: "unknown", reason: "the seat registry exists but couldn't be read (EACCES)" });
+    }
+  });
+
+  it("F3: malformed rows: a Codex seat without a parsed row is unknown, with the count; a parsed row still applies", async () => {
+    const p = prod({ seats: codexSeats, registry: { body: HEADER + "dev-qa@r\tr\tcodex\n" + ROW, mode: 0o600 } });
+    const rows = await p.bySeat();
+    expect(rows.get("dev-qa@r")!.configured).toEqual({ source: "unknown", reason: "the registry has 1 malformed row; this seat may be among them" });
+    expect(rows.get("dev-cx@r")!.configured).toMatchObject({ source: "registry", profileRef: "saved-work" });
+  });
+
+  it("F3: an absent registry is a supported absence: default login", async () => {
+    const p = prod({ seats: codexSeats });
+    const rows = await p.bySeat();
+    for (const seat of ["dev-qa@r", "dev-cx@r"]) expect(rows.get(seat)!.configured).toMatchObject({ source: "default_login" });
+  });
+
+  it("F4: an empty CLAUDE_CONFIG_DIR resolves per seat, as the launch resolver does, never to HOME/.claude", async () => {
+    const p = prod({ seats: claudeSeats.slice(0, 2), env: { CLAUDE_CONFIG_DIR: "" } });
+    const rows = await p.bySeat();
+    for (const seat of ["a@r", "b@r"]) {
+      expect(rows.get(seat)!.configured).toEqual({ source: "default_login", home: null, homeNote: "CLAUDE_CONFIG_DIR is set but empty: it resolves to each seat's working directory" });
+    }
   });
 });
