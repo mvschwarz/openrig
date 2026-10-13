@@ -38,7 +38,15 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
   const profiles = new Set(input.auth.profiles);
   const registryBySeat = new Map(input.auth.seats.map((row) => [row.seat, row]));
   const claudeHome = claudeConfigHome(input.claudeConfigDir, input.home);
-  const claudeSampled = input.claudeSamples ? new Set(input.claudeSamples.map((s) => s.seatSession)) : null;
+  // Each seat's newest sample time. The samples carry no time bound, so "sampled" always comes with its time.
+  let claudeSampled: Map<string, string> | null = null;
+  if (input.claudeSamples) {
+    claudeSampled = new Map();
+    for (const s of input.claudeSamples) {
+      const prev = claudeSampled.get(s.seatSession);
+      if (prev === undefined || Date.parse(s.sampledAt) > Date.parse(prev)) claudeSampled.set(s.seatSession, s.sampledAt);
+    }
+  }
   const claudeDiffers = currentDisagreements(input.usage);
   const registryGap = codexRegistryGap(input.auth);
   const sharedBySession = new Map<string, number>();
@@ -99,6 +107,7 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
           : claudeSampled.has(seat.seatSession)
           ? {
               windowsSampled: true,
+              lastSampledAt: claudeSampled.get(seat.seatSession)!,
               ...(differs?.size ? { differsFrom: [...differs].sort(), note: DIFFERS_NOTE } : {}),
             }
           : { windowsSampled: false },

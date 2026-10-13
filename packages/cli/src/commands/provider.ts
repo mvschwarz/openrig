@@ -133,7 +133,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const observed = r["observed"] as Record<string, unknown> | undefined;
       const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];
       if (differs.length) console.log(`    observed: differs from ${differs.join(", ")} (${observed?.["note"]})`);
-      else if (observed?.["windowsSampled"] === true) console.log("    observed: this seat's status line reported windows (see USAGE)");
+      else if (observed?.["windowsSampled"] === true) console.log(`    observed: this seat's status line last reported windows at ${observed["lastSampledAt"] ?? "an unknown time"}`);
       else if (observed?.["windowsSampled"] === false) console.log("    observed: no status-line windows from this seat yet");
       else if (observed?.["note"]) console.log(`    observed: ${observed["note"]}`);
       if (allowance["reason"]) console.log(`    allowance not linked: ${allowance["reason"]}`);

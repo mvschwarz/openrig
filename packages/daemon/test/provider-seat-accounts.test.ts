@@ -114,12 +114,20 @@ describe("configuredSeatAccounts — each state", () => {
       usage: [claudeRow([claudeWindow("a@r", "2026-10-13T18:00:00Z", ["b@r"])])],
       claudeSamples: [sampleOf("a@r"), sampleOf("b@r")],
     }));
-    expect(rows[0]!.observed).toEqual({ windowsSampled: true, differsFrom: ["b@r"], note: expect.stringMatching(/^possibly a different login: .*not a verdict$/) });
+    expect(rows[0]!.observed).toEqual({ windowsSampled: true, lastSampledAt: ASOF, differsFrom: ["b@r"], note: expect.stringMatching(/^possibly a different login: .*not a verdict$/) });
     expect(rows[1]!.observed).toMatchObject({ windowsSampled: true, differsFrom: ["a@r"] });
     expect(rows[2]!.observed).toEqual({ windowsSampled: false });
     for (const row of rows) {
       expect(row.configured.source).toBe("default_login");
       expect(row.allowance.linked).toBe(false);
+    }
+  });
+
+  it("lastSampledAt is the seat's newest sample across its windows, whatever their order", () => {
+    const older = { ...sampleOf("a@r"), window: "weekly" as const, sampledAt: "2026-10-13T14:00:00.000Z" };
+    for (const claudeSamples of [[older, sampleOf("a@r")], [sampleOf("a@r"), older]]) {
+      const [row] = configuredSeatAccounts(input({ seats: [seat("a@r", "claude-code")], claudeSamples }));
+      expect(row!.observed).toEqual({ windowsSampled: true, lastSampledAt: ASOF });
     }
   });
 
@@ -303,9 +311,18 @@ describe("seatAccounts on the production path (samples, registry reads, config d
     // The served window keeps one sample per window: A's. B is not in it, but B did report.
     const shown = (await p.svc.getReadModel()).usage!.find((r) => r.provider === "claude")!.windows.map((w) => w.seatSession);
     expect(shown).toEqual(["a@r", "a@r"]);
-    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true });
-    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true });
+    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true, lastSampledAt: minutes(-1 / 60) });
+    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true, lastSampledAt: minutes(-2 / 60) });
     expect(rows.get("c@r")!.observed).toEqual({ windowsSampled: false });
+  });
+
+  it("an old sample: still sampled, with its own time, so the seat never reads as reporting now", async () => {
+    const p = prod({ seats: claudeSeats.slice(0, 2) });
+    p.sample("a@r", minutes(-1), RESET);
+    p.sample("b@r", minutes(-21 * 1440), minutes(-20 * 1440));
+    const rows = await p.bySeat();
+    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true, lastSampledAt: minutes(-21 * 1440) });
+    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true, lastSampledAt: minutes(-1) });
   });
 
   it("F2: a repaired disagreement: the earlier divergent row is history, and SEATS shows no current difference", async () => {
@@ -323,8 +340,8 @@ describe("seatAccounts on the production path (samples, registry reads, config d
     // The history still shows the old disagreement, labelled earlier; the current row has none.
     expect(usage.map((r) => [r.latestFromSource, r.windows.some((w) => (w.disagreeingSeats ?? []).length > 0)])).toEqual([[true, false], [false, true]]);
     const rows = await p.bySeat();
-    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true });
-    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true });
+    expect(rows.get("a@r")!.observed).toEqual({ windowsSampled: true, lastSampledAt: minutes(-0.5) });
+    expect(rows.get("b@r")!.observed).toEqual({ windowsSampled: true, lastSampledAt: minutes(-0.6) });
   });
 
   const codexSeats = [{ id: "qa", session: "dev-qa@r", runtime: "codex" }, { id: "cx", session: "dev-cx@r", runtime: "codex" }];

@@ -337,7 +337,7 @@ describe("rig provider status — usage windows", () => {
       { seatSession: "dev-build@r", rigName: "r", runtime: "claude-code",
         configured: { source: "default_login", home: "/h/.claude", homeNote: "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon" },
         allowance: { linked: false, reason: "the usage read reads the login this home holds now; the seat runs the login that was active when it launched" },
-        observed: { windowsSampled: true, differsFrom: ["dev-r1@r"], note: "possibly a different login: not a verdict" } },
+        observed: { windowsSampled: true, lastSampledAt: "2026-10-13T14:59:00Z", differsFrom: ["dev-r1@r"], note: "possibly a different login: not a verdict" } },
       { seatSession: "t@r", rigName: "r", runtime: "terminal",
         configured: { source: "unknown", reason: "no account configuration is known for runtime terminal" },
         allowance: { linked: false, reason: "no configured account" } },
@@ -369,6 +369,17 @@ describe("rig provider status — usage windows", () => {
         allowance: { linked: false, reason: "r" }, observed: { withheld: true, note } },
     ] };
     expect((await run(["status"], port)).out).toContain(`    observed: ${note}`);
+  });
+
+  it("a sampled seat names when its status line last reported, never pointing at USAGE", async () => {
+    model = { ...MODEL, seatAccounts: [
+      { seatSession: "b@r", rigName: "r", runtime: "claude-code",
+        configured: { source: "default_login", home: "/h/.claude", homeNote: "shared" },
+        allowance: { linked: false, reason: "r" }, observed: { windowsSampled: true, lastSampledAt: "2026-09-22T15:00:00Z" } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("    observed: this seat's status line last reported windows at 2026-09-22T15:00:00Z");
+    expect(out).not.toContain("see USAGE");
   });
 
   it("review round 1 wordings: an unreadable registry, an empty CLAUDE_CONFIG_DIR, samples not available", async () => {

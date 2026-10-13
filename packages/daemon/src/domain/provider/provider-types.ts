@@ -171,7 +171,7 @@ export interface SeatConfiguredAccount {
   /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose
    *  fresh readings disagree with it (possibly a different login, never a verdict). `withheld` when several
    *  seats share this session name, so samples keyed by it can't be attributed to one seat. */
-  observed?: { windowsSampled?: boolean; differsFrom?: string[]; withheld?: true; note?: string };
+  observed?: { windowsSampled?: boolean; lastSampledAt?: string; differsFrom?: string[]; withheld?: true; note?: string };
 }
 
 /** Slice 01 — allowance identity: the usage answer's accountId, else the workspace account/read
