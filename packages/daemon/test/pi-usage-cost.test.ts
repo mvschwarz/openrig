@@ -12,7 +12,7 @@ import { PiUsageEntriesStore, validPiUsageFact } from "../src/domain/pi-usage-en
 import { computeCostView, PI_COST_COVERAGE } from "../src/domain/usage-series.js";
 import { activityRoutes } from "../src/routes/activity.js";
 import { RunnerCore, parseRunnerArgs, readPiSessionEntryIds, type RunnerIo } from "../src/adapters/pi-runner.js";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
@@ -93,6 +93,27 @@ describe("extractPiUsageFacts (Pi 0.87.1, session format v3)", () => {
       }
       expect(await readPiSessionEntryIds(nodePath.join(dir, "missing.jsonl"))).toBeNull();
       expect(await readPiSessionEntryIds(dir)).toBeNull();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("R5-F1: a parent that grows or shrinks during the read answers nothing; within or across the limit", async () => {
+    const dir = mkdtempSync(nodePath.join(process.env.TMPDIR ?? tmpdir(), "pi-grow-"));
+    try {
+      const file = nodePath.join(dir, "parent.jsonl");
+      const header = JSON.stringify({ type: "session", version: 3, id: "par", timestamp: at(0), cwd: "/w" });
+      const rest = "\n" + JSON.stringify(ENTRIES[1]) + "\n"; // the copied a1 lands right after the stat
+      const grow = () => appendFileSync(file, rest);
+      // The measured schedule: the header without its newline at the stat, then the newline and a copied entry.
+      writeFileSync(file, header);
+      expect(await readPiSessionEntryIds(file, undefined, { afterStat: grow })).toBeNull();
+      writeFileSync(file, header);
+      expect(await readPiSessionEntryIds(file, header.length + 10, { afterStat: grow })).toBeNull(); // grows past the limit
+      writeFileSync(file, header + "\n");
+      expect(await readPiSessionEntryIds(file, undefined, { afterRead: grow })).toBeNull(); // grows after the read reached the end
+      writeFileSync(file, header + rest);
+      expect(await readPiSessionEntryIds(file, undefined, { afterStat: () => writeFileSync(file, header + "\n") })).toBeNull(); // shrinks
+      writeFileSync(file, header + rest);
+      expect([...(await readPiSessionEntryIds(file))!]).toEqual(["a1"]); // the settled file answers
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -471,6 +492,38 @@ describe("runner → authenticated route → SQLite → cost view", () => {
     await p.refresh(forkEntries);
     expect(reads.n).toBe(0);
     expect(p.view()).toMatchObject({ entries: { own: 2, inherited: { count: 6 } } }); // n7 at(7) is before at(7.5): history by time
+  });
+
+  it("R5-F1 through the runner: a parent caught mid-write leaves the tie unknown, never charged; it settles once the write completes", async () => {
+    const dir = mkdtempSync(nodePath.join(process.env.TMPDIR ?? tmpdir(), "pi-grow-"));
+    try {
+      const file = nodePath.join(dir, "parent.jsonl");
+      const valid = [JSON.stringify({ type: "session", version: 3, id: "par", timestamp: at(0), cwd: "/w" }),
+        ...ENTRIES.slice(0, 7).map((e) => JSON.stringify(e)), ""].join("\n");
+      const cut = valid.indexOf("\n"); // the header without its newline
+      writeFileSync(file, valid.slice(0, cut));
+      let grown = false;
+      const p = pipeline(() => forkHeader(at(7), file), () => readPiSessionEntryIds(file, undefined, {
+        afterStat: () => { if (!grown) { grown = true; appendFileSync(file, valid.slice(cut)); } } }));
+      await p.refresh(forkEntries);
+      expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } });
+      expect(p.view().costUsd).toBeCloseTo(0.05, 10); // the copied b1 is not charged
+      await p.refresh(forkEntries);
+      expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } });
+      expect(p.d.prepare("SELECT origin FROM pi_usage_entries WHERE entry_id = 'b1'").get()).toEqual({ origin: "inherited" });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("a tie that arrives while the parent read is under way settles when it completes, without another refresh", async () => {
+    let release!: (ids: ReadonlySet<string>) => void;
+    const reads = { n: 0 };
+    const p = pipeline(() => forkHeader(at(7)), () => new Promise((resolve) => { release = resolve; }), reads);
+    await p.refresh(forkEntries.filter((e) => e.id !== "n7")); // b1 ties: the read starts
+    await p.refresh(forkEntries); // n7 arrives while it is under way
+    release(PARENT_IDS);
+    for (let i = 0; i < 6; i += 1) await settle();
+    expect(reads.n).toBe(1);
+    expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } });
   });
 
   it("F2: a header that parses but isn't valid is unknown (nothing counted as own); a later valid header settles it", async () => {

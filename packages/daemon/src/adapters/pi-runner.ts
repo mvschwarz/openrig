@@ -318,20 +318,32 @@ const PARENT_SESSION_READ_LIMIT_BYTES = 64 * 1024 * 1024;
  * runner), at most `limitBytes` actually read from that handle, a session header first, every line a whole
  * entry with an id, and no torn last line. Anything else is null (the tie stays unknown and is retried). Ids only.
  */
-export async function readPiSessionEntryIds(path: string, limitBytes = PARENT_SESSION_READ_LIMIT_BYTES): Promise<ReadonlySet<string> | null> {
+export async function readPiSessionEntryIds(
+  path: string,
+  limitBytes = PARENT_SESSION_READ_LIMIT_BYTES,
+  /** Test seam only: called after the stat and after the read, to change the file at those points. */
+  testHooks?: { afterStat?: () => void | Promise<void>; afterRead?: () => void | Promise<void> },
+): Promise<ReadonlySet<string> | null> {
   let handle: fs.promises.FileHandle | undefined;
   try {
     handle = await fs.promises.open(path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > limitBytes) return null;
-    const buffer = Buffer.alloc(Math.min(stat.size, limitBytes) + 1);
+    await testHooks?.afterStat?.();
+    // Complete only with evidence: the read reaches end of file (a read returns 0 bytes) before filling a buffer
+    // one byte larger than the stat, it got exactly the stat's size, and the size is unchanged afterwards. A parent
+    // that grew, shrank or is still being written answers nothing (the tie stays unknown and is read again later).
+    const buffer = Buffer.alloc(stat.size + 1);
     let length = 0;
+    let reachedEnd = false;
     while (length < buffer.length) {
       const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
-      if (bytesRead === 0) break;
+      if (bytesRead === 0) { reachedEnd = true; break; }
       length += bytesRead;
     }
-    if (length === 0 || length > limitBytes) return null; // empty, or grew past the limit since the stat
+    if (!reachedEnd || length !== stat.size || length === 0) return null;
+    await testHooks?.afterRead?.();
+    if ((await handle.stat()).size !== length) return null;
     const text = buffer.subarray(0, length).toString("utf8");
     if (!text.endsWith("\n")) return null; // Pi ends every entry with a newline: a torn or partial write
     const lines = text.slice(0, -1).split("\n");
@@ -376,6 +388,8 @@ export class RunnerCore {
   private usageBoundary: PiSessionBoundary | null = null;
   /** OPR.0.7.0.2: a fork parent read is under way (at most one at a time). */
   private parentReadInFlight = false;
+  /** OPR.0.7.0.2: the last get_entries batch reported, replayed when a parent read completes. */
+  private latestUsageEntries: unknown[] = [];
   /** Entry ids the daemon has accepted with a known origin. Anything else is sent again on the next refresh;
    *  the daemon stores each (session, entry) once regardless. */
   private readonly postedUsageEntryIds = new Set<string>();
@@ -528,6 +542,7 @@ export class RunnerCore {
       const firstLine = this.sessionFile && this.io.readFirstLine ? this.io.readFirstLine(this.sessionFile) : null;
       this.usageBoundary = firstLine ? parsePiSessionHeader(firstLine) : null;
     }
+    this.latestUsageEntries = entries;
     const { facts, malformed } = extractPiUsageFacts(entries, this.usageBoundary);
     // A new entry often shares the fork header's millisecond, and so can a copied one: only the parent session's
     // entry ids tell them apart. Read them in the background, only when such a tie needs deciding; meanwhile the
@@ -541,7 +556,8 @@ export class RunnerCore {
         this.parentReadInFlight = false;
         if (!parentEntryIds || this.usageBoundary !== boundary) return;
         this.usageBoundary = { ...boundary, parentEntryIds };
-        this.reportUsageFacts(entries);
+        // The latest batch, so a tie that arrived while the read was under way settles now too.
+        this.reportUsageFacts(this.latestUsageEntries);
       }, () => { this.parentReadInFlight = false; });
     }
     const fresh = facts.filter((fact) => !this.postedUsageEntryIds.has(fact.entryId));
