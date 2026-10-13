@@ -533,6 +533,18 @@ describe("TranscriptStore", () => {
       expect(result).toContain("KEEP_TWO");
     });
 
+    it.each(["\n", ""])("readTail keeps a complete long line before prompt noise (ending %j)", (ending) => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("long-rig");
+      const filePath = store.getTranscriptPath("long-rig", "dev@long-rig");
+      const output = JSON.stringify({ result: "é".repeat(10_000) });
+      // One output line and seven prompts fill the initial eight-line read.
+      // The last 16 KiB begins inside the output, not at its start.
+      writeFileSync(filePath, ["earlier output", output, ...Array(7).fill("user@example.test rigged %")].join("\n") + ending);
+
+      expect(store.readTail("long-rig", "dev@long-rig", 1)).toBe(output + "\n");
+    });
+
     it("readTail handles multibyte UTF-8 characters at chunk boundaries", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("utf8-rig");
