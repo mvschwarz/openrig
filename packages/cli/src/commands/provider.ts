@@ -154,6 +154,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
         const seat = w["seatSession"] ? ` by seat ${w["seatSession"]}` : "";
         console.log(`    ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})`);
+        for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
+          console.log(`      seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
+        }
       }
       if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`    ${r["unavailableReason"]}`);
       if (r["limitEvidence"]) console.log(`    limit evidence: ${r["limitEvidence"]}`);

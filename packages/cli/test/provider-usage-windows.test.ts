@@ -175,6 +175,22 @@ describe("rig provider status — usage windows", () => {
     ].join("\n"));
   });
 
+  it("seats that disagree: each other seat's own numbers print under the window", async () => {
+    model = { ...MODEL, usage: [{
+      provider: "claude", identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: null, subscriptionType: null, source: "claude auth status orgId and email" },
+      source: { kind: "claude_statusline_samples", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown", limitEvidence: null, latestFromSource: true,
+      currentAvailability: "unknown", lastRefresh: null,
+      windows: [{ window: "weekly", durationMins: 10080, usedPercent: 10, remainingPercent: 90, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z",
+        seatSession: "a@rig", level: "unknown", levelReason: "Claude seats report different windows (possibly different logins): a@rig, b@rig", freshness: "fresh",
+        disagreeingSeats: [{ seatSession: "b@rig", usedPercent: 90, resetsAt: "2026-10-16T09:00:00.000Z", observedAt: "2026-10-12T19:59:00.000Z" }] }],
+    }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "    weekly (weekly)  90% left  unknown (Claude seats report different windows (possibly different logins): a@rig, b@rig)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z by seat a@rig (fresh)",
+      "      seat b@rig reports 10% left  resets 2026-10-16T09:00:00.000Z  observed 2026-10-12T19:59:00.000Z",
+    ].join("\n"));
+  });
+
   it("a Claude identity refresh that failed says the identity is from the last refresh that worked; no seat yet says so", async () => {
     model = { ...MODEL, usage: [{
       provider: "claude", identity: null, source: { kind: "claude_statusline_samples", host: "local" }, observedAt: null, seats: "unknown", windows: [],
@@ -256,6 +272,10 @@ describe("rig provider status — usage windows", () => {
       claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "binary_not_found", detail: "d", coalesced: false }, usage: [] } },
     };
     expect((await run(["status", "--refresh"], port)).exitCode).toBe(1);
+    // auth status failing unexpectedly (for example {"loggedIn": false} with exit 9) applies: the bare refresh fails.
+    refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "auth_status_failed", detail: "claude auth status failed (exit 9)", coalesced: false }, usage: [] } } };
+    const unexpected = await run(["status", "--refresh"], port);
+    expect([unexpected.exitCode, unexpected.err]).toEqual([1, ""]);
     // A Claude failure that does apply (it's installed and logged in) still fails the bare refresh.
     refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "timeout", coalesced: false }, usage: [] } } };
     expect((await run(["status", "--refresh"], port)).exitCode).toBe(1);
