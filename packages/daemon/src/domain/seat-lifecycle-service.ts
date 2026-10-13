@@ -23,7 +23,7 @@ import { validateNativePermissionSelection, unresolvedClaudePermissionModes } fr
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
 import {
-  effortPrecedence, emittedEffortFromArgv, readNativeEffort, resolveSeatEffort,
+  effortPrecedence, emittedEffortFromArgv, readNativeEffort, resolveSeatEffort, unknownLevelWarning,
   type EffortResolution, type NativeEffortObservation,
 } from "./seat-effort.js";
 import { observeClaudePaneRuntime, observeCodexPaneProcess, processArgv } from "./native-process-lineage.js";
@@ -164,6 +164,8 @@ export type SetEffortResult =
       /** Emitted at launch and observed natively are separate facts this command can't know. */
       emitted: "not_yet";
       observed: "not_observed";
+      /** Set when the level isn't one the runtime is known to accept; the choice is saved anyway. */
+      warning?: string;
       effect: string;
     }
   | SeatRefusal;
@@ -353,6 +355,7 @@ export class SeatLifecycleService {
       ok: true, seat, runtime, requested, from, saved, changed,
       running: running.state, ...(running.detail ? { runningDetail: running.detail } : {}),
       emitted: "not_yet", observed: "not_observed", effect,
+      ...(unknownLevelWarning(runtime, requested) ? { warning: unknownLevelWarning(runtime, requested) } : {}),
     };
   }
 

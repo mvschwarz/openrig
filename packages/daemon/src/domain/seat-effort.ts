@@ -82,6 +82,20 @@ export const effortPrecedence: EffortPrecedenceRule = UNDECIDED_EFFORT_PRECEDENC
 
 export type EffortRuntime = "claude-code" | "codex";
 
+/** Levels each runtime is known to accept (Codex 0.153.4's service lists these when it rejects one;
+ *  Claude Code's --effort levels). A level outside the list is saved with a warning, never refused:
+ *  versions and models move, and the runtime's own answer is what the report shows. */
+export const KNOWN_EFFORT_LEVELS: Record<EffortRuntime, readonly string[]> = {
+  codex: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+  "claude-code": ["low", "medium", "high", "xhigh", "max"],
+};
+
+export function unknownLevelWarning(runtime: EffortRuntime, level: string | null): string | undefined {
+  if (level === null || KNOWN_EFFORT_LEVELS[runtime].includes(level)) return undefined;
+  const name = runtime === "codex" ? "Codex" : "Claude Code";
+  return `"${level}" isn't a level ${name} is known to accept (${KNOWN_EFFORT_LEVELS[runtime].join(", ")}); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`;
+}
+
 /** The effort a launch command line carries. "none": parsed, and it sends no effort flag. */
 export function emittedEffortFromArgv(runtime: EffortRuntime, argv: string[]): { flag: "present"; value: string } | { flag: "none" } {
   let found: string | null = null;

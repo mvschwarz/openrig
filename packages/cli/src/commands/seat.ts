@@ -626,6 +626,7 @@ Examples:
         console.log(String(data["effect"]));
         const running = data["running"] === "yes" ? "running now" : data["running"] === "no" ? "not running now" : `running state unknown (${String(data["runningDetail"] ?? "probe failed")})`;
         console.log(`Seat ${running}. Emitted at launch: not yet. Native effort: not observed.`);
+        if (data["warning"]) console.log(`Warning: ${String(data["warning"])}`);
       });
     });
 

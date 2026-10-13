@@ -159,4 +159,18 @@ describe("SeatLifecycleService.setEffort", () => {
     expect(result).toMatchObject({ ok: false, code: "effort_unavailable" });
     expect(eventsOfType(db, "node.effort_changed")).toHaveLength(0);
   });
+
+  it("saves a level the runtime isn't known to accept, with a warning, never a refusal", async () => {
+    const { sessionName } = seat("dev.typo", { runtime: "codex", effort: "medium" });
+    const typo = await service.setEffort({ seatRef: sessionName, effort: "hihg", reason: "typo" });
+    if (!typo.ok) throw new Error(typo.message);
+    expect(typo).toMatchObject({ changed: true, saved: { choice: "hihg", effective: "hihg" } });
+    expect(typo.warning).toContain(`"hihg" isn't a level Codex is known to accept`);
+    const known = await service.setEffort({ seatRef: sessionName, effort: "xhigh", reason: "known" });
+    if (!known.ok) throw new Error(known.message);
+    expect(known.warning).toBeUndefined();
+    const cleared = await service.setEffort({ seatRef: sessionName, effort: null, reason: "clear" });
+    if (!cleared.ok) throw new Error(cleared.message);
+    expect(cleared.warning).toBeUndefined();
+  });
 });
