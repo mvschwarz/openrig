@@ -347,9 +347,14 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }
-  const text = bounded([headline, gateContext, body, questionParts?.text, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n"), SLACK_TEXT_CAP, "complete fallback");
+  const fallback = (context: string | null) => [headline, context, body, questionParts?.text, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
+  // The gate context line is supplementary: when it alone would push the complete fallback over
+  // budget, it is left out rather than refusing the gate.
+  const shownContext = gateContext && fallback(gateContext).length > SLACK_TEXT_CAP && fallback(null).length <= SLACK_TEXT_CAP
+    ? null : gateContext;
+  const text = bounded(fallback(shownContext), SLACK_TEXT_CAP, "complete fallback");
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: headline } }];
-  if (gateContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: gateContext }] });
+  if (shownContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownContext }] });
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
   if (questionParts) blocks.push(...questionParts.blocks);
   blocks.push(...imageBlocks);

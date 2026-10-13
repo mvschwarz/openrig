@@ -265,6 +265,18 @@ describe("#1013 — a workflow gate parked on a human seat renders the question,
     expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
   });
 
+  it("leaves the context line out when it alone would push a near-limit gate over the fallback budget", () => {
+    const tags = ["workflow", "gate", `workflow:${"&".repeat(100)}`, `instance:${"&".repeat(100)}`, `step:${"&".repeat(100)}`];
+    const summary = "s".repeat(2990);
+    const m = buildOutboundMessage({ ...gateRow, summary, tags }, opts);
+    expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
+    expect(m.text).toContain(summary);
+    expect(m.text).not.toContain("Workflow ");
+    expect(JSON.stringify(m.blocks)).not.toContain("Workflow ");
+    // The same tags with an ordinary summary keep the line.
+    expect(buildOutboundMessage({ ...gateRow, tags }, opts).text).toContain(`Workflow ${"&amp;".repeat(79)}…`);
+  });
+
   it("omits the step from the context line when the row carries no step tag", () => {
     const m = buildOutboundMessage(gateRow, opts);
     expect(m.text).toContain("Workflow tianqi-mission · instance 01M4EXAMPLEINSTANCE");
