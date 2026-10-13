@@ -12,6 +12,7 @@ import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
+import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -1304,9 +1305,15 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         const fullCommand = `rig queue show ${shellQuote(qitemId)} --full --json`;
         const view = readView(item, fullCommand, bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []);
         const transformed = { ...item, body: preview, bodyBytes, bodyTruncated, readView: view };
-        printResult(json, transformed, res.status);
+        // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
+        const compact = compactOutputEnabled() ? compactShow(transformed) : null;
+        printResult(json, compact ? compact.item : transformed, res.status);
         if (!json && bodyTruncated) {
           console.log(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
+        }
+        if (compact && compact.emptyOmitted.length > 0) {
+          const notice = showEmptyNotice(compact.emptyOmitted, fullCommand);
+          if (json) console.error(notice); else console.log(notice);
         }
       });
     });
@@ -1315,10 +1322,19 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .command("transitions <qitemId>")
     .description("Show the append-only transition log for a qitem")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { json?: boolean }) => {
+    .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest ${TRANSITIONS_SHOWN} and the current disposition)`)
+    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`);
+        // Slice 15 P3: with output.compact on, the recent story; the notice goes to stderr so it stays
+        // visible when the array is piped through jq.
+        if (!opts.full && res.status < 400 && Array.isArray(res.data) && compactOutputEnabled()) {
+          const { transitions, earlier } = compactTransitions(res.data as Record<string, unknown>[]);
+          printResult(opts.json ?? false, transitions, res.status);
+          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)} --full${opts.json ? " --json" : ""}`));
+          return;
+        }
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
