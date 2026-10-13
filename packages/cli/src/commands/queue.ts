@@ -1322,7 +1322,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .command("transitions <qitemId>")
     .description("Show the append-only transition log for a qitem")
     .option("--json", "JSON output for agents")
-    .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest ${TRANSITIONS_SHOWN} and the current disposition)`)
+    .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest transitions, ${TRANSITIONS_SHOWN} in all, always including the current disposition)`)
     .action(async (qitemId: string, opts: { json?: boolean; full?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {

@@ -11,7 +11,7 @@ type Row = Record<string, unknown>;
  *  `.priority == "routine"` read as they do today. Every other field appears only with a value. */
 const SHOW_ALWAYS = new Set([
   "qitemId", "state", "destinationSession", "sourceSession", "summary", "priority", "tags", "tsCreated", "tsUpdated",
-  "pickup", "waiting", "body", "bodyBytes", "bodyTruncated", "readView",
+  "pickup", "waiting", "blockedOn", "closureReason", "body", "bodyBytes", "bodyTruncated", "readView",
 ]);
 
 function isEmpty(value: unknown): boolean {

@@ -117,7 +117,8 @@ describe("queue show and transitions (output.compact, P2/P3)", () => {
       for (const key of ["qitemId", "state", "destinationSession", "sourceSession", "summary", "priority", "tags", "tsCreated", "tsUpdated",
         "pickup", "waiting", "body", "bodyBytes", "bodyTruncated", "readView", "blockedOn"]) expect(out, key).toHaveProperty(key);
       expect(out.waiting.blocker).toEqual({ ref: "external:ci", owner: null, state: null });
-      for (const key of ["tier", "evidenceRef", "closureReason", "handedOffTo", "humanQuestions", "targetRepo"]) expect(out, key).not.toHaveProperty(key);
+      expect(out, "the closure stays, null when there is none").toHaveProperty("closureReason", null);
+      for (const key of ["tier", "evidenceRef", "handedOffTo", "humanQuestions", "targetRepo"]) expect(out, key).not.toHaveProperty(key);
       const empties = out.readView.omittedFields.find((f: { path: string }) => f.path === "empty fields");
       expect(empties.items).toBeGreaterThan(10);
       expect(out.readView.omittedFields[0].path).toBe("body (after preview)");
@@ -153,6 +154,13 @@ describe("queue show and transitions (output.compact, P2/P3)", () => {
       expect(item).toMatchObject({ flag: false, count: 0 });
       expect(emptyOmitted.sort()).toEqual(["list", "note", "obj"]);
     });
+  });
+
+  it("P2: an empty blocker and closure stay at their paths, so .blockedOn == null still reads", async () => {
+    vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "1");
+    const out = JSON.parse(await run(["show", ID, "--json"], { [`GET /api/queue/${ID}`]: { status: 200, data: row() } }));
+    expect(out).toHaveProperty("blockedOn", null);
+    expect(out).toHaveProperty("closureReason", null);
   });
 
   describe("P3 queue transitions", () => {
