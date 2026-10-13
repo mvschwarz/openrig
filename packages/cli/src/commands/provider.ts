@@ -129,12 +129,12 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         continue;
       }
       // Identity first (Codex: account, else the workspace account/read reported; Claude: the organisation
-      // auth status reported; else unresolved); email is a label.
+      // and email auth status reported; else unresolved); for Codex the email is a label.
       const identity = id["accountId"] ? `account ${id["accountId"]}`
         : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
-          : id["orgId"] ? `organisation ${id["orgId"]}`
+          : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
             : "identity unresolved";
-      const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], "seats unknown"]
+      const labels = [identity, `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], "seats unknown"]
         .filter((x) => x !== null && x !== undefined);
       // Not from the latest read: say only that. A later read proves no other account (an unresolved read
       // may be this same login), so the label names the read, not an account.
@@ -201,23 +201,43 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         // 60 s so a slow-dying child never turns the daemon's answer into a transport error here. Both
         // providers are read in parallel unless --provider names one.
         const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
-        const answers = await Promise.all(providers.map((provider) =>
-          client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider }, { timeoutMs: 60_000 })));
-        if (answers.every((a) => a.status === 409)) {
+        const answered = await Promise.all(providers.map(async (provider) => ({
+          provider,
+          answer: await client.post<Record<string, unknown>>("/api/provider/usage/refresh", { provider }, { timeoutMs: 60_000 }),
+        })));
+        // Bare --refresh keeps main's Codex exit: Claude is read too, but where it doesn't apply on this host
+        // (no claude, no login, not a subscription login), or the daemon has no Claude refresh (400/404, an
+        // older daemon), that is a note, not a failure. Naming --provider claude makes it count.
+        const implicit = opts.provider === undefined;
+        const notApplicable = ({ provider, answer }: (typeof answered)[number]): boolean => {
+          if (!implicit || provider !== "claude") return false;
+          if (answer.status === 400 || answer.status === 404) return true;
+          const reason = answer.status === 200 ? (answer.data?.["refresh"] as Record<string, unknown> | undefined)?.["reason"] : undefined;
+          return reason === "binary_not_found" || reason === "not_logged_in" || reason === "not_subscription_login";
+        };
+        const counted = answered.filter((a) => !notApplicable(a));
+        if (counted.length > 0 && counted.every((a) => a.answer.status === 409)) {
           // The switch is off: one line naming it (the first provider's message).
-          const p = (answers[0]!.data ?? {}) as { message?: unknown };
+          const p = (counted[0]!.answer.data ?? {}) as { message?: unknown };
           console.error(p.message ?? "Codex usage windows are off (provider.usage_windows)");
           process.exitCode = 1;
           return;
         }
-        // One provider's refusal or error (e.g. a daemon without a Claude reader) is printed, and the status
-        // is still read and printed for the other; the exit code then says the refresh didn't fully succeed.
-        for (const refreshed of answers) {
-          if (handleHttpError(refreshed, "refresh usage windows")) {
+        for (const a of answered) {
+          if (!notApplicable(a)) continue;
+          const refresh = a.answer.status === 200 ? (a.answer.data?.["refresh"] as Record<string, unknown> | undefined) : undefined;
+          console.error(refresh
+            ? `note: Claude usage not read on this host: ${refresh["reason"]} (${refresh["detail"]}); exit unaffected (name --provider claude to require it)`
+            : "note: this daemon has no Claude usage refresh; exit unaffected");
+        }
+        // A counted provider's refusal or error is printed, and the status is still read and printed for the
+        // other; the exit code then says the refresh didn't fully succeed.
+        for (const { answer } of counted) {
+          if (handleHttpError(answer, "refresh usage windows")) {
             refreshExit = Math.max(refreshExit, process.exitCode === 2 ? 2 : 1);
             continue;
           }
-          if ((refreshed.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed") refreshExit = Math.max(refreshExit, 1);
+          if ((answer.data["refresh"] as Record<string, unknown> | undefined)?.["outcome"] === "failed") refreshExit = Math.max(refreshExit, 1);
         }
         process.exitCode = undefined;
       }

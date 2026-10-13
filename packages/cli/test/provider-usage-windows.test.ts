@@ -156,17 +156,17 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status"], port)).out).not.toContain("saved rig auth profiles");
   });
 
-  it("a Claude row: organisation identity, bucket, email label, its windows", async () => {
+  it("a Claude row: organisation (name and id), bucket, email, subscription, its windows", async () => {
     model = { ...MODEL, usage: [{
       provider: "claude",
-      identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", source: "claude auth status orgId" },
+      identity: { orgId: "org-1", limitId: "all models", email: "d***@example.test", orgName: "Example Org", subscriptionType: "team", source: "claude auth status orgId and email" },
       source: { kind: "claude_usage_screen", host: "local" }, observedAt: "2026-10-12T20:00:00.000Z", seats: "unknown",
       windows: [{ window: "current_week", durationMins: 10080, usedPercent: 85, remainingPercent: 15, resetsAt: "2026-10-14T09:00:00.000Z", observedAt: "2026-10-12T20:00:00.000Z", level: "nearing", levelReason: "80% or more used", freshness: "fresh" }],
       limitEvidence: null, latestFromSource: true, lastRefresh: { at: "2026-10-12T20:00:00.000Z", outcome: "ok" }, currentAvailability: "known",
     }] };
     const { out } = await run(["status"], port);
     expect(out).toContain([
-      "  claude  organisation org-1 · bucket all models · d***@example.test · seats unknown",
+      "  claude  organisation Example Org (org-1) · bucket all models · d***@example.test · team · seats unknown",
       "    weekly (current_week)  15% left  nearing (80% or more used)  resets 2026-10-14T09:00:00.000Z  observed 2026-10-12T20:00:00.000Z (fresh)",
       "    current availability: known",
     ].join("\n"));
@@ -194,15 +194,56 @@ describe("rig provider status — usage windows", () => {
       codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } },
       claude: { status: 400, body: { error: "claude usage windows are not available on this daemon" } },
     };
-    const r = await run(["status", "--refresh"], port);
+    const r = await run(["status", "--refresh", "--provider", "claude"], port);
     expect(r.err).toBe("claude usage windows are not available on this daemon");
     expect(r.out).toContain("USAGE");
     expect(r.exitCode).toBe(1);
+    refreshByProvider = { codex: { status: 500, body: { error: "boom" } }, claude: refreshByProvider.claude! };
+    const codexFails = await run(["status", "--refresh"], port);
+    expect(codexFails.exitCode).toBe(2);
+    expect(codexFails.out).toContain("USAGE");
     refreshByProvider = { claude: { status: 503, body: { error: "provider_service_unavailable" } },
       codex: { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } } };
     const five = await run(["status", "--refresh"], port);
     expect([five.err, five.exitCode]).toEqual(["provider_service_unavailable", 2]);
     expect(five.out).toContain("USAGE");
+  });
+
+  it("bare --refresh keeps main's exit where Claude doesn't apply on this host: one note line, exit unchanged", async () => {
+    model = { ...MODEL, usage: [READING] };
+    const codexOk = { status: 200, body: { refresh: { at: "t", outcome: "ok", coalesced: false }, usage: [] } };
+    for (const reason of ["binary_not_found", "not_logged_in", "not_subscription_login"]) {
+      refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason, detail: "d", coalesced: false }, usage: [] } } };
+      const bare = await run(["status", "--refresh"], port);
+      expect([bare.exitCode, bare.err], reason).toEqual([undefined, `note: Claude usage not read on this host: ${reason} (d); exit unaffected (name --provider claude to require it)`]);
+      expect(bare.out).toContain("USAGE");
+      // Named, it counts.
+      expect((await run(["status", "--refresh", "--provider", "claude"], port)).exitCode, reason).toBe(1);
+    }
+    // A daemon without a Claude refresh (400, or 404 from an older route): a note, exit unchanged.
+    for (const status of [400, 404]) {
+      refreshByProvider = { codex: codexOk, claude: { status, body: { error: "no claude" } } };
+      const old = await run(["status", "--refresh"], port);
+      expect([old.exitCode, old.err], String(status)).toEqual([undefined, "note: this daemon has no Claude usage refresh; exit unaffected"]);
+    }
+    // Main's exit when the host has no claude and Codex fails: still 1, from Codex.
+    refreshByProvider = {
+      codex: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "timeout", coalesced: false }, usage: [] } },
+      claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "binary_not_found", detail: "d", coalesced: false }, usage: [] } },
+    };
+    expect((await run(["status", "--refresh"], port)).exitCode).toBe(1);
+    // A Claude failure that does apply (it's installed and logged in) still fails the bare refresh.
+    refreshByProvider = { codex: codexOk, claude: { status: 200, body: { refresh: { at: "t", outcome: "failed", reason: "timeout", coalesced: false }, usage: [] } } };
+    expect((await run(["status", "--refresh"], port)).exitCode).toBe(1);
+  });
+
+  it("an older daemon with the switch off (Codex 409, Claude 400): main's one off line, exit 1", async () => {
+    refreshByProvider = {
+      codex: { status: 409, body: { error: "usage_windows_disabled", message: "Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true" } },
+      claude: { status: 400, body: { error: "usage windows can be refreshed for codex only in this version (got claude)" } },
+    };
+    const r = await run(["status", "--refresh"], port);
+    expect([r.err, r.out, r.exitCode]).toEqual(["Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true", "", 1]);
   });
 
   it("--provider takes codex or claude only", async () => {
