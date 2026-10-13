@@ -154,7 +154,7 @@ export interface FourBlockReadModel {
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
  *  which login a running session uses. A default login is whatever the daemon's home held at the seat's launch. */
 export type SeatAccountConfiguration =
-  | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean }
+  | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
   | { source: "default_login"; home: string | null; homeNote: string }
   | { source: "unknown"; reason: string };
 

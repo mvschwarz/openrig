@@ -270,13 +270,19 @@ describe("seatAccounts on the production path (samples, registry reads, config d
   const minutes = (m: number) => new Date(Date.parse(ASOF) + m * 60_000).toISOString();
   const RESET = minutes(180);
 
-  function prod(opts: { seats: Array<{ id: string; session: string; runtime: string }>; registry?: { body: string; mode: number }; env?: Record<string, string> }) {
+  function prod(opts: { seats: Array<{ id: string; session: string; runtime: string }>; registry?: { body: string; mode: number }; profiles?: { names: string[]; folderMode: number }; env?: Record<string, string> }) {
     const db = createDb();
     migrate(db, ALL_MIGRATIONS);
     seedSeats(db, opts.seats);
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "seat-accounts-prod-home-"));
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "seat-accounts-prod-codex-"));
     if (opts.registry) fs.writeFileSync(path.join(codexHome, "auth-seat-registry.tsv"), opts.registry.body, { mode: opts.registry.mode });
+    const profileDir = path.join(codexHome, "auth-profiles");
+    if (opts.profiles) {
+      fs.mkdirSync(profileDir);
+      for (const name of opts.profiles.names) fs.writeFileSync(path.join(profileDir, `${name}.json`), "{\"tokens\":\"never read\"}", { mode: 0o600 });
+      fs.chmodSync(profileDir, opts.profiles.folderMode);
+    }
     let clock = ASOF;
     let org = "org-1";
     const insert = db.prepare(`INSERT INTO usage_samples (lane, seat_session, source, sampled_at, captured_at, window, window_used_percent, resets_at)
@@ -295,7 +301,7 @@ describe("seatAccounts on the production path (samples, registry reads, config d
       env: { CODEX_HOME: codexHome, HOME: home, ...opts.env } as NodeJS.ProcessEnv,
       usageWindows: { enabled: () => true, windows, claude } });
     const bySeat = async () => new Map((await svc.getReadModel()).seatAccounts!.map((row) => [row.seatSession, row]));
-    return { svc, claude, sample, bySeat, home, setClock: (t: string) => { clock = t; }, setOrg: (o: string) => { org = o; } };
+    return { svc, claude, sample, bySeat, home, profileDir, setClock: (t: string) => { clock = t; }, setOrg: (o: string) => { org = o; } };
   }
   const claudeSeats = [
     { id: "a", session: "a@r", runtime: "claude-code" },
@@ -361,6 +367,29 @@ describe("seatAccounts on the production path (samples, registry reads, config d
     const rows = await p.bySeat();
     expect(rows.get("dev-qa@r")!.configured).toEqual({ source: "unknown", reason: "the registry has 1 malformed row; this seat may be among them" });
     expect(rows.get("dev-cx@r")!.configured).toMatchObject({ source: "registry", profileRef: "saved-work" });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("an unreadable profile folder: whether the profile is saved can't be told (null), never 'not saved'", async () => {
+    const p = prod({ seats: codexSeats, registry: { body: HEADER + ROW, mode: 0o600 }, profiles: { names: ["saved-work"], folderMode: 0o000 } });
+    try {
+      const model = await p.svc.getReadModel();
+      const row = model.seatAccounts!.find((r) => r.seatSession === "dev-cx@r")!;
+      expect(row.configured).toEqual({ source: "registry", profileRef: "saved-work", recordedAt: "2026-10-12T10:00:00Z", profileSaved: null });
+      expect(row.registryNotes).toEqual(["can't tell whether profile saved-work is saved on this host: the profile folder couldn't be read (EACCES)"]);
+      expect(JSON.stringify(model)).not.toContain("not saved");
+      // The existing blocks read the folder as before: no profiles, so no accounts and no savedProfiles.
+      expect(model.accounts).toEqual([]);
+      for (const usage of model.usage!) expect(usage).not.toHaveProperty("savedProfiles");
+    } finally {
+      fs.chmodSync(p.profileDir, 0o700);
+    }
+  });
+
+  it("an absent profile folder is a supported absence: the profile is not saved", async () => {
+    const p = prod({ seats: codexSeats, registry: { body: HEADER + ROW, mode: 0o600 } });
+    const row = (await p.bySeat()).get("dev-cx@r")!;
+    expect(row.configured).toMatchObject({ source: "registry", profileSaved: false });
+    expect(row.registryNotes).toEqual(["profile saved-work is not saved on this host"]);
   });
 
   it("F3: an absent registry is a supported absence: default login", async () => {

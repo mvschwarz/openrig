@@ -64,8 +64,11 @@ export function configuredSeatAccounts(input: SeatAccountsInput): SeatConfigured
     if (seat.runtime === "codex") {
       if (row) {
         if (row.runtime !== "codex") notes.push(`the registry row's runtime column says ${row.runtime}, not codex`);
-        const profileSaved = profiles.has(row.authProfile);
-        if (!profileSaved) notes.push(`profile ${row.authProfile} is not saved on this host`);
+        // An unreadable profile folder can't say either way: profileSaved is null, never "not saved".
+        const folder = input.auth.profilesRead;
+        const profileSaved = folder?.status === "unreadable" ? null : profiles.has(row.authProfile);
+        if (profileSaved === null) notes.push(`can't tell whether profile ${row.authProfile} is saved on this host: the profile folder couldn't be read (${folder!.code ?? "unknown"})`);
+        else if (!profileSaved) notes.push(`profile ${row.authProfile} is not saved on this host`);
         if (row.rig && row.rig !== seat.rigName) notes.push(`registry row names rig ${row.rig}; this seat is in rig ${seat.rigName}`);
         if (shared > 1) notes.push(`${shared} seats share session name ${seat.seatSession}; the seat-keyed registry row cannot tell them apart`);
         return {

@@ -371,6 +371,21 @@ describe("rig provider status — usage windows", () => {
     expect((await run(["status"], port)).out).toContain(`    observed: ${note}`);
   });
 
+  it("an unreadable profile folder: the profile's saved state renders as unknown, never 'not saved'", async () => {
+    const note = "can't tell whether profile work-a is saved on this host: the profile folder couldn't be read (EACCES)";
+    model = { ...MODEL, seatAccounts: [
+      { seatSession: "dev-qa@r", rigName: "r", runtime: "codex",
+        configured: { source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: null },
+        registryNotes: [note], allowance: { linked: false, reason: "r" }, observed: { note: "no per-seat observation for Codex" } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain([
+      "  dev-qa@r  codex  configured: profile work-a (registry, recorded 2026-10-12T10:00:00Z; whether the profile is saved: unknown) · allowance not linked",
+      `    ${note}`,
+    ].join("\n"));
+    expect(out).not.toContain("not saved");
+  });
+
   it("a sampled seat names when its status line last reported, never pointing at USAGE", async () => {
     model = { ...MODEL, seatAccounts: [
       { seatSession: "b@r", rigName: "r", runtime: "claude-code",
