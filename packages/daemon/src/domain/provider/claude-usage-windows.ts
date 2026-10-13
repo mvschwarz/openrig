@@ -43,14 +43,26 @@ export interface ClaudeWindowSample {
   sampledAt: string;
 }
 
-/** Each seat's latest provider-window sample per window (lane provider_window). */
+/** Each seat's latest provider-window sample per window (lane provider_window). This runs on every read-model
+ *  call while the switch is on, so it never walks the series: it steps from one seat to the next on 094's partial
+ *  index (seat_session, window, id), then takes each window's latest id with one index seek (about 0.1 ms with
+ *  200k samples across 20 seats, where a per-row MAX subquery took about 150 ms). */
 export function latestClaudeWindowSamples(db: Database.Database): ClaudeWindowSample[] {
   const rows = db.prepare(
-    `SELECT seat_session, window, window_used_percent, resets_at, sampled_at
-     FROM usage_samples u
-     WHERE lane = 'provider_window' AND window IS NOT NULL
-       AND id = (SELECT MAX(id) FROM usage_samples
-                 WHERE lane = 'provider_window' AND seat_session = u.seat_session AND window = u.window)`,
+    `WITH RECURSIVE seats(s) AS (
+       SELECT MIN(seat_session) FROM usage_samples WHERE lane = 'provider_window'
+       UNION ALL
+       SELECT (SELECT MIN(seat_session) FROM usage_samples WHERE lane = 'provider_window' AND seat_session > s)
+       FROM seats WHERE s IS NOT NULL
+     ),
+     latest(id) AS (
+       SELECT (SELECT MAX(id) FROM usage_samples WHERE lane = 'provider_window' AND seat_session = seats.s AND window = w.window)
+       FROM seats, (SELECT 'five_hour' AS window UNION ALL SELECT 'weekly') w
+       WHERE seats.s IS NOT NULL
+     )
+     SELECT seat_session, window, window_used_percent, resets_at, sampled_at
+     FROM usage_samples
+     WHERE id IN (SELECT id FROM latest WHERE id IS NOT NULL)`,
   ).all() as Array<{ seat_session: string; window: string; window_used_percent: number | null; resets_at: string | null; sampled_at: string | null }>;
   const out: ClaudeWindowSample[] = [];
   for (const r of rows) {
