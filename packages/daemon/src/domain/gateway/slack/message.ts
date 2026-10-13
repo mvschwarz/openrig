@@ -294,10 +294,11 @@ function bounded(text: string, max: number, field: string): string {
 /** Longest tag value the gate context line shows, in characters, ellipsis included. */
 export const GATE_CONTEXT_VALUE_CAP = 80;
 
-/** Shorten a redacted tag value to GATE_CONTEXT_VALUE_CAP characters while keeping two long
- * values that differ anywhere distinct: its start and end around `…`, then a short hash of the
- * whole value. Counts code points, so no surrogate pair is split, and keeps a redaction marker
- * whole or leaves it out, never cut. */
+/** Shorten a redacted tag value to GATE_CONTEXT_VALUE_CAP characters: its start and end around
+ * `…`, then the first 12 hex characters of the SHA-256 of the whole value. Labels that differ at
+ * the start or end stay visibly distinct; for labels that differ only in the cut middle, the
+ * digest makes a collision unlikely but doesn't rule it out. Counts code points, so no surrogate
+ * pair is split, and keeps a redaction marker whole or leaves it out, never cut. */
 function shortenGateValue(value: string): string {
   const tokens: string[] = [];
   value.split(REDACTED_SECRET).forEach((part, index) => {
@@ -306,7 +307,7 @@ function shortenGateValue(value: string): string {
   });
   const width = (token: string) => (token === REDACTED_SECRET ? REDACTED_SECRET.length : 1);
   if (tokens.reduce((sum, token) => sum + width(token), 0) <= GATE_CONTEXT_VALUE_CAP) return value;
-  const hash = ` #${createHash("sha256").update(value).digest("hex").slice(0, 6)}`;
+  const hash = ` #${createHash("sha256").update(value).digest("hex").slice(0, 12)}`;
   const room = GATE_CONTEXT_VALUE_CAP - hash.length - 1;
   const take = (from: string[], budget: number): string[] => {
     const kept: string[] = [];

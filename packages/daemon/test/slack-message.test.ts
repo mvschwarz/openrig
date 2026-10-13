@@ -257,9 +257,9 @@ describe("#1013 — a workflow gate parked on a human seat renders the question,
       ...gateRow,
       tags: ["workflow", "gate", `workflow:${"w".repeat(5000)}`, `instance:${"<".repeat(2000)}`, `step:${"\u{1F600}".repeat(200)}`],
     }, opts);
-    // Each value keeps 35 characters, an ellipsis, its last 36 and a short hash, cut before escaping, so no escape or emoji is split.
-    expect(m.text).toMatch(new RegExp(`Workflow w{35}…w{36} #[0-9a-f]{6} · instance (&lt;){35}…(&lt;){36} #[0-9a-f]{6} · step (\u{1F600}){35}…(\u{1F600}){36} #[0-9a-f]{6}`, "u"));
-    expect(m.text).not.toContain("w".repeat(37));
+    // Each value keeps 32 characters, an ellipsis, its last 33 and a 12-hex digest, cut before escaping, so no escape or emoji is split.
+    expect(m.text).toMatch(new RegExp(`Workflow w{32}…w{33} #[0-9a-f]{12} · instance (&lt;){32}…(&lt;){33} #[0-9a-f]{12} · step (\u{1F600}){32}…(\u{1F600}){33} #[0-9a-f]{12}`, "u"));
+    expect(m.text).not.toContain("w".repeat(34));
     const context = m.blocks[1] as { type: string; elements: Array<{ text: string }> };
     expect(context.type).toBe("context");
     expect(m.text).toContain(context.elements[0]!.text);
@@ -273,12 +273,26 @@ describe("#1013 — a workflow gate parked on a human seat renders the question,
     );
     const a = instance("-A");
     const b = instance("-B");
-    expect(a.text).toContain(`${"p".repeat(34)}-A #`);
-    expect(b.text).toContain(`${"p".repeat(34)}-B #`);
+    expect(a.text).toContain(`${"p".repeat(31)}-A #`);
+    expect(b.text).toContain(`${"p".repeat(31)}-B #`);
     expect(a.text).not.toBe(b.text);
     expect(JSON.stringify(a.blocks)).not.toBe(JSON.stringify(b.blocks));
     // An instance label of ordinary length (a ULID) is shown whole.
     expect(buildOutboundMessage(gateRow, opts).text).toContain("instance 01M4EXAMPLEINSTANCE");
+  });
+
+  it("keeps two long instance labels that differ only in the middle distinct", () => {
+    // These two labels share their first 6 digest characters (b20078), so a 6-character digest posted them identically.
+    const instance = (middle: string) => buildOutboundMessage(
+      { ...gateRow, tags: ["workflow", "gate", "workflow:tianqi-mission", `instance:${"p".repeat(35)}${middle}${"z".repeat(36)}`, "step:plan_signoff"] },
+      opts,
+    );
+    const a = instance("label-00000219");
+    const b = instance("label-00004669");
+    expect(a.text).toContain(`instance ${"p".repeat(32)}…${"z".repeat(33)} #b200786b3a4e`);
+    expect(b.text).toContain(`instance ${"p".repeat(32)}…${"z".repeat(33)} #b200784519a9`);
+    expect(a.text).not.toBe(b.text);
+    expect(JSON.stringify(a.blocks)).not.toBe(JSON.stringify(b.blocks));
   });
 
   it("never cuts the redaction marker in a shortened tag value", () => {
@@ -303,7 +317,7 @@ describe("#1013 — a workflow gate parked on a human seat renders the question,
     expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
     expect(m.text).toContain(summary);
     expect(m.text).not.toContain("Workflow ");
-    expect(m.text).toMatch(/instance (&amp;){35}…(&amp;){36} #[0-9a-f]{6}/);
+    expect(m.text).toMatch(/instance (&amp;){32}…(&amp;){33} #[0-9a-f]{12}/);
     expect(JSON.stringify(m.blocks)).toContain("instance &amp;");
     // The same tags with an ordinary summary keep the whole line.
     expect(buildOutboundMessage({ ...gateRow, tags }, opts).text).toContain("Workflow &amp;");
