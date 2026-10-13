@@ -4,7 +4,7 @@
 // "unknown" origin settling to own or inherited once the session header could be read.
 import type { Database } from "better-sqlite3";
 import type { PiUsageFact, PiUsageFactKind, PiUsageOrigin } from "./pi-usage-facts.js";
-import type { PiProviderCharge } from "./openrouter-charge.js";
+import { OPENROUTER_TEXT_LIMIT, type PiProviderCharge } from "./openrouter-charge.js";
 
 const KINDS: ReadonlySet<PiUsageFactKind> = new Set(["assistant", "usage", "tool_result", "compaction", "branch_summary"]);
 const ORIGINS: ReadonlySet<PiUsageOrigin> = new Set(["own", "inherited", "unknown"]);
@@ -38,7 +38,9 @@ export function validPiProviderCharge(raw: unknown): PiProviderCharge | null {
   const status = f["status"];
   if (!entryId || !generationId || !credentialSource || (status !== "charged" && status !== "unavailable")) return null;
   if (!optional.every((k) => ok(k, (v) => typeof v === "number" && Number.isFinite(v)))) return null;
-  if (!optionalText.every((k) => ok(k, (v) => typeof v === "string"))) return null;
+  // Bounded like the reply fields the runner keeps (OPENROUTER_TEXT_LIMIT); a reason is the runner's own text.
+  if (!optionalText.every((k) => ok(k, (v) => typeof v === "string" && v.length <= (k === "reason" ? 512 : OPENROUTER_TEXT_LIMIT)))) return null;
+  if ([entryId, generationId, credentialSource].some((v) => v.length > 256)) return null;
   if (!ok("isByok", (v) => typeof v === "boolean")) return null;
   const total = n("totalCostUsd");
   if (status === "charged" && (total === null || total < 0)) return null;
@@ -98,7 +100,7 @@ export class PiUsageEntriesStore {
    *  unavailable one can become charged; anything else is a replay and changes nothing. Facts never stored, or
    *  stored for another seat, are refused. */
   recordCharges(input: { seatSession: string; piSessionId: string; charges: PiProviderCharge[] }, recordedAt: string):
-    { stored: number; unchanged: number; refused: number } {
+    { stored: number; unchanged: number; refused: number; acknowledged: string[] } {
     const known = this.db.prepare(
       "SELECT response_id FROM pi_usage_entries WHERE pi_session_id = ? AND entry_id = ? AND seat_session = ?",
     );
@@ -120,16 +122,18 @@ export class PiUsageEntriesStore {
     );
     let stored = 0;
     let refused = 0;
+    const acknowledged: string[] = [];
     this.db.transaction(() => {
       for (const c of input.charges) {
         const entry = known.get(input.piSessionId, c.entryId, input.seatSession) as { response_id: string | null } | undefined;
         if (!entry || entry.response_id !== c.generationId) { refused += 1; continue; }
+        acknowledged.push(c.entryId); // stored now, or the store already holds this entry's outcome
         stored += upsert.run(input.piSessionId, c.entryId, c.generationId, c.status, c.totalCostUsd, c.upstreamInferenceCostUsd,
           c.cacheDiscountUsd, c.isByok === null ? null : c.isByok ? 1 : 0, c.providerName, c.model, c.apiType, c.workspaceId,
           c.generationCreatedAt, c.credentialSource, c.reason, input.seatSession, recordedAt).changes;
       }
     })();
-    return { stored, unchanged: input.charges.length - stored - refused, refused };
+    return { stored, unchanged: input.charges.length - stored - refused, refused, acknowledged };
   }
 
   /** Store each fact once. Returns how many were new (or had an unknown origin settled) and how many were already stored. */
@@ -144,13 +148,26 @@ export class PiUsageEntriesStore {
        ON CONFLICT(pi_session_id, entry_id) DO UPDATE SET origin = excluded.origin
          WHERE pi_usage_entries.origin = 'unknown' AND excluded.origin <> 'unknown'`,
     );
+    // K4 (rows stored before migration 108): a replay of the same entry (same seat, kind, time, tokens and
+    // estimate) fills the request correlation it didn't have. Cost and origin are never changed by this.
+    const backfill = this.chargeColumns ? this.db.prepare(
+      `UPDATE pi_usage_entries SET api = COALESCE(api, ?), response_id = COALESCE(response_id, ?)
+        WHERE pi_session_id = ? AND entry_id = ? AND seat_session = ? AND kind = ? AND entry_timestamp = ?
+          AND input_tokens = ? AND output_tokens = ? AND cost_total IS ?
+          AND ((api IS NULL AND ? IS NOT NULL) OR (response_id IS NULL AND ? IS NOT NULL))`,
+    ) : null;
     let stored = 0;
     this.db.transaction(() => {
       for (const fact of input.facts) {
-        stored += insert.run(input.piSessionId, fact.entryId, fact.parentEntryId, fact.entryTimestamp, fact.kind, fact.usageCategory,
+        const changes = insert.run(input.piSessionId, fact.entryId, fact.parentEntryId, fact.entryTimestamp, fact.kind, fact.usageCategory,
           fact.provider, fact.model, fact.input, fact.output, fact.cacheRead, fact.cacheWrite, fact.costTotal, fact.stopReason,
           fact.origin, input.seatSession, input.nodeId, input.generation, recordedAt,
           ...(this.chargeColumns ? [fact.api ?? null, fact.responseId ?? null] : [])).changes;
+        stored += changes;
+        if (changes === 0 && backfill) {
+          backfill.run(fact.api ?? null, fact.responseId ?? null, input.piSessionId, fact.entryId, input.seatSession, fact.kind,
+            fact.entryTimestamp, fact.input, fact.output, fact.costTotal, fact.api ?? null, fact.responseId ?? null);
+        }
       }
     })();
     return { stored, duplicates: input.facts.length - stored };

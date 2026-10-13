@@ -109,3 +109,92 @@ export function piCredentialNotice(opts: {
     }
   }
 }
+
+/** OPR.0.7.0.2 K4: what metadata shows about Pi's OpenRouter credential at one moment. Pi records no
+ *  per-request credential, so a request's credential is established by two of these, taken before and after
+ *  it (see judgeChargeProvenance). Metadata only: credential files are classified, never used; settings are
+ *  read only for extension entries; extension directories are listed, never loaded. */
+export type PiCredentialEvidence = {
+  at: number;
+  source: PiCredentialSource;
+  /** Whether a Pi extension could load (and so register a provider or a runtime key): Pi 0.87.1 discovers
+   *  <agentDir>/extensions, <cwd>/.pi/extensions, and `packages`/`extensions` entries in either settings.json.
+   *  OpenRig passes no -e flags. */
+  extensions: "none" | "present" | "unknown";
+  /** Identity of every file and directory above, so a change between two observations is visible. */
+  fingerprint: string;
+};
+
+export function piCredentialEvidence(opts: {
+  agentDir: string;
+  cwd: string;
+  env: Readonly<Record<string, string | undefined>>;
+  now: () => number;
+  /** "absent", or a stable identity for a file (e.g. ino:size:mtime). */
+  statId: (file: string) => string;
+  /** Entry names of a directory; [] when it doesn't exist. Throws when it can't be read. */
+  listDir: (dir: string) => string[];
+  readFile: (file: string) => string;
+}): PiCredentialEvidence {
+  const at = opts.now();
+  const files = ["auth.json", "models.json", "settings.json"].map((name) => path.join(opts.agentDir, name))
+    .concat(path.join(opts.cwd, ".pi", "settings.json"));
+  const dirs = [path.join(opts.agentDir, "extensions"), path.join(opts.cwd, ".pi", "extensions")];
+  let extensions: PiCredentialEvidence["extensions"] = "none";
+  const parts: string[] = [];
+  try {
+    for (const file of files) parts.push(`${file}=${opts.statId(file)}`);
+    for (const dir of dirs) {
+      const names = opts.listDir(dir).sort();
+      parts.push(`${dir}/=${names.join("|")}`);
+      if (names.length > 0) extensions = "present";
+    }
+    for (const file of files.slice(2)) {
+      let text: string;
+      try { text = opts.readFile(file); } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        throw error;
+      }
+      if (text.length > 1024 * 1024) throw new Error("Unbounded metadata");
+      const settings: unknown = JSON.parse(text.replace(/^﻿/, ""));
+      if (!object(settings)) throw new Error("Unknown metadata");
+      for (const key of ["packages", "extensions"]) {
+        const value = settings[key];
+        if (value === undefined || (Array.isArray(value) && value.length === 0)) continue;
+        extensions = "present";
+      }
+    }
+  } catch {
+    extensions = "unknown";
+  }
+  return {
+    at,
+    source: piCredentialSource({ model: "openrouter/charge-lookup", agentDir: opts.agentDir, env: opts.env, readFile: opts.readFile }),
+    extensions,
+    fingerprint: parts.join("\n"),
+  };
+}
+
+/** Whether a request's credential is established as the key OpenRig forwarded: it was persisted after `before`
+ *  and observed by `after`, both show Pi's OpenRouter credential as that key with no extension able to replace
+ *  it, and nothing changed in between. Otherwise the reason it isn't. */
+export function judgeChargeProvenance(before: PiCredentialEvidence | null, after: PiCredentialEvidence, entryTimestamp: string):
+  { ok: true; credentialSource: string } | { ok: false; reason: string } {
+  const t = Date.parse(entryTimestamp);
+  if (!before || Number.isNaN(t) || t <= before.at) {
+    return { ok: false, reason: "made before this runner observed Pi's credential; the credential it used is unknown" };
+  }
+  for (const e of [before, after]) {
+    if (e.source.kind !== "managed-env" || e.source.provider !== "openrouter") {
+      return { ok: false, reason: `Pi's OpenRouter credential around the request was ${e.source.kind}, not the key OpenRig forwarded` };
+    }
+    if (e.extensions !== "none") {
+      return { ok: false, reason: e.extensions === "present"
+        ? "a Pi extension is configured and could have supplied the credential"
+        : "Pi's extension configuration couldn't be checked" };
+    }
+  }
+  if (before.fingerprint !== after.fingerprint) return { ok: false, reason: "Pi's credential or extension files changed around the request" };
+  const envVar = before.source.kind === "managed-env" ? before.source.envVar : "OPENROUTER_API_KEY";
+  return { ok: true, credentialSource: `${envVar} (forwarded by OpenRig; Pi's credential observed before and after the request)` };
+}

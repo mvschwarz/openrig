@@ -44,7 +44,9 @@ export function openRouterChargeTarget(fact: { kind: string; provider: string | 
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
-const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+/** The longest reply text kept (model, provider, workspace, api type, timestamp); longer text isn't kept. */
+export const OPENROUTER_TEXT_LIMIT = 256;
+const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 && v.length <= OPENROUTER_TEXT_LIMIT ? v : null);
 
 /** OpenRouter's reply for one generation, checked against the generation asked about. */
 export function parseOpenRouterGeneration(body: unknown, generationId: string):

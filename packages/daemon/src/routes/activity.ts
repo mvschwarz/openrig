@@ -116,7 +116,8 @@ activityRoutes.post("/pi-usage", async (c) => {
     seatSession: req.seat.sessionName, nodeId: req.seat.nodeId, generation: stringOrNull(req.body.generation), piSessionId: req.piSessionId, facts: valid,
   }, new Date().toISOString());
   return c.json({ ok: true, ...result, rejected: facts.length - valid.length,
-    charged: store.chargedEntryIds(req.piSessionId, valid.map((fact) => fact.entryId)) });
+    // Only for a runner that looks up charges; otherwise the reply is unchanged.
+    ...(req.body.wantCharged === true ? { charged: store.chargedEntryIds(req.piSessionId, valid.map((fact) => fact.entryId)) } : {}) });
 });
 
 // OPR.0.7.0.2 (cost reporting, K4): with usage.pi_openrouter_charge on, the runner posts OpenRouter's charge (or

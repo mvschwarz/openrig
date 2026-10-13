@@ -13,7 +13,7 @@ import { activityRoutes } from "../src/routes/activity.js";
 import { computeCostView, type PiProviderChargeView } from "../src/domain/usage-series.js";
 import { RunnerCore, parseRunnerArgs, type RunnerIo } from "../src/adapters/pi-runner.js";
 import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
-import { piCredentialSource, type PiCredentialSource } from "../src/adapters/pi-readiness.js";
+import { judgeChargeProvenance, piCredentialEvidence, piCredentialSource, type PiCredentialEvidence, type PiCredentialSource } from "../src/adapters/pi-readiness.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, OPENROUTER_CHARGE_MAX_ATTEMPTS, type GenerationReply } from "../src/adapters/pi-openrouter-charge.js";
 import { openRouterChargeTarget, parseOpenRouterGeneration } from "../src/domain/openrouter-charge.js";
 import { PiUsageEntriesStore, validPiProviderCharge } from "../src/domain/pi-usage-entries-store.js";
@@ -50,7 +50,10 @@ afterEach(() => { for (const d of dbs.splice(0)) d.close(); });
 /** The production pieces wired together; only the OpenRouter replies, the credential source and timers are fixtures. */
 function pipeline(opts: {
   replies?: (id: string, attempt: number) => GenerationReply;
+  /** Pi's OpenRouter credential source in each observation (launch, then each refresh). */
   source?: () => PiCredentialSource;
+  extensions?: () => PiCredentialEvidence["extensions"];
+  fingerprint?: () => string;
   db?: Database.Database;
   postChargesOk?: () => boolean;
   openRouterCharge?: boolean;
@@ -70,8 +73,14 @@ function pipeline(opts: {
   const lookups: string[] = [];
   const attempts = new Map<string, number>();
   const timers: Array<() => void> = [];
+  // Observations: the first (at start) is before every fixture entry; later ones fall between the entries.
+  let observations = 0;
+  const evidence = (): PiCredentialEvidence => ({
+    at: Date.parse(observations++ === 0 ? at(0) : at(1)),
+    source: (opts.source ?? (() => MANAGED))(), extensions: (opts.extensions ?? (() => "none"))(), fingerprint: (opts.fingerprint ?? (() => "same"))(),
+  });
+  const notices: string[] = [];
   const newLookup = () => new OpenRouterChargeLookup({
-    credentialSource: opts.source ?? (() => MANAGED),
     fetchGeneration: async (id) => {
       lookups.push(id);
       const n = (attempts.get(id) ?? 0) + 1;
@@ -80,9 +89,11 @@ function pipeline(opts: {
     },
     postCharges: async (piSessionId, charges) => {
       if (opts.postChargesOk && !opts.postChargesOk()) return false;
-      return (await post("pi-usage-charges", { sessionName: SESSION, nodeId: "node-1", piSessionId, charges })).ok;
+      const res = await post("pi-usage-charges", { sessionName: SESSION, nodeId: "node-1", piSessionId, charges });
+      return res.ok ? new Set(((await res.json()) as { acknowledged: string[] }).acknowledged) : false;
     },
     schedule: (fn) => { timers.push(fn); },
+    notice: (line) => { notices.push(line); },
   });
   let lookup = newLookup();
   const io: RunnerIo = {
@@ -92,9 +103,10 @@ function pipeline(opts: {
     postUsageFacts: async (payload) => {
       const res = await post("pi-usage", payload);
       if (!res.ok) return false;
-      return { charged: ((await res.json()) as { charged: string[] }).charged };
+      return { charged: ((await res.json()) as { charged?: string[] }).charged ?? [] };
     },
-    enqueueChargeLookups: (piSessionId, facts, charged) => lookup.enqueue(piSessionId, facts, charged),
+    enqueueChargeLookups: (piSessionId, items, charged) => lookup.enqueue(piSessionId, items, charged),
+    credentialEvidence: evidence,
   };
   const start = () => {
     const core = new RunnerCore(io, { sessionName: SESSION, nodeId: "node-1" },
@@ -108,12 +120,12 @@ function pipeline(opts: {
     core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-cursor-refresh", success: true, command: "get_entries", data: { entries, leafId: null } }));
     await settleAll();
   };
-  const restart = () => { lookup = newLookup(); core = start(); }; // a new runner process: nothing remembered in memory
+  const restart = () => { observations = 0; lookup = newLookup(); core = start(); }; // a new runner process: nothing remembered in memory
   const runTimers = async () => { for (const fn of timers.splice(0)) fn(); await settleAll(); };
   const seat = () => computeCostView(d, { nowIso: at(60) }).seats[0] as Record<string, any>;
   const charge = () => seat().providerCharge as PiProviderChargeView;
   const rows = () => d.prepare("SELECT entry_id, generation_id, status, total_cost_usd, reason, credential_source FROM pi_usage_charges ORDER BY entry_id").all();
-  return { d, post, lookups, timers, refresh, restart, runTimers, seat, charge, rows };
+  return { d, post, lookups, timers, notices, refresh, restart, runTimers, seat, charge, rows };
 }
 
 describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
@@ -127,7 +139,7 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
       kind: "provider charge", source: "OpenRouter GET /api/v1/generation (data.total_cost, USD)", status: "reported",
       requests: { openRouter: 3, covered: 2, charged: 2, pending: 0, unavailable: { count: 0 },
         notCovered: { count: 1, reasons: { "Pi's anthropic-messages API: its response id isn't a documented OpenRouter generation id": 1 } } },
-      accountContext: { credentialSources: ["OPENROUTER_API_KEY (forwarded by OpenRig)"], workspaceIds: ["ws-fixture"], byokRequests: 0 },
+      accountContext: { credentialSources: ["OPENROUTER_API_KEY (forwarded by OpenRig; Pi's credential observed before and after the request)"], workspaceIds: ["ws-fixture"], byokRequests: 0 },
     });
     expect(p.charge().costUsd).toBeCloseTo(0.042, 10);
     expect(p.charge().estimateForChargedUsd).toBeCloseTo(0.03, 10); // Pi's estimate for exactly those two requests
@@ -156,9 +168,9 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
   it("not there yet (404, timeout, 429, 5xx): pending, retried later, then charged; the estimate stays meanwhile", async () => {
     const p = pipeline({ replies: (id, n) => n === 1 ? { status: 404, body: null } : n === 2 ? { error: "timeout" } : generation(id, 0.5) });
     await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
-    expect(p.charge()).toMatchObject({ status: "none", requests: { covered: 1, pending: 1 } }); // nothing recorded yet
+    expect(p.seat()).not.toHaveProperty("providerCharge"); // no outcome yet: the view is the estimate alone
     await p.runTimers();
-    expect(p.charge()).toMatchObject({ status: "none", requests: { pending: 1 } });
+    expect(p.seat()).not.toHaveProperty("providerCharge");
     await p.runTimers();
     expect(p.charge()).toMatchObject({ status: "reported", costUsd: 0.5, requests: { charged: 1, pending: 0 } });
     expect(p.seat().costUsd).toBeCloseTo(0.01, 10);
@@ -191,10 +203,42 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
       const p = pipeline({ source: () => source });
       await p.refresh();
       expect(p.lookups).toEqual([]);
-      expect(p.charge()).toMatchObject({ status: "unavailable", requests: { unavailable: { count: 2,
-        reasons: { [`the generating credential isn't one OpenRig holds (Pi's OpenRouter credential source: ${kind})`]: 2 } } } });
-      expect(p.charge().accountContext.credentialSources).toEqual([`pi:${kind}`]);
+      expect(p.charge()).toMatchObject({ status: "unavailable", requests: { unavailable: { count: 2, reasons: {
+        [`the generating credential isn't established: Pi's OpenRouter credential around the request was ${kind}, not the key OpenRig forwarded`]: 2 } } } });
+      expect(p.charge().accountContext.credentialSources).toEqual(["not established"]);
     }
+  });
+
+  it("F1: provenance comes from the observations around the request, never from a later read", async () => {
+    // A stored key at the request (first observation), removed before the lookup: never charged as the forwarded key.
+    let current: PiCredentialSource = { kind: "stored-key", provider: "openrouter" };
+    const p = pipeline({ source: () => current });
+    current = MANAGED; // launch saw the stored key; the refresh after the request sees the env key
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(p.lookups).toEqual([]);
+    expect(p.charge().requests.unavailable.reasons).toEqual({
+      "the generating credential isn't established: Pi's OpenRouter credential around the request was stored-key, not the key OpenRig forwarded": 1 });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]); // still the first observation's verdict
+    expect(p.lookups).toEqual([]);
+  });
+
+  it("F1: an extension that could supply the credential, a file that changed, or a request before the runner observed: unavailable", async () => {
+    const cases: Array<[Parameters<typeof pipeline>[0], string]> = [
+      [{ extensions: () => "present" }, "a Pi extension is configured and could have supplied the credential"],
+      [{ extensions: () => "unknown" }, "Pi's extension configuration couldn't be checked"],
+      [{ fingerprint: (() => { let n = 0; return () => `v${n++}`; })() }, "Pi's credential or extension files changed around the request"],
+    ];
+    for (const [opts, reason] of cases) {
+      const p = pipeline(opts);
+      await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+      expect(p.lookups).toEqual([]);
+      expect(p.charge().requests.unavailable.reasons).toEqual({ [`the generating credential isn't established: ${reason}`]: 1 });
+    }
+    const before = pipeline();
+    await before.refresh([turn("old", 0, { cost: 0.01, responseId: "gen-old-1" })]); // stamped at the runner's first observation
+    expect(before.lookups).toEqual([]);
+    expect(before.charge().requests.unavailable.reasons).toEqual({
+      "the generating credential isn't established: made before this runner observed Pi's credential; the credential it used is unknown": 1 });
   });
 
   it("an outcome the daemon didn't store is posted again; only stored outcomes are done", async () => {
@@ -208,11 +252,74 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     expect(p.lookups).toEqual(["gen-x-1", "gen-x-2"]); // the stored-later outcome wasn't looked up twice
   });
 
-  it("switch off: the runner never queues a lookup", async () => {
+  it("switch off: no lookup, and the cost view is the estimate alone, worded as before", async () => {
     const p = pipeline({ openRouterCharge: false });
     await p.refresh();
     expect(p.lookups).toEqual([]);
-    expect(p.charge()).toMatchObject({ status: "none" });
+    expect(p.seat()).not.toHaveProperty("providerCharge");
+    expect(p.seat().coverage).toContain("an OpenRouter actual charge isn't correlated here");
+    const reply = await (await p.post("pi-usage", { sessionName: SESSION, piSessionId: "0197a2f0", facts: [] })).json();
+    expect(reply).not.toHaveProperty("charged"); // the /pi-usage reply is unchanged for a runner that doesn't look up charges
+  });
+
+  it("F2: an entry stored before migration 108 gets its correlation from a verified replay, then its charge is stored", async () => {
+    const d = createDb();
+    dbs.push(d);
+    migrate(d, ALL_MIGRATIONS.filter((m) => m.name !== "108_pi_usage_charges.sql"));
+    const legacy = pipeline({ db: d, openRouterCharge: false });
+    await legacy.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    migrate(d, ALL_MIGRATIONS);
+    expect(d.prepare("SELECT api, response_id, cost_total, origin FROM pi_usage_entries").get()).toEqual({ api: null, response_id: null, cost_total: 0.01, origin: "own" });
+    const p = pipeline({ db: d });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(d.prepare("SELECT api, response_id, cost_total, origin FROM pi_usage_entries").get())
+      .toEqual({ api: "openai-completions", response_id: "gen-x-1", cost_total: 0.01, origin: "own" });
+    expect(p.rows()).toEqual([expect.objectContaining({ entry_id: "a1", status: "charged", total_cost_usd: 0.03 })]);
+    // A replay that doesn't match the stored entry (a different estimate) fills nothing.
+    const store = new PiUsageEntriesStore(d);
+    d.prepare("UPDATE pi_usage_entries SET api = NULL, response_id = NULL").run();
+    const facts = [{ entryId: "a1", parentEntryId: null, entryTimestamp: at(2), kind: "assistant" as const, usageCategory: null, provider: "openrouter",
+      model: "m", input: 100, output: 20, cacheRead: 0, cacheWrite: 0, costTotal: 0.99, stopReason: "stop", origin: "own" as const, api: "openai-completions", responseId: "gen-x-1" }];
+    store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts }, at(30));
+    expect(d.prepare("SELECT api, response_id FROM pi_usage_entries").get()).toEqual({ api: null, response_id: null });
+  });
+
+  it("F2: only what the daemon stored is acknowledged; a refused outcome is posted again a bounded number of times, then noticed", async () => {
+    const p = pipeline({ replies: (id) => generation(id, 0.5) });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    // The store refuses a charge whose generation doesn't match the entry; simulate a stored entry that disagrees.
+    p.d.prepare("DELETE FROM pi_usage_charges").run();
+    p.d.prepare("UPDATE pi_usage_entries SET response_id = 'gen-other'").run();
+    p.restart();
+    p.d.prepare("UPDATE pi_usage_entries SET response_id = 'gen-other'").run();
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    for (let i = 0; i < 6; i += 1) await p.runTimers();
+    expect(p.rows()).toEqual([]);
+    expect(p.notices.some((line) => line.includes("entry a1 wasn't stored by the daemon"))).toBe(true);
+    expect(p.timers).toEqual([]); // bounded: nothing left scheduled
+  });
+
+  it("F3: on a quiet seat, an outcome whose post failed is posted again on its own schedule, without another lookup", async () => {
+    let up = false;
+    const p = pipeline({ postChargesOk: () => up });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(p.rows()).toEqual([]);
+    up = true;
+    await p.runTimers(); // no new usage fact, no refresh
+    expect(p.rows()).toEqual([expect.objectContaining({ entry_id: "a1", status: "charged" })]);
+    expect(p.lookups).toEqual(["gen-x-1"]);
+    expect(p.timers).toEqual([]);
+  });
+
+  it("a reply field that reflects the key is never stored or shown", async () => {
+    const key = "sk-or-fixture-secret";
+    const fake = (async () => new Response(JSON.stringify(generation("gen-x-1", 0.5, { model: `echo ${key}`, workspace_id: key }).body), { status: 200 })) as unknown as typeof fetch;
+    const reply = await openRouterGenerationFetcher(() => key, fake)("gen-x-1");
+    const p = pipeline({ replies: () => reply });
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(JSON.stringify(p.d.prepare("SELECT * FROM pi_usage_charges").all())).not.toContain(key);
+    expect(JSON.stringify(p.seat())).not.toContain(key);
+    expect(p.charge()).toMatchObject({ status: "reported", costUsd: 0.5, accountContext: { workspaceIds: [] } });
   });
 });
 
@@ -271,6 +378,57 @@ describe("contract pieces", () => {
     expect(parseOpenRouterGeneration(generation("gen-1", -1).body, "gen-1")).toEqual({ ok: false, reason: "malformed reply: no total_cost" });
   });
 
+  it("F4/F5: the reply is read within a byte limit and one timeout; a stalled body is a timeout, an incomplete JSON body malformed", async () => {
+    const big = "x".repeat(70 * 1024);
+    const declared = (async () => new Response(big, { status: 200, headers: { "content-length": String(big.length) } })) as unknown as typeof fetch;
+    expect(await openRouterGenerationFetcher(() => "k", declared)("gen-1")).toEqual({ status: 200, tooLarge: true });
+    const streamed = (async () => new Response(new ReadableStream({ start(c) { for (let i = 0; i < 80; i += 1) c.enqueue(new TextEncoder().encode("x".repeat(1024))); c.close(); } }), { status: 200 })) as unknown as typeof fetch;
+    expect(await openRouterGenerationFetcher(() => "k", streamed)("gen-1")).toEqual({ status: 200, tooLarge: true });
+    const stalled = ((_u: string, init: RequestInit) => Promise.resolve(new Response(new ReadableStream({ start(c) {
+      c.enqueue(new TextEncoder().encode("{\"data\":"));
+      init.signal!.addEventListener("abort", () => c.error(new Error("aborted")));
+    } }), { status: 200 }))) as unknown as typeof fetch;
+    expect(await openRouterGenerationFetcher(() => "k", stalled, 20)("gen-1")).toEqual({ error: "timeout" });
+    const truncated = (async () => new Response("{\"data\":", { status: 200 })) as unknown as typeof fetch;
+    expect(await openRouterGenerationFetcher(() => "k", truncated)("gen-1")).toEqual({ status: 200, malformed: true });
+    // Through the lookup: too large is a final unavailable; a stalled body takes the capped retry path.
+    const large = pipeline({ replies: () => ({ status: 200, tooLarge: true }) });
+    await large.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    expect(large.charge().requests.unavailable.reasons).toEqual({ "reply larger than 65536 bytes": 1 });
+    const slow = pipeline({ replies: (id, n) => n < 3 ? { error: "timeout" } : generation(id, 0.2) });
+    await slow.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+    await slow.runTimers();
+    await slow.runTimers();
+    expect(slow.charge()).toMatchObject({ status: "reported", costUsd: 0.2 });
+  });
+
+  it("piCredentialEvidence: extensions from Pi's discovery places, settings entries, and a fingerprint that moves with the files", () => {
+    const files: Record<string, string> = {};
+    const dirs: Record<string, string[]> = {};
+    const base = { agentDir: "/agent", cwd: "/work", env: { OPENROUTER_API_KEY: "k" }, now: () => 5,
+      statId: (f: string) => (f in files ? `id:${files[f]!.length}` : "absent"),
+      listDir: (d: string) => dirs[d] ?? [],
+      readFile: (f: string) => { if (!(f in files)) throw Object.assign(new Error("missing"), { code: "ENOENT" }); return files[f]!; } };
+    const clean = piCredentialEvidence(base);
+    expect(clean).toMatchObject({ at: 5, source: MANAGED, extensions: "none" });
+    dirs["/agent/extensions"] = ["proxy.ts"];
+    expect(piCredentialEvidence(base).extensions).toBe("present");
+    delete dirs["/agent/extensions"];
+    dirs["/work/.pi/extensions"] = ["x.js"];
+    expect(piCredentialEvidence(base).extensions).toBe("present");
+    delete dirs["/work/.pi/extensions"];
+    files["/work/.pi/settings.json"] = JSON.stringify({ packages: ["npm:pi-proxy"] });
+    expect(piCredentialEvidence(base).extensions).toBe("present");
+    files["/work/.pi/settings.json"] = JSON.stringify({ packages: [], theme: "dark" });
+    expect(piCredentialEvidence(base).extensions).toBe("none");
+    expect(piCredentialEvidence(base).fingerprint).not.toBe(clean.fingerprint);
+    files["/agent/settings.json"] = "{nope";
+    expect(piCredentialEvidence(base).extensions).toBe("unknown");
+    const judged = judgeChargeProvenance(clean, clean, new Date(10).toISOString());
+    expect(judged).toMatchObject({ ok: true });
+    expect(judgeChargeProvenance(null, clean, new Date(10).toISOString())).toMatchObject({ ok: false });
+  });
+
   it("the production fetcher asks the documented endpoint with the key in the Authorization header only, bounded by a timeout", async () => {
     const seen: Array<{ url: string; init: RequestInit }> = [];
     const fake = (async (url: string, init: RequestInit) => {
@@ -281,6 +439,7 @@ describe("contract pieces", () => {
     expect(reply).toMatchObject({ status: 200, body: { data: { id: "gen-1-a" } } });
     expect(seen[0]!.url).toBe("https://openrouter.ai/api/v1/generation?id=gen-1-a");
     expect(seen[0]!.init.headers).toEqual({ authorization: "Bearer sk-or-fixture" });
+    expect(seen[0]!.init.redirect).toBe("error"); // a redirect never carries the key anywhere
     expect(await openRouterGenerationFetcher(() => undefined, fake)("gen-1-a")).toEqual({ error: "network" });
     const hang = ((_u: string, init: RequestInit) => new Promise((_r, reject) => init.signal!.addEventListener("abort", () => reject(new Error("aborted"))))) as unknown as typeof fetch;
     expect(await openRouterGenerationFetcher(() => "k", hang, 20)("gen-1-a")).toEqual({ error: "timeout" });
