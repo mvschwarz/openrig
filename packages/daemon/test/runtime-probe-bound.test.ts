@@ -128,6 +128,68 @@ process.stdout.write("holder 4.5.6\\n", () => process.exit(0));
   });
 });
 
+describe("boundedProbeExec reads everything the probe wrote before closing the pipes", () => {
+  it("a probe that writes a large version output just before exiting, while a descendant holds stdout, is read in full", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-probe-bound-late-"));
+    const log = path.join(dir, "pids");
+    const script = path.join(dir, "late");
+    const SIZE = 300_000; // larger than a pipe buffer: much of it is still in the pipe when the probe exits
+    fs.writeFileSync(script, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+require("node:fs").writeFileSync(${JSON.stringify(log)}, JSON.stringify({ child: child.pid }));
+process.stdout.write("late 1.0.0 " + "x".repeat(${SIZE}) + "\\n", () => process.exit(0));
+`, { mode: 0o755 });
+    const out = await boundedProbeExec(5_000, 300)(`${script} --version`);
+    expect(out.length).toBe("late 1.0.0 ".length + SIZE + 1);
+    expect(out.startsWith("late 1.0.0 ")).toBe(true);
+    const { child } = JSON.parse(fs.readFileSync(log, "utf8")) as { child: number };
+    const until = Date.now() + REAP_BOUND_MS;
+    while (Date.now() < until && exists(child)) await new Promise((r) => setTimeout(r, 50));
+    expect(exists(child), `descendant ${child}`).toBe(false);
+  });
+
+  it("output written in the last instant before the pipes close (a descendant's final line on TERM) is still read", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-probe-bound-tail-"));
+    const script = path.join(dir, "tail");
+    // The probe prints its version and exits 0; its descendant holds stdout, and on TERM writes a final line and exits.
+    fs.writeFileSync(script, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{process.stdout.write('TAIL ' + 'y'.repeat(200000) + '\\\\n',()=>process.exit(0))});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+process.stdout.write("tail 2.0.0\\n", () => process.exit(0));
+`, { mode: 0o755 });
+    const out = await boundedProbeExec(5_000, 300)(`${script} --version`);
+    expect(out.startsWith("tail 2.0.0\n")).toBe(true);
+    expect(out.endsWith("y\n"), `got ${out.length} bytes`).toBe(true);
+  });
+});
+
+describe("boundedProbeExec leaves a descendant that closed its stdio alone, as main does", () => {
+  it("a probe that exits 0 leaving a descendant with its stdio closed answers at once, and the descendant keeps running", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-probe-bound-bg-"));
+    const log = path.join(dir, "pids");
+    const script = path.join(dir, "updater");
+    // Prints its version, starts a background child (same group, stdio closed: like an updater without setsid), exits 0.
+    fs.writeFileSync(script, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+child.unref();
+require("node:fs").writeFileSync(${JSON.stringify(log)}, JSON.stringify({ child: child.pid }));
+process.stdout.write("updater 7.8.9\\n", () => process.exit(0));
+`, { mode: 0o755 });
+    const started = performance.now();
+    expect(await boundedProbeExec(5_000, 300)(`${script} --version`)).toBe("updater 7.8.9\n");
+    expect(performance.now() - started).toBeLessThan(3_000);
+    const { child } = JSON.parse(fs.readFileSync(log, "utf8")) as { child: number };
+    await new Promise((r) => setTimeout(r, 500));
+    expect(exists(child), `background descendant ${child}`).toBe(true);
+    process.kill(child, "SIGKILL");
+    const until = Date.now() + REAP_BOUND_MS;
+    while (Date.now() < until && exists(child)) await new Promise((r) => setTimeout(r, 50));
+    expect(exists(child)).toBe(false);
+  });
+});
+
 describe("RuntimeVerifier with a bounded probe", () => {
   let db: Database.Database;
   let restorePath: string | undefined;

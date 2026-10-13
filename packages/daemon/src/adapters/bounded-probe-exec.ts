@@ -25,8 +25,10 @@ export class ProbeTimeoutError extends Error {
  * for the reap; the Codex readers' stopGroup) and the promise rejects with ProbeTimeoutError. Where a group
  * can't be signalled (Windows), the probe process itself is then killed; its own descendants may survive there.
  * Otherwise it answers when the probe exits: what it wrote (after a short drain) on exit 0, or a rejection like
- * execCommand's on any other exit. Anything it left in its group is ended either way, so a descendant holding
- * the output open can't turn a finished probe into a timeout.
+ * execCommand's on any other exit. Only if that 200 ms drain times out (the output pipes are still held open, by
+ * a descendant) is the group ended then, so that descendant can't turn a finished probe into a timeout; a healthy
+ * probe whose pipes end within the drain never reaches stopGroup. A descendant that closed its stdio is left
+ * running, as execCommand leaves it.
  */
 export function boundedProbeExec(
   timeoutMs = RUNTIME_PROBE_TIMEOUT_MS,
@@ -54,7 +56,8 @@ export function boundedProbeExec(
       else child.once("exit", () => r());
     });
     // The group first; then, where group signals don't reach (Windows), the probe process itself, waiting (bounded)
-    // for its exit. The pipes are closed after, so nothing holds the caller.
+    // for its exit. Then let the pipes end by themselves, bounded, so output still in them is read before they're
+    // closed; nothing holds the caller past that.
     const end = async () => {
       await endGroup(child, graceMs);
       if (child.exitCode === null && child.signalCode === null) {
@@ -63,6 +66,11 @@ export function boundedProbeExec(
         await Promise.race([exited, new Promise((r) => { t = setTimeout(r, graceMs); })]);
         clearTimeout(t);
       }
+      const ends = [child.stdout, child.stderr].filter((stream) => stream && !stream.readableEnded)
+        .map((stream) => new Promise<void>((r) => { stream!.once("end", () => r()); stream!.once("close", () => r()); }));
+      let t: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.all(ends), new Promise((r) => { t = setTimeout(r, graceMs); })]);
+      clearTimeout(t);
       child.stdout?.destroy();
       child.stderr?.destroy();
     };
@@ -78,21 +86,21 @@ export function boundedProbeExec(
       reject(err);
     });
     // Answer when the probe exits, after a short drain of what it wrote (a descendant may keep the pipes open, so
-    // don't wait for `close`), then end anything it left in its group.
+    // don't wait for `close`). Only pipes still held open after the drain mean a descendant holds the output: then,
+    // and only then, end the group. A descendant that closed its stdio is left alone.
     child.once("exit", (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      const open = () => [child.stdout, child.stderr].filter((stream) => stream && !stream.readableEnded);
       const drained = new Promise<void>((r) => {
         let pending = 0;
         const done = () => { pending -= 1; if (pending <= 0) r(); };
-        for (const stream of [child.stdout, child.stderr]) {
-          if (stream && !stream.readableEnded) { pending += 1; stream.once("end", done); }
-        }
+        for (const stream of open()) { pending += 1; stream!.once("end", done); }
         if (pending === 0) r();
         setTimeout(r, DRAIN_MS);
       });
-      void drained.then(end).then(() => {
+      void drained.then(() => (open().length > 0 ? end() : undefined)).then(() => {
         if (code === 0) resolve(stdout);
         else {
           const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
