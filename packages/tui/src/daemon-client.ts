@@ -1,6 +1,5 @@
 import type { PageRead } from "./page-read.js";
 import type { ProjectSelection } from "./types.js";
-import { readUsageCost } from "./cost/cost-read.js";
 // The TUI's ONLY daemon surface — thin typed fetch wrappers over the §4.A
 // endpoint table, ONE module by design: the R7 no-new-data source-check is a
 // one-file read (every route below is an EXISTING, web-consumed daemon read).
@@ -226,8 +225,23 @@ export class DaemonClient {
 
   /** Slice 02 — the cost view, as `rig usage cost --json` prints it. GET only, computed from what the daemon already
    *  stores: no provider lookup, native read or charge lookup. A failed or absent route resolves to its status. */
-  usageCost(): Promise<import("./cost/cost-read.js").CostRead["status"]> {
-    return readUsageCost(this.fetchImpl, this.baseUrl, this.headers);
+  async usageCost(): Promise<import("./cost/cost-read.js").CostRead["status"]> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/telemetry/usage/cost`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) return { status: res.status, error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}` };
+    // Every seat must be an object naming its seat and status, or the whole body isn't a cost view: a malformed
+    // member reads as unavailable, never as a partial view or a render failure.
+    const isSeat = (s: unknown) => !!s && typeof s === "object" && !Array.isArray(s)
+      && typeof (s as Record<string, unknown>)["seatSession"] === "string" && typeof (s as Record<string, unknown>)["status"] === "string";
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data["seats"]) || !data["seats"].every(isSeat)) {
+      return { status: res.status, error: "the response was not a cost view" };
+    }
+    return { body: { seats: data["seats"] as import("./cost/cost-read.js").CostBody["seats"], note: typeof data["note"] === "string" ? data["note"] : "" } };
   }
 
   /** Bounded canonical findings; the TUI filters this one record set by scope. */

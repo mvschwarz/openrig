@@ -34,6 +34,7 @@ const SPEC_4A_ROUTES = [
   "/api/health?limit=200",
   "/api/provider/status",
   "/api/provider/usage/hosts",
+  "/api/telemetry/usage/cost",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -70,6 +71,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await (c as unknown as { healthFindings(): Promise<unknown> }).healthFindings();
     await c.providerStatus();
     await c.usageAcrossHosts();
+    await c.usageCost();
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });

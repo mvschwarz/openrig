@@ -13,11 +13,12 @@ import { COMMAND_REGISTRY } from "../src/commands/registry.js";
 import { renderScreen } from "../src/render.js";
 import { createLiveRefresh } from "../src/live.js";
 import { pageReadKey } from "../src/page-read.js";
-import { COST_ROUTE } from "../src/cost/cost-read.js";
 import { COST_HEADER, COST_READ_HINT } from "../src/cost/cost-model.js";
 import { costLine } from "../../cli/src/commands/usage.js";
 import type { FleetSnapshot, Screen, ViewStateStore } from "../src/types.js";
 import { costApp, seededDb } from "./helpers/cost-fixture.js";
+
+const COST_ROUTE = "/api/telemetry/usage/cost";
 
 let db: Database.Database;
 let external: ReturnType<typeof vi.fn>;
@@ -29,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); db.close(); });
 
-type Mode = "serve" | "fail" | "gone";
+type Mode = "serve" | "fail" | "gone" | "malformed";
 
 /** A TUI on the fixture daemon: a real client (every request traced), the real view state, hydrate and render. Only
  *  the cost route is mounted; every other route answers 404, as on a daemon that has none of them. */
@@ -40,6 +41,7 @@ function tui(mode: () => Mode = () => "serve") {
     const u = new URL(String(url));
     trace.push(`${init?.method ?? "GET"} ${u.pathname}${u.search}`);
     if (u.pathname === COST_ROUTE && mode() === "gone") return new Response("Not Found", { status: 404 });
+    if (u.pathname === COST_ROUTE && mode() === "malformed") return Response.json({ seats: [null], note: "" });
     if (u.pathname === COST_ROUTE && mode() === "fail") return Response.json({ error: "telemetry_unavailable" }, { status: 503 });
     if (u.pathname !== COST_ROUTE) return Response.json({ error: "not_found" }, { status: 404 });
     return app.request(u.pathname + u.search, init);
@@ -131,6 +133,27 @@ describe("System → Cost through the TUI", () => {
     await empty.openView();
     expect(empty.text()).toContain("  no usage samples yet: no seat has reported tokens or cost");
     expect(empty.text()).not.toMatch(/\$\d/);
+  });
+
+  it("a 200 with a malformed seat (seats: [null]) draws the unavailable state, never throws, on open and on a live re-read", async () => {
+    const t = tui(() => "malformed");
+    await t.openView();
+    expect(() => t.draw()).not.toThrow();
+    expect(t.text()).toContain("  Cost unavailable: the response was not a cost view. Nothing is inferred from the missing read.");
+    expect(t.snap().readErrors).toEqual(["cost: the response was not a cost view"]);
+    let mode: Mode = "serve";
+    const u = tui(() => mode);
+    u.view.dispatch(parseCommand("cost"));
+    const live = u.live(() => 1_000);
+    await live.refresh();
+    expect(renderScreen(u.view.get(), live.snapshot(), { cols: 1000, rows: 600, load: live.load() }).lines.join("\n")).toContain("dev-claude@r  $0.45");
+    mode = "malformed";
+    await live.refresh();
+    const screen = () => renderScreen(u.view.get(), live.snapshot(), { cols: 1000, rows: 600, load: live.load() }).lines.join("\n");
+    expect(screen).not.toThrow();
+    expect(screen()).toContain("Cost unavailable: the response was not a cost view.");
+    expect(screen()).not.toContain("dev-claude@r  $0.45");
+    live.close();
   });
 
   it("a good read, then a 503: the previous view stays, marked retained; then a 404 drops it and says so", async () => {

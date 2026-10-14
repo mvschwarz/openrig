@@ -6,9 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { costLine } from "../../cli/src/commands/usage.js";
-import { readUsageCost, COST_ROUTE, type CostRead } from "../src/cost/cost-read.js";
+import { DaemonClient } from "../src/daemon-client.js";
+import type { CostRead } from "../src/cost/cost-read.js";
 import { costLines, costHeadLine, formatUsd } from "../src/cost/cost-model.js";
 import { at, costApp, seededDb } from "./helpers/cost-fixture.js";
+
+const COST_ROUTE = "/api/telemetry/usage/cost";
 
 let db: Database.Database;
 let trace: string[];
@@ -34,7 +37,7 @@ function daemonFetch(): typeof fetch {
     return app.request(u.pathname + u.search, init);
   }) as unknown as typeof fetch;
 }
-async function read(): Promise<CostRead> { return { status: await readUsageCost(daemonFetch(), "http://fixture", { authorization: "Bearer t" }) }; }
+async function read(): Promise<CostRead> { return { status: await new DaemonClient({ baseUrl: "http://fixture", fetchImpl: daemonFetch(), headers: { authorization: "Bearer t" } }).usageCost() }; }
 const text = (r: CostRead, width = 4000) => costLines(r, width).map((l) => l.text).join("\n");
 const served = async () => (await (await daemonFetch()("http://fixture" + COST_ROUTE)).json()) as { seats: Array<Record<string, any>>; note: string };
 
@@ -125,9 +128,20 @@ describe("System → Cost: the presenter over the daemon's cost route", () => {
     expect(text(await read())).toContain("Cost unavailable: telemetry_unavailable. Nothing is inferred from the missing read.");
     override = () => Response.json({ rows: [] });
     expect(text(await read())).toContain("Cost unavailable: the response was not a cost view.");
-    const down = { status: await readUsageCost((async () => { throw new Error("connect ECONNREFUSED"); }) as unknown as typeof fetch, "http://x", {}) };
+    const down = { status: await new DaemonClient({ baseUrl: "http://x", fetchImpl: (async () => { throw new Error("connect ECONNREFUSED"); }) as unknown as typeof fetch }).usageCost() };
     expect(text(down)).toContain("Cost unavailable: connect ECONNREFUSED.");
     expect(text(undefined as never)).toContain("Not read yet.");
+  });
+
+  it("a 200 whose seats aren't all seat objects is not a cost view: null, a number, a string, an array, or a seat without its name or status", async () => {
+    for (const bad of [null, 1, "x", [], {}, { seatSession: "a@r" }, { status: "reported" }, { seatSession: 1, status: "reported" }]) {
+      override = (p) => (p === COST_ROUTE ? Response.json({ seats: [{ seatSession: "ok@r", status: "absent", reason: "r" }, bad], note: "n" }) : null);
+      const r = await read();
+      expect(r.status).toEqual({ status: 200, error: "the response was not a cost view" });
+      expect(() => costLines(r, 120)).not.toThrow();
+      expect(text(r)).toContain("Cost unavailable: the response was not a cost view.");
+      expect(text(r)).not.toContain("ok@r");
+    }
   });
 
   it("the read is one GET of the cost route, and starts nothing else", async () => {
