@@ -255,6 +255,13 @@ describe("slice-04 ps/summary event-loop regression", () => {
         if (watchdog) clearTimeout(watchdog);
         if (watchdogKill) clearTimeout(watchdogKill);
       }
+      // Report the measured worst on every run, pass or fail (and when an earlier step threw), so each CI log
+      // keeps the number. Reporting only: the assertions below are unchanged.
+      const measured = health.length > 0
+        ? `${Math.max(...health.map((h) => h.ms))} ms over ${health.length} probes`
+        : "no probes completed";
+      console.log(`[ps-summary D2] worst /healthz ${measured} (budget ${HEALTHZ_RESPONSIVENESS_BUDGET_MS} ms; `
+        + `ps 200s ${psStatuses.filter((st) => st === 200).length}/24, summary 200s ${sumStatuses.filter((st) => st === 200).length}/24)`);
     }
 
     // Teardown is guaranteed done above; now assert (the budget pin is the LAST assertion).

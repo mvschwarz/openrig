@@ -78,7 +78,7 @@ export interface SeatHandoverMutationResult {
    *  declared addresses were gaps, and (when the chain is empty) the named
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
 }
 
@@ -359,7 +359,7 @@ export class SeatHandoverService {
     // (the respawn), so a missing/undiscoverable token is an honest pre-mutation
     // refusal — never a blank successor silently reported as a fork, and never a
     // mid-swap abort for a condition knowable up front.
-    let forkSource: { kind: "native_id"; value: string } | null = null;
+    let forkSource: { kind: "native_id"; value: string; pendingIdAllowed: true } | null = null;
     if (parsed.source.mode === "fork") {
       const forkRef = parsed.source.ref ?? latestSession.session_name;
       const discovery = discoverResumeToken(this.db, forkRef);
@@ -387,7 +387,7 @@ export class SeatHandoverService {
           guidance: "Fork from a source session that runs the seat's runtime.",
         };
       }
-      forkSource = { kind: "native_id", value: discovery.result.nativeId };
+      forkSource = { kind: "native_id", value: discovery.result.nativeId, pendingIdAllowed: true };
     }
 
     // Already-created successor: route straight through the discovered->commit
@@ -526,8 +526,22 @@ export class SeatHandoverService {
     // OPR.0.5.5.5 — per-source execution outcome, recorded on the result so the
     // operator sees exactly what carried context (fork origin / primed set).
     let sourceOutcome: SeatHandoverMutationResult["sourceOutcome"];
+    // A fork's own id is never its parent's (the fork source) or the retiring occupant's; either answer
+    // from the launch-time capture is treated as not captured.
+    const launchedId = launch.resumeToken?.trim() || null;
+    const retireeId = (this.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(latestSession.id) as
+      { resume_token: string | null } | undefined)?.resume_token?.trim() || null;
+    const forkOwnId = forkSource && launchedId && launchedId !== forkSource.value && launchedId !== retireeId ? launchedId : null;
+    const launchToken = forkSource
+      ? (forkOwnId ? { token: forkOwnId, resumeType: launch.resumeType } : null)
+      : (launchedId ? { token: launchedId, resumeType: launch.resumeType } : null);
     if (parsed.source.mode === "fork" && forkSource) {
-      sourceOutcome = { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name };
+      // A fork whose own conversation id wasn't captured at launch commits with no resume token and
+      // says so: its exact resumability isn't established until the id is recorded.
+      sourceOutcome = forkOwnId
+        ? { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "captured" }
+        : { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "pending",
+            limit: "The fork's own conversation id wasn't captured at launch, so no resume token is recorded for this seat. It may stay unrecorded (for example when the process has logged more than one conversation); `rig ps --nodes --json` shows whether one has been. Until it is, exact resumption of this conversation isn't established, and a restore of the seat can't resume it; what restore does instead follows the seat's restore policy." };
     }
     if (parsed.source.mode === "rebuild") {
       // rebuild: the successor is a FRESH conversation primed from the seat's
@@ -591,7 +605,7 @@ export class SeatHandoverService {
       contextDelivered,
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
-      launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
+      launchToken,
       occupantGeneration,
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,

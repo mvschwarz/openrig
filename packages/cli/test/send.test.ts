@@ -133,6 +133,9 @@ describe("Send CLI", () => {
             // does NOT match this send's identity (+100 lines vs a 1-line payload)
             // — someone else's staged content; unverifiable, never this send.
             "unrelated-paste-session": "❯ [Pasted text #7 +100 lines]\n  ⏵⏵ accept edits on (shift+tab to cycle)",
+            // #79: Codex 0.153 renders the composer prompt as `»`; the shared glyph set
+            // must read it exactly like `❯`/`›`.
+            "codex153-session": "» hello there\n  ⏵⏵ accept edits on (shift+tab to cycle)",
           };
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: panes[parsed.session as string] ?? "❯ " }));
@@ -142,7 +145,7 @@ describe("Send CLI", () => {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
           sendBodies.push(parsed);
-          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session" || parsed.session === "unrelated-paste-session") {
+          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session" || parsed.session === "unrelated-paste-session" || parsed.session === "codex153-session") {
             // S3 RED fixture: the TRANSPORT believes it delivered (its verify
             // is measured-unreliable in exactly this direction) — the staged
             // truth is visible only by pane effect.
@@ -717,6 +720,14 @@ describe("Send CLI", () => {
       // "Verified: yes" and no staged report exists.
       expect(output).toMatch(/staged/i);
       expect(output).toMatch(/not (yet )?consumed|not submitted|still at the prompt/i);
+    });
+
+    it("PROOF-1b: a `»` Codex 0.153 prompt is staged evidence through the shared glyph set", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "codex153-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toMatch(/staged/i);
     });
 
     it("PROOF-2: a genuinely consumed send verifies positively and is NEVER reported staged", async () => {

@@ -1432,7 +1432,10 @@ export class RestoreOrchestrator {
               };
             }
             if (isPodAware && resumeRequested) {
-              if (startupResult.recovery === "retry_fresh") {
+              // Only the runtime's own report that the conversation doesn't exist rolls the seat back
+              // as unresumable. A pane that went back to its shell for another reason stays failed,
+              // with its pane and binding kept, so its output can still be read.
+              if (startupResult.recovery === "retry_fresh" && startupResult.missingConversation) {
                 await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
                 return {
                   nodeId: node.id,

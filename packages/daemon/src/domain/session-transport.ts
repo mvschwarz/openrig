@@ -1,6 +1,20 @@
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
 import { inspectStartupStagedText, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import {
+  composerNumberedChoicePattern,
+  composerPromptClassForRuntime,
+  composerPromptIsAmbiguous,
+  composerSelectionPrefixPattern,
+  COMPOSER_DRAFT_PATTERN,
+  COMPOSER_EMPTY_CODEX_PLACEHOLDER_PATTERN as CODEX_EMPTY_COMPOSER_PATTERN,
+  COMPOSER_EMPTY_PATTERN,
+  COMPOSER_PROMPT_CLASS,
+  COMPOSER_SELECTION_PATTERN,
+  COMPOSER_SELECTION_SCAN_PATTERN,
+  findComposerInputLineIndex,
+  stripComposerPromptGlyph,
+} from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
@@ -36,7 +50,7 @@ const MID_WORK_PATTERNS = [
   /Working/,
   /^[✶✢✳✻✽·]\s+\S.*(?:…|\.{3})\s+\([^)]*\bthinking\)$/m,
   /esc to interrupt/,
-  /^[❯›]\s*\d+\.\s/m,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
+  COMPOSER_SELECTION_SCAN_PATTERN,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
 
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
@@ -48,15 +62,14 @@ const MID_WORK_PATTERNS = [
 // normally sits above it, but Codex hides that row while it streams assistant output. So the
 // placeholder counts as idle only through MID_WORK_PATTERNS here, and classifySendReadiness
 // never lets a placeholder-only verdict override a display-fresh running/needs_input hook.
-const CODEX_EMPTY_COMPOSER_PATTERN = /^›\s+Ask Codex to do anything\s*$/;
 
 const IDLE_PROMPT_PATTERNS = [
-  /^[❯›]\s*$/,  // prompt char + optional whitespace + end-of-line only
+  COMPOSER_EMPTY_PATTERN,  // prompt char + optional whitespace + end-of-line only
   CODEX_EMPTY_COMPOSER_PATTERN,
 ];
 
 const PROMPT_DRAFT_PATTERNS = [
-  /^[❯›]\s+\S/,
+  COMPOSER_DRAFT_PATTERN,
 ];
 
 // Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
@@ -231,7 +244,7 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
 
   const priorTrimmed = priorLine.trim();
   const looksLikeDraft = PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(priorTrimmed));
-  const looksLikeSelection = /^[❯›]\s*\d+\.\s/.test(priorTrimmed);
+  const looksLikeSelection = COMPOSER_SELECTION_PATTERN.test(priorTrimmed);
   if (!looksLikeDraft || looksLikeSelection) return null;
 
   return truncateEvidence(priorTrimmed);
@@ -331,7 +344,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
       oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
     ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
   const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??
-    findPatternEvidence(selectionLines, [/^[❯›]\s*\d+\.\s/m]);
+    findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]);
   if (selectionPromptEvidence) {
     return {
       state: "attention",
@@ -670,7 +683,9 @@ function verificationSnippet(text: string): { snippet: string; envelope: boolean
 /** Count whole visible envelope blocks, not prefixes of longer messages.
  * A new envelope, prompt or same-column output ends an indented user block.
  * Whitespace is compared only after retaining boundaries and quote indentation. */
-function countEnvelopeOccurrences(transcript: string, expected: string): number {
+function countEnvelopeOccurrences(transcript: string, expected: string, promptClass: string): number {
+  const promptPrefix = new RegExp(`^[${promptClass}]\\s+`);
+  const promptBoundary = new RegExp(`^[${promptClass}](?:\\s|$)`);
   const lines = transcript.split("\n");
   let count = 0;
   let block: string[] | null = null;
@@ -684,8 +699,8 @@ function countEnvelopeOccurrences(transcript: string, expected: string): number 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     const indent = /^[ \t]*/.exec(line)![0].length;
-    const prompted = /^[❯›]\s+/.test(line.slice(indent));
-    const header = line.slice(indent).replace(/^[❯›]\s+/, "");
+    const prompted = promptPrefix.test(line.slice(indent));
+    const header = line.slice(indent).replace(promptPrefix, "");
     const atBoundary = (!block && !inAgentOutput) || indent <= blockIndent;
     const candidate = normalizeVerificationText([header, ...lines.slice(i + 1, i + 5)].join("\n"));
     const envelopeHeader = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.test(candidate);
@@ -702,7 +717,7 @@ function countEnvelopeOccurrences(transcript: string, expected: string): number 
       // quotes stay in the body, and blank separators do not change its text.
       finish();
       inAgentOutput = true;
-    } else if (atBoundary && /^[❯›](?:\s|$)/.test(line.slice(indent))) {
+    } else if (atBoundary && promptBoundary.test(line.slice(indent))) {
       finish();
     } else if (block) {
       block.push(line);
@@ -715,15 +730,16 @@ function countEnvelopeOccurrences(transcript: string, expected: string): number 
 /** The last prompt marker owns the current input region. Never count it or its
  * continuation lines as submitted transcript, in either capture. If a capture
  * ends at a historical prompt with no later input marker, leave it unconfirmed. */
-function verificationTranscript(content: string | null): string {
+function verificationTranscript(content: string | null, promptClass: string): string {
+  const indentedPrompt = new RegExp(`^([ \\t]*)[${promptClass}]`);
   const lines = (content ?? "").replace(/\r\n/g, "\n").split("\n");
-  let inputAt = lastPromptLine(lines);
+  let inputAt = findComposerInputLineIndex(lines, promptClass);
   if (inputAt >= 0) {
     let indent = /^[ \t]*/.exec(lines[inputAt]!)![0].length;
     // Claude indents draft continuation lines. A quoted prompt on one of them
     // belongs to the enclosing input, not a new transcript/composer boundary.
     for (let i = inputAt - 1; i >= 0; i--) {
-      const prompt = /^([ \t]*)[❯›]/.exec(lines[i]!);
+      const prompt = indentedPrompt.exec(lines[i]!);
       if (prompt && prompt[1]!.length < indent) {
         inputAt = i;
         indent = prompt[1]!.length;
@@ -768,37 +784,42 @@ export type ResolveResult =
 
 /** The existing submit-only identity check, also used to inspect startup's own paste.
  * A false result is no matching staged evidence, not proof of model consumption. */
-export function hasExpectedStagedText(pane: string | null, expected: string): boolean {
+export function hasExpectedStagedText(pane: string | null, expected: string, runtime: string | null = null): boolean {
   const norm = (s: string) => s.replace(/\s+/g, "");
+  // The composer glyph set is scoped to the runtime when known: a Claude draft's
+  // continuation line can start with a Codex glyph, and taking that line as the
+  // input marker would misread the staged text. Unknown runtimes keep the union.
+  const promptClass = composerPromptClassForRuntime(runtime);
   // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
   // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
   // prompt owns the input, and an Enter there approves the prompt. So:
   //   1. Only the pane's LAST input-marker line counts (the current input; everything above
   //      is history).
-  //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
+  //   2. A numbered-option line (`❯ 1. …`, `› 1.Yes`) is a PROMPT SELECTION, never staged
+  //      input: refuse.
   //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
   //      only when X matches the expected piece's own line count (±1 for a trailing newline).
   //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
   //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
   //      paste renders inline, possibly truncated).
   const paneLines = (pane ?? "").split("\n");
-  let currentInputAt = -1;
-  for (let i = paneLines.length - 1; i >= 0; i--) {
-    if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
-  }
+  const currentInputAt = findComposerInputLineIndex(paneLines, promptClass);
   let stagedEvidence = false;
   if (currentInputAt >= 0) {
+    // Unknown runtime: a composer block that mixes glyph kinds has no runtime to
+    // say which line is live, so fail closed exactly as the pre-union check did.
+    if (composerPromptIsAmbiguous(paneLines, currentInputAt, promptClass)) return false;
     const inputLine = paneLines[currentInputAt]!.trimStart();
-    // The region is the last ❯-line through the input box's closing separator (a box-drawing
-    // line) or pane end — wrapped input continues below the marker; everything ABOVE the
-    // marker is history and everything below the separator is hint-bar chrome.
+    // The region is the last composer-marker line through the input box's closing separator
+    // (a box-drawing line) or pane end — wrapped input continues below the marker; everything
+    // ABOVE the marker is history and everything below the separator is hint-bar chrome.
     let regionEnd = paneLines.length;
     for (let i = currentInputAt + 1; i < paneLines.length; i++) {
       const t = paneLines[i]!.trim();
       if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
     }
     const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
-    if (!/^❯\s*\d+\./.test(inputLine)) {
+    if (!composerSelectionPrefixPattern(promptClass).test(inputLine)) {
       // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
       // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
       // by the piece's own literal tail wrapped across pane lines — and the placeholder
@@ -823,7 +844,7 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
         // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
         // enough content to identify the staged state, and a bare Enter is never guessed.
         const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
-        const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
+        const residual = stripComposerPromptGlyph(norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")), promptClass);
         const pieceNorm = norm(expected);
         const sum = counts.reduce((a, b) => a + b, 0);
         // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
@@ -857,17 +878,22 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
  * numbered choice or a partial prefix. Unknown rendering is not consumption. */
 function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
   if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
+  // Fail closed for an unknown runtime: with no scoped glyph set there is no way to
+  // say which prompt line is the live input (the pre-shared-matcher check did the same).
+  if (runtime !== "codex" && runtime !== "claude-code") return false;
+  const promptClass = composerPromptClassForRuntime(runtime);
   const lines = pane.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const input = lines[i]!.trimStart();
-    if (!/^[❯›]/.test(input)) continue;
-    if (/^[❯›]\s*\d+[.)]/.test(input)) return false;
-    if (runtime === "codex" ? !input.startsWith("›") : runtime !== "claude-code" || !input.startsWith("❯")) return false;
-    const end = lines.findIndex((line, index) => index > i && (runtime === "codex"
-      ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
-    return end > i && lines.slice(i, end).join("\n").trimStart().slice(1).trim() === answer.trim();
-  }
-  return false;
+  // Only the LAST prompt line of this runtime's glyph set can be the current input;
+  // everything above it is transcript history, and another harness's glyph is not ours.
+  const inputIndex = findComposerInputLineIndex(lines, promptClass);
+  if (inputIndex < 0) return false;
+  const input = lines[inputIndex]!.trimStart();
+  // A numbered choice (`.` or `)`), e.g. `» 1)` or `❯ 1.`, is a menu selection, never the answer.
+  if (composerNumberedChoicePattern(promptClass).test(input)) return false;
+  // Where the input ends: Codex closes the composer on a blank line, Claude Code on a rule line.
+  const end = lines.findIndex((line, index) => index > inputIndex && (runtime === "codex"
+    ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
+  return end > inputIndex && lines.slice(inputIndex, end).join("\n").trimStart().slice(1).trim() === answer.trim();
 }
 
 export interface SendOpts {
@@ -1722,7 +1748,7 @@ export class SessionTransport {
       const recordMismatch = (pane: string | null): void => {
         if (!opts.requireFullStagedText || !opts.onStartupMismatch) return;
         try {
-          const evidence = startupSubmissionEvidence(pane, expected, opts.submitOnlyCaptureLines ?? 50);
+          const evidence = startupSubmissionEvidence(pane, expected, opts.submitOnlyCaptureLines ?? 50, runtime);
           if (evidence) opts.onStartupMismatch(evidence);
         } catch { /* Observation has no delivery authority. */ }
       };
@@ -1737,8 +1763,8 @@ export class SessionTransport {
         throw error; // Preserve the existing guarded/unguarded error handling.
       }
       const staged = opts.requireFullStagedText
-        ? inspectStartupStagedText(pane, expected) === "staged"
-        : hasExpectedStagedText(pane, expected);
+        ? inspectStartupStagedText(pane, expected, runtime) === "staged"
+        : hasExpectedStagedText(pane, expected, runtime);
       if (!staged) {
         recordMismatch(pane);
         return {
@@ -2075,9 +2101,12 @@ export class SessionTransport {
         // its original prefix-count verification even while a command is running.
         const terminal = runtime === "terminal";
         const { snippet, envelope } = terminal ? { snippet: text.slice(0, 40), envelope: false } : verificationSnippet(text);
+        // Only Codex gains »; all other runtimes keep the existing boundaries.
+        const promptClass = runtime === "codex" ? COMPOSER_PROMPT_CLASS : "❯›";
         const transcript = terminal ? (pane: string | null) => pane ?? ""
-          : envelope ? verificationTranscript : (pane: string | null) => normalizeVerificationText(verificationTranscript(pane));
-        const count = envelope ? countEnvelopeOccurrences : countOccurrences;
+          : (pane: string | null) => envelope ? verificationTranscript(pane, promptClass)
+            : normalizeVerificationText(verificationTranscript(pane, promptClass));
+        const count = envelope ? (pane: string, expected: string) => countEnvelopeOccurrences(pane, expected, promptClass) : countOccurrences;
         const preCount = count(transcript(preVerifyContent), snippet);
         const postCount = count(transcript(content), snippet);
         const verified = postCount > preCount;

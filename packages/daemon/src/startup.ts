@@ -43,6 +43,8 @@ import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
+import { claudeAuthStatusReader } from "./domain/provider/claude-auth-status-reader.js";
+import { ClaudeUsageWindows, latestClaudeWindowSamples } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
 import { PiResumeAdapter } from "./adapters/pi-resume.js";
 import { OmpResumeAdapter } from "./adapters/omp-resume.js";
@@ -186,7 +188,7 @@ interface DaemonOptions {
    *  listeners by binding evidence. Absent (tests/legacy) = healthz body unchanged. */
   bindPlan?: import("./domain/bind-plan.js").BindPlan;
   tmuxExec?: ExecFn;
-  /** Optional shell-free tmux executor; selected by default on Windows. */
+  /** Optional shell-free tmux executor; the default unless tmuxExec is injected. */
   argvExec?: ArgvExecFn;
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
@@ -481,8 +483,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
+  // An injected string exec keeps the shell path, so its fake sees every command. OPENRIG_TMUX_SHELL=1 keeps it too.
   const argvExec = opts?.argvExec
-    ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
+    ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
   // The real tmux runs with this process's environment, so its server is the one $TMUX names.
   // An injected exec has no server of its own: printed attach commands stay in the default form.
@@ -634,11 +637,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const piStateRoot = nodePath.join(OPENRIG_HOME, "state", "pi");
   const ompStateRoot = nodePath.join(OPENRIG_HOME, "state", "omp");
   const piRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/pi-runner.js");
+  // OPR.0.7.0.2: Pi seats report cost facts from persisted entries only while usage.pi_cost_facts is on;
+  // read at each launch and resume, so the switch takes effect at the next one.
+  const piUsageFactsEnabled = (): boolean => {
+    try { return new ContextPackSettingsStore().resolveOne("usage.pi_cost_facts").value === true; } catch { return false; }
+  };
+  // OPR.0.7.0.2 K4: Pi seats look up OpenRouter's actual charge only while usage.pi_openrouter_charge is on (and
+  // only alongside usage.pi_cost_facts); read at each launch and resume.
+  const piOpenRouterChargeEnabled = (): boolean => {
+    try { return new ContextPackSettingsStore().resolveOne("usage.pi_openrouter_charge").value === true; } catch { return false; }
+  };
   const piResume = new PiResumeAdapter(
     tmuxAdapter,
     { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
     { stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath },
-    { seatLaunchEnvironment },
+    { seatLaunchEnvironment, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled },
   );
   const ompResume = new OmpResumeAdapter(
     tmuxAdapter,
@@ -788,7 +801,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") });
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
-  const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m) }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath });
+  const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m) }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath, usageFactsEnabled: piUsageFactsEnabled, openRouterChargeEnabled: piOpenRouterChargeEnabled });
   const ompAdapter = new OmpRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
@@ -1241,11 +1254,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
-      // Slice 01: Codex usage windows, off unless provider.usage_windows is on (read per call). The reader
-      // runs only on an explicit refresh, with the PATH, HOME and CODEX_HOME a seat session gets.
+      // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The native
+      // readers (Codex's app-server; Claude's auth status, for identity) run only on an explicit refresh, with the
+      // PATH, HOME, CODEX_HOME and CLAUDE_CONFIG_DIR a seat session gets. Claude's windows are the seats' status-line
+      // samples (usage_samples), read on every view.
       usageWindows: {
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
         windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }) }),
+        claude: new ClaudeUsageWindows({
+          readIdentity: claudeAuthStatusReader({ launchPath: process.env.PATH, home: daemonHome, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
+          listSamples: () => latestClaudeWindowSamples(db),
+        }),
       },
     }),
     restoreOrchestrator,

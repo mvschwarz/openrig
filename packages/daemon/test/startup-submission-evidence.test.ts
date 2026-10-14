@@ -69,6 +69,15 @@ describe("our own collapsed startup paste", () => {
     expect(startupOwnCollapsedPaste(composer("[Pasted text #2 +28 lines]"), file)).toBe(false);
   });
 
+  // A transcript above the composer can hold another harness's glyph (a quoted Codex line); the seat's
+  // runtime scopes the region so the last Claude prompt line is still read as ours. Without a runtime
+  // the union glyph walk stays ambiguous and keeps the unknown-runtime refusal.
+  it.each(["›", "»"])("reads a Claude seat's own paste with an earlier %s transcript line", glyph => {
+    const pane = `${glyph} an earlier line from another harness\n${composer("[Pasted text #1 +95 lines]")}`;
+    expect(startupOwnCollapsedPaste(pane, prompt, "claude-code")).toBe(true);
+    expect(startupOwnCollapsedPaste(pane, prompt)).toBe(false);
+  });
+
   it.each([
     "[Pasted text #1 +94 lines]", "[Pasted text #1 +96 lines]", "[Pasted text #1]", "[Pasted text +95 lines]",
     "a person's draft [Pasted text #1 +95 lines]", "[Pasted text #1 +95 lines] and more", "a person's draft", "",

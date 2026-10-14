@@ -32,6 +32,7 @@ const SPEC_4A_ROUTES = [
   "/api/queue/recent-transitions?scope=rig&rig=openrig-build&limit=20",
   "/api/queue/recent-transitions?scope=instance&limit=20",
   "/api/health?limit=200",
+  "/api/provider/status",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -66,6 +67,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.queueRecentTransitions({ kind: "rig", rig: "openrig-build" });
     await c.queueRecentTransitions({ kind: "instance" });
     await (c as unknown as { healthFindings(): Promise<unknown> }).healthFindings();
+    await c.providerStatus();
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });
@@ -158,5 +160,33 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.startupRequest("/r1");
     expect(seen).toEqual([{ "Content-Type": "application/json" },
       { Authorization: "Bearer newly-created-test-token", "Content-Type": "application/json" }]);
+  });
+});
+
+
+describe("terminal preview width", () => {
+  it.each([undefined, 0, -1, 119.5, Infinity, NaN, 119, 120, 159, 160])("only sends a measured positive integer width: %s", async columns => {
+    const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    const requests: string[] = [];
+    try {
+      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+      Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns });
+      const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async url => {
+        requests.push(String(url));
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as typeof fetch });
+      await client.previewTerminal("saved:kernel");
+      const expected = Number.isSafeInteger(columns) && columns! > 0 ? String(columns) : null;
+      expect(new URL(requests[0]!).searchParams.get("viewportColumns")).toBe(expected);
+      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false });
+      await client.previewTerminal("saved:kernel");
+      expect(new URL(requests[1]!).searchParams.has("viewportColumns")).toBe(false);
+    } finally {
+      if (descriptor) Object.defineProperty(process.stdout, "columns", descriptor);
+      else delete (process.stdout as unknown as Record<string, unknown>)["columns"];
+      if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+      else delete (process.stdout as unknown as Record<string, unknown>)["isTTY"];
+    }
   });
 });

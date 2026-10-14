@@ -19,9 +19,9 @@ interface TmuxShellCommandOptions {
 /**
  * Argv exec: run the multiplexer WITHOUT a shell (execFile-style — the
  * binary is argv[0], the rest are verbatim arguments, no quoting layer).
- * This is the Windows/psmux path: POSIX shells, single-quote quoting and
- * `/dev/null` redirections do not exist there. Opt-in via the constructor;
- * when absent every method uses the legacy shell-string path unchanged.
+ * The daemon wires it on every platform: no shell process per call, and on
+ * Windows/psmux no POSIX quoting or `/dev/null` redirections to depend on.
+ * When absent every method uses the legacy shell-string path unchanged.
  */
 export type ArgvExecFn = (argv: string[]) => Promise<string>;
 
@@ -39,11 +39,25 @@ export interface TmuxFileOps {
   bufferName(): string;
 }
 
-function defaultTmuxFileOps(): TmuxFileOps {
+// One source for the staged script's name: the generator (defaultTmuxFileOps) and the matcher
+// (isStagedSendScriptPath) are both built from it.
+const SEND_SCRIPT_PREFIX = "openrig-tmux-send-";
+const SEND_SCRIPT_SUFFIX = ".txt";
+const SEND_SCRIPT_NAME = new RegExp(
+  `^${SEND_SCRIPT_PREFIX}\\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}${SEND_SCRIPT_SUFFIX.replace(".", "\\.")}$`,
+);
+
+/** Whether `path` names a launch script sendShellCommand staged (an absolute path with the name
+ *  defaultTmuxFileOps gives it). The script removes itself first, so this is a name check only. */
+export function isStagedSendScriptPath(path: string): boolean {
+  return path.startsWith("/") && SEND_SCRIPT_NAME.test(path.split("/").pop() ?? "");
+}
+
+export function defaultTmuxFileOps(): TmuxFileOps {
   return {
     writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
     unlink: (p) => fsUnlink(p),
-    tmpName: () => pathJoin(tmpdir(), `openrig-tmux-send-${process.pid}-${randomUUID()}.txt`),
+    tmpName: () => pathJoin(tmpdir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
     bufferName: () => `openrig_${process.pid}_${randomUUID().replace(/-/g, "")}`,
   };
 }

@@ -15,7 +15,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, classifyStyledFrame, probeSessionActivity, promptTextIsFaint, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, classifyStyledFrame, hasExpectedStagedText, inspectStartupStagedText, probeSessionActivity, promptTextIsFaint, SessionTransport } from "../src/domain/session-transport.js";
 import { SeatDeliveryGuard, resolveGuardTarget, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
@@ -78,6 +78,18 @@ describe("agent pane activity classifier", () => {
     const result = classifyPaneActivity([
       "  Tip: You can resume a previous conversation by running codex resume",
       "› Ask Codex to do anything",
+      "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
+      "  ← for agents · ? for shortcuts                       ⚠ 1 warning · f2 to view",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_prompt");
+  });
+
+  it("classifies an idle Codex 0.153 `»` composer placeholder as agent_idle", () => {
+    const result = classifyPaneActivity([
+      "  Tip: You can resume a previous conversation by running codex resume",
+      "» Ask Codex to do anything",
       "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
       "  ← for agents · ? for shortcuts                       ⚠ 1 warning · f2 to view",
     ].join("\n"));
@@ -363,6 +375,109 @@ describe("agent pane activity classifier", () => {
     expect(result.state).toBe("unknown");
     expect(result.reason).toBe("empty_capture");
   });
+
+  // #79 — Codex 0.153 variants draw the composer prompt as `»`. The shared
+  // glyph set (composer-prompts.ts) must classify it exactly like `❯`/`›`.
+  it("classifies a `»` composer as idle", () => {
+    const result = classifyPaneActivity(["prior output", "» "].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_prompt");
+  });
+
+  it("classifies a `»` draft above the Codex footer as a prompt draft", () => {
+    const result = classifyPaneActivity([
+      "prior output",
+      "» half typed input",
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("prompt_draft");
+  });
+
+  it("classifies a `»` numbered selection as attention", () => {
+    const result = classifyPaneActivity(["» 1. Yes", "  2. No"].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("selection_prompt");
+  });
+});
+
+describe("shared composer matchers", () => {
+  it("hasExpectedStagedText matches Claude `❯` staged text", () => {
+    expect(hasExpectedStagedText("prior\n❯ deploy the release\n────────────\nhint", "deploy the release", "claude-code")).toBe(true);
+  });
+
+  it("hasExpectedStagedText matches Codex `›` staged text", () => {
+    expect(hasExpectedStagedText("prior\n› deploy the release\n", "deploy the release", "codex")).toBe(true);
+  });
+
+  it("hasExpectedStagedText matches Codex 0.153 `»` staged text", () => {
+    expect(hasExpectedStagedText("prior\n» deploy the release\n", "deploy the release", "codex")).toBe(true);
+  });
+
+  it("hasExpectedStagedText reads a Claude draft whose continuation starts with a Codex glyph", () => {
+    const pane = [
+      "prior output",
+      "❯ please check this:",
+      "› run the tests",
+      "────────────",
+      "hint bar",
+    ].join("\n");
+    // Runtime-scoped markers: the `›` continuation is part of the Claude draft,
+    // not a second composer. The union-only read would take the `›` line as the
+    // input marker and lose the drafted head.
+    expect(hasExpectedStagedText(pane, "please check this:\n› run the tests", "claude-code")).toBe(true);
+  });
+
+  it("hasExpectedStagedText never treats a numbered selection as staged input", () => {
+    expect(hasExpectedStagedText("prior\n❯ 1. Yes\n", "Yes", "claude-code")).toBe(false);
+    expect(hasExpectedStagedText("prior\n» 1. Yes\n", "Yes", "codex")).toBe(false);
+    // The broad prefix exclusion also catches compact options (`1.Yes`), which
+    // the draft/selection classifier's spaced pattern deliberately does not.
+    expect(hasExpectedStagedText("prior\n❯ 1.Yes\n", "Yes", "claude-code")).toBe(false);
+    expect(hasExpectedStagedText("prior\n› 2.No\n", "2.No", "codex")).toBe(false);
+  });
+
+  it("inspectStartupStagedText reads a `»` composer body", () => {
+    const pane = [
+      "Previous turn",
+      "» hello world",
+      "────────────",
+      "shift+tab to cycle",
+    ].join("\n");
+
+    expect(inspectStartupStagedText(pane, "hello world", "codex")).toBe("staged");
+    expect(inspectStartupStagedText(pane, "something else", "codex")).toBe("unverified");
+  });
+
+  it("inspectStartupStagedText excludes a compact numbered option", () => {
+    const pane = ["Previous turn", "❯ 1.Yes", "────────────", "shift+tab to cycle"].join("\n");
+
+    expect(inspectStartupStagedText(pane, "1.Yes", "claude-code")).toBe("unverified");
+  });
+
+  // Review round 2 (mvschwarz on #635): with no runtime there is no way to say
+  // which mixed-glyph line is the live composer, so the union read must fail
+  // closed exactly as the pre-shared-matcher check did.
+  it("unknown runtime refuses a mixed-glyph composer block", () => {
+    const separators: string[][] = [[], [""], ["────────────"]];
+    for (const separator of separators) {
+      for (const glyph of ["›", "»"]) {
+        const pane = [
+          "❯ unrelated first line",
+          ...separator,
+          `${glyph} expected text`,
+          "────────────",
+          "shift+tab to cycle",
+        ].join("\n");
+
+        expect(hasExpectedStagedText(pane, "expected text")).toBe(false);
+        expect(inspectStartupStagedText(pane, "expected text")).toBe("unverified");
+      }
+    }
+  });
 });
 
 function setupDb(): Database.Database {
@@ -428,10 +543,10 @@ describe("SessionTransport", () => {
     });
   }
 
-  function seedCanonicalRig() {
+  function seedCanonicalRig(runtime = "claude-code") {
     const rig = rigRepo.createRig("my-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", {
-      role: "worker", runtime: "claude-code",
+      role: "worker", runtime,
     });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@my-rig");
     sessionRegistry.updateStatus(session.id, "running");
@@ -773,6 +888,82 @@ describe("SessionTransport", () => {
     const tmux = mockTmux({
       sendKeys: async () => { submitted = true; return { ok: true }; },
       capturePaneContent: async () => submitted ? "❯ " + message.split("\n").join("\n  ") : "❯ ",
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
+  });
+
+  it.each(["❯", "›", "»"].flatMap(glyph =>
+    ["raw staged", "raw submitted", "envelope staged", "envelope submitted", "quoted draft", "quoted prompt in draft", "after reply", "flat transcript boundary"]
+      .map(mode => [glyph, mode] as const),
+  ))("send verification recognises composer %s: %s", async (glyph, mode) => {
+    seedCanonicalRig(glyph === "❯" ? "claude-code" : "codex");
+    const message = mode.startsWith("raw") ? "Please check this task."
+      : "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nPlease check this task.";
+    const render = (text: string) => glyph + " " + text.split("\n").join("\n  ");
+    const verified = mode === "raw submitted" || mode === "envelope submitted" || mode === "after reply" || mode === "flat transcript boundary";
+    let submitted = false;
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async () => {
+        if (!submitted) return "Prior output\n" + glyph + " ";
+        if (mode === "quoted draft") return glyph + " Check this envelope:\n  " + message.split("\n").join("\n  ");
+        if (mode === "quoted prompt in draft") return render(message) + "\n  " + glyph + " quoted prompt";
+        if (mode === "flat transcript boundary") return message + "\n" + glyph + " previous input\nAgent reply\n" + glyph + " ";
+        const previous = mode === "after reply"
+          ? render(message.replace("Please check this task.", "A different task.")) + "\nAgent reply\n" : "";
+        return previous + render(message) + (verified ? "\n" + glyph + " " : "");
+      },
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified,
+      outcome: verified ? "delivered" : "rendered-unconfirmed" });
+  });
+
+  it.each([
+    ["raw", "same-column below draft"], ["raw", "below framed draft"],
+    ["envelope", "same-column below draft"], ["envelope", "below framed draft"],
+    ["envelope", "assistant quoted envelope"],
+    ["envelope", "flat body »"], ["envelope", "flat body ›"], ["envelope", "flat body ❯"],
+  ])("Claude verification keeps existing boundaries: %s %s", async (kind, shape) => {
+    const rig = rigRepo.createRig("verification");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const address = "worker@verification";
+    const session = sessionRegistry.registerSession(node.id, address);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: address });
+    let message = kind === "raw" ? "Check the blue ledger, then report its total."
+      : `From: sender@fixture\nTo: ${address}\nSent: 10-13 10:00Z\n---\nCheck the blue ledger.\nReport its total.\n---\n↩ Reply: rig send sender@fixture "..."`;
+    const render = (glyph: string, text: string) => glyph + " " + text.split("\n").join("\n  ");
+    let post = render("❯", message) + "\n» reply quotation below live input";
+    if (shape === "below framed draft") post = "────────────────────\n" + render("❯", message) + "\n────────────────────\n? for shortcuts\n» later quote";
+    if (shape === "assistant quoted envelope") post = "❯ Different request\nAssistant reply with quotation:\n" + render("»", message) + "\n❯ ";
+    if (shape.startsWith("flat body")) {
+      message = message.replace("Check the blue ledger.", shape.slice(-1) + " Check the blue ledger.");
+      post = message + "\n❯ ";
+    }
+    let submitted = false;
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async () => submitted ? post : "❯ ",
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined }).send(address, message, { verify: true });
+    const verified = shape === "flat body »";
+    expect(result).toMatchObject({ ok: true, verified,
+      outcome: verified ? "delivered" : "rendered-unconfirmed" });
+  });
+
+  it("unknown-runtime verification keeps existing boundaries", async () => {
+    const { node } = seedCanonicalRig();
+    db.prepare("UPDATE nodes SET runtime = NULL WHERE id = ?").run(node.id);
+    expect(db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(node.id)).toEqual({ runtime: null });
+    const message = "Check the blue ledger, then report its total.";
+    let submitted = false;
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async () => submitted ? "❯ " + message + "\n» reply quotation below live input" : "❯ ",
     });
     const result = await createTransport(tmux, { sleep: async () => undefined })
       .send("dev-impl@my-rig", message, { verify: true });
@@ -1425,25 +1616,39 @@ describe("SessionTransport", () => {
       sessionName: "dev-impl@my-rig",
       hookEvent: "UserPromptSubmit",
     });
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
-      sendText: sendTextSpy,
-    });
-    const transport = createTransport(tmux, {
-      agentActivityStore,
-      waitForIdlePollMs: 1,
-    });
+    // This tests the classification of fresh hook evidence and expiry AFTER a running observation, not
+    // classification speed: freeze the deadline clock and its race timer, and advance only at the poll,
+    // as the 1 ms expiry tests above do. A real 1 ms wait discards a first observation that a slow runner
+    // can't finish in time, and then reads target_activity_unknown.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({
+        capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+        sendText: sendTextSpy,
+      });
+      const sleep = vi.fn(async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); });
+      const transport = createTransport(tmux, {
+        agentActivityStore,
+        sleep,
+        waitForIdlePollMs: 1,
+      });
 
-    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("wait_for_idle_timeout");
-    expect(result.sent).toBe(false);
-    expect(result.activity?.state).toBe("running");
-    expect(result.activity?.reason).toBe("user_prompt_submit");
-    expect(result.activity?.evidenceSource).toBe("runtime_hook");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("wait_for_idle_timeout");
+      expect(result.sent).toBe(false);
+      expect(result.activity?.state).toBe("running");
+      expect(result.activity?.reason).toBe("user_prompt_submit");
+      expect(result.activity?.evidenceSource).toBe("runtime_hook");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.attempts).toBe(2);
+      expect(result.waitedMs).toBe(1);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("send with wait-for-idle hard-stops on fresh permission prompt hook evidence", async () => {

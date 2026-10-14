@@ -105,6 +105,9 @@ import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_trans
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
 import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
+import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
+import { piUsageEntriesSchema } from "./migrations/107_pi_usage_entries.js";
+import { piUsageChargesSchema } from "./migrations/108_pi_usage_charges.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -209,4 +212,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsRecoveryTagsSchema,
   resumeRotationSchema,
   sessionStopIntentSchema,
+  usageSamplesClientCostSchema,
+  piUsageEntriesSchema,
+  piUsageChargesSchema,
 ];

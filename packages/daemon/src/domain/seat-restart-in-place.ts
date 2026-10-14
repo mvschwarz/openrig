@@ -3,7 +3,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
 import type BetterSqlite3 from "better-sqlite3";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { isStagedSendScriptPath, type TmuxAdapter } from "../adapters/tmux.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -395,9 +395,13 @@ export class CodexInPlaceRestart {
     const top = chain.at(-1)!;
     const root = rows.find((row) => row.pid === panePid);
     let paneShape: PaneShape;
+    // OpenRig types a Codex launch (and this restart's relaunch) as `/bin/sh <staged script>`, so a managed
+    // Codex runs one sh below the pane's shell. Only that script is accepted between them.
+    const between = rows.find((row) => row.pid === top.ppid);
+    const viaLaunchScript = !!between && between.ppid === panePid && isStagedLaunchScript(between);
     if (top.pid === panePid) paneShape = "direct_native";
-    else if (root && top.ppid === panePid && isShellForeground(executableBase(root))) paneShape = "shell_backed";
-    else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex nor Codex itself; nothing was stopped." };
+    else if (root && (top.ppid === panePid || viaLaunchScript) && isShellForeground(executableBase(root))) paneShape = "shell_backed";
+    else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex (directly or through OpenRig's own launch script) nor Codex itself; nothing was stopped." };
 
     // Where the relaunched Codex would run, and with which home.
     let cwd: string;
@@ -725,6 +729,16 @@ function readResumeToken(db: BetterSqlite3.Database, sessionId: string): string 
 function executableBase(row: NativeProcessRow): string {
   const name = row.executableName ?? processArgv(row.command)[0] ?? "";
   return (name.split("/").pop() ?? name).replace(/^-/, "");
+}
+
+/** The shells `/bin/sh` can run as. macOS's /bin/sh is a shim that runs bash (or dash or zsh, if so
+ *  configured), so the OS names the staged script's process after that shell, not sh. */
+const SH_RUNS_AS = new Set(["sh", "bash", "dash", "zsh"]);
+
+/** `/bin/sh <path>` running a launch script that OpenRig's tmux adapter staged, and nothing else. */
+function isStagedLaunchScript(row: NativeProcessRow): boolean {
+  const argv = processArgv(row.command);
+  return SH_RUNS_AS.has(executableBase(row)) && argv.length === 2 && /^(?:\/bin\/)?sh$/.test(argv[0]!) && isStagedSendScriptPath(argv[1]!);
 }
 
 /** The Codex process and its Codex launcher ancestors, deepest first, up to the pane root. */

@@ -12,6 +12,7 @@ import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
+import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -36,7 +37,8 @@ export interface QueueDeps extends StatusDeps {
 }
 
 interface DeliveryResultBase {
-  /** human: a human-seat or @external address, or a row the gateway owns. agent: any other seat. */
+  /** human: a human-seat or @external address, a row the gateway owns, or a seat the gateway also
+   *  posts to (a registered person with a pane). agent: any other seat. */
   destinationKind: "agent" | "human";
   /** Human destinations only. No receipt can prove that a person read the message. */
   humanReadership?: "unknown";
@@ -66,6 +68,9 @@ export interface TerminalDeliveryResult extends DeliveryResultBase {
   /** A claim shows the seat took the item; it does not prove the body was read.
    *  pickup is the daemon's derived pickup receipt state, as the row reports it. */
   claim: { observed: boolean; claimedAt: string | null; pickup: string | null };
+  /** Present when the gateway may also post this row: a registered person who is also a seat with
+   *  its own pane. The Slack receipt, kept apart from the terminal side; posted is not read. */
+  gateway?: GatewayReceipt;
 }
 
 export type VerifiedDeliveryResult = GatewayDeliveryResult | TerminalDeliveryResult;
@@ -82,20 +87,46 @@ function stringField(row: QueueRow, key: string): string | null {
   return typeof row[key] === "string" ? row[key] as string : null;
 }
 
-/** The row's own signals decide who owns delivery: a gateway receipt, then the recorded wake
- *  result, then the daemon's destination class (present before any wake, e.g. --no-nudge). The
- *  address pattern is only the fallback for a daemon that reports none of these. */
+/** The row's own signals decide who owns delivery: the recorded wake result, then the daemon's
+ *  destination class (present before any wake, e.g. --no-nudge), then a gateway receipt. The
+ *  address pattern is only the fallback for a daemon that reports none of these. A gateway
+ *  receipt beside a terminal signal adds a gateway side (gatewayAlsoPosts); it doesn't replace it. */
 function receiptSourceOf(destination: string | null, row: QueueRow): "gateway" | "terminal" {
-  if (stringField(row, "deliveryOutcome") !== null) return "gateway";
   const wakeResult = stringField(row, "lastNudgeResult");
   if (wakeResult !== null) return wakeResult.startsWith("gateway-owned:") ? "gateway" : "terminal";
   const destinationClass = stringField(row, "destinationClass");
   if (destinationClass !== null) return destinationClass === "gateway-routable" ? "gateway" : "terminal";
+  if (stringField(row, "deliveryOutcome") !== null) return "gateway";
   return destination !== null && isHumanSeatSessionRef(destination) ? "gateway" : "terminal";
 }
 
-function destinationKindOf(destination: string | null, source: "gateway" | "terminal"): "agent" | "human" {
-  return source === "gateway" || (destination !== null && isHumanSeatSessionRef(destination)) ? "human" : "agent";
+/** A terminal destination the gateway may also post to (a registered person who is also a seat
+ *  with a pane): the row carries the owner notification level the Slack selector keys on, or a
+ *  gateway receipt already exists. */
+function gatewayAlsoPosts(row: QueueRow): boolean {
+  return stringField(row, "ownerNotificationLevel") !== null || stringField(row, "deliveryOutcome") !== null;
+}
+
+/** A terminal destination is a person when the gateway also posts to it or its address is a human seat's. */
+function terminalDestinationKind(destination: string | null, gatewaySide: boolean): "agent" | "human" {
+  return gatewaySide || (destination !== null && isHumanSeatSessionRef(destination)) ? "human" : "agent";
+}
+
+/** The gateway (Slack connector) receipt on the row, in one place for both result shapes. */
+interface GatewayReceipt {
+  outcome: "posted" | "transport-failed" | "never-posted" | "still-pending";
+  connectorAccepted: boolean | null;
+  detail?: string;
+}
+
+function gatewayReceiptOf(row: QueueRow): GatewayReceipt {
+  const outcome = stringField(row, "deliveryOutcome");
+  if (outcome === "posted") return { outcome, connectorAccepted: true };
+  if (outcome === "transport-failed" || outcome === "never-posted") {
+    const detail = stringField(row, "deliveryFailureDetail");
+    return { outcome, connectorAccepted: false, ...(detail ? { detail } : {}) };
+  }
+  return { outcome: "still-pending", connectorAccepted: null };
 }
 
 function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult["outcome"] {
@@ -137,8 +168,16 @@ function terminalDeliveryResult(
   const claimText = claim.observed
     ? `Claimed at ${claimedAt}${pickupState ? ` (pickup ${pickupState})` : ""}. A claim shows the seat took the item; it does not prove the body was read.`
     : waitedMs === null ? "No claim observed yet." : `No claim observed within ${waitedMs}ms.`;
-  const notFailed = !claim.observed && isKnownUnconfirmed(wakeResult, outcome) ? " This is not a failed handoff." : "";
-  const destinationKind = destinationKindOf(destination, "terminal");
+  const gatewaySide = gatewayAlsoPosts(row);
+  const gateway = gatewaySide ? gatewayReceiptOf(row) : null;
+  const slackText = gateway === null ? ""
+    : gateway.outcome === "posted" ? " Slack receipt: posted."
+    : gateway.outcome === "still-pending" ? (waitedMs === null ? " No Slack receipt yet." : ` No Slack receipt within ${waitedMs}ms.`)
+    : ` Slack delivery ${gateway.outcome}${gateway.detail ? `: ${gateway.detail}` : ""}.`;
+  const gatewayFailed = gateway !== null && gateway.connectorAccepted === false;
+  const notFailed = !claim.observed && !gatewayFailed && isKnownUnconfirmed(wakeResult, outcome) ? " This is not a failed handoff." : "";
+  const destinationKind = terminalDestinationKind(destination, gatewaySide);
+  const settled = claim.observed && (gateway === null || gateway.outcome === "posted");
   return {
     receiptSource: "terminal",
     destinationKind,
@@ -146,8 +185,9 @@ function terminalDeliveryResult(
     outcome,
     wakeResult,
     claim,
-    detail: `The qitem is saved. ${receipt[outcome]} ${claimText}${notFailed}`,
-    nextAction: claim.observed ? null : outcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
+    ...(gateway ? { gateway } : {}),
+    detail: `The qitem is saved. ${receipt[outcome]}${slackText} ${claimText}${notFailed}`,
+    nextAction: settled ? null : outcome === "retained" ? `rig seat held-messages ${seat}` : `rig queue show ${qitemId} --json`,
   };
 }
 
@@ -213,13 +253,8 @@ export async function waitForDeliveryOutcome(
         };
       }
       if (outcome === "transport-failed" || outcome === "never-posted") {
-        return {
-          ...gateway,
-          outcome,
-          connectorAccepted: false,
-          detail: stringField(row, "deliveryFailureDetail") ?? undefined,
-          nextAction: `rig queue show ${qitemId} --json`,
-        };
+        const { detail } = gatewayReceiptOf(row);
+        return { ...gateway, outcome, connectorAccepted: false, ...(detail ? { detail } : {}), nextAction: `rig queue show ${qitemId} --json` };
       }
       if (timedOut) {
         return {
@@ -232,13 +267,15 @@ export async function waitForDeliveryOutcome(
       }
     } else {
       // --no-nudge requested no wake: there is no terminal receipt to wait for.
-      if (target.nudge === false) return terminalDeliveryResult(qitemId, destination, row, "not-requested", null);
       const wakeResult = stringField(row, "lastNudgeResult");
-      const outcome = terminalWakeOutcome(wakeResult);
-      // Any recorded wake result (or an existing claim) ends the wait: a later pickup is
-      // `rig queue show`'s to report. Only a missing wake result waits up to the bound.
-      // Nothing here re-sends the wake.
-      if (wakeResult !== null || stringField(row, "claimedAt") !== null) {
+      const outcome = target.nudge === false ? "not-requested" : terminalWakeOutcome(wakeResult);
+      // Any recorded wake result (or an existing claim) settles the terminal side: a later pickup
+      // is `rig queue show`'s to report. When the gateway may also post the row, its receipt is
+      // awaited too. Only a missing receipt waits, up to the bound. Nothing here re-sends anything.
+      const gatewaySide = gatewayAlsoPosts(row);
+      const terminalSettled = outcome === "not-requested" || wakeResult !== null || stringField(row, "claimedAt") !== null;
+      const gatewaySettled = !gatewaySide || stringField(row, "deliveryOutcome") !== null;
+      if (terminalSettled && gatewaySettled) {
         return terminalDeliveryResult(qitemId, destination, row, outcome, null);
       }
       if (timedOut) return terminalDeliveryResult(qitemId, destination, row, outcome, timeoutMs);
@@ -647,7 +684,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
-    .option("--verify", "Boundedly wait after persistence for the existing receipt: the gateway receipt for a human destination, or the wake result and any claim for an agent. Never retries the create or the wake, and never claims the message was read")
+    .option("--verify", "Boundedly wait after persistence for the existing receipts: the gateway receipt for a person, or the wake result and any claim already present for a seat, plus the gateway receipt when the gateway may also post to that seat (a registered person with a pane; eligible to post, not guaranteed). Never retries the create or the wake, and never claims the message was read")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
@@ -1304,9 +1341,15 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         const fullCommand = `rig queue show ${shellQuote(qitemId)} --full --json`;
         const view = readView(item, fullCommand, bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []);
         const transformed = { ...item, body: preview, bodyBytes, bodyTruncated, readView: view };
-        printResult(json, transformed, res.status);
+        // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
+        const compact = compactOutputEnabled() ? compactShow(transformed) : null;
+        printResult(json, compact ? compact.item : transformed, res.status);
         if (!json && bodyTruncated) {
           console.log(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
+        }
+        if (compact && compact.emptyOmitted.length > 0) {
+          const notice = showEmptyNotice(compact.emptyOmitted, fullCommand);
+          if (json) console.error(notice); else console.log(notice);
         }
       });
     });
@@ -1315,10 +1358,19 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .command("transitions <qitemId>")
     .description("Show the append-only transition log for a qitem")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { json?: boolean }) => {
+    .option("--full", `The whole log, as today, even when output.compact is on (compact shows the latest transitions, ${TRANSITIONS_SHOWN} in all, always including the current disposition)`)
+    .action(async (qitemId: string, opts: { json?: boolean; full?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`);
+        // Slice 15 P3: with output.compact on, the recent story; the notice goes to stderr so it stays
+        // visible when the array is piped through jq.
+        if (!opts.full && res.status < 400 && Array.isArray(res.data) && compactOutputEnabled()) {
+          const { transitions, earlier } = compactTransitions(res.data as Record<string, unknown>[]);
+          printResult(opts.json ?? false, transitions, res.status);
+          if (earlier > 0) console.error(transitionsNotice(earlier, res.data.length, `rig queue transitions ${shellQuote(qitemId)} --full${opts.json ? " --json" : ""}`));
+          return;
+        }
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });

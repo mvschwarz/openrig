@@ -4,6 +4,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
@@ -367,11 +368,14 @@ export class SeatLifecycleService {
       const probed = await this.probeLiveness(name, "clean refuses rather than clear state under a possibly-live seat");
       if ("code" in probed) return probed;
       if (probed.state === "present") {
+        const latest = this.latestSession(resolved.nodeId);
         return {
           ok: false,
           code: "session_live",
           message: `Session "${name}" is alive in tmux (checked: tmux has-session, against EVERY session row clean would mutate) — clean only operates on dead seats.`,
-          guidance: "Stop a live seat first with: rig seat stop",
+          guidance: latest?.session_name === name && latest.origin !== "claimed"
+            ? "Stop a live seat first with: rig seat stop"
+            : `Check that session (rig capture -- ${shellQuote(name)}) and end it yourself if it is no longer needed, then retry; rig seat stop targets the seat's latest session, not a selected historical session.`,
         };
       }
     }

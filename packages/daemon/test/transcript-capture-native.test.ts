@@ -101,7 +101,15 @@ it.skipIf(!nativeAvailable)("keeps real idle transcript health fresh across a va
     await run("send-keys", "-t", "seat", "-l", "idle seed αβ"); await run("send-keys", "-t", "seat", "Enter");
     await wait(100);
     startTranscriptRotation(adapter, "seat", file, { lines: 1000, pollIntervalMs: 2000 }, () => ({ lines: 1000, pollIntervalMs: 2000 }));
-    await wait(200);
+    // The first capture runs two real tmux execs and a write before the transcript exists (until then health reads
+    // capture_missing). Wait for that condition, not a fixed time: a loaded runner can take well over 200 ms.
+    const firstBy = Date.now() + 10_000;
+    let first = store.getIngestHealth("rig", "seat");
+    while (first.reason !== "capture_fresh" && Date.now() < firstBy) {
+      await wait(50);
+      first = store.getIngestHealth("rig", "seat");
+    }
+    expect(first, "the first capture landed within 10 s").toMatchObject({ state: "live", reason: "capture_fresh" });
     const until = Date.now() + 25_000;
     while (Date.now() < until) {
       expect(store.getIngestHealth("rig", "seat")).toMatchObject({ state: "live", reason: "capture_fresh" });
@@ -114,4 +122,4 @@ it.skipIf(!nativeAvailable)("keeps real idle transcript health fresh across a va
     await run("kill-server").catch(() => {});
     rmSync(root, { recursive: true, force: true });
   }
-}, 35_000);
+}, 45_000);

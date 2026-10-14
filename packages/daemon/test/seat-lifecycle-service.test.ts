@@ -471,7 +471,7 @@ describe("SeatLifecycleService", () => {
     expect(liveResult.ok).toBe(false);
     if (liveResult.ok) throw new Error("expected refusal");
     expect(liveResult.code).toBe("session_live");
-    expect(liveResult.guidance).toContain("stop");
+    expect(liveResult.guidance).toBe("Stop a live seat first with: rig seat stop");
     expect(sessionRegistry.getBindingForNode(live.node.id)).not.toBeNull();
 
     const probed = seatFixture("s5-rig", "dev.flaky");
@@ -491,6 +491,88 @@ describe("SeatLifecycleService", () => {
     expect(nothing.code).toBe("nothing_to_clean");
     expect(nothing.message).toMatch(/binding/i);
     expect(nothing.message).toMatch(/session/i);
+  });
+
+  it.each([true, false])("clean names the older live blocker when the latest session is live=%s", async (latestAlive) => {
+    // Distinct registration times make the same ordering used by stop deterministic.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() - 1000);
+    let older: ReturnType<typeof seatFixture>;
+    try { older = seatFixture("s5-rig", "dev.impl"); } finally { clock.mockRestore(); }
+    const newerName = "dev-impl-v2@s5-rig";
+    const newer = sessionRegistry.registerSession(older.node.id, newerName);
+    sessionRegistry.updateStatus(newer.id, "running");
+    sessionRegistry.updateBinding(older.node.id, { attachmentType: "tmux", tmuxSession: newerName, tmuxPane: "%2" });
+    tmux.setAlive(newerName, latestAlive);
+    const snapshot = () => ({
+      sessions: db.prepare("SELECT * FROM sessions WHERE node_id = ? ORDER BY id").all(older.node.id),
+      binding: sessionRegistry.getBindingForNode(older.node.id),
+      lineage: lineageSnapshot(db, older.node.id),
+    });
+    const before = snapshot();
+
+    const result = await service.cleanSeat({ seatRef: newerName, reason: "inspect stale history" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected live-session refusal");
+    expect(result.code).toBe("session_live");
+    expect(result.message).toContain(older.sessionName);
+    expect(snapshot()).toEqual(before);
+    expect(eventsOfType(db, "session.cleaned")).toHaveLength(0);
+    expect(tmux.killed).toEqual([]);
+
+    // The old advice cannot clear this blocker: stop selects the newer row.
+    const stopped = await service.stopSeat({ seatRef: newerName, reason: "demonstrate stop target" });
+    expect(stopped.ok).toBe(latestAlive);
+    if (!stopped.ok) expect(stopped.code).toBe("session_not_live");
+    expect(tmux.killed).toEqual(latestAlive ? [newerName] : []);
+    const retry = await service.cleanSeat({ seatRef: newerName, reason: "retry after stop" });
+    expect(retry).toMatchObject({ ok: false, code: "session_live" });
+    expect(await tmux.adapter.hasSession(older.sessionName)).toBe(true);
+
+    expect(result.guidance).toContain(`rig capture -- '${older.sessionName}'`);
+    expect(result.guidance).toContain("end it yourself if it is no longer needed");
+    expect(result.guidance).toContain("retry");
+    expect(result.guidance).toContain("rig seat stop targets the seat's latest session");
+    expect(result.guidance).not.toContain("Stop a live seat first");
+  });
+
+  it("clean also names a live binding target that stop cannot select", async () => {
+    const seat = seatFixture("s5-rig", "dev.impl");
+    sessionRegistry.updateStatus(seat.session.id, "exited");
+    tmux.setAlive(seat.sessionName, false);
+    const bindingName = "dev-impl-bound@s5-rig";
+    sessionRegistry.updateBinding(seat.node.id, { attachmentType: "tmux", tmuxSession: bindingName, tmuxPane: "%2" });
+    tmux.setAlive(bindingName, true);
+
+    const result = await service.cleanSeat({ seatRef: "dev.impl", reason: "inspect stale binding" });
+    expect(result).toMatchObject({ ok: false, code: "session_live" });
+    if (result.ok) throw new Error("expected live-binding refusal");
+    expect(result.guidance).toContain(`rig capture -- '${bindingName}'`);
+    expect(result.guidance).not.toContain("Stop a live seat first");
+    expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxSession).toBe(bindingName);
+    expect(tmux.killed).toEqual([]);
+    expect(eventsOfType(db, "session.cleaned")).toHaveLength(0);
+  });
+
+  it.each([
+    ["personal terminal", "'personal terminal'"],
+    ["personal'terminal", "'personal'\"'\"'terminal'"],
+    ["-old", "'-old'"],
+  ])("clean quotes adopted live binding %s whose latest row is terminal", async (name, quoted) => {
+    const seat = seatFixture("s5-rig", "dev.impl", { origin: "claimed" });
+    db.prepare("UPDATE sessions SET session_name = ?, status = 'exited' WHERE id = ?").run(name, seat.session.id);
+    sessionRegistry.updateBinding(seat.node.id, { attachmentType: "tmux", tmuxSession: name, tmuxPane: "%1" });
+    tmux.setAlive(seat.sessionName, false);
+    tmux.setAlive(name, true);
+    const result = await service.cleanSeat({ seatRef: "dev.impl", reason: "inspect adopted binding" });
+    expect(result).toMatchObject({ ok: false, code: "session_live" });
+    if (result.ok) throw new Error("expected live-binding refusal");
+    expect(result.guidance).toContain(`rig capture -- ${quoted}`);
+    expect(result.guidance).not.toContain("Stop a live seat first");
+    expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxSession).toBe(name);
+    const stopped = await service.stopSeat({ seatRef: "dev.impl", reason: "demonstrate adopted refusal" });
+    expect(stopped).toMatchObject({ ok: false, code: "claimed_session" });
+    expect(tmux.killed).toEqual([]);
+    expect(eventsOfType(db, "session.cleaned")).toHaveLength(0);
   });
 
   // ---- Wave-2 fix round 1 (r1 BLOCKING, row 9baac99f) — transport blip vs the REAL adapter ----
