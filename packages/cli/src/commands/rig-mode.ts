@@ -85,6 +85,7 @@ interface ListResponse {
 interface EffectiveResponse {
   operatingPosture?: OperatingPosture;
   effective: { binding: BindingResponse["binding"]; resolvedScope: Scope } | null;
+  categories?: { mode: BindingResponse["binding"] | null; posture: BindingResponse["binding"] | null };
   posture: "known" | "unknown_posture";
   hint?: string;
 }
@@ -97,6 +98,31 @@ async function withClient<T>(
   if (!daemonStatusGuard(status)) return undefined;
   const client = deps.clientFactory(getDaemonUrl(status));
   return fn(client);
+}
+
+type Binding = BindingResponse["binding"];
+type Category = "mode" | "posture";
+/** A saved legacy mode and an operating posture are kept separately at one target. */
+function categoryOf(mode: string): Category {
+  return mode === "human-led" || mode === "delegated" ? "posture" : "mode";
+}
+
+/** Each category's binding at this exact target, or null when it couldn't be read (any failure: the preview then
+ *  stays as it was). A daemon without per-category reads returns its one binding, read as that binding's category. */
+async function currentAtTarget(client: DaemonClient, scope: string, qualifier: string | null): Promise<(Record<Category, Binding | null> & { stored: string }) | null> {
+  try {
+    const res = await client.get<{ binding?: Binding; bindings?: Binding[] }>(`/api/rig-mode/bindings/${scope}${qualifier ? `/${encodeURIComponent(qualifier)}` : ""}`);
+    const asked = `${scope}${qualifier ? ` ${qualifier}` : ""}`;
+    if (res.status === 404) return { mode: null, posture: null, stored: asked };
+    if (res.status >= 400) return null;
+    const all = res.data.bindings ?? (res.data.binding ? [res.data.binding] : []);
+    // The daemon reads the qualifier as given and canonicalises only when nothing is stored under it, so name the
+    // stored target it answered for: a binding kept under another spelling of the same rig isn't in this answer.
+    const stored = all[0] ? `${scope}${all[0].qualifier ? ` ${all[0].qualifier}` : ""}` : asked;
+    return { mode: all.find((b) => categoryOf(b.mode) === "mode") ?? null, posture: all.find((b) => categoryOf(b.mode) === "posture") ?? null, stored };
+  } catch {
+    return null;
+  }
 }
 
 function emitRecord(label: string, record: Record<string, string>): void {
@@ -293,14 +319,22 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         };
 
         if (!opts.confirm) {
-          // Restate-and-confirm (HG-7). No daemon write.
+          // Restate-and-confirm (HG-7). No daemon write. What's at this target now is read on a best-effort basis: a
+          // read that fails leaves the preview as it was, saying so.
+          const current = await currentAtTarget(client, scope, qualifier);
+          const category = categoryOf(mode);
           if (opts.json) {
-            console.log(JSON.stringify({ ok: false, proposed: { mode, scope, qualifier, record }, confirm_required: true }, null, 2));
+            console.log(JSON.stringify({ ok: false, proposed: { mode, scope, qualifier, record }, confirm_required: true,
+              ...(current === null ? { current: "unknown", displaces: "unknown" }
+                : { current: { mode: current.mode, posture: current.posture, stored: current.stored }, displaces: current[category] }) }, null, 2));
           } else {
             console.log(`Proposed binding (restate-and-confirm — NOT applied):`);
             console.log(`  mode:      ${mode}`);
             console.log(`  scope:     ${scope}${qualifier ? ` (${qualifier})` : ""}`);
             emitRecord(`  record:`, record);
+            console.log(current === null
+              ? "  currently: UNKNOWN (this target's current bindings couldn't be read); what this write replaces is unknown"
+              : `  currently (stored as ${current.stored}): mode=${current.mode?.mode ?? "none"}, posture=${current.posture?.mode ?? "none"}; this write replaces only the ${category} binding here`);
             console.log(`\nRe-run with --confirm to apply.`);
           }
           process.exitCode = 2;
@@ -415,6 +449,9 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         }
         const b = res.data.effective.binding;
         console.log(`Effective: ${b.mode} (resolved scope: ${res.data.effective.resolvedScope})`);
+        // A saved mode and a posture can be kept side by side; name the other one when both apply here.
+        const other = categoryOf(b.mode) === "mode" ? res.data.categories?.posture : res.data.categories?.mode;
+        if (other && other.id !== b.id) console.log(`  also kept: ${other.mode} (${categoryOf(other.mode)}, ${other.id}, set_at=${other.setAt})`);
         emitRecord(`  record:`, b.record);
         console.log(`  set_by:  ${b.setBy}`);
         console.log(`  set_at:  ${b.setAt}`);
@@ -458,13 +495,14 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
   // -- unset -------------------------------------------------------------
   cmd
     .command("unset <scope> [qualifier]")
-    .description("Delete one binding (operator-only). Scope: global_host | rig | project | mission | workstream | qitem.")
+    .description("Delete one binding (operator-only). Scope: global_host | rig | project | mission | workstream | qitem. Where a saved mode and a posture are both kept, this removes the latest set one, or the one --category names.")
     .option("--bearer <token>")
+    .option("--category <category>", "mode or posture: which binding to remove where both are kept")
     .option("--json", "JSON output for agents")
     .action(async (
       scopeArg: string,
       qualifierArg: string | undefined,
-      opts: { bearer?: string; json?: boolean },
+      opts: { bearer?: string; category?: string; json?: boolean },
     ) => {
       if (!(SCOPES as readonly string[]).includes(scopeArg)) {
         console.error(`Unknown scope '${scopeArg}'. Allowed: ${SCOPES.join(", ")}.`);
@@ -492,7 +530,8 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         const headers: Record<string, string> = {};
         const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
-        const res = await client.delete<{ removed: boolean }>(`/api/rig-mode/bindings/${scope}${qualifierPath}`, { headers });
+        const categoryQuery = opts.category !== undefined ? `?category=${encodeURIComponent(opts.category)}` : "";
+        const res = await client.delete<{ removed: boolean; category?: Category; remaining?: Binding | null }>(`/api/rig-mode/bindings/${scope}${qualifierPath}${categoryQuery}`, { headers });
         if (res.status >= 400) {
           if (opts.json) {
             console.log(JSON.stringify({ ok: false, ...(res.data as object) }, null, 2));
@@ -503,9 +542,12 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
           return;
         }
         if (opts.json) {
-          console.log(JSON.stringify({ ok: true, removed: res.data.removed }, null, 2));
+          console.log(JSON.stringify({ ok: true, removed: res.data.removed,
+            ...(res.data.category ? { category: res.data.category, remaining: res.data.remaining ?? null } : {}) }, null, 2));
         } else {
           console.log(res.data.removed ? `Removed ${scope}${qualifier ? `:${qualifier}` : ""}` : "Nothing to remove.");
+          // The other category kept at this target, if any.
+          if (res.data.remaining) console.log(`  still kept: ${res.data.remaining.mode} (${categoryOf(res.data.remaining.mode)}, ${res.data.remaining.id})`);
         }
       });
     });

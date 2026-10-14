@@ -423,3 +423,66 @@ describe("rig policy unset — operator-only DELETE", () => {
     expect(del.path).toBe("/api/rig-mode/bindings/global_host");
   });
 });
+
+// Slice 04 (OPR.0.7.0.4) 04-A2 — a saved mode and a posture kept side by side at one target.
+describe("rig mode: a saved mode and a posture kept side by side (04-A2)", () => {
+  const binding = (mode: string, id: string) => ({ id, mode, record: {}, qualifier: "r1", setAt: "2026-10-14T18:00:00.000Z", setBy: "operator" });
+
+  it("preview names what's at the target now and that the write replaces only its own category; exit 2, no PUT", async () => {
+    // (The test defaults carry only the legacy modes, so the proposal is a mode beside a kept posture.)
+    const { client, calls } = fakeClient({ getResponse: { status: 200, data: { binding: binding("delegated", "rig:r1"), bindings: [binding("delegated", "rig:r1")] } } });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "set", "focus", "--scope", "rig", "--qualifier", "r1"]);
+    expect(process.exitCode).toBe(2);
+    expect(logs.join("\n")).toContain("  currently (stored as rig r1): mode=none, posture=delegated; this write replaces only the mode binding here");
+    expect(calls.filter((c) => c.method === "GET").map((c) => c.path)).toEqual(["/api/rig-mode/defaults", "/api/rig-mode/bindings/rig/r1"]);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+  });
+
+  it("preview with nothing at the target says so (404)", async () => {
+    const { client } = fakeClient({ getResponse: { status: 404, data: { error: "not_found" } } });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "set", "focus", "--scope", "rig", "--qualifier", "r1", "--json"]);
+    expect(process.exitCode).toBe(2);
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({ confirm_required: true, current: { mode: null, posture: null, stored: "rig r1" }, displaces: null });
+  });
+
+  it.each([
+    ["an HTTP error", { status: 500, data: { error: "boom" } }],
+    ["a failed request", "throw"],
+  ])("preview whose read of the target fails (%s) still restates the proposal, with the current state UNKNOWN; exit 2", async (_label, response) => {
+    const { client } = fakeClient(response === "throw" ? {} : { getResponse: response as { status: number; data: unknown } });
+    if (response === "throw") {
+      const get = (client as { get: (path: string) => Promise<unknown> }).get;
+      (client as { get: unknown }).get = vi.fn(async (path: string) => {
+        if (path.startsWith("/api/rig-mode/bindings/")) throw new Error("connection reset");
+        return get(path);
+      });
+    }
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "set", "focus", "--scope", "rig", "--qualifier", "r1"]);
+    expect(process.exitCode).toBe(2);
+    const out = logs.join("\n");
+    expect(out).toContain("Proposed binding (restate-and-confirm — NOT applied)");
+    expect(out).toContain("  currently: UNKNOWN (this target's current bindings couldn't be read); what this write replaces is unknown");
+    expect(out).not.toContain("mode=none");
+  });
+
+  it("unset where both were kept says which one is still kept, in the text and the JSON", async () => {
+    const deleteResponse = { status: 200, data: { removed: true, category: "posture", remaining: binding("focus", "rig:r1") } };
+    const { client } = fakeClient({ deleteResponse });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "unset", "rig", "r1", "--category", "posture"]);
+    expect(logs).toEqual(["Removed rig:r1", "  still kept: focus (mode, rig:r1)"]);
+    logs.length = 0;
+    const json = fakeClient({ deleteResponse });
+    await rigModeCommand(deps(json.client)).parseAsync(["node", "rig", "unset", "rig", "r1", "--category", "posture", "--json"]);
+    expect(JSON.parse(logs.join("\n"))).toEqual({ ok: true, removed: true, category: "posture", remaining: deleteResponse.data.remaining });
+    expect(json.calls.find((c) => c.method === "DELETE")!.path).toBe("/api/rig-mode/bindings/rig/r1?category=posture");
+  });
+
+  it("effective names the other category's binding when both apply", async () => {
+    const effective = { binding: { ...binding("delegated", "posture@rig:r1"), record: { scope: "rig" } }, resolvedScope: "rig" };
+    const { client } = fakeClient({ effectiveResponse: { status: 200, data: {
+      posture: "known", effective, categories: { mode: binding("focus", "rig:r1"), posture: effective.binding },
+    } } });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "effective", "--rig", "r1"]);
+    expect(logs.join("\n")).toContain("  also kept: focus (mode, rig:r1, set_at=2026-10-14T18:00:00.000Z)");
+  });
+});
