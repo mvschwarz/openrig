@@ -1,6 +1,6 @@
 // OPR.0.7.0.7 — one seat's effort four ways: requested, saved, emitted at launch, observed natively.
-// The shared resolver every managed continuation reads, the restore/refresh precedence seam (no rule
-// picked), and the report that keeps the four values apart.
+// The shared resolver every managed continuation reads, the restore/refresh precedence seam (latest
+// wins), and the report that keeps the four values apart.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +14,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import {
-  UNDECIDED_EFFORT_PRECEDENCE, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort,
+  LATEST_WINS_EFFORT_PRECEDENCE, UNDECIDED_EFFORT_PRECEDENCE, effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort,
 } from "../src/domain/seat-effort.js";
 
 const LSTART = "Tue Oct 13 05:49:17 2026";
@@ -137,19 +137,42 @@ describe("readNativeEffort: what the native session recorded since this process 
   });
 });
 
-describe("UNDECIDED_EFFORT_PRECEDENCE: the seam where the founder's rule plugs in", () => {
-  it("is marked undecided; a restore keeps launching the snapshot's effort and says so when the saved choice differs", () => {
-    expect(UNDECIDED_EFFORT_PRECEDENCE.decided).toBe(false);
-    const live = resolveSeatEffort({ effort: "medium", effortChoice: "high" });
-    const differs = UNDECIDED_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "medium" }, live });
-    expect(differs.effort).toBe("medium");
-    expect(differs.warning).toContain("saved choice high");
-    expect(UNDECIDED_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "high" }, live })).toEqual({ effort: "high" });
-    expect(UNDECIDED_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "low" }, live: resolveSeatEffort({ effort: "medium" }) })).toEqual({ effort: "low" });
+describe("Effort precedence: the decided rule, latest wins (OPR.0.7.0.7)", () => {
+  it("is the rule in force, and it is decided", () => {
+    expect(effortPrecedence).toBe(LATEST_WINS_EFFORT_PRECEDENCE);
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.decided).toBe(true);
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.detail).toContain("No restore option picks older settings");
   });
 
-  it("never deletes the saved choice on a spec refresh", () => {
-    expect(UNDECIDED_EFFORT_PRECEDENCE.specRefreshChoice({ choice: "high", authoredBefore: "medium", authoredAfter: "low" })).toBe("keep");
+  it("a restore launches the seat's saved choice, and says so when the snapshot held another value", () => {
+    const live = resolveSeatEffort({ effort: "medium", effortChoice: "high" });
+    const differs = LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "medium" }, live });
+    expect(differs.effort).toBe("high");
+    expect(differs.warning).toContain("launched the seat's saved choice high, not medium from the snapshot");
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "medium", effortChoice: "low" }, live }).warning)
+      .toContain("not low from the snapshot");
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "medium", effortChoice: "high" }, live })).toEqual({ effort: "high" });
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: {}, live }).warning).toContain("not the snapshot's runtime default");
+  });
+
+  it("without a saved choice (never set, or cleared) a restore launches the snapshot's authored effort: an older choice never comes back", () => {
+    const cleared = resolveSeatEffort({ effort: "medium" });
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "low", effortChoice: "high" }, live: cleared })).toEqual({ effort: "low" });
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: {}, live: cleared })).toEqual({ effort: null });
+  });
+
+  it("with the seat's node row gone, the latest explicit choice known is the snapshot's", () => {
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "low", effortChoice: "high" }, live: null })).toEqual({ effort: "high" });
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.restoreLaunchEffort({ snapshot: { effort: "low" }, live: null })).toEqual({ effort: "low" });
+  });
+
+  it("a spec refresh keeps the saved choice", () => {
+    expect(LATEST_WINS_EFFORT_PRECEDENCE.specRefreshChoice({ choice: "high", authoredBefore: "medium", authoredAfter: "low" })).toBe("keep");
+  });
+
+  it("the undecided placeholder is kept only for comparison, and isn't in force", () => {
+    expect(UNDECIDED_EFFORT_PRECEDENCE.decided).toBe(false);
+    expect(effortPrecedence).not.toBe(UNDECIDED_EFFORT_PRECEDENCE);
   });
 });
 
@@ -218,7 +241,7 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
       saved: { choice: "high", authored: "medium", effective: "high", source: "seat_choice" },
       emitted: { state: "observed", value: "high", pid: 200, matchesSaved: true },
       observed: { state: "observed", value: "medium", matchesEmitted: false, outcome: "accepted" },
-      precedence: { decided: false },
+      precedence: { decided: true },
     });
     expect((report as { summary: string }).summary).toContain("medium, not the high the launch sent");
     expect((report as { summary: string }).summary).toContain("accepted by the service for that turn");

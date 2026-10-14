@@ -352,9 +352,8 @@ export class SeatLifecycleService {
     }
     const saved = this.readEffort(seat.nodeId) ?? from;
     const running = await this.runningState(seat.nodeId);
-    const fallback = saved.source === "authored" ? `the authored effort ${saved.authored}` : "no effort flag (the runtime's own default)";
     const effect = requested === null
-      ? `Cleared: the seat has no saved effort choice now. Its next ordinary managed launch or resume resolves effort under the seat's rules (today: ${fallback}). An in-place restart keeps the running effort and refuses if it would change it. The running process is unchanged; nothing was restarted.`
+      ? `Cleared: the seat has no saved effort choice now, so it goes back to ${saved.source === "authored" ? `the spec's authored effort ${saved.authored}` : "no effort flag (the runtime's own default)"} at its next managed launch, resume, restore or spec refresh. An in-place restart keeps the running effort and refuses if it would change it. The running process is unchanged; nothing was restarted.`
       : `Saved for the seat's next managed continuation. The running process is unchanged; nothing was restarted.`;
     return {
       ok: true, seat, runtime, requested, from, saved, changed,

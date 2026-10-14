@@ -542,11 +542,11 @@ describe("Effort clear: removing effort from resolved config clears stored node 
 });
 
 
-// OPR.0.7.0.7: what restore and spec refresh do with a seat's saved choice is the founder's open
-// decision. Both ask one seam (seat-effort.ts); undecided, neither deletes the choice, and a restore
-// that launches a different value says so.
-describe("Effort precedence seam: a choice saved after the snapshot (OPR.0.7.0.7, rule undecided)", () => {
-  it("restore launches the snapshot's effort, warns about the saved choice, and keeps it", async () => {
+// OPR.0.7.0.7, the decided rule (latest wins): a seat's latest explicit effort choice sticks until cleared,
+// through restores and spec refreshes. Both ask one seam (seat-effort.ts); neither deletes the choice, and a
+// restore that launches a value other than the snapshot's says so.
+describe("Effort precedence, latest wins: a choice saved after the snapshot (OPR.0.7.0.7)", () => {
+  it("restore launches the seat's saved choice, not the snapshot's effort, says so, and keeps the choice", async () => {
     const ctx = setup();
     const rig = ctx.rigRepo.createRig("prec-rig");
     const node = ctx.rigRepo.addNode(rig.id, "coder", { runtime: "codex", model: "o3-mini", effort: "medium", cwd: "/workspace" });
@@ -575,9 +575,43 @@ describe("Effort precedence seam: a choice saved after the snapshot (OPR.0.7.0.7
 
     const result = await restoreOrch.restore(snapshot.id);
     expect(result.ok).toBe(true);
-    expect((mockCodexResume.resume as any).mock.calls[0]![7]).toBe("medium");
-    expect(JSON.stringify(result)).toContain("not the seat's saved choice high");
+    expect((mockCodexResume.resume as any).mock.calls[0]![7]).toBe("high");
+    expect(JSON.stringify(result)).toContain("this restore launched the seat's saved choice high, not medium from the snapshot");
     expect(ctx.rigRepo.getRig(rig.id)!.nodes.find((n) => n.id === node.id)!.effortChoice).toBe("high");
+    ctx.db.close();
+  });
+
+  it("a choice cleared after the snapshot stays cleared: restore launches the snapshot's authored effort, silently", async () => {
+    const ctx = setup();
+    const rig = ctx.rigRepo.createRig("prec-clear");
+    const node = ctx.rigRepo.addNode(rig.id, "coder", { runtime: "codex", model: "o3-mini", effort: "medium", cwd: "/workspace" });
+    ctx.rigRepo.setNodeEffortChoice(node.id, "high"); // the snapshot holds the choice high
+    const session = ctx.sessionRegistry.registerSession(node.id, "coder@prec-clear");
+    ctx.sessionRegistry.updateStatus(session.id, "running");
+    ctx.sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
+    ctx.db.prepare("UPDATE sessions SET resume_type = 'codex_id', resume_token = 'sess-codex-2' WHERE id = ?").run(session.id);
+    const snapshot = ctx.snapshotCapture.captureSnapshot(rig.id, "manual");
+    ctx.rigRepo.setNodeEffortChoice(node.id, null); // then cleared: the latest explicit act
+    const mockCodexResume = { canResume: vi.fn(() => true), resume: vi.fn(async () => ({ ok: true, code: "resumed" })) } as unknown as CodexResumeAdapter;
+    const mockTmux = {
+      createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })),
+      listSessions: vi.fn(async () => []), hasSession: vi.fn(async () => false),
+      sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
+      listWindows: vi.fn(async () => []), listPanes: vi.fn(async () => []), getPaneCommand: vi.fn(async () => "codex"),
+    } as any;
+    const nodeLauncher = new NodeLauncher({ db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus, tmuxAdapter: mockTmux });
+    const restoreOrch = new RestoreOrchestrator({
+      db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus,
+      snapshotRepo: ctx.snapshotRepo, snapshotCapture: ctx.snapshotCapture, checkpointStore: ctx.checkpointStore,
+      nodeLauncher, tmuxAdapter: mockTmux,
+      claudeResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+      codexResume: mockCodexResume,
+    });
+    const result = await restoreOrch.restore(snapshot.id);
+    expect(result.ok).toBe(true);
+    expect((mockCodexResume.resume as any).mock.calls[0]![7]).toBe("medium");
+    expect(JSON.stringify(result)).not.toContain("saved choice");
+    expect(ctx.rigRepo.getRig(rig.id)!.nodes.find((n) => n.id === node.id)!.effortChoice ?? null).toBeNull();
     ctx.db.close();
   });
 

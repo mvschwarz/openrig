@@ -45,12 +45,11 @@ export function readSeatEffort(db: Database.Database, nodeId: string): EffortRes
 }
 
 /**
- * The founder's open precedence decision (OPR.0.7.0.7 "Open, with owner"): what restoring an older
- * snapshot and refreshing the spec do with a seat's saved effort choice. Every such writer asks this
- * one seam, so the decided rule replaces `effortPrecedence` here and nowhere else.
+ * The precedence rule (OPR.0.7.0.7): what restoring an older snapshot and refreshing the spec do with a
+ * seat's saved effort choice. Every such writer asks this one seam; `effortPrecedence` is the rule in force.
  */
 export interface EffortPrecedenceRule {
-  /** false until the founder decides. */
+  /** Whether the rule is the decided one (false only for the placeholder kept for comparison). */
   readonly decided: boolean;
   readonly detail: string;
   /** The effort a snapshot restore launches the seat with. `snapshot` is the node as the snapshot
@@ -78,7 +77,37 @@ export const UNDECIDED_EFFORT_PRECEDENCE: EffortPrecedenceRule = {
   specRefreshChoice: () => "keep",
 };
 
-export const effortPrecedence: EffortPrecedenceRule = UNDECIDED_EFFORT_PRECEDENCE;
+/**
+ * The decided rule: a seat's latest explicit effort choice sticks until cleared, through reboots, team restarts,
+ * restores and spec refreshes; clearing returns to the spec's authored effort or the runtime default, and says
+ * which. Fresh launches, successors and in-place restarts already resolve the choice first (resolveSeatEffort);
+ * this rule covers the two writers that hold older values:
+ * - a snapshot restore launches the seat's saved choice when it has one (saying so when the snapshot held another
+ *   value); a seat without a choice (never set, or cleared) launches the snapshot's authored effort as before,
+ *   so an older snapshot never brings a cleared choice back; when the seat's node row is gone, the latest
+ *   explicit choice known is the one the snapshot recorded;
+ * - a spec refresh rewrites the authored value and keeps the choice.
+ * No restore option in this version picks older settings deliberately, so every restore keeps the choice.
+ */
+export const LATEST_WINS_EFFORT_PRECEDENCE: EffortPrecedenceRule = {
+  decided: true,
+  detail: "A seat's latest explicit effort choice sticks until cleared, through reboots, team restarts, restores and spec refreshes; clearing returns to the spec's authored effort or the runtime default. No restore option picks older settings, so every restore keeps the choice.",
+  restoreLaunchEffort({ snapshot, live }) {
+    const snapshotChoice = snapshot.effortChoice?.trim() || null;
+    const snapshotEffort = snapshot.effort?.trim() || null;
+    if (!live) return { effort: snapshotChoice ?? snapshotEffort };
+    if (!live.choice) return { effort: snapshotEffort };
+    const held = snapshotChoice ?? snapshotEffort;
+    if (held === live.choice) return { effort: live.choice };
+    return {
+      effort: live.choice,
+      warning: `Effort: this restore launched the seat's saved choice ${live.choice}, not ${held ?? "the snapshot's runtime default (no effort flag)"} from the snapshot; the latest explicit choice stays until it is cleared (rig seat set-effort --clear).`,
+    };
+  },
+  specRefreshChoice: () => "keep",
+};
+
+export const effortPrecedence: EffortPrecedenceRule = LATEST_WINS_EFFORT_PRECEDENCE;
 
 export type EffortRuntime = "claude-code" | "codex";
 
