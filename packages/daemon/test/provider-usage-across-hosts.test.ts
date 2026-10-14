@@ -392,6 +392,10 @@ describe("POST /api/provider/usage/hosts/refresh", () => {
     expect((await refreshVia(hub, { provider: "codex", hosts: [] })).body).toEqual({ error: "hosts must be a non-empty array of host ids" });
     expect((await refreshVia(hub, { providers: [] })).status).toBe(400);
     expect((await refreshVia(hub, { providers: ["codex", "gemini"] })).status).toBe(400);
+    for (const body of [{ providers: "claude" }, { provider: "codex", providers: ["claude"] }]) {
+      expect(await refreshVia(hub, body), JSON.stringify(body)).toEqual({ status: 400, body: { error: "give either providers (a list) or provider, not both" } });
+    }
+    expect(hub.codexReads + hub.claudeReads).toBe(0);
     expect((await refreshVia(hub, { provider: "codex", hosts: ["nope"] })).body).toEqual({ error: "unknown host ids: nope" });
   });
 });

@@ -148,7 +148,11 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       raw = {};
     }
     const body = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-    // `providers: ["codex", "claude"]`, or one `provider` (codex when neither is given).
+    // `providers: ["codex", "claude"]`, or one `provider` (codex when neither is given); never both, and a `providers`
+    // that isn't a list is refused, not read as "codex".
+    if (body["providers"] !== undefined && (!Array.isArray(body["providers"]) || body["provider"] !== undefined)) {
+      return c.json({ error: "give either providers (a list) or provider, not both" }, 400);
+    }
     const asked = Array.isArray(body["providers"]) ? body["providers"] : [body["provider"] ?? "codex"];
     const bad = asked.find((p) => p !== "codex" && p !== "claude");
     if (asked.length === 0 || bad !== undefined) {
