@@ -823,6 +823,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const collectorCmd = `node ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
+    // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a
+    // change. This avoids rewriting on every poll; it doesn't make a needed write safe against a concurrent writer.
+    if (statusLine["type"] === "command" && current === collectorCmd) return;
 
     existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
 
