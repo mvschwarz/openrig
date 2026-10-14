@@ -92,8 +92,10 @@ export function allowanceLines(r: Row): ContentLine[] {
   return lines;
 }
 
-/** One served seat account, as served (also drawn per host by System → Usage across hosts). */
-export function seatLines(r: Row): ContentLine[] {
+/** One served seat account, as served (also drawn per host by System → Usage across hosts). `differsFirst` (only the
+ *  all-hosts page passes it) draws a seat's difference under the CLI's condition: whenever one is served, whatever
+ *  `windowsSampled` or `withheld` say. Without it the single-host page draws as before. */
+export function seatLines(r: Row, opts: { differsFirst?: boolean } = {}): ContentLine[] {
   const c = (r["configured"] ?? {}) as Row;
   const configured = c["source"] === "registry"
     ? `configured: profile ${str(c["profileRef"])} (registry, recorded ${str(c["recordedAt"])}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
@@ -105,10 +107,12 @@ export function seatLines(r: Row): ContentLine[] {
   for (const note of (r["registryNotes"] as string[] | undefined) ?? []) lines.push({ text: `    ${note}` });
   const observed = r["observed"] as Row | undefined;
   const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];
-  if (observed?.["withheld"] === true) lines.push({ text: `    observed: ${str(observed["note"], "withheld")}` });
+  const differsLine = (): ContentLine => ({ text: `    observed: differs from ${differs.join(", ")}${observed?.["note"] !== undefined ? ` (${observed["note"]})` : ""}` });
+  if (opts.differsFirst && differs.length) lines.push(differsLine());
+  else if (observed?.["withheld"] === true) lines.push({ text: `    observed: ${str(observed["note"], "withheld")}` });
   else if (observed?.["windowsSampled"] === true) {
     lines.push({ text: `    observed: this seat's status line last reported windows at ${str(observed["lastSampledAt"], "an unknown time")}` });
-    if (differs.length) lines.push({ text: `    observed: differs from ${differs.join(", ")}${observed["note"] !== undefined ? ` (${observed["note"]})` : ""}` });
+    if (differs.length) lines.push(differsLine());
   } else if (observed?.["windowsSampled"] === false) lines.push({ text: "    observed: no status-line windows from this seat yet" });
   else if (observed?.["note"]) lines.push({ text: `    observed: ${observed["note"]}` });
   const allowance = (r["allowance"] ?? {}) as Row;

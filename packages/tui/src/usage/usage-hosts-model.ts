@@ -74,7 +74,7 @@ export function usageHostsLines(snap: FleetSnapshot, width: number): ContentLine
     lines.push(sectionRule(`Seats on ${str(s["hostId"])} · configured account (not proof of the login a running session uses)`, width));
     const seats = (s["seats"] as Row[] | undefined) ?? [];
     if (seats.length === 0) lines.push({ text: "  No seats served." });
-    for (const r of seats) lines.push(...seatLines(r));
+    for (const r of seats) lines.push(...seatLines(r, { differsFirst: true }));
   }
   return wrapDetailLines(lines, width);
 }

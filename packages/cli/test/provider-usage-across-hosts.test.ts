@@ -10,7 +10,7 @@ import { providerCommand } from "../src/commands/provider.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
-import { closedPortUrl, UsageHost, usageAcrossHostsFacts, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
+import { closedPortUrl, SEAT_SHAPES, UsageHost, usageAcrossHostsFacts, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
 import { BEARER_REDACTED } from "../../daemon/src/domain/provider/usage-across-hosts.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
@@ -60,7 +60,8 @@ async function refreshDirect(h: UsageHost): Promise<void> {
 
 describe("rig provider status --all-hosts", () => {
   it("prints every served fact verbatim: one entry per allowance with each host's observation, and every host's status", async () => {
-    const a = await host("a");
+    // a also serves a seat in each observed shape, so the seat facts are held to the same list.
+    const a = await host("a", { rewrite: (p, body) => p === "/api/provider/status" ? { ...(body as object), seatAccounts: SEAT_SHAPES } : body });
     const b = await host("b", { codex: { secondaryUsed: 90, secondaryResetsAt: "2026-10-20T04:00:00.000Z" } });
     const c = await host("c", { codex: { email: "other@example.com" } });
     const off = await host("off", { usageWindows: false });
@@ -80,6 +81,7 @@ describe("rig provider status --all-hosts", () => {
     const missing = usageAcrossHostsFacts(served).filter((f) => !out.includes(f));
     expect(missing).toEqual([]);
     expect(usageAcrossHostsFacts(served).length).toBeGreaterThan(20);
+    expect(usageAcrossHostsFacts(served)).toEqual(expect.arrayContaining(["seat-withheld-differs@r", "differs from peer-b@r", "differs from peer-c@r, peer-d@r", "differs from peer-e@r"]));
     // One entry for the shared login on a and b (disagreeing), one for c's other login, never a sum.
     expect(out).toContain("codex  account acct-1 · bucket codex  [the same allowance on 2 hosts, disagreeing: a, b]");
     expect(out).toContain("codex  account acct-1 · bucket codex  [linkage unknown; observed on c]");

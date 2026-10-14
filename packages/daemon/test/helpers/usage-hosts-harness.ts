@@ -281,5 +281,44 @@ export function usageAcrossHostsFacts(view: Record<string, unknown>): string[] {
       if (last?.["outcome"] === "failed") for (const k of ["at", "reason", "detail"]) add(last[k]);
     }
   }
+  for (const group of (view["seatAccounts"] ?? []) as Array<Record<string, unknown>>) {
+    add(group["hostId"]);
+    for (const seat of group["seats"] as Array<Record<string, unknown>>) {
+      for (const k of ["seatSession", "runtime"]) add(seat[k]);
+      const c = seat["configured"] as Record<string, unknown>;
+      for (const k of ["profileRef", "recordedAt", "home", "homeNote", "reason"]) add(c[k]);
+      for (const n of (seat["registryNotes"] ?? []) as string[]) add(n);
+      add((seat["allowance"] as Record<string, unknown>)["reason"]);
+      // The observed line as the CLI chooses it: a difference first, whatever windowsSampled or withheld say.
+      const o = (seat["observed"] ?? {}) as Record<string, unknown>;
+      const differs = (o["differsFrom"] ?? []) as string[];
+      if (differs.length) { add(`differs from ${differs.join(", ")}`); add(o["note"]); }
+      else if (o["windowsSampled"] === true) add(o["lastSampledAt"]);
+      else if (o["windowsSampled"] !== false) add(o["note"]);
+    }
+  }
   return [...new Set(out)];
 }
+
+/** Served seat accounts in each observed shape: today's producer's four, and a difference with windowsSampled false,
+ *  absent or alongside withheld, which the daemon also accepts. Both views' parity tests serve these. */
+export const SEAT_SHAPES: Array<Record<string, unknown>> = [
+  { seatSession: "seat-sampled@r", rigName: "r", runtime: "claude-code",
+    configured: { source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: false },
+    registryNotes: ["a registry note"], allowance: { linked: false, reason: "seat allowance reason" },
+    observed: { windowsSampled: true, lastSampledAt: "2026-10-13T23:01:00Z" } },
+  { seatSession: "seat-differs@r", rigName: "r", runtime: "claude-code",
+    configured: { source: "default_login", home: "/home/fixture", homeNote: "the fixture's home note" },
+    allowance: { linked: false, reason: "seat allowance reason" },
+    observed: { windowsSampled: true, lastSampledAt: "2026-10-13T23:02:00Z", differsFrom: ["peer-a@r"], note: "possibly a different login" } },
+  { seatSession: "seat-unsampled@r", rigName: "r", runtime: "codex", configured: { source: "unknown", reason: "no registry row" },
+    allowance: { linked: false, reason: "seat allowance reason" }, observed: { windowsSampled: false } },
+  { seatSession: "seat-withheld@r", rigName: "r", runtime: "claude-code", configured: { source: "unknown", reason: "no registry row" },
+    allowance: { linked: false, reason: "seat allowance reason" }, observed: { withheld: true, note: "observation withheld: 2 seats share it" } },
+  { seatSession: "seat-false-differs@r", rigName: "r", runtime: "claude-code", configured: { source: "unknown", reason: "no registry row" },
+    allowance: { linked: false, reason: "seat allowance reason" }, observed: { windowsSampled: false, differsFrom: ["peer-b@r"], note: "false-sampled note" } },
+  { seatSession: "seat-absent-differs@r", rigName: "r", runtime: "claude-code", configured: { source: "unknown", reason: "no registry row" },
+    allowance: { linked: false, reason: "seat allowance reason" }, observed: { differsFrom: ["peer-c@r", "peer-d@r"] } },
+  { seatSession: "seat-withheld-differs@r", rigName: "r", runtime: "claude-code", configured: { source: "unknown", reason: "no registry row" },
+    allowance: { linked: false, reason: "seat allowance reason" }, observed: { withheld: true, differsFrom: ["peer-e@r"], note: "withheld-differs note" } },
+];

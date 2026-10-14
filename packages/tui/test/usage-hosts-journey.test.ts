@@ -14,7 +14,7 @@ import { createLiveRefresh } from "../src/live.js";
 import { pageReadKey } from "../src/page-read.js";
 import { USAGE_HOSTS_HEADER, USAGE_HOSTS_HINT } from "../src/usage/usage-hosts-model.js";
 import type { FleetSnapshot, Screen, ViewStateStore } from "../src/types.js";
-import { closedPortUrl, redirectingRelay, UsageHost, usageAcrossHostsFacts, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
+import { closedPortUrl, redirectingRelay, SEAT_SHAPES, UsageHost, usageAcrossHostsFacts, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
 
@@ -70,7 +70,8 @@ function tuiOn(hub: UsageHost, opts: { gone?: () => boolean; hold?: () => boolea
 
 describe("System → Usage across hosts", () => {
   it("draws every served fact verbatim, the same facts the CLI prints, with each host's status and the groups", async () => {
-    const a = await host("a");
+    // a also serves a seat in each observed shape, so the seat facts are held to the same list.
+    const a = await host("a", { rewrite: (p, body) => p === "/api/provider/status" ? { ...(body as object), seatAccounts: SEAT_SHAPES } : body });
     const b = await host("b", { codex: { secondaryUsed: 90, secondaryResetsAt: "2026-10-20T04:00:00.000Z" } });
     const c = await host("c", { codex: { email: "other@example.com" } });
     const off = await host("off", { usageWindows: false });
@@ -93,6 +94,7 @@ describe("System → Usage across hosts", () => {
     const facts = usageAcrossHostsFacts(served);
     expect(facts.length).toBeGreaterThan(30);
     expect(facts.filter((f) => !text.includes(f))).toEqual([]);
+    expect(facts).toEqual(expect.arrayContaining(["seat-withheld-differs@r", "differs from peer-b@r", "differs from peer-c@r, peer-d@r", "differs from peer-e@r"]));
     expect(text).toContain("codex  account acct-1 · bucket codex  [the same allowance on 4 hosts, disagreeing: local, a, b, failing]");
     expect(text).toContain("codex  account acct-1 · bucket codex  [linkage unknown; observed on c]");
     expect(text).toContain("  older  answered · usage older: this host has no provider status route (its daemon predates it)");
@@ -294,6 +296,27 @@ describe("System → Usage across hosts: what #1246 serves since the plan", () =
     expect(text).toContain(`    refresh from here (codex) failed at ${NOW}: no reason given; this host's earlier observations are kept`);
     expect(text).toContain(`refresh failed at ${NOW}: no reason given; last reading kept, marked old`);
     expect(lines.some((l) => l.endsWith("observed: differs from dev-b@r"))).toBe(true);
+  });
+
+  it("a seat's difference draws as the CLI prints it, whatever windowsSampled or withheld say (sampled false, absent, withheld)", async () => {
+    const seats = await host("seats", { rewrite: (p, b) => p === "/api/provider/status" ? { ...(b as Body), seatAccounts: SEAT_SHAPES } : b });
+    const hub = await host("hub", { registry: [seats.entry()] });
+    const tui = tuiOn(hub);
+    await tui.openView();
+    const lines = tui.draw().lines.map((l) => l.slice(l.indexOf("┃") + 2).trimEnd());
+    // Each seat's observed lines, in order, as `rig provider status --all-hosts` prints them.
+    const observed = (seat: string) => {
+      const at = lines.findIndex((l) => l.startsWith(`  ${seat}  `));
+      const end = lines.findIndex((l, i) => i > at && !l.startsWith("    "));
+      return lines.slice(at + 1, end).filter((l) => l.startsWith("    observed: "));
+    };
+    expect(observed("seat-false-differs@r")).toEqual(["    observed: differs from peer-b@r (false-sampled note)"]);
+    expect(observed("seat-absent-differs@r")).toEqual(["    observed: differs from peer-c@r, peer-d@r"]);
+    expect(observed("seat-withheld-differs@r")).toEqual(["    observed: differs from peer-e@r (withheld-differs note)"]);
+    expect(observed("seat-differs@r")).toEqual(["    observed: differs from peer-a@r (possibly a different login)"]);
+    expect(observed("seat-sampled@r")).toEqual(["    observed: this seat's status line last reported windows at 2026-10-13T23:01:00Z"]);
+    expect(observed("seat-unsampled@r")).toEqual(["    observed: no status-line windows from this seat yet"]);
+    expect(observed("seat-withheld@r")).toEqual(["    observed: observation withheld: 2 seats share it"]);
   });
 
   it("a field no view draws passes through as served, whatever it holds, and the view still draws", async () => {
