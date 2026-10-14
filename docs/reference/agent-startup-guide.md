@@ -357,6 +357,23 @@ can affect native configuration, but OpenRig's launch flags can override those
 values. Recording a config-surface `permission_policy` is not proof that its
 rules were translated or applied. See [permission precedence and limits](getting-started.md#custom-settings-and-precedence).
 
+### SSH agent access for Git
+
+When `SSH_AUTH_SOCK` is set in the environment that starts the daemon, OpenRig
+passes it to new seat panes and handover successor panes. Claude's explicit
+permission-mode launches preserve the socket currently available in the pane,
+including one supplied by tmux or shell startup when the daemon has none. This
+also applies to fork and resume launches. Pi and OMP preserve the supplied socket
+in their child-tool environment.
+
+The agent must already be running with the intended keys loaded; `ssh-add -l`
+inside the seat checks whether its tools can reach that agent. OpenRig passes the
+socket path, not key files or passphrases, and does not start an SSH agent or
+change SSH client configuration. Existing panes keep their own environment;
+changing the daemon's environment does not update already running processes.
+This does not require adding `SSH_AUTH_SOCK` to
+`recovery.provider_auth_env_allowlist`, which remains limited to provider keys.
+
 ### Separate Codex homes for separate installations
 
 Set an **absolute `CODEX_HOME` in the environment that starts the daemon** when

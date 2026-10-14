@@ -173,8 +173,9 @@ export const OMP_PROVIDER_EXTRA_ENV_VARS: Record<string, readonly string[]> = {
   litellm: ["LITELLM_BASE_URL"],
 };
 
-// Baseline process needs. No host credential families or shell customization.
-export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
+// Baseline process needs, including local SSH agent access for tools.
+// Provider credential variables are selected separately below.
+export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "SSH_AUTH_SOCK", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
 
 // NodeLauncher supplies identity and instance routing on both fresh and resumed
 // seats. Pi's shell tools inherit this child env: dropping these values makes
