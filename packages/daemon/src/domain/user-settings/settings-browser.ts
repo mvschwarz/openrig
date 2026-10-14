@@ -33,7 +33,7 @@ const PATHS = new Set(["db.path", "transcripts.path", "workspace.root", "workspa
   "topology.root", "context.root", "skills.root", "policies.claude_compaction.message_file_path"]);
 const IDENTITIES = new Set(["daemon.host", "host.name", "host.selected", "context.system_world",
   "ui.timezone", "agents.advisor_session", "agents.operator_session", "workspace.operator_seat_name",
-  "workflow.exception_routing", "policies.idle_gate_qitem.auto_register"]);
+  "workflow.exception_routing", "policies.idle_gate_qitem.auto_register", "terminal.tmux_server"]);
 const INSTRUCTIONS = new Set(["policies.claude_compaction.pre_compact_instruction",
   "policies.claude_compaction.compact_instruction", "policies.claude_compaction.message_inline",
   "policies.claude_compaction.post_restore_audit_instruction"]);
@@ -90,6 +90,7 @@ function sourceFile(file: string): { state: State; bytes: string | null } {
   catch (error) { return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unavailable", bytes: null }; }
 }
 function application(key: string): string {
+  if (key === "terminal.tmux_server") return "Selected at daemon restart; surviving sessions keep their previous server until deliberately stopped. See terminal status for the effective choice.";
   if (key === "ui.terminal.max_live_terminals") return "Legacy web client; unset resolver value, consumer fallback 2. No TUI limit implied.";
   if (key === "workflow.exception_routing") return "Unset leaves routing to workflow/class/host precedence; running route unverified.";
   if (key === "ui.timezone") return "Daemon-instance value; TUI display timezone is client-local and selected at launch.";

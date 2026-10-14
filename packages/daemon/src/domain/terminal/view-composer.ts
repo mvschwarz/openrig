@@ -9,7 +9,7 @@
 //                      absolute path when the context carries one)
 //   view-only / cross-rig (read-only)
 //                    → `tmux attach -r -t <session>`
-//   ssh host         → `ssh <dest> tmux attach [-r] -t <session>`
+//   ssh host         → `ssh -t <dest> ... rig terminal attach [--read-only] -- <session>`
 //   http host        → NO pane; honest-degrade { seat, host, reason }
 //   dead / no session → absent[] (named, never silently dropped)
 //
@@ -69,9 +69,9 @@ export interface ComposeContext {
    */
   localTmux?: string;
   /**
-   * The daemon's tmux server flags (`-L <name>` or `-S <path>`), for LOCAL panes only. The daemon's
-   * sessions live on the server its inherited $TMUX names, which a new terminal doesn't reach by
-   * default. Absent or empty → no flags, unchanged. Never put into an ssh remote command.
+   * The daemon's effective tmux server flags (`-L <name>` or `-S <path>`), for LOCAL panes only.
+   * An inherited or dedicated socket may differ from the attaching terminal's server.
+   * Absent or empty → no flags, unchanged. Remote panes resolve their server on that host.
    */
   localTmuxServer?: readonly string[];
 }
@@ -166,12 +166,14 @@ export function composeView(
         });
         continue;
       }
-      const remoteCommand = `tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`;
+      // Resolve on that host: neither a local socket nor a guessed default can
+      // identify a remote instance's dedicated tmux server.
+      const remoteCommand = `env OPENRIG_HOST_SELECTED=local rig terminal attach${m.readOnly ? " --read-only" : ""} -- ${shellQuote(m.tmuxSession)}`;
       opened.push({
         seat: m.seat,
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
-        paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
+        paneCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
         readOnly: m.readOnly,
       });
       continue;
@@ -203,5 +205,6 @@ export function composeView(
     });
   }
 
-  return { id, opened, absent, degraded, pages: chunkPanes(opened, ctx.panesPerPage ?? PANES_PER_PAGE) };
+  return { id, opened, absent, degraded, pages: chunkPanes(opened, ctx.panesPerPage ?? PANES_PER_PAGE),
+    ...(ctx.localTmuxServer?.length ? { localTmuxServer: [...ctx.localTmuxServer] } : {}) };
 }

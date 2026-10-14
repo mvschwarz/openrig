@@ -34,7 +34,7 @@ import path from "node:path";
 // Tests can still set explicit overrides after setup; test/provider opt-in flags
 // are not instance selectors and remain untouched.
 for (const key of [
-  "URL", "PORT", "HOST", "BIND_HOST", "HOST_SELECTED", "DB",
+  "URL", "PORT", "HOST", "BIND_HOST", "HOST_SELECTED", "DB", "TMUX_SERVER",
   "TRANSCRIPTS_PATH", "WORKSPACE_ROOT", "WORKSPACE_SLICES_ROOT",
   "WORKSPACE_STEERING_PATH", "WORKSPACE_SPECS_ROOT", "WORKSPACE_PROJECTS_ROOT",
   "WORKSPACE_CATALOG_PATH", "TOPOLOGY_ROOT", "CONTEXT_ROOT", "CONTEXT_PACKS_ROOT",

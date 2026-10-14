@@ -352,7 +352,7 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
-      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -385,7 +385,7 @@ export class TmuxAdapter {
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
     const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
-      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      const out = await this.exec(this.onServer(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`));
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {
@@ -455,7 +455,16 @@ export class TmuxAdapter {
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),
     private argvExec?: ArgvExecFn,
-  ) {}
+    serverArgs: readonly string[] = [],
+  ) { this.serverArgs = [...serverArgs]; }
+
+  private readonly serverArgs: readonly string[];
+
+  /** Prefix one adapter-owned tmux invocation, including its chained commands.
+   * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
+  private onServer(command: string): string {
+    return this.serverArgs.length ? `tmux ${posixJoinArgv([...this.serverArgs])}${command.slice(4)}` : command;
+  }
 
   /**
    * Run a multiplexer command. `argv` is what is EXECUTED on both paths:
@@ -467,8 +476,9 @@ export class TmuxAdapter {
    * preserve an exact legacy string, never to smuggle new semantics.
    */
   private async run(argv: string[], legacy?: string): Promise<string> {
-    if (this.argvExec) return this.argvExec(argv);
-    return this.exec(legacy ?? posixJoinArgv(argv));
+    const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    if (this.argvExec) return this.argvExec(targeted);
+    return this.exec(legacy ? this.onServer(legacy) : posixJoinArgv(targeted));
   }
 
   /** Start an empty native terminal server, without inventing a seat/session. */
@@ -481,7 +491,7 @@ export class TmuxAdapter {
       // and server bootstrap is POSIX-specific (psmux auto-starts its own).
       // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
-      await this.exec("tmux -D </dev/null >/dev/null 2>&1 &");
+      await this.exec(this.onServer("tmux -D </dev/null >/dev/null 2>&1 &"));
       for (let attempt = 0; attempt < 20; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
         if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };

@@ -44,7 +44,7 @@ it.each([
     seat, label: seat, tmuxSession: seat, host: null, readOnly: true, alive: true,
   })), { resolveHost: () => null, panesPerPage: 16, localTmux: wrapper });
   expect(composed.pages.map(page => page.length)).toEqual([16, 3]);
-  const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed } }) } as unknown as DaemonClient;
+  const client = { baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed } }) } as unknown as DaemonClient;
   const desktop = vi.fn(async () => "window");
   const beforeSplits: string[] = [];
   const deps: WindowDeps = {
@@ -84,7 +84,7 @@ it.each([false, true])("opens real viewer panes and preserves source processes (
   for (const name of names) tmux(source, ["new-session", "-d", "-s", name, "sleep 60"]);
   const original = tmux(source, ["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"]);
   const panes = names.map(seat => ({ seat, label: seat, paneCommand: `tmux -L ${source} attach-session -t '=${seat}'` }));
-  const client = { baseUrl: "http://localhost:7433", get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: paged ? panes.map(pane => [pane]) : [panes], columns: paged ? 1 : 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
+  const client = { baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get: async () => ({ status: 200, data: { planId: "fixture", status: {}, composed: { opened: panes, pages: paged ? panes.map(pane => [pane]) : [panes], columns: paged ? 1 : 3, absent: [], degraded: [] } } }) } as unknown as DaemonClient;
   const desktop = vi.fn(async () => "window");
   const deps: WindowDeps = {
     herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },
@@ -127,7 +127,7 @@ it.each([80, 119, 120, 174])("opens the measured %i-column welcome in an owned v
     const pages = width >= 120 ? [[panes[1]!, panes[0]!], [panes[2]!]] : panes.map(pane => [pane]);
     return { status: 200, data: { planId: "fixture", status: {}, composed: { id: "kernel", kernelLayout: "dual-runtime", opened: pages.flat(), pages, columns: width >= 120 ? 2 : 1, absent: [], degraded: [] } } };
   });
-  const client = { baseUrl: "http://localhost:7433", get } as unknown as DaemonClient;
+  const client = { baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get } as unknown as DaemonClient;
   const desktop = vi.fn(async () => `window:${columns}`);
   const deps: WindowDeps = {
     herdrConfig: () => { throw new Error("tmux must not prepare Herdr config"); },

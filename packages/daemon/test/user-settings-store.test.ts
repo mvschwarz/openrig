@@ -25,7 +25,7 @@ const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md"
 
 function clearEnv(): () => void {
   const keys = [
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -86,6 +86,16 @@ describe("SettingsStore (User Settings v0)", () => {
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
     restoreEnv();
+  });
+
+  it("resolves tmux isolation from the shared config and environment with a strict mode", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("terminal.tmux_server")).toMatchObject({ value: "inherit", source: "default" });
+    store.set("terminal.tmux_server", "isolated");
+    expect(store.resolveOne("terminal.tmux_server")).toMatchObject({ value: "isolated", source: "file" });
+    process.env.OPENRIG_TMUX_SERVER = "inherit";
+    expect(store.resolveOne("terminal.tmux_server")).toMatchObject({ value: "inherit", source: "env" });
+    expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
   });
 
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
@@ -153,6 +163,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "snapshots.periodic.retention_keep",
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
+      "terminal.tmux_server",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
       // Slice 15 P5 — the whoami peer bound under output.compact.

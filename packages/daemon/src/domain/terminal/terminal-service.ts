@@ -34,7 +34,8 @@ import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
-import { daemonTmuxServerArgs } from "../../adapters/tmux-server.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
+import type { TmuxServerSelection } from "../tmux-server-selection.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
 import type {
@@ -96,6 +97,7 @@ export interface ProviderStatusReport {
 
 export interface TerminalStatusResult {
   providers: ProviderStatusReport[];
+  tmux?: TmuxServerSelection;
 }
 
 export interface TerminalServiceDeps {
@@ -303,7 +305,8 @@ export class TerminalService {
       }
       providers.push({ name, status: await p.status(), liveness: await p.liveness() });
     }
-    return { providers };
+    const tmux = daemonTmuxServerInfo();
+    return { providers, ...(tmux ? { tmux } : {}) };
   }
 
   /** Resolve a view argument into composer-ready members (precedence in the file header). */

@@ -11,25 +11,28 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).trim();
+const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).replace(/\r?\n$/, "");
 
 export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
   | { attachmentType: "external_cli" }
-  | { attachmentType: "tmux"; tmuxSession: string; tmuxWindow?: string; tmuxPane: string } {
+  | { attachmentType: "tmux"; tmuxSession: string; tmuxWindow?: string; tmuxPane: string; tmuxSocketPath?: string } {
   const tmuxPane = process.env["TMUX_PANE"];
   if (!tmuxPane) {
     return { attachmentType: "external_cli" };
   }
 
   try {
-    const output = tmuxExec(`tmux display-message -p -t ${JSON.stringify(tmuxPane)} "#{session_name}\n#{window_id}\n#{pane_id}"`);
-    const [tmuxSession, tmuxWindow, resolvedPane] = output.split("\n").map((part) => part.trim());
+    const output = tmuxExec(`tmux display-message -p -t ${JSON.stringify(tmuxPane)} "#{session_name}\n#{window_id}\n#{pane_id}\n#{socket_path}"`);
+    const parts = output.split("\n");
+    const [tmuxSession, tmuxWindow, resolvedPane] = parts.slice(0, 3).map(part => part.trim());
+    const tmuxSocketPath = parts[3]?.replace(/\r$/, "");
     if (tmuxSession && resolvedPane) {
       return {
         attachmentType: "tmux",
         tmuxSession,
         tmuxWindow: tmuxWindow || undefined,
         tmuxPane: resolvedPane,
+        ...(tmuxSocketPath ? { tmuxSocketPath } : {}),
       };
     }
   } catch {
@@ -119,6 +122,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
         body["tmuxSession"] = attachContext.tmuxSession;
         if (attachContext.tmuxWindow) body["tmuxWindow"] = attachContext.tmuxWindow;
         body["tmuxPane"] = attachContext.tmuxPane;
+        if (attachContext.tmuxSocketPath) body["tmuxSocketPath"] = attachContext.tmuxSocketPath;
       } else if (opts.displayName) {
         body["displayName"] = opts.displayName;
       }

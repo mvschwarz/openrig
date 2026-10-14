@@ -64,6 +64,29 @@ describe("destroy helpers", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("resolves the effective socket before stopping or deleting state and passes it to every session kill", async () => {
+    const args = ["-S", join(tmpDir, "selected.sock")];
+    const deps = makeDestroyDeps({ resolveTmuxServerArgs: vi.fn(() => args) });
+    const plan = buildDestroyPlan("all", false, { stateRoot: tmpDir, dbPath: join(tmpDir, "db"),
+      transcriptsPath: join(tmpDir, "transcripts"), daemonHost: "localhost", daemonPort: 7433 }, deps);
+    plan.managedTmuxSessions = ["seat"];
+    await executeDestroy(plan, deps);
+    expect(deps.resolveTmuxServerArgs).toHaveBeenCalledWith(tmpDir);
+    expect(deps.killTmuxSession).toHaveBeenCalledWith("seat", args);
+    expect(vi.mocked(deps.resolveTmuxServerArgs!).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(deps.stopDaemon).mock.invocationCallOrder[0]!);
+  });
+
+  it("leaves daemon, sessions and state intact if its server record cannot be read", async () => {
+    const deps = makeDestroyDeps({ resolveTmuxServerArgs: () => { throw new Error("unreadable server record"); } });
+    const plan = buildDestroyPlan("all", false, { stateRoot: tmpDir, dbPath: join(tmpDir, "db"),
+      transcriptsPath: join(tmpDir, "transcripts"), daemonHost: "localhost", daemonPort: 7433 }, deps);
+    await expect(executeDestroy(plan, deps)).rejects.toThrow("unreadable server record");
+    expect(deps.stopDaemon).not.toHaveBeenCalled();
+    expect(deps.killTmuxSession).not.toHaveBeenCalled();
+    expect(deps.removePath).not.toHaveBeenCalled();
+  });
+
   it("buildBackupPath appends timestamp and resolves collisions", () => {
     const target = join(tmpDir, ".openrig");
     const first = buildBackupPath(target, existsSync, new Date("2026-04-10T08:10:11Z"));

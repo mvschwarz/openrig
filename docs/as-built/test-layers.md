@@ -148,6 +148,17 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 
 ### Host mode: while you're writing a scenario
 
+The tmux server selection regression also uses these scaffold and lifecycle helpers
+in `packages/daemon/test/tmux-server-isolation-daemon.test.ts`. It runs a real stub
+seat through config changes, daemon restarts, capture, self-attachment and cleanup,
+while native socket observations verify that a personal namesake survives. The
+test also removes the effective-server record and verifies that `destroy --all`
+leaves the daemon, database and both servers' sessions intact before restoring
+the record and checking normal cleanup. The
+YAML grammar has no config-write or socket-inventory surface, so these assertions
+live in the Vitest integration test. It does not exercise a real provider model,
+SSH connection or graphical terminal window.
+
 ```sh
 npm run build    # the runner drives packages/cli/dist/bin-wrapper.js
 node --import tsx packages/daemon/scripts/run-scenarios.mjs     # the fixture scenario-*.yaml files

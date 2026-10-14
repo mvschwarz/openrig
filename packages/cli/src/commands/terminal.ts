@@ -1,10 +1,11 @@
 // OPR.0.4.6.02 C3 — the `rig terminal` command family (the TUI-1 opaque verb +
-// the operator's terminal-provider-ride entry). Three subcommands, all hitting
+// the operator's terminal-provider-ride entry). The subcommands read
 // the ONE canonical daemon composer (`/api/terminal/...`):
 //
 //   rig terminal open <view> [--provider herdr|cmux] [--json]
 //   rig terminal views [--json]
 //   rig terminal status [--provider herdr|cmux] [--json]
+//   rig terminal attach <session> [--read-only]
 //
 // `<view>` resolves daemon-side: a rig name (per-rig derived) | `mission:<id>` |
 // `slice:<id>` (derived) | a saved-view id. The result is the ONE shared
@@ -22,8 +23,12 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { assertLocalTmux, attachTmux, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 
-export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
+export interface TerminalDeps extends StatusDeps {
+  windowDeps?: WindowDeps;
+  attachTmux?: (target: TmuxAttachment) => Promise<number>;
+}
 
 /** The one shared open-result shape (mirrors the daemon `OpenViewResult`). */
 export interface OpenViewResult {
@@ -160,6 +165,29 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           : "/api/terminal/status";
         const res = await client.get<unknown>(path);
         printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd.command("attach <session>")
+    .description("Attach this terminal to a session on the selected daemon's tmux server")
+    .option("--read-only", "View the session without sending input")
+    .action(async (session: string, opts: { readOnly?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async client => {
+        try {
+          await assertLocalTmux(client);
+          const response = await client.get<{ tmux?: { serverArgs?: unknown } }>("/api/terminal/status");
+          if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
+          if (response.data.tmux?.serverArgs === undefined) {
+            throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");
+          }
+          process.exitCode = await (deps.attachTmux ?? attachTmux)({
+            session, serverArgs: readTmuxServerArgs(response.data.tmux.serverArgs), readOnly: opts.readOnly ?? false,
+          });
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+          process.exitCode = 1;
+        }
       });
     });
 

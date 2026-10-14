@@ -56,6 +56,8 @@ export interface DegradedSeat {
  */
 export interface ComposedView {
   id: string;
+  /** Explicit daemon server for local viewer creation as well as its attached seats. */
+  localTmuxServer?: readonly string[];
   /** Service-provided preview fingerprint, attached after composition for provider labels. */
   planId?: string;
   opened: ComposedPane[];

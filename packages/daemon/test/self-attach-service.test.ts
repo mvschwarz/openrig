@@ -55,6 +55,35 @@ describe("SelfAttachService", () => {
     db.close();
   });
 
+  it.each([undefined, "/another/server"])("rejects a foreign or unreported socket before creating any binding: %s", async socketPath => {
+    const service = new SelfAttachService({ db, rigRepo, podRepo, sessionRegistry, eventBus,
+      tmuxServer: { socketPath: "/selected/server", mode: "isolated" } });
+    const rig = rigRepo.createRig("socket-fixture");
+    const pod = podRepo.createPod(rig.id, "dev", "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.existing", { runtime: "stub", podId: pod.id });
+    const context = { attachmentType: "tmux" as const, tmuxSession: "same-name", tmuxPane: "%0", tmuxSocketPath: socketPath };
+    expect(await service.attachToNode({ rigId: rig.id, logicalId: node.logicalId, context }))
+      .toMatchObject({ ok: false, code: "tmux_server_mismatch" });
+    expect(await service.attachToPod({ rigId: rig.id, podNamespace: "dev", memberName: "new", runtime: "stub", context }))
+      .toMatchObject({ ok: false, code: "tmux_server_mismatch" });
+    expect(sessionRegistry.getBindingForNode(node.id)).toBeNull();
+    expect(rigRepo.getRig(rig.id)!.nodes).toHaveLength(1);
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toHaveLength(0);
+  });
+
+  it("accepts the selected socket and keeps external CLI attachment available", async () => {
+    const service = new SelfAttachService({ db, rigRepo, podRepo, sessionRegistry, eventBus,
+      tmuxServer: { socketPath: "/selected/server", mode: "isolated" } });
+    const rig = rigRepo.createRig("socket-fixture");
+    rigRepo.addNode(rig.id, "dev.tmux", { runtime: "stub" });
+    rigRepo.addNode(rig.id, "dev.external", { runtime: "stub" });
+    expect(await service.attachToNode({ rigId: rig.id, logicalId: "dev.tmux", context: {
+      attachmentType: "tmux", tmuxSession: "selected-seat", tmuxSocketPath: "/selected/server",
+    } })).toMatchObject({ ok: true, attachmentType: "tmux" });
+    expect(await service.attachToNode({ rigId: rig.id, logicalId: "dev.external" }))
+      .toMatchObject({ ok: true, attachmentType: "external_cli" });
+  });
+
   it("attachToNode binds the current raw agent as external_cli", async () => {
     const rig = rigRepo.createRig("rigged-buildout");
     const node = rigRepo.addNode(rig.id, "orch1.lead", {

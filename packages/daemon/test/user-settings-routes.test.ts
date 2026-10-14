@@ -23,7 +23,7 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
     "OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH",
     "OPENRIG_CONTEXT_ROOT", "OPENRIG_CONTEXT_PACKS_ROOT",
-    "OPENRIG_LAUNCH_NON_INTERRUPTIVE",
+    "OPENRIG_LAUNCH_NON_INTERRUPTIVE", "OPENRIG_TMUX_SERVER",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
@@ -86,7 +86,7 @@ describe("config routes (User Settings v0)", () => {
     // + 1 OPR.0.4.0.1 (ui.terminal.max_live_terminals)
     // + 2 OPR.0.4.6.MH1 (host.selected / host.name)
     // + 1 OPR.0.4.6.WF5 (workflow.exception_routing)
-    // + 1 OPR.0.4.6.02 (terminal.status_bar — the ratified sole v1 terminal key)
+    // + 1 OPR.0.4.6.02 (terminal.status_bar)
     // + 5 OPR.0.4.6.FS-1 W2 (retention.enabled / transitions_days / watchdog_days /
     //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs;
     //   + retention.usage_samples_days, 51-08 A2)
@@ -114,7 +114,9 @@ describe("config routes (User Settings v0)", () => {
     // + 1 output.whoami_peers (slice 15 P5 whoami peer bound; default 8).
     // + 1 usage.pi_cost_facts (slice 02 Pi cost from persisted entries; default off).
     // + 1 usage.pi_openrouter_charge (slice 02 K4 OpenRouter charge beside the Pi estimate; default off).
-    expect(Object.keys(body.settings).length).toBe(78);
+    // + 1 terminal.tmux_server (per-instance server selection; default inherit).
+    expect(Object.keys(body.settings).length).toBe(79);
+    expect(body.settings["terminal.tmux_server"]).toMatchObject({ value: "inherit", source: "default" });
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });
     expect(body.settings["runtime.readiness_timeout_seconds"]).toMatchObject({ value: 30, source: "default" });
     expect(body.settings["ui.enabled"]).toMatchObject({ value: false, source: "default" });

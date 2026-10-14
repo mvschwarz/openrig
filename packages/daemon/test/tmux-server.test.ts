@@ -61,7 +61,7 @@ describe("the daemon's tmux server", () => {
     const plain = composeView("v", [local, remote], { resolveHost });
     expect(plain.opened.map((p) => p.paneCommand)).toEqual([
       "tmux attach -t 'dev-review@starter'",
-      "ssh 'box.example' 'tmux attach -t '\"'\"'dev-build@starter'\"'\"''",
+      "ssh -t 'box.example' 'env OPENRIG_HOST_SELECTED=local rig terminal attach -- '\"'\"'dev-build@starter'\"'\"''",
     ]);
     const onServer = composeView("v", [local, remote], { resolveHost, localTmux: "/usr/bin/tmux", localTmuxServer: ["-L", "person"] });
     expect(onServer.opened.map((p) => p.paneCommand)).toEqual([

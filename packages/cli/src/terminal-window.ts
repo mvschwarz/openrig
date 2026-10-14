@@ -1,12 +1,13 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { homedir, hostname, networkInterfaces } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
+import { assertLocalTmux, readTmuxServerArgs } from "./tmux-attachment.js";
 import type { OpenViewResult } from "./commands/terminal.js";
 
 interface Pane { seat: string; label: string; paneCommand: string }
@@ -14,7 +15,7 @@ interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
   status: { launch?: { socketPath: string; session?: string } };
-  composed: { id: string; opened: Pane[]; pages: Pane[][]; columns?: number; kernelLayout?: string; spaceLabel?: string; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
+  composed: { id: string; localTmuxServer?: readonly string[]; opened: Pane[]; pages: Pane[][]; columns?: number; kernelLayout?: string; spaceLabel?: string; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
 }
 
 export interface WindowDeps {
@@ -78,13 +79,6 @@ export function defaultWindowDeps(): WindowDeps {
       return undefined;
     },
   };
-}
-
-function localDaemon(url: string): boolean {
-  const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
-  return ["localhost", "::1", "::", "0.0.0.0", hostname()].includes(host)
-    || /^127\./.test(host)
-    || Object.values(networkInterfaces()).flat().some(iface => iface?.address === host);
 }
 
 async function herdrBinary(deps: WindowDeps): Promise<string | null> {
@@ -199,7 +193,7 @@ function failure(provider: string, error: string): OpenViewResult {
 }
 
 /** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
-async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps): Promise<boolean> {
+async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps, serverArgs: readonly string[]): Promise<boolean> {
   try {
     const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
     if (!path.isAbsolute(tmux)) return false;
@@ -209,13 +203,14 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
     const clients = new Map<string, string[]>();
     // Match view-composer's serialization (these strings are compared, never executed).
     const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
-    const inventory = await deps.exec(tmux, ["list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+    const server = serverArgs.map((arg, index) => index % 2 ? quote(arg) : arg).join(" ");
+    const inventory = await deps.exec(tmux, [...serverArgs, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
     for (const line of inventory.trim().split("\n")) {
       const [pid, session, readOnly] = line.split("\t");
       if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
       // Compare the composer's exact command, including session aliases and read-only mode.
       // SSH/custom commands cannot be confirmed from this local client inventory.
-      clients.set(pid, ["tmux", quote(tmux)].map(binary => `${binary} attach ${readOnly === "1" ? "-r " : ""}-t ${quote(session)}`));
+      clients.set(pid, ["tmux", quote(tmux)].map(binary => `${binary}${server ? ` ${server}` : ""} attach ${readOnly === "1" ? "-r " : ""}-t ${quote(session)}`));
     }
     const used = new Set<string>();
     for (const [index, page] of pages.entries()) {
@@ -263,7 +258,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         : `No terminal window was opened. ${reason} On the daemon's desktop, run: ${recovery}`), windowAttempted });
   const windowNotes: string[] = [];
   try {
-    if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
+    await assertLocalTmux(client, "The window launcher must run on the daemon's own desktop; its instance identity could not be confirmed locally.");
     if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
     const launchWindow = await windowLauncher(deps, windowNotes);
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
@@ -278,6 +273,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failed((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
     }
     let { composed, planId } = preview.data;
+    const tmuxServer = readTmuxServerArgs(composed.localTmuxServer);
     if (expectedPlan !== undefined && expectedPlan !== planId) {
       return failure(provider, "The terminal view changed since preview. Refresh the preview before opening.");
     }
@@ -288,6 +284,9 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         const next = await client.get<Preview | OpenViewResult>(previewUrl());
         if (next.status >= 400 || !("composed" in next.data)) throw new Error("Could not compose the measured terminal view.");
         if (expectedPlan !== undefined && expectedPlan !== next.data.planId) throw new Error("The measured terminal layout differs from the expected preview; refresh the preview before opening.");
+        if (JSON.stringify(readTmuxServerArgs(next.data.composed.localTmuxServer)) !== JSON.stringify(tmuxServer)) {
+          throw new Error("The daemon's tmux server changed while opening the window; refresh the preview before retrying.");
+        }
         ({ composed, planId } = next.data);
         if (!composed.opened.length) throw new Error("No conversations are attachable after opening the terminal.");
       }
@@ -323,7 +322,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     }
     const directCommand = herdr && socket
       ? `${configPrefix}env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`
-      : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh /, "ssh -t ")}`;
+      : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh (?!-t )/, "ssh -t ")}`;
     manualCommand = directCommand;
     if (typeof launchWindow === "string") {
       const headless = deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]
@@ -405,7 +404,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       }
       let existing: HerdrTab | undefined;
       for (const candidate of candidates) {
-        if (await hasLiveAttachments(candidate, tabs, composed.pages, pageLabel(candidate), herdrArgs, deps)) { existing = candidate; break; }
+        if (await hasLiveAttachments(candidate, tabs, composed.pages, pageLabel(candidate), herdrArgs, deps, tmuxServer)) { existing = candidate; break; }
         windowNotes.push(`Could not confirm live attachments in workspace ${candidate.workspace_id}. Its contents were kept. After inspecting it, close it if no longer needed: herdr workspace close ${shellQuote(candidate.workspace_id)}`);
       }
       if (existing) {
@@ -430,14 +429,17 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (typeof launchWindow !== "function") throw new Error("No terminal window launcher is available.");
     const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"]).catch(() => "")).trim();
     if (!tmux) throw new Error("tmux is unavailable; run rig setup first.");
+    const runTmux = (args: string[]) => deps.exec(tmux, [...tmuxServer, ...args]);
+    const serverWords = tmuxServer.map((arg, index) => index % 2 ? shellQuote(arg) : arg).join(" ");
+    const tmuxCommand = `${shellQuote(tmux)}${serverWords ? ` ${serverWords}` : ""}`;
     viewer = `openrig-view-${deps.id()}`;
     let placeholder: string | undefined;
     if (composed.kernelLayout) {
       // This is our fresh, empty viewer, never a source seat. Attach it first so Terminal can
       // report the real new window width before we select the OpenRig view layout.
-      placeholder = (await deps.exec(tmux, ["new-session", "-d", "-s", viewer, "-n", "view-1", "-P", "-F", "#{pane_id}"])).trim();
+      placeholder = (await runTmux(["new-session", "-d", "-s", viewer, "-n", "view-1", "-P", "-F", "#{pane_id}"])).trim();
       windowAttempted = true;
-      window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);
+      window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
       await measureWindow();
     }
     for (const [pageIndex, page] of composed.pages.entries()) {
@@ -447,27 +449,27 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       const args = pageIndex === 0 ? ["new-session", "-d", "-s", viewer, "-n", name] : ["new-window", "-d", "-t", `${viewer}:`, "-n", name];
       let pane: string;
       if (pageIndex === 0 && placeholder) {
-        await deps.exec(tmux, ["respawn-pane", "-k", "-t", placeholder, `env -u TMUX ${first.paneCommand}`]);
+        await runTmux(["respawn-pane", "-k", "-t", placeholder, `env -u TMUX ${first.paneCommand}`]);
         pane = placeholder;
-      } else pane = (await deps.exec(tmux, [...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
+      } else pane = (await runTmux([...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
       // Nested source clients on this server can make a new window too narrow to split.
       // Use the viewer's configured detached size, then restore normal client resizing.
-      const [width, height] = (await deps.exec(tmux, ["show-options", "-Av", "-t", viewer, "default-size"])).trim().split("x");
-      const sizing = (await deps.exec(tmux, ["show-options", "-Awv", "-t", pane, "window-size"])).trim();
-      await deps.exec(tmux, ["resize-window", "-t", pane, "-x", width!, "-y", height!]);
-      await deps.exec(tmux, ["select-pane", "-t", pane, "-T", first.label]);
+      const [width, height] = (await runTmux(["show-options", "-Av", "-t", viewer, "default-size"])).trim().split("x");
+      const sizing = (await runTmux(["show-options", "-Awv", "-t", pane, "window-size"])).trim();
+      await runTmux(["resize-window", "-t", pane, "-x", width!, "-y", height!]);
+      await runTmux(["select-pane", "-t", pane, "-T", first.label]);
       for (const item of page.slice(1)) {
-        pane = (await deps.exec(tmux, ["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
-        await deps.exec(tmux, ["select-pane", "-t", pane, "-T", item.label]);
-        await deps.exec(tmux, ["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
+        pane = (await runTmux(["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
+        await runTmux(["select-pane", "-t", pane, "-T", item.label]);
+        await runTmux(["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
       }
-      await deps.exec(tmux, ["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
-      await deps.exec(tmux, ["set-option", "-w", "-t", `${viewer}:${name}`, "window-size", sizing]);
+      await runTmux(["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
+      await runTmux(["set-option", "-w", "-t", `${viewer}:${name}`, "window-size", sizing]);
     }
-    await deps.exec(tmux, ["select-window", "-t", `${viewer}:view-1`]);
+    await runTmux(["select-window", "-t", `${viewer}:view-1`]);
     if (!window) {
       windowAttempted = true;
-      window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);
+      window = await launchWindow(`env -u TMUX ${tmuxCommand} attach-session -t ${shellQuote(`=${viewer}`)}`);
     }
     return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
   } catch (err) {

@@ -580,6 +580,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
   const tmuxSession = typeof body["tmuxSession"] === "string" ? body["tmuxSession"].trim() : "";
   const tmuxWindow = typeof body["tmuxWindow"] === "string" ? body["tmuxWindow"].trim() : "";
   const tmuxPane = typeof body["tmuxPane"] === "string" ? body["tmuxPane"].trim() : "";
+  const tmuxSocketPath = typeof body["tmuxSocketPath"] === "string" ? body["tmuxSocketPath"] : undefined;
 
   const hasNodeTarget = logicalId.length > 0;
   const hasPodFields = podNamespace.length > 0 || memberName.length > 0;
@@ -606,6 +607,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
         tmuxSession,
         tmuxWindow: tmuxWindow || undefined,
         tmuxPane: tmuxPane || undefined,
+        tmuxSocketPath,
       }
     : undefined;
 
@@ -628,6 +630,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
     case "duplicate_logical_id":
     case "invalid_member_name":
     case "runtime_mismatch":
+    case "tmux_server_mismatch":
       return c.json(result, 409);
     default:
       return c.json(result, 500);

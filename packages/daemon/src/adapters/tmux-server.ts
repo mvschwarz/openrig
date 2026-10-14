@@ -1,12 +1,12 @@
 // Which tmux server the daemon's sessions live on, as the flags a person's attach command needs.
 //
-// The daemon runs every tmux command without -L or -S, so tmux uses the server named by the
-// daemon's inherited $TMUX when it was started from inside tmux, and otherwise the default
-// server. A person attaching from a new terminal reaches the default server, so an attach
-// command printed for a daemon on another server must name that server.
+// Startup selects either the inherited server or this OpenRig home's dedicated socket.
+// Native commands, printed attach commands and structured terminal metadata all use that
+// effective selection, including when a requested migration waits for live seats to stop.
 
 import fs from "node:fs";
 import path from "node:path";
+import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
 
 function realpath(p: string): string {
   try {
@@ -41,13 +41,20 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
 }
 
 let daemonServerArgs: string[] = [];
+let daemonServerSelection: TmuxServerSelection | undefined;
 
-/** Recorded once at daemon startup, from the daemon's own environment. */
-export function setDaemonTmuxServer(args: readonly string[]): void {
+/** Recorded once at daemon startup, before reconciliation or launch. */
+export function setDaemonTmuxServer(args: readonly string[], selection?: TmuxServerSelection): void {
   daemonServerArgs = [...args];
+  daemonServerSelection = selection;
 }
 
-/** The daemon's tmux server flags; empty for the default server. */
+/** Effective startup choice, including a deferred change while old seats survive. */
+export function daemonTmuxServerInfo(): TmuxServerSelection | undefined {
+  return daemonServerSelection;
+}
+
+/** The daemon's effective server flags; empty for legacy/injected compositions. */
 export function daemonTmuxServerArgs(): readonly string[] {
   return daemonServerArgs;
 }
@@ -56,7 +63,7 @@ function shellWord(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
 
-/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
+/** `tmux attach -t <session>`, with the daemon's effective server flags. */
 export function tmuxAttachCommand(session: string): string {
   const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
   return `tmux${server ? ` ${server}` : ""} attach -t ${session}`;

@@ -317,16 +317,21 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   // operator's server. Refuse before any filesystem effect, like the others.
   assertNoAmbientTmux(baseEnv);
 
-  const root = mkdtempSync(join(tmpdir(), "openrig-scenario-"));
+  // Leave room for the per-home socket, including macOS's /private prefix,
+  // while keeping every socket within the caller's isolated TMPDIR.
+  const root = mkdtempSync(join(tmpdir(), "o"));
   const home = join(root, "home");
   const openrigHome = join(root, "openrig-home");
   const stateDir = join(root, "state");
   // Keep both compatibility and explicit socket paths below sun_path's cap.
-  const tmuxTmpDir = join(root, "tx");
-  const tmuxSocketPath = join(root, "tmux.sock");
+  const tmuxTmpDir = root;
+  // Match native default resolution as well as the wrapper. The daemon now
+  // passes its selected -S explicitly, which takes precedence over the wrapper.
+  const tmuxServerDir = join(tmuxTmpDir, `tmux-${process.getuid?.() ?? 0}`);
+  const tmuxSocketPath = join(tmuxServerDir, "default");
   const tmuxWrapperDir = join(root, "bin");
   const tmuxWrapperPath = join(tmuxWrapperDir, "tmux");
-  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir, tmuxWrapperDir]) {
+  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir, tmuxServerDir, tmuxWrapperDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
@@ -354,6 +359,10 @@ process.exit(result.status ?? 1);
   const env: Record<string, string | undefined> = { ...baseEnv };
   for (const name of DAEMON_TARGET_ENV_VARS) delete env[name];
   for (const name of CREDENTIAL_ENV_VARS) delete env[name];
+  // The fixture owns one explicit socket; an ambient mode must not select an
+  // additional server that ordinary scaffold cleanup would leave running.
+  delete env.OPENRIG_TMUX_SERVER;
+  delete env.RIGGED_TMUX_SERVER;
   // Scrub any injected-clock var (defense in depth behind the fail-closed guard) so
   // only an explicit injectClockNow can set it below — never an inherited value.
   for (const name of TEST_CLOCK_ENV_VARS) delete env[name];

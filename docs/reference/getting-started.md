@@ -324,7 +324,11 @@ rig terminal open saved:kernel --provider herdr --json
 rig terminal open saved:kernel --provider cmux --json
 ```
 
-Use `rig terminal status --json` to inspect provider availability and liveness.
+Use `rig terminal status --json` to inspect provider availability, liveness and the
+daemon's effective tmux server. To keep managed seats out of your personal tmux
+session list, opt into [an isolated server](tmux-servers.md) with
+`rig config set terminal.tmux_server isolated`; existing live seats defer the
+switch until they are stopped and the daemon restarts.
 For the first desktop handoff, use `--window`. Only if the window cannot open,
 `rig tui --shared` is the dashboard-only fallback, not the operator's conversation.
 

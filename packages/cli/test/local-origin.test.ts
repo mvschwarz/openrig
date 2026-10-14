@@ -87,3 +87,45 @@ describe("direct endpoint attribution", () => {
     expect(requests).toHaveLength(1); expect(requests[0]?.headers["X-OpenRig-Session"]).toBe("rig-admin@ops@vm-origin");
   });
 });
+
+describe("local instance proof for terminal attachment", () => {
+  it.each([
+    ["local-instance", true], ["remote-instance", false], [undefined, false],
+  ] as const)("compares the loopback endpoint's identity %s with this home's durable identity", async (target, expected) => {
+    seed("local-instance");
+    // Attachment also requires proof outside an agent seat and without OPENRIG_URL.
+    vi.stubEnv("OPENRIG_SESSION_NAME", ""); vi.stubEnv("RIGGED_SESSION_NAME", ""); vi.stubEnv("OPENRIG_URL", "");
+    const { factory, requests } = client(target);
+    expect(await factory("http://127.0.0.1:12345").isLocalInstance()).toBe(expected);
+    expect(requests.map(r => r.url)).toEqual(["http://127.0.0.1:12345/healthz"]);
+  });
+
+  it("does not accept the endpoint's identity when the local store is absent", async () => {
+    const { factory, requests } = client("remote-instance");
+    expect(await factory("http://localhost:7433").isLocalInstance()).toBe(false);
+    expect(requests).toEqual([]);
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("does not use a caller-supplied origin or a registered remote as local proof", async () => {
+    seed("local-instance");
+    const { factory } = client("remote-instance");
+    const c = factory("http://localhost:7433");
+    c.originSelfHostId = "remote-instance";
+    expect(await c.isLocalInstance()).toBe(false);
+    const same = client("local-instance");
+    expect(await remoteDaemonClient(same.factory, "http://localhost:7433").isLocalInstance()).toBe(false);
+    expect(same.requests).toEqual([]);
+  });
+
+  it("bounds an unresponsive identity probe and cancels it", async () => {
+    seed("local-instance");
+    let signal: AbortSignal | null | undefined;
+    const c = new DaemonClient("http://127.0.0.1:12345", { timeoutMs: 25, fetchImpl: (async (_url, init) => {
+      signal = init?.signal;
+      return new Promise<Response>(() => {});
+    }) as typeof fetch });
+    expect(await c.isLocalInstance()).toBe(false);
+    expect(signal?.aborted).toBe(true);
+  });
+});
