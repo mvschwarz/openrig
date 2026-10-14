@@ -149,13 +149,17 @@ export class PiUsageEntriesStore {
          WHERE pi_usage_entries.origin = 'unknown' AND excluded.origin <> 'unknown'`,
     );
     // K4 (rows stored before migration 108): a replay of the same entry fills the request correlation it didn't
-    // have. Same means every stored request fact agrees: seat, kind, time, all four token counts, estimate,
-    // provider and model. A value already there is never overwritten; cost and origin are never changed here.
+    // have. Same means it agrees with every fact field stored for the entry: seat, parent entry, time, kind,
+    // usage category, provider, model, all four token counts, estimate and stop reason (origin settles on its
+    // own), and with any correlation value already stored. A value already there is never overwritten; cost and
+    // origin are never changed here.
     const backfill = this.chargeColumns ? this.db.prepare(
       `UPDATE pi_usage_entries SET api = COALESCE(api, ?), response_id = COALESCE(response_id, ?)
-        WHERE pi_session_id = ? AND entry_id = ? AND seat_session = ? AND kind = ? AND entry_timestamp = ?
+        WHERE pi_session_id = ? AND entry_id = ? AND seat_session = ? AND parent_entry_id IS ? AND entry_timestamp = ?
+          AND kind = ? AND usage_category IS ? AND provider IS ? AND model IS ?
           AND input_tokens = ? AND output_tokens = ? AND cache_read_tokens = ? AND cache_write_tokens = ?
-          AND cost_total IS ? AND provider IS ? AND model IS ?
+          AND cost_total IS ? AND stop_reason IS ?
+          AND (api IS NULL OR api IS ?) AND (response_id IS NULL OR response_id IS ?)
           AND ((api IS NULL AND ? IS NOT NULL) OR (response_id IS NULL AND ? IS NOT NULL))`,
     ) : null;
     let stored = 0;
@@ -168,9 +172,11 @@ export class PiUsageEntriesStore {
         stored += changes;
         // Also when this replay just settled the row's origin (a change of its own): correlation is separate.
         if (backfill) {
-          backfill.run(fact.api ?? null, fact.responseId ?? null, input.piSessionId, fact.entryId, input.seatSession, fact.kind,
-            fact.entryTimestamp, fact.input, fact.output, fact.cacheRead, fact.cacheWrite, fact.costTotal, fact.provider, fact.model,
-            fact.api ?? null, fact.responseId ?? null);
+          const api = fact.api ?? null;
+          const responseId = fact.responseId ?? null;
+          backfill.run(api, responseId, input.piSessionId, fact.entryId, input.seatSession, fact.parentEntryId, fact.entryTimestamp,
+            fact.kind, fact.usageCategory, fact.provider, fact.model, fact.input, fact.output, fact.cacheRead, fact.cacheWrite,
+            fact.costTotal, fact.stopReason, api, responseId, api, responseId);
         }
       }
     })();

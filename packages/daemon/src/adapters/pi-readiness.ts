@@ -121,6 +121,9 @@ export type PiCredentialEvidence = {
    *  <agentDir>/extensions, <cwd>/.pi/extensions, and `packages`/`extensions` entries in either settings.json.
    *  OpenRig passes no -e flags. */
   extensions: "none" | "present" | "unknown";
+  /** Whether models.json has any OpenRouter provider entry, whichever credential wins and whether or not its key
+   *  is literal: Pi's provider composer holds it from load until a reload, so its presence alone matters. */
+  modelsOpenRouterEntry: "none" | "present" | "unknown";
   /** Identity of every file and directory above, so a change between two observations is visible. */
   fingerprint: string;
 };
@@ -141,6 +144,19 @@ export function piCredentialEvidence(opts: {
     .concat(path.join(opts.cwd, ".pi", "settings.json"));
   const dirs = [path.join(opts.agentDir, "extensions"), path.join(opts.cwd, ".pi", "extensions")];
   let extensions: PiCredentialEvidence["extensions"] = "none";
+  let modelsOpenRouterEntry: PiCredentialEvidence["modelsOpenRouterEntry"] = "none";
+  try {
+    const text = opts.readFile(path.join(opts.agentDir, "models.json"));
+    if (text.length > 1024 * 1024) throw new Error("Unbounded metadata");
+    const models: unknown = JSON.parse(text.replace(/^\uFEFF/, ""));
+    if (!object(models)) throw new Error("Unknown metadata");
+    if (models.providers !== undefined) {
+      if (!object(models.providers)) throw new Error("Unknown metadata");
+      if (Object.hasOwn(models.providers, "openrouter")) modelsOpenRouterEntry = "present";
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") modelsOpenRouterEntry = "unknown";
+  }
   const parts: string[] = [];
   try {
     for (const file of files) parts.push(`${file}=${opts.statId(file)}`);
@@ -171,6 +187,7 @@ export function piCredentialEvidence(opts: {
     at,
     source: piCredentialSource({ model: "openrouter/charge-lookup", agentDir: opts.agentDir, env: opts.env, readFile: opts.readFile }),
     extensions,
+    modelsOpenRouterEntry,
     fingerprint: parts.join("\n"),
   };
 }
@@ -181,9 +198,14 @@ export function piCredentialEvidence(opts: {
  *  the running Pi loaded, so once seen, this is sticky for the process. */
 export function credentialTaint(e: PiCredentialEvidence): string | null {
   const when = new Date(e.at).toISOString();
-  if (e.extensions === "present") return `a Pi extension was configured when observed at ${when}, and Pi keeps what it loaded until it restarts`;
-  if (e.extensions === "unknown") return `Pi's extension configuration couldn't be checked at ${when}, and Pi keeps what it loaded until it restarts`;
-  if (e.source.kind === "models-key") return `a models.json OpenRouter key was configured when observed at ${when}, and Pi keeps what it loaded until it restarts`;
+  const kept = "and Pi keeps what it loaded until it restarts or reloads";
+  if (e.extensions === "present") return `a Pi extension was configured when observed at ${when}, ${kept}`;
+  if (e.extensions === "unknown") return `Pi's extension configuration couldn't be checked at ${when}, ${kept}`;
+  if (e.modelsOpenRouterEntry === "present" || e.source.kind === "models-key") {
+    return `models.json had an OpenRouter provider entry when observed at ${when}, ${kept}`;
+  }
+  if (e.modelsOpenRouterEntry === "unknown") return `models.json couldn't be checked for an OpenRouter entry at ${when}, ${kept}`;
+  if (e.source.kind === "unknown") return `Pi's OpenRouter credential source couldn't be classified at ${when}, ${kept}`;
   return null;
 }
 
