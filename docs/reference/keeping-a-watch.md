@@ -170,7 +170,12 @@ accounts on every machine. Run it only when the person asks for a fresh reading 
 
 **Choose the allowance with the person once, and write its identity into the body.**
 - **The allowance:** its `items[].key` and `items[].provider`, read from one run of the check. Show them the allowance
-  by its label in the plain `rig provider status --all-hosts` view, never a key they have to type.
+  by its label in the plain `rig provider status --all-hosts` view, never a key they have to type. An item whose key
+  is null (a login that hasn't been identified) can't be watched: say so, and offer to watch it once it's identified.
+- **For Codex, the login email too:** `items[].observations[].row.identity.email`, shown on each machine's line in the
+  plain view. The same Codex account can appear as more than one item with the same key, one per login email (or none)
+  it was seen under. So on each fire, if the key matches more than one item, use the one item whose observations carry
+  that email. If none or several do, you can't tell.
 - **The window:** `items[].observations[].row.windows[].window`. Claude's are `five_hour` and `weekly`; Codex's are
   `primary` and `secondary`, with `items[].observations[].row.windows[].durationMins` saying which is which.
 - **The threshold:** on `items[].observations[].row.windows[].remainingPercent`. It's a percentage, and no absolute
@@ -181,23 +186,29 @@ accounts on every machine. Run it only when the person asks for a fresh reading 
 
 | Field | What it tells you |
 |---|---|
-| `items[].linkage` | `single`: one machine saw it. `same`: several machines saw one allowance. Compare their observations; **never add or average them**. `conflict`: the machines disagree (their reset times are more than 60 s apart); every observation is kept. `unknown`: the same id seen under another login, or with no login email. It isn't merged, so you can't tell whether it's the person's allowance. Say so plainly. `items[].notes` says why |
+| `items[].linkage` | `single`: one machine saw it. `same`: several machines saw one allowance. Compare their observations; **never add or average them**. `conflict`: the machines' fresh observations disagree (their reset times are more than 60 s apart); every observation is kept and none is chosen. `unknown`: the same id seen under another login, or with no login email. It isn't merged, so you can't tell whether it's the person's allowance. Say so plainly. `items[].notes` says why |
 | `items[].observations[].hostId`, `items[].observations[].readAt` | Which machine the observation is from, and when this daemon read it |
 | `items[].observations[].row.windows[].observedAt` | When that machine's reading was taken: the time to tell the person |
-| `items[].observations[].row.windows[].freshness` | `fresh`, `stale` or `unavailable`, with `items[].observations[].row.windows[].freshnessReason` saying why |
-| `items[].observations[].row.windows[].level` | The served level, with `items[].observations[].row.windows[].levelReason`. The person's own threshold is what you compare, not this |
-| `items[].observations[].row.lastRefresh` | That machine's last read. When `items[].observations[].row.lastRefresh.outcome` is `failed`, its reading is older evidence and reads `stale` |
+| `items[].observations[].row.windows[].resetsAt` | When that window resets: tell the person this too |
+| `items[].observations[].row.windows[].freshness` | `fresh`, `stale` or `unavailable`, with `items[].observations[].row.windows[].freshnessReason` saying why. A reading is fresh for 15 minutes |
+| `items[].observations[].row.windows[].level` | The served level, with `items[].observations[].row.windows[].levelReason`. Compare the person's threshold, not this level. But **`unknown` means the number can't be used**: no usage was reported, the window's reset time has passed (the number is from before it), or Claude seats report different windows (possibly different logins) |
+| `items[].observations[].row.lastRefresh` | **Codex:** that machine's last native read. When `items[].observations[].row.lastRefresh.outcome` is `failed`, the reading it kept is older and reads `stale`. **Claude:** the last read of the daemon's own Claude login (its identity) only. Claude's windows come from the seats' status-line readings at their own times, so they can stay `fresh` beside a failed identity read |
+| `items[].observations[].row.identityNote` | **Claude:** which login the identity is (as of the last identity read) and which seats the windows came from. The windows aren't proven to be that login. Say so when you tell the person |
 | `hosts[].usage`, `hosts[].usageReason` | Whether each machine's usage was read: `served`, `off`, `older` or `unavailable`, and why. A machine that wasn't read contributes nothing, never a zero |
 | `hosts[].lastRefresh` | The last refresh started from here for that machine, per provider. A `failed` one sits beside the older observation the machine kept |
-| `seatAccounts[].seats[].configured`, `seatAccounts[].seats[].allowance` | The account each seat is **configured** to use. `seatAccounts[].seats[].allowance.linked` is always false: configuration isn't proof of which allowance a running seat draws on. Never tell the person a seat uses this allowance because of it |
+| `seatAccounts[].seats[].configured`, `seatAccounts[].seats[].allowance` | The account each seat is **configured** to use. `seatAccounts[].seats[].allowance.linked` is always false: configuration isn't proof of which allowance a running seat draws on, or that a Claude seat's windows are the identity's login. Never tell the person a seat uses this allowance because of it |
+| `seatAccounts[].seats[].observed` | What the seat itself was seen reporting: whether its status line has sent windows and when (`seatAccounts[].seats[].observed.lastSampledAt`), and `seatAccounts[].seats[].observed.differsFrom`, the seats whose readings disagree with it. Observed facts, still not a link to an allowance |
 
-**The decision on each fire,** using the table in "Every time the timer fires":
-- **Met:** a `fresh` observation of the chosen window is below the threshold. Tell them the lowest one, with its
-  machine and `observedAt`.
-- **Not met:** every `fresh` observation of it is at or above the threshold.
-- **Can't tell:** no `fresh` observation of it, a `fresh` one whose `remainingPercent` is null, the allowance missing
-  from the answer, or its linkage `unknown`. Use the once-then-quiet unknown rule, and give the reason
-  (`freshnessReason`, `levelReason` for a null reading, or the machine's `usageReason`).
+**The decision on each fire,** using the table in "Every time the timer fires". A usable reading is a `fresh`
+observation of the chosen window whose `level` isn't `unknown`.
+- **Met:** a usable reading is below the threshold. Tell them the lowest one, with its machine, `observedAt` and
+  `resetsAt`. If the linkage is `conflict`, also tell them the machines disagree, from `items[].notes`, rather than
+  presenting the lowest as the reading.
+- **Not met:** every usable reading is at or above the threshold, and there is at least one.
+- **Can't tell:** no usable reading: none `fresh`, or the fresh ones' `level` is `unknown`, which includes a null
+  `remainingPercent`. Also when the allowance is missing from the answer, its linkage is `unknown`, or (Codex) its key
+  matches more than one item and not exactly one carries the recorded email. Use the once-then-quiet unknown rule,
+  and give the reason (`freshnessReason`, `levelReason`, or the machine's `usageReason`).
 
 The task body, for the person's own allowance, window and threshold:
 
@@ -205,10 +216,13 @@ The task body, for the person's own allowance, window and threshold:
 Person's words: "Warn me when my Claude allowance drops below 20% of its 5-hour window; check every 30 minutes."
 Check: `rig provider status --all-hosts --json` (served readings only; never --refresh).
 Allowance: key <allowance key>, provider claude, window five_hour. Chosen with the person.
-Met: a fresh observation of that window with remainingPercent below 20. Report the lowest, with its machine and observedAt.
-Never add machines' numbers.
-Can't tell: no fresh observation of that window, a fresh one with remainingPercent null (give its levelReason), the
-allowance missing, or its linkage unknown. Give the reason.
+(For Codex, also: login email <email shown in the label>.)
+Usable: a fresh observation of that window whose level isn't unknown.
+Met: a usable reading with remainingPercent below 20. Report the lowest, with its machine, observedAt and resetsAt.
+Never add machines' numbers. If the linkage is conflict, say the machines disagree (items[].notes).
+Claude: say the windows come from seats' status lines and aren't proven to be the identity's login (identityNote).
+Can't tell: no usable reading (none fresh, or level unknown: give its levelReason), the allowance missing, its linkage
+unknown, or (Codex) the key on several items without exactly one carrying the email. Give the reason.
 Interval: 30m.
 Tell them: <entityId>@external (human channel), once, when met.
 Stop: after telling them once, or when they say stop.

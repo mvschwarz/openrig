@@ -82,14 +82,21 @@ describe("keeping-a-watch: the usage warning", () => {
 
   it("every field path the page names is in what that command serves", async () => {
     // Two machines with one login, one with another login's same account, a switched-off one, one whose read failed
-    // after a good one (an older, stale reading and a failed leg from here), and seat accounts in each shape.
+    // after a good one (an older, stale reading and a failed leg from here), seat accounts in each shape, and a Claude
+    // login whose windows come from two seats' status lines that disagree on the 5-hour window.
     const a = await host("a", { rewrite: (p, b) => (p === "/api/provider/status" ? { ...(b as object), seatAccounts: SEAT_SHAPES } : b) });
     const b = await host("b", { codex: { secondaryUsed: 90 } });
     const c = await host("c", { codex: { email: "other@example.com" } });
     const off = await host("off", { usageWindows: false });
     const failing = await host("failing");
-    const hub = await host("hub", { registry: [a.entry(), b.entry(), c.entry(), off.entry(), failing.entry()] });
+    const claude = await host("claude", { samples: [
+      { seatSession: "seat-1@r", window: "five_hour", usedPercent: 85, resetsAt: "2026-10-14T02:00:00.000Z", sampledAt: "2026-10-13T23:25:00.000Z" },
+      { seatSession: "seat-2@r", window: "five_hour", usedPercent: 30, resetsAt: "2026-10-14T04:00:00.000Z", sampledAt: "2026-10-13T23:24:00.000Z" },
+      { seatSession: "seat-1@r", window: "weekly", usedPercent: 40, resetsAt: "2026-10-20T00:00:00.000Z", sampledAt: "2026-10-13T23:25:00.000Z" },
+    ] });
+    const hub = await host("hub", { registry: [a.entry(), b.entry(), c.entry(), off.entry(), failing.entry(), claude.entry()] });
     for (const h of [a, b, c, failing]) await post(h.url, "/api/provider/usage/refresh", { provider: "codex" });
+    await post(claude.url, "/api/provider/usage/refresh", { provider: "claude" });
     failing.codex = { fail: { reason: "rpc_error", detail: "the app-server said no" } };
     await post(hub.url, "/api/provider/usage/hosts/refresh", { provider: "codex", hosts: ["failing"] });
 
@@ -97,6 +104,16 @@ describe("keeping-a-watch: the usage warning", () => {
     const paths = fieldPaths(page);
     expect(paths.length).toBeGreaterThan(15);
     expect(paths.filter((p) => !present(served, p.split(".")))).toEqual([]);
+
+    // The window names the page teaches are the ones served, Claude's and Codex's.
+    const items = (served as { items: Array<{ observations: Array<{ row: { windows: Array<{ window: string; level: string }> } }> }> }).items;
+    const windows = items.flatMap((g) => g.observations.flatMap((o) => o.row.windows));
+    for (const name of ["five_hour", "weekly", "primary", "secondary"]) {
+      expect(page).toContain(`\`${name}\``);
+      expect(windows.map((w) => w.window)).toContain(name);
+    }
+    // The page's can't-tell case for a level the number can't be used with is served here: seats that disagree.
+    expect(windows.some((w) => w.window === "five_hour" && w.level === "unknown")).toBe(true);
   });
 
   it("a field the page names by itself is the last part of a path it names in full", () => {
