@@ -396,8 +396,6 @@ export class RunnerCore {
   private lastCredentialEvidence: PiCredentialEvidence | null = null;
   /** Sticky for this process: what an observation showed Pi may have loaded (see credentialTaint). */
   private credentialTainted: string | null = null;
-  /** The previous observation's uncertain reading, if any (two in a row become sticky). */
-  private lastUncertain: string | null = null;
   private readonly chargeProvenance = new Map<string, ChargeProvenance>();
   /** OPR.0.7.0.2: a fork parent read is under way (at most one at a time). */
   private parentReadInFlight = false;
@@ -557,17 +555,10 @@ export class RunnerCore {
 
   /** OPR.0.7.0.2: report usage from the persisted entries a get_entries response returned (catch-up after a
    *  restart, or the refresh after each agent_end). Pi only, and only with --usage-facts. Never live updates. */
-  /** K4: what an observation shows Pi may hold for the rest of the process. A definite sighting is sticky at
-   *  once; an uncertain one (unreadable configuration, perhaps a torn read) only when the next observation is
-   *  uncertain too. Either way the windows around an uncertain observation are unavailable (the judge). */
+  /** K4: what an observation shows Pi may hold for the rest of the process (an extension, a credential-bearing
+   *  models.json entry, or a reading that couldn't be made) is sticky at once. */
   private noteTaint(e: PiCredentialEvidence): void {
-    const taint = credentialTaint(e);
-    if (taint && "sticky" in taint) this.credentialTainted ??= taint.sticky;
-    const uncertain = taint && "uncertain" in taint ? taint.uncertain : null;
-    if (uncertain && this.lastUncertain) {
-      this.credentialTainted ??= `${uncertain} in two consecutive observations (to ${new Date(e.at).toISOString()}), and Pi keeps what it loaded until it restarts or reloads`;
-    }
-    this.lastUncertain = uncertain;
+    this.credentialTainted ??= credentialTaint(e)?.sticky ?? null;
   }
 
   private reportUsageFacts(entries: unknown[]): void {

@@ -13,7 +13,7 @@ import { activityRoutes } from "../src/routes/activity.js";
 import { computeCostView, type PiProviderChargeView } from "../src/domain/usage-series.js";
 import { RunnerCore, parseRunnerArgs, type RunnerIo } from "../src/adapters/pi-runner.js";
 import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
-import { judgeChargeProvenance, piCredentialEvidence, piCredentialSource, type PiCredentialEvidence, type PiCredentialSource } from "../src/adapters/pi-readiness.js";
+import { judgeChargeProvenance, parsePiModelsJson, piCredentialEvidence, piCredentialSource, type PiCredentialEvidence, type PiCredentialSource } from "../src/adapters/pi-readiness.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, OPENROUTER_CHARGE_MAX_ATTEMPTS, type GenerationReply } from "../src/adapters/pi-openrouter-charge.js";
 import { openRouterChargeTarget, parseOpenRouterGeneration } from "../src/domain/openrouter-charge.js";
 import { PiUsageEntriesStore, validPiProviderCharge } from "../src/domain/pi-usage-entries-store.js";
@@ -205,8 +205,8 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
       const p = pipeline({ source: () => source });
       await p.refresh();
       expect(p.lookups).toEqual([]);
-      const reason = kind === "unknown" // unclassifiable in two consecutive observations: sticky
-        ? `the generating credential isn't established: Pi's OpenRouter credential source couldn't be classified in two consecutive observations (to ${at(1)}), and Pi keeps what it loaded until it restarts or reloads`
+      const reason = kind === "unknown" // unclassifiable: sticky for the process
+        ? `the generating credential isn't established: Pi's OpenRouter credential source couldn't be classified when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`
         : kind === "models-key" // models.json is loaded at Pi's start: sticky for the process
         ? `the generating credential isn't established: models.json had a credential-bearing OpenRouter provider entry when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`
         : `the generating credential isn't established: Pi's OpenRouter credential around the request was ${kind}, not the key OpenRig forwarded`;
@@ -231,7 +231,7 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
   it("F1: an extension that could supply the credential, a file that changed, or a request before the runner observed: unavailable", async () => {
     const cases: Array<[Parameters<typeof pipeline>[0], string]> = [
       [{ extensions: () => "present" }, `a Pi extension was configured when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`],
-      [{ extensions: () => "unknown" }, `Pi's extension configuration couldn't be checked in two consecutive observations (to ${at(1)}), and Pi keeps what it loaded until it restarts or reloads`],
+      [{ extensions: () => "unknown" }, `Pi's extension configuration couldn't be checked when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`],
       [{ fingerprint: (() => { let n = 0; return () => `v${n++}`; })() }, "Pi's credential or extension files changed around the request"],
     ];
     for (const [opts, reason] of cases) {
@@ -290,24 +290,20 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     }
   });
 
-  it("R4-F1 optional: one unreadable observation (a torn read) leaves only its windows unavailable; two in a row are sticky", async () => {
+  it("R5-F1: one unreadable observation taints the runner process; later clean readings, or alternating ones, don't reopen it", async () => {
     for (const field of ["models", "extensions", "source"] as const) {
-      const once = (bad: number[]) => { let i = 0; return () => bad.includes(i++); };
-      const make = (isBad: () => boolean): Parameters<typeof pipeline>[0] => field === "models"
-        ? { models: () => (isBad() ? "unknown" : "none") }
-        : field === "extensions" ? { extensions: () => (isBad() ? "unknown" : "none") }
-        : { source: () => (isBad() ? { kind: "unknown" } : MANAGED) };
-      const torn = pipeline(make(once([1]))); // launch clean, refresh 1 unreadable, refresh 2 clean
-      await torn.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
-      await torn.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" })]);
-      expect(torn.lookups).toEqual([]); // a1's window ends at the unreadable observation, a2's starts there
-      await torn.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" }),
-        turn("a3", 4, { cost: 0.01, responseId: "gen-x-3" })]);
-      expect(torn.lookups).toEqual(["gen-x-3"]); // clean on both sides: charged, not tainted for the process
-      const twice = pipeline(make(once([1, 2])));
-      for (const n of [1, 2, 3]) await twice.refresh(Array.from({ length: n }, (_, k) => turn(`a${k + 1}`, k + 2, { cost: 0.01, responseId: `gen-x-${k + 1}` })));
-      expect(twice.lookups).toEqual([]);
-      expect(Object.keys(twice.charge().requests.unavailable.reasons).some((reason) => reason.includes("in two consecutive observations"))).toBe(true);
+      for (const bad of [[1], [1, 3, 5]]) { // once (an EACCES, a torn read), and alternating unreadable/clean
+        let i = 0;
+        const isBad = () => bad.includes(i++);
+        const p = pipeline(field === "models" ? { models: () => (isBad() ? "unknown" : "none") }
+          : field === "extensions" ? { extensions: () => (isBad() ? "unknown" : "none") }
+          : { source: () => (isBad() ? { kind: "unknown" } : MANAGED) });
+        for (const n of [1, 2, 3, 4, 5]) {
+          await p.refresh(Array.from({ length: n }, (_, k) => turn(`a${k + 1}`, k + 2, { cost: 0.01, responseId: `gen-x-${k + 1}` })));
+        }
+        expect(p.lookups).toEqual([]);
+        expect(p.charge().requests.unavailable.count).toBe(5);
+      }
     }
   });
 
@@ -330,6 +326,12 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
       files["/agent/models.json"] = JSON.stringify({ providers: { openrouter: entry } });
       expect(piCredentialEvidence(base).modelsOpenRouterEntry).toBe("unknown");
     }
+    // Pi strips // comments and trailing commas from models.json (stripJsonComments), so the readers do too.
+    files["/agent/models.json"] = '\uFEFF{\n  // custom models only\n  "providers": { "openrouter": { "models": [{ "id": "a//b", "name": "x" },], }, },\n}\n';
+    expect(piCredentialEvidence(base)).toMatchObject({ modelsOpenRouterEntry: "none", source: MANAGED });
+    files["/agent/models.json"] = '{ "providers": { "openrouter": { "apiKey": "sk", // key\n } } }';
+    expect(piCredentialEvidence(base)).toMatchObject({ modelsOpenRouterEntry: "present", source: { kind: "models-key", provider: "openrouter" } });
+    expect(parsePiModelsJson('{ "u": "http://x//y", }')).toEqual({ u: "http://x//y" });
   });
 
   it("R2-F1: the production runner's first observation is the one taken before Pi was spawned", async () => {

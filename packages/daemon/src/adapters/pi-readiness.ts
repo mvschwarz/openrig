@@ -50,6 +50,15 @@ export function providerEntryAuth(entry: unknown): "none" | "bearing" | "unknown
   return parts.includes("bearing") ? "bearing" : parts.includes("unknown") ? "unknown" : "none";
 }
 
+/** Pi 0.87.1 parses models.json as JSON.parse(stripJsonComments(stripBom(text))) (model-config.js, utils/json.js):
+ *  `//` line comments outside strings and trailing commas are removed. The same here, so a file Pi reads is read. */
+export function parsePiModelsJson(text: string): unknown {
+  const stripped = text.replace(/^\uFEFF/, "")
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : ""))
+    .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail: string | undefined) => tail ?? (m[0] === '"' ? m : ""));
+  return JSON.parse(stripped);
+}
+
 export type PiCredentialSource =
   | { kind: "stored-sign-in" | "stored-key" | "models-key"; provider: string }
   | { kind: "managed-env"; provider: string; envVar: string }
@@ -72,7 +81,7 @@ export function piCredentialSource(opts: {
       throw error;
     }
     if (text.length > 1024 * 1024) throw new Error("Unbounded metadata");
-    const value: unknown = JSON.parse(text.replace(/^\uFEFF/, ""));
+    const value: unknown = name === "models.json" ? parsePiModelsJson(text) : JSON.parse(text.replace(/^\uFEFF/, ""));
     if (!object(value)) throw new Error("Unknown metadata");
     return value;
   };
@@ -171,7 +180,7 @@ export function piCredentialEvidence(opts: {
   try {
     const text = opts.readFile(path.join(opts.agentDir, "models.json"));
     if (text.length > 1024 * 1024) throw new Error("Unbounded metadata");
-    const models: unknown = JSON.parse(text.replace(/^\uFEFF/, ""));
+    const models: unknown = parsePiModelsJson(text);
     if (!object(models)) throw new Error("Unknown metadata");
     if (models.providers !== undefined) {
       if (!object(models.providers)) throw new Error("Unknown metadata");
@@ -222,17 +231,18 @@ export function piCredentialEvidence(opts: {
  *  (Pi 0.87.1 loads extensions at start and again only on an explicit /reload) or a models.json OpenRouter key
  *  (Pi loads models.json at start and again only on an explicit refresh). Clean files later don't change what
  *  the running Pi loaded, so once seen, this is sticky for the process. */
-export function credentialTaint(e: PiCredentialEvidence): { sticky: string } | { uncertain: string } | null {
+export function credentialTaint(e: PiCredentialEvidence): { sticky: string } | null {
   const when = new Date(e.at).toISOString();
   const kept = "and Pi keeps what it loaded until it restarts or reloads";
   if (e.extensions === "present") return { sticky: `a Pi extension was configured when observed at ${when}, ${kept}` };
   if (e.modelsOpenRouterEntry === "present" || e.source.kind === "models-key") {
     return { sticky: `models.json had a credential-bearing OpenRouter provider entry when observed at ${when}, ${kept}` };
   }
-  // An unreadable observation may be a torn read of a file being rewritten: sticky only when it repeats.
-  if (e.extensions === "unknown") return { uncertain: `Pi's extension configuration couldn't be checked` };
-  if (e.modelsOpenRouterEntry === "unknown") return { uncertain: `models.json couldn't be checked for an OpenRouter entry` };
-  if (e.source.kind === "unknown") return { uncertain: `Pi's OpenRouter credential source couldn't be classified` };
+  // Unreadable is sticky too: one failed read can't establish what the running Pi loaded, and later clean reads
+  // don't say what it holds. Only a new runner process (and so a new Pi) starts clear.
+  if (e.extensions === "unknown") return { sticky: `Pi's extension configuration couldn't be checked when observed at ${when}, ${kept}` };
+  if (e.modelsOpenRouterEntry === "unknown") return { sticky: `models.json couldn't be checked for an OpenRouter entry when observed at ${when}, ${kept}` };
+  if (e.source.kind === "unknown") return { sticky: `Pi's OpenRouter credential source couldn't be classified when observed at ${when}, ${kept}` };
   return null;
 }
 
