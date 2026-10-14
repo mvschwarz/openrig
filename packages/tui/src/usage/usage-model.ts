@@ -6,7 +6,7 @@ import type { FleetSnapshot } from "../types.js";
 // read from memory, and this view never asks for a refresh. Fields and the daemon's own strings (notes, reasons,
 // levelReason, freshnessReason, times) are shown as served; nothing is matched, summed, thresholded or re-timed here.
 
-type Row = Record<string, unknown>;
+export type Row = Record<string, unknown>;
 
 export interface UsageRead {
   /** The served read model, or why it couldn't be read (status null: no HTTP answer). */
@@ -21,7 +21,7 @@ export interface UsageRead {
 export const USAGE_HEADER = "this host's daemon only · not fleet-wide · not proof of the login a running session uses";
 export const USAGE_REFRESH_HINT = "This view shows what this daemon already holds and never reads the logins itself. To read them now: rig provider status --refresh [--provider codex|claude]";
 
-const str = (v: unknown, fallback = "unknown"): string => (v === null || v === undefined || v === "" ? fallback : String(v));
+export const str = (v: unknown, fallback = "unknown"): string => (v === null || v === undefined || v === "" ? fallback : String(v));
 
 function windowName(w: Row): string {
   const mins = w["durationMins"];
@@ -29,20 +29,32 @@ function windowName(w: Row): string {
   return label ? `${label} (${str(w["window"])})` : str(w["window"]);
 }
 
-function allowanceLines(r: Row): ContentLine[] {
+/** A failure's reason and detail as served, worded as `rig provider status` words them. Both are optional in the read
+ *  model: an absent reason reads "no reason given" and an absent detail drops its clause. When both are served, as this
+ *  daemon always serves them, the text is "reason (detail)". */
+export function failureText(f: Row): string {
+  return `${f["reason"] ?? "no reason given"}${f["detail"] !== undefined ? ` (${f["detail"]})` : ""}`;
+}
+
+/** Codex: account, else the workspace account/read reported; Claude: the organisation; else unresolved. */
+export function identityLabel(id: Row): string {
+  return id["accountId"] ? `account ${id["accountId"]}`
+    : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
+      : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
+        : "identity unresolved";
+}
+
+/** One served allowance row, as served (also drawn per host by System → Usage across hosts). */
+export function allowanceLines(r: Row): ContentLine[] {
   const lines: ContentLine[] = [];
   const id = r["identity"] as Row | null | undefined;
   if (!id) {
     lines.push({ text: `  ${str(r["provider"])}  unavailable: ${str(r["unavailableReason"], "no reading")}` });
     const last = r["lastRefresh"] as Row | null | undefined;
-    if (last?.["outcome"] === "failed") lines.push({ text: `    refresh failed at ${str(last["at"])}: ${str(last["reason"])} (${str(last["detail"])})` });
+    if (last?.["outcome"] === "failed") lines.push({ text: `    refresh failed at ${str(last["at"])}: ${failureText(last)}` });
     return lines;
   }
-  const identity = id["accountId"] ? `account ${id["accountId"]}`
-    : id["workspaceId"] ? `workspace ${id["workspaceId"]} (from account/read; no usage account id)`
-      : id["source"] !== "unresolved" && id["orgId"] ? `organisation ${id["orgName"] ? `${id["orgName"]} (${id["orgId"]})` : id["orgId"]}`
-        : "identity unresolved";
-  const labels = [identity, `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
+  const labels = [identityLabel(id), `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
     .filter((x) => x !== null && x !== undefined);
   const earlier = r["latestFromSource"] ? ""
     : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
@@ -73,14 +85,15 @@ function allowanceLines(r: Row): ContentLine[] {
   const last = r["lastRefresh"] as Row | null | undefined;
   if (last?.["outcome"] === "failed") {
     lines.push({ text: r["provider"] === "claude"
-      ? `    identity refresh failed at ${str(last["at"])}: ${str(last["reason"])} (${str(last["detail"])}); the identity shown is from the last refresh that worked, if any`
-      : `    refresh failed at ${str(last["at"])}: ${str(last["reason"])} (${str(last["detail"])}); last reading kept, marked old` });
+      ? `    identity refresh failed at ${str(last["at"])}: ${failureText(last)}; the identity shown is from the last refresh that worked, if any`
+      : `    refresh failed at ${str(last["at"])}: ${failureText(last)}; last reading kept, marked old` });
   }
   lines.push({ text: `    current availability: ${str(r["currentAvailability"])}` });
   return lines;
 }
 
-function seatLines(r: Row): ContentLine[] {
+/** One served seat account, as served (also drawn per host by System → Usage across hosts). */
+export function seatLines(r: Row): ContentLine[] {
   const c = (r["configured"] ?? {}) as Row;
   const configured = c["source"] === "registry"
     ? `configured: profile ${str(c["profileRef"])} (registry, recorded ${str(c["recordedAt"])}${c["profileSaved"] === false ? "; profile not saved on this host" : c["profileSaved"] === null ? "; whether the profile is saved: unknown" : ""})`
@@ -95,7 +108,7 @@ function seatLines(r: Row): ContentLine[] {
   if (observed?.["withheld"] === true) lines.push({ text: `    observed: ${str(observed["note"], "withheld")}` });
   else if (observed?.["windowsSampled"] === true) {
     lines.push({ text: `    observed: this seat's status line last reported windows at ${str(observed["lastSampledAt"], "an unknown time")}` });
-    if (differs.length) lines.push({ text: `    observed: differs from ${differs.join(", ")} (${str(observed["note"])})` });
+    if (differs.length) lines.push({ text: `    observed: differs from ${differs.join(", ")}${observed["note"] !== undefined ? ` (${observed["note"]})` : ""}` });
   } else if (observed?.["windowsSampled"] === false) lines.push({ text: "    observed: no status-line windows from this seat yet" });
   else if (observed?.["note"]) lines.push({ text: `    observed: ${observed["note"]}` });
   const allowance = (r["allowance"] ?? {}) as Row;

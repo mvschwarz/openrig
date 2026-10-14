@@ -198,6 +198,31 @@ export class DaemonClient {
     return { model: data };
   }
 
+  /** Slice 01 — usage windows across registered hosts, as `rig provider status --all-hosts --json` prints them. GET
+   *  only: the daemon and every host answer from memory, and this client has no method for the refresh route. A
+   *  failed or absent route resolves to its status, with the daemon's own message (409: usage windows off here). */
+  async usageAcrossHosts(): Promise<import("./usage/usage-hosts-model.js").UsageHostsRead["status"]> {
+    let res: Response;
+    try {
+      // 20 s, not the usual 5 s: the daemon answers this view within its own 15 s deadline whatever the registry's
+      // size (hosts it hasn't heard from by then are listed as such), plus 5 s for its own read and the transfer. The
+      // page reader is per page, so a slow read here holds up neither other sections nor the live refresh of other pages.
+      res = await this.fetchImpl(`${this.baseUrl}/api/provider/usage/hosts`, { headers: this.headers, signal: AbortSignal.timeout(20_000) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) {
+      return {
+        status: res.status,
+        error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}`,
+        ...(typeof data?.["message"] === "string" ? { message: data["message"] } : {}),
+      };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) return { status: res.status, error: "the response was not a usage-across-hosts view" };
+    return { view: data };
+  }
+
   /** Bounded canonical findings; the TUI filters this one record set by scope. */
   healthFindings(limit = 200) {
     return this.get(`/api/health?limit=${limit}`);

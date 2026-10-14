@@ -10,7 +10,7 @@ import { providerCommand } from "../src/commands/provider.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
-import { closedPortUrl, UsageHost, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
+import { closedPortUrl, UsageHost, usageAcrossHostsFacts, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
 import { BEARER_REDACTED } from "../../daemon/src/domain/provider/usage-across-hosts.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
@@ -58,32 +58,6 @@ async function refreshDirect(h: UsageHost): Promise<void> {
   expect(res.status).toBe(200);
 }
 
-/** The served facts a person must see: identities, hosts, times, levels and freshness with reasons, notes, failures. */
-function facts(view: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  const add = (v: unknown) => { if (typeof v === "string" && v.length > 0) out.push(v); };
-  for (const h of view["hosts"] as Array<Record<string, unknown>>) {
-    for (const k of ["hostId", "error", "usageReason", "readAt"]) add(h[k]);
-    for (const leg of Object.values((h["lastRefresh"] ?? {}) as Record<string, Record<string, unknown>>)) for (const k of ["at", "reason", "detail"]) add(leg[k]);
-  }
-  for (const s of view["skipped"] as Array<Record<string, unknown>>) { add(s["hostId"]); add(s["reason"]); }
-  for (const g of view["items"] as Array<Record<string, unknown>>) {
-    for (const n of g["notes"] as string[]) add(n);
-    for (const o of g["observations"] as Array<Record<string, unknown>>) {
-      add(o["hostId"]);
-      add(o["readAt"]);
-      const row = o["row"] as Record<string, unknown>;
-      const id = (row["identity"] ?? {}) as Record<string, unknown>;
-      for (const k of ["accountId", "workspaceId", "limitId", "email", "orgId"]) add(id[k]);
-      add(row["unavailableReason"]);
-      for (const w of row["windows"] as Array<Record<string, unknown>>) for (const k of ["window", "resetsAt", "observedAt", "level", "levelReason", "freshness", "freshnessReason"]) add(w[k]);
-      const last = row["lastRefresh"] as Record<string, unknown> | null;
-      if (last?.["outcome"] === "failed") for (const k of ["at", "reason", "detail"]) add(last[k]);
-    }
-  }
-  return [...new Set(out)];
-}
-
 describe("rig provider status --all-hosts", () => {
   it("prints every served fact verbatim: one entry per allowance with each host's observation, and every host's status", async () => {
     const a = await host("a");
@@ -103,9 +77,9 @@ describe("rig provider status --all-hosts", () => {
     expect(JSON.stringify(served)).toContain('"freshnessReason":"refresh failed at 2026-10-13T23:30:00.000Z; this reading is older"');
     const { out, exitCode } = await run(["status", "--all-hosts"], hub);
     expect(exitCode).toBeUndefined();
-    const missing = facts(served).filter((f) => !out.includes(f));
+    const missing = usageAcrossHostsFacts(served).filter((f) => !out.includes(f));
     expect(missing).toEqual([]);
-    expect(facts(served).length).toBeGreaterThan(20);
+    expect(usageAcrossHostsFacts(served).length).toBeGreaterThan(20);
     // One entry for the shared login on a and b (disagreeing), one for c's other login, never a sum.
     expect(out).toContain("codex  account acct-1 · bucket codex  [the same allowance on 2 hosts, disagreeing: a, b]");
     expect(out).toContain("codex  account acct-1 · bucket codex  [linkage unknown; observed on c]");

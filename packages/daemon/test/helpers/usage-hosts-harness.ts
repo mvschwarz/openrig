@@ -65,6 +65,8 @@ export interface UsageHostOptions {
   now?: () => string;
   /** Answer GET /api/provider/status and /api/config only after this long (real time). */
   slowReadMs?: number;
+  /** For a hub: the fetch its calls to other hosts go through (the daemon's remoteFetchImpl seam). */
+  remoteFetch?: typeof fetch;
   /** Rewrite this host's JSON answers on /api/provider/* and /api/config (a malformed, oversized or echoing host). */
   rewrite?: (path: string, body: unknown) => unknown;
 }
@@ -80,6 +82,8 @@ export class UsageHost {
   claude: ClaudePlan;
   samples: ClaudeWindowSample[];
   readonly settings: SettingsStore;
+  /** False: the provider service is unwired, so its routes answer 503. */
+  wired = true;
   private readonly hangs: Array<() => void> = [];
   private server!: ServerType;
   url = "";
@@ -179,7 +183,8 @@ export class UsageHost {
       if (slow && c.req.method === "GET" && (c.req.path === "/api/provider/status" || c.req.path === "/api/config")) {
         await new Promise((r) => setTimeout(r, slow));
       }
-      c.set("providerService" as never, svc as never);
+      if (this.wired) c.set("providerService" as never, svc as never);
+      if (this.opts.remoteFetch) c.set("remoteFetchImpl" as never, this.opts.remoteFetch as never);
       c.set("settingsStore" as never, this.settings as never);
       if (registry) {
         c.set("hostRegistryLoader" as never, ((): HostRegistryLoadResult =>
@@ -251,4 +256,30 @@ export async function closedPortUrl(): Promise<string> {
   const url = host.url;
   await host.close();
   return url;
+}
+
+/** The served facts a person must see, in the CLI and the TUI alike: identities, hosts, times, levels and freshness with reasons, notes, failures. */
+export function usageAcrossHostsFacts(view: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const add = (v: unknown) => { if (typeof v === "string" && v.length > 0) out.push(v); };
+  for (const h of view["hosts"] as Array<Record<string, unknown>>) {
+    for (const k of ["hostId", "error", "usageReason", "readAt"]) add(h[k]);
+    for (const leg of Object.values((h["lastRefresh"] ?? {}) as Record<string, Record<string, unknown>>)) for (const k of ["at", "reason", "detail"]) add(leg[k]);
+  }
+  for (const s of view["skipped"] as Array<Record<string, unknown>>) { add(s["hostId"]); add(s["reason"]); }
+  for (const g of view["items"] as Array<Record<string, unknown>>) {
+    for (const n of g["notes"] as string[]) add(n);
+    for (const o of g["observations"] as Array<Record<string, unknown>>) {
+      add(o["hostId"]);
+      add(o["readAt"]);
+      const row = o["row"] as Record<string, unknown>;
+      const id = (row["identity"] ?? {}) as Record<string, unknown>;
+      for (const k of ["accountId", "workspaceId", "limitId", "email", "orgId"]) add(id[k]);
+      add(row["unavailableReason"]);
+      for (const w of row["windows"] as Array<Record<string, unknown>>) for (const k of ["window", "resetsAt", "observedAt", "level", "levelReason", "freshness", "freshnessReason"]) add(w[k]);
+      const last = row["lastRefresh"] as Record<string, unknown> | null;
+      if (last?.["outcome"] === "failed") for (const k of ["at", "reason", "detail"]) add(last[k]);
+    }
+  }
+  return [...new Set(out)];
 }
