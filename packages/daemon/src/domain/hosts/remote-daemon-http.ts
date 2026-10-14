@@ -40,8 +40,12 @@ export interface RemoteJsonOptions extends RemoteJsonDeps {
   headers?: Record<string, string>;
   /** Stop reading an answer larger than this many bytes (a failure, never parsed). Absent: no bound (today's default). */
   maxBytes?: number;
-  /** Absent: fetch's default (follow). "manual": a 3xx comes back as the http failure it is, never followed. */
+  /** Absent: fetch's default (follow). "manual": a 3xx comes back as the http failure it is, never followed, and its
+   *  body isn't read. */
   redirect?: "follow" | "manual" | "error";
+  /** The bearer resolution to send, made by the caller with `resolveBearer` right before this call, so the caller
+   *  knows exactly which token went out. Absent: resolved here, as before. */
+  resolvedBearer?: ReturnType<typeof resolveBearer>;
 }
 
 export type RemoteJsonFailureKind = "bearer" | "timeout" | "network" | "http";
@@ -110,7 +114,7 @@ export function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: 
  *  request + body; every outcome is structured — this function never hangs
  *  and never throws. */
 export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts: RemoteJsonOptions): Promise<RemoteJsonResult> {
-  const bearer = resolveBearer(host, opts);
+  const bearer = opts.resolvedBearer ?? resolveBearer(host, opts);
   if (!bearer.ok) return { ok: false, kind: "bearer", detail: bearer.detail };
 
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -135,6 +139,13 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
     clearTimeout(timer);
     if (controller.signal.aborted) return { ok: false, kind: "timeout", phase: "request", detail: "" };
     return { ok: false, kind: "network", detail: (err as Error).message };
+  }
+
+  // A redirect the caller won't follow is classified on its status alone; its body is never read.
+  if (opts.redirect === "manual" && res.status >= 300 && res.status < 400) {
+    clearTimeout(timer);
+    await res.body?.cancel().catch(() => {});
+    return { ok: false, kind: "http", status: res.status, detail: "" };
   }
 
   // Body parse under the SAME still-armed deadline, raced explicitly.

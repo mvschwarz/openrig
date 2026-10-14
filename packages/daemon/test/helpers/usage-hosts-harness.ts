@@ -65,7 +65,7 @@ export interface UsageHostOptions {
   now?: () => string;
   /** Answer GET /api/provider/status and /api/config only after this long (real time). */
   slowReadMs?: number;
-  /** Rewrite this host's JSON answers on /api/provider/* (a malformed, oversized or echoing host). */
+  /** Rewrite this host's JSON answers on /api/provider/* and /api/config (a malformed, oversized or echoing host). */
   rewrite?: (path: string, body: unknown) => unknown;
 }
 
@@ -186,7 +186,7 @@ export class UsageHost {
           Array.isArray(registry) ? { ok: true, registry: { hosts: registry } } : loadHostRegistry(registry.path)) as never);
       }
       await next();
-      if (this.opts.rewrite && c.req.path.startsWith("/api/provider/") && c.res.headers.get("content-type")?.includes("json")) {
+      if (this.opts.rewrite && (c.req.path.startsWith("/api/provider/") || c.req.path === "/api/config") && c.res.headers.get("content-type")?.includes("json")) {
         const body = await c.res.clone().json();
         c.res = new Response(JSON.stringify(this.opts.rewrite(c.req.path, body)), { status: c.res.status, headers: { "content-type": "application/json" } });
       }

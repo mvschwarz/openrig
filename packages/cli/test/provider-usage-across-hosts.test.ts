@@ -2,6 +2,9 @@
 // loopback hosts (the daemon's real provider and config routes, scripted native readers; usage-hosts-harness.ts).
 // The human view prints every served fact verbatim; --json prints the served body; a refresh across hosts reports
 // each failed leg and keeps the view.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { providerCommand } from "../src/commands/provider.js";
 import { DaemonClient } from "../src/client.js";
@@ -256,6 +259,75 @@ describe("round 2 through the CLI", () => {
       expect(json.out).toContain(BEARER_REDACTED);
     } finally {
       delete process.env["XHOST_CLI_MARKER"];
+    }
+  });
+});
+
+describe("round 3 through the CLI", () => {
+  const TRAP = { toString: 1, valueOf: 1 };
+  type Body = Record<string, unknown>;
+  const rows = (b: unknown) => (b as { usage: Body[] }).usage;
+  const withCodexRow = (patch: (r: Body) => Body) => (p: string, b: unknown) =>
+    p === "/api/provider/status" ? { ...(b as Body), usage: rows(b).map((r) => (r["provider"] === "codex" ? patch(r) : r)) } : b;
+  const firstWindow = (patch: (w: Body) => Body) => withCodexRow((r) => ({ ...r, windows: (r["windows"] as Body[]).map((w, i) => (i === 0 ? patch(w) : w)) }));
+  const seat = (patch: Body) => (p: string, b: unknown) => p === "/api/provider/status" ? { ...(b as Body), seatAccounts: [{
+    seatSession: "dev-qa@r", rigName: "r", runtime: "codex",
+    configured: { source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: true },
+    allowance: { linked: false, reason: "not linked" }, ...patch,
+  }] } : b;
+  let deep: unknown = "leaf";
+  for (let i = 0; i < 2_000; i++) deep = { d: deep };
+
+  it("a malformed host of each rendered field class, or nested 2,000 deep: named unavailable, the rest printed, exit 0", async () => {
+    const bad: Array<[string, UsageHostOptions]> = [
+      ["seats", { rewrite: withCodexRow((r) => ({ ...r, seats: TRAP })) }],
+      ["plan", { rewrite: withCodexRow((r) => ({ ...r, identity: { ...(r["identity"] as Body), planType: TRAP } })) }],
+      ["reason", { rewrite: firstWindow((w) => ({ ...w, freshnessReason: TRAP })) }],
+      ["left", { rewrite: firstWindow(({ remainingPercent: _r, ...w }) => w) }],
+      ["disagree", { rewrite: firstWindow((w) => ({ ...w, disagreeingSeats: [{ seatSession: "x@r", usedPercent: TRAP, resetsAt: null, observedAt: NOW }] })) }],
+      ["notes", { rewrite: seat({ registryNotes: 5 }) }],
+      ["differs", { rewrite: seat({ observed: { differsFrom: "dev-b@r", note: "n" } }) }],
+      ["setting", { usageWindows: false, rewrite: (p, b) => p === "/api/config"
+        ? { ...(b as Body), entries: ((b as { entries: Body[] }).entries).map((e) => (e["key"] === "provider.usage_windows" ? { ...e, value: TRAP } : e)) } : b }],
+      ["deep", { rewrite: (p, b) => (p === "/api/provider/status" ? { ...(b as Body), deep } : b) }],
+    ];
+    const good = await host("good");
+    const hosts = await Promise.all(bad.map(([id, opts]) => host(id, opts)));
+    for (const h of [good, ...hosts]) await refreshDirect(h).catch(() => {});
+    const hub = await host("hub", { registry: [good.entry(), ...hosts.map((h) => h.entry())] });
+    const got = await run(["status", "--all-hosts"], hub);
+    expect([got.exitCode, got.err]).toEqual([undefined, ""]);
+    expect(got.out).toContain("    on good (read ");
+    for (const id of ["seats", "plan", "reason", "left", "disagree"]) {
+      expect(got.out).toContain(`  ${id}  answered · usage unavailable: this host served usage rows in a shape this daemon doesn't recognize`);
+    }
+    for (const id of ["notes", "differs"]) {
+      expect(got.out).toContain(`  ${id}  answered · usage unavailable: this host served seat accounts in a shape this daemon doesn't recognize`);
+    }
+    expect(got.out).toContain("  setting  answered · usage off: usage windows are off on this host (provider.usage_windows = an unrecognized value)");
+    expect(got.out).toContain("  deep  answered · usage unavailable: this host's answer is nested deeper than 32 levels");
+    expect(got.out).not.toContain("undefined");
+  });
+
+  it("a rotated bearer: the sent one echoed back by a refresh never reaches the printed lines", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage-hosts-bearer-"));
+    const file = path.join(dir, "bearer");
+    const A = "SYNTHETIC-ROTATE-CLI-A-5b2e", B = "SYNTHETIC-ROTATE-CLI-B-80d1";
+    try {
+      fs.writeFileSync(file, A);
+      const leg = await host("leg", { rewrite: (p, b) => {
+        if (p !== "/api/provider/usage/refresh") return b;
+        fs.writeFileSync(file, B);
+        return { refresh: { at: NOW, outcome: "failed", reason: "rpc_error", detail: `sent ${A}`, coalesced: false } };
+      } });
+      const hub = await host("hub", { registry: [leg.entry({ bearer_file: file } as never)] });
+      const refreshed = await run(["status", "--all-hosts", "--refresh", "--provider", "codex"], hub);
+      const later = await run(["status", "--all-hosts"], hub);
+      for (const text of [refreshed.out, refreshed.err, later.out]) expect(text).not.toContain(A);
+      expect(refreshed.err).toContain(`refresh codex on leg failed: rpc_error (${BEARER_REDACTED})`);
+      expect(later.out).toContain(`refresh from here (codex) failed at ${NOW}: rpc_error (${BEARER_REDACTED})`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

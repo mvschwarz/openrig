@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   BEARER_REDACTED,
   groupUsageAcrossHosts,
+  isSeat,
+  isUsageRow,
   remoteRefreshLeg,
   UsageRefreshLegs,
   type UsageAcrossHosts,
@@ -15,6 +17,7 @@ import {
 } from "../src/domain/provider/usage-across-hosts.js";
 import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import type { ProviderUsageAllowance, UsageWindowRow } from "../src/domain/provider/provider-types.js";
+import { configuredSeatAccounts } from "../src/domain/provider/provider-seat-accounts.js";
 import { closedPortUrl, redirectingRelay, UsageHost, type UsageHostOptions } from "./helpers/usage-hosts-harness.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
@@ -507,5 +510,152 @@ describe("round 2: linkage evidence, a partial answer, and what a host can send 
     } finally {
       await relay.close();
     }
+  });
+});
+
+describe("round 3: every rendered field checked, failures kept to their host, a scrub per exchange", () => {
+  // JSON can't carry a function, so an object whose toString and valueOf aren't callable is what a host can send to make
+  // a template string or join throw.
+  const TRAP = { toString: 1, valueOf: 1 };
+  type Body = Record<string, unknown>;
+  const rows = (b: unknown) => (b as { usage: Body[] }).usage;
+  const withCodexRow = (patch: (r: Body) => Body) => (p: string, b: unknown) =>
+    p === "/api/provider/status" ? { ...(b as Body), usage: rows(b).map((r) => (r["provider"] === "codex" ? patch(r) : r)) } : b;
+  const firstWindow = (patch: (w: Body) => Body) => withCodexRow((r) => ({ ...r, windows: (r["windows"] as Body[]).map((w, i) => (i === 0 ? patch(w) : w)) }));
+  const SEAT = {
+    seatSession: "dev-qa@r", rigName: "r", runtime: "codex",
+    configured: { source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: true },
+    registryNotes: ["a note"], allowance: { linked: false, reason: "not linked" },
+    observed: { windowsSampled: true, lastSampledAt: "2026-10-13T23:00:00Z", differsFrom: ["dev-b@r"], note: "possibly a different login" },
+  };
+  const withSeat = (patch: (s: Body) => Body) => (p: string, b: unknown) =>
+    p === "/api/provider/status" ? { ...(b as Body), seatAccounts: [patch(structuredClone(SEAT))] } : b;
+
+  it("today's real rows and seat accounts all pass the checks", async () => {
+    const h = await host("real", { now: () => NOW, samples: [
+      { seatSession: "a@r", window: "five_hour", usedPercent: 40, resetsAt: "2026-10-14T03:00:00.000Z", sampledAt: NOW },
+      { seatSession: "b@r", window: "five_hour", usedPercent: 10, resetsAt: "2026-10-14T06:00:00.000Z", sampledAt: NOW },
+      { seatSession: "a@r", window: "weekly", usedPercent: 90, resetsAt: "2026-10-18T00:00:00.000Z", sampledAt: NOW },
+    ] });
+    const before = await servedRows(h);
+    await refreshDirect(h, "codex");
+    await refreshDirect(h, "claude");
+    h.codex = { fail: { reason: "rpc_error", detail: "no" } };
+    await refreshDirect(h, "codex");
+    h.codex = { accountId: null, email: null };
+    await refreshDirect(h, "codex");
+    const after = await servedRows(h);
+    const all = [...before, ...after];
+    expect(all.length).toBeGreaterThanOrEqual(5);
+    expect(all.some((r) => r.windows.some((w) => w.disagreeingSeats))).toBe(true);
+    expect(all.filter((r) => !isUsageRow(r))).toEqual([]);
+    const seat = (seatSession: string, runtime: string) => ({ seatSession, rigName: "r", runtime, lifecycleState: "running" });
+    const seats = configuredSeatAccounts({
+      seats: [seat("q@r", "codex"), seat("d@r", "codex"), seat("a@r", "claude-code"), seat("b@r", "claude-code"), seat("x@r", "pi"), seat("q@r", "codex")],
+      auth: { profiles: ["work-a"], seats: [{ seat: "q@r", rig: "r", runtime: "codex", cwd: "/w", authProfile: "work-a", updatedTs: "2026-10-12T10:00:00Z" },
+        { seat: "d@r", rig: "r", runtime: "claude-code", cwd: "/w", authProfile: "gone", updatedTs: "2026-10-12T10:00:00Z" }] } as never,
+      usage: after, claudeSamples: h.samples, codexHome: "/h/.codex", claudeConfigDir: undefined, home: "/h",
+    });
+    expect(seats.length).toBe(6);
+    expect(new Set(seats.map((s) => s.configured.source))).toEqual(new Set(["registry", "default_login", "unknown"]));
+    expect(seats.filter((s) => !isSeat(s))).toEqual([]);
+  });
+
+  const cases: Array<[string, UsageHostOptions["rewrite"], string]> = [
+    ["seats", withCodexRow((r) => ({ ...r, seats: TRAP })), "rows"],
+    ["identity label (plan)", withCodexRow((r) => ({ ...r, identity: { ...(r["identity"] as Body), planType: TRAP } })), "rows"],
+    ["window reason", firstWindow((w) => ({ ...w, levelReason: TRAP })), "rows"],
+    ["window remaining percent missing", firstWindow(({ remainingPercent: _r, ...w }) => w), "rows"],
+    ["disagreeing seat", firstWindow((w) => ({ ...w, disagreeingSeats: [{ seatSession: TRAP, usedPercent: 1, resetsAt: null, observedAt: NOW }] })), "rows"],
+    ["seat account label", withSeat((x) => ({ ...x, configured: { ...(x["configured"] as Body), profileRef: TRAP } })), "seats"],
+    ["seat registryNotes not a list", withSeat((x) => ({ ...x, registryNotes: 5 })), "seats"],
+    ["seat differsFrom not a list", withSeat((x) => ({ ...x, observed: { ...(x["observed"] as Body), differsFrom: "dev-b@r" } })), "seats"],
+  ];
+  const REASON = { rows: "this host served usage rows in a shape this daemon doesn't recognize", seats: "this host served seat accounts in a shape this daemon doesn't recognize" };
+
+  it("each rendered field class: a malformed host is unavailable with the reason; this host and a healthy one are served", async () => {
+    const good = await host("good");
+    const bad = await Promise.all(cases.map(([, rewrite], i) => host(`bad${i}`, { rewrite })));
+    for (const h of [good, ...bad]) await refreshDirect(h);
+    const hub = await host("hub", { registry: [good.entry(), ...bad.map((h) => h.entry())] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.map((h) => [h.hostId, h.usage, h.usageReason ?? null])).toEqual([
+      ["local", "served", null], ["good", "served", null],
+      ...cases.map(([, , kind], i) => [`bad${i}`, "unavailable", REASON[kind as "rows" | "seats"]]),
+    ]);
+    // The seat that passed is served, and every healthy seat (the fixture SEAT itself) passes.
+    expect(isSeat(SEAT)).toBe(true);
+  });
+
+  it("a settings value that can't be shown is named as such; the answer is served", async () => {
+    const odd = await host("odd", { usageWindows: false, rewrite: (p, b) => p === "/api/config"
+      ? { ...(b as Body), entries: ((b as { entries: Body[] }).entries).map((e) => (e["key"] === "provider.usage_windows" ? { ...e, value: TRAP } : e)) } : b });
+    const hub = await host("hub", { registry: [odd.entry()] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.find((h) => h.hostId === "odd")).toMatchObject({ usage: "off", usageReason: "usage windows are off on this host (provider.usage_windows = an unrecognized value)" });
+  });
+
+  it("an answer nested 2,000 deep, with a configured bearer: that host unavailable, its leg failed; the rest served", async () => {
+    let deep: unknown = "leaf";
+    for (let i = 0; i < 2_000; i++) deep = { d: deep };
+    process.env["XHOST_DEEP_BEARER"] = "SYNTHETIC-DEEP-MARKER-0c1e";
+    try {
+      const good = await host("good");
+      const nested = await host("nested", { rewrite: (p, b) => (p === "/api/provider/status" || p === "/api/provider/usage/refresh") ? { ...(b as Body), deep } : b });
+      const hub = await host("hub", { registry: [good.entry(), nested.entry({ bearer_env: "XHOST_DEEP_BEARER" } as never)] });
+      const { status, body } = await view(hub);
+      expect(status).toBe(200);
+      expect(body.hosts.map((h) => [h.hostId, h.usage, h.usageReason ?? null])).toEqual([
+        ["local", "served", null], ["good", "served", null], ["nested", "unavailable", "this host's answer is nested deeper than 32 levels"],
+      ]);
+      const refreshed = await refreshVia(hub, { provider: "codex" });
+      expect(refreshed.status).toBe(200);
+      expect(refreshed.body.refresh.find((l) => l["hostId"] === "nested")).toMatchObject({ outcome: "failed", reason: "too_deep", detail: "the host's answer is nested deeper than 32 levels" });
+      expect(refreshed.body.refresh.find((l) => l["hostId"] === "good")).toMatchObject({ outcome: "ok" });
+    } finally {
+      delete process.env["XHOST_DEEP_BEARER"];
+    }
+  });
+
+  it("each exchange is scrubbed with the bearer it sent: a refresh echoing the sent A after a rotation to B, and settings echoing the newer B", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "usage-hosts-bearer-"));
+    const file = path.join(dir, "bearer");
+    const A = "SYNTHETIC-ROTATE-A-91f0", B = "SYNTHETIC-ROTATE-B-27c4";
+    try {
+      fs.writeFileSync(file, A);
+      // The refresh: the handler rotates the file to B, then answers with the A it was sent.
+      const leg = await host("leg", { rewrite: (p, b) => {
+        if (p !== "/api/provider/usage/refresh") return b;
+        fs.writeFileSync(file, B);
+        return { refresh: { at: NOW, outcome: "failed", reason: "rpc_error", detail: `sent ${A}`, coalesced: false } };
+      } });
+      const hub = await host("hub", { registry: [leg.entry({ bearer_file: file } as never)] });
+      const refreshed = JSON.stringify((await refreshVia(hub, { provider: "codex" })).body);
+      const later = (await view(hub)).body;
+      for (const text of [refreshed, JSON.stringify(later)]) expect(text).not.toContain(A);
+      expect(later.hosts.find((h) => h.hostId === "leg")!.lastRefresh!.codex!.detail).toBe(BEARER_REDACTED);
+
+      // The read: the status answer rotates the file to B before the settings fallback, which echoes B.
+      fs.writeFileSync(file, A);
+      const read = await host("read", { usageWindows: false, rewrite: (p, b) => {
+        if (p === "/api/provider/status") fs.writeFileSync(file, B);
+        if (p !== "/api/config") return b;
+        return { ...(b as Body), entries: ((b as { entries: Body[] }).entries).map((e) => (e["key"] === "provider.usage_windows" ? { ...e, value: `off ${B}` } : e)) };
+      } });
+      const hub2 = await host("hub2", { registry: [read.entry({ bearer_file: file } as never)] });
+      const seen = (await view(hub2)).body;
+      expect(JSON.stringify(seen)).not.toContain(B);
+      expect(seen.hosts.find((h) => h.hostId === "read")!.usageReason).toBe(`usage windows are off on this host (provider.usage_windows = ${BEARER_REDACTED})`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an empty Codex login email is no evidence either: it links to nothing", () => {
+    const groups = groupUsageAcrossHosts([obs("a", codexRow("acct-1", "")), obs("b", codexRow("acct-1", ""))]);
+    expect(groups.map((g) => [g.linkage, g.observations.map((o) => o.hostId)])).toEqual([["unknown", ["a"]], ["unknown", ["b"]]]);
+    expect(groups[0]!.notes[0]).toContain("is also observed on b; no login email was reported here;");
   });
 });

@@ -39,6 +39,10 @@ export const USAGE_HOSTS_VIEW_DEADLINE_MS = 15_000;
  *  answer with both providers and a few dozen seats is tens of kilobytes; 1 MiB leaves room for hundreds of seats. */
 export const USAGE_HOSTS_MAX_BYTES = 1024 * 1024;
 
+/** The deepest nesting accepted in a host's answer. Today's deepest is about seven levels (a status answer's usage row,
+ *  window, disagreeing seat); past 32 the answer is malformed, and that host is unavailable. */
+export const USAGE_HOSTS_MAX_DEPTH = 32;
+
 /** What replaces any string from a host that contains the bearer configured for that host. */
 export const BEARER_REDACTED = "[redacted: contained this host's bearer]";
 
@@ -118,12 +122,13 @@ export function allowanceKey(row: ProviderUsageAllowance): string | null {
  * one host a single login is read, but across hosts the same account or workspace id can come with different login
  * emails, and the source can't tell one allowance from a workspace whose members have their own limits. So across
  * hosts a Codex observation links only under the same login email too; the rest stay apart as unknown linkage. A
- * missing email is no evidence of the same login, so an observation without one links to nothing on another host.
+ * missing (or empty) email is no evidence of the same login, so an observation without one links to nothing on
+ * another host.
  */
 export function crossHostLinkKey(row: ProviderUsageAllowance, key: string, hostId: string): string {
   if (row.provider !== "codex") return key;
   const email = (row.identity as UsageAllowanceIdentity).email;
-  return email === null ? `${key}\u0000host:${hostId}` : `${key}\u0000email:${email}`;
+  return email ? `${key}\u0000email:${email}` : `${key}\u0000host:${hostId}`;
 }
 
 function idLabel(row: ProviderUsageAllowance): string {
@@ -182,9 +187,9 @@ export function groupUsageAcrossHosts(observations: UsageObservation[]): UsageAl
         // The link to those other hosts is unknown; the hosts inside this group still share one login and id.
         if (hosts.size === 1) linkage = "unknown";
         const email = (row: ProviderUsageAllowance) => (row.identity as UsageAllowanceIdentity).email;
-        const how = email(g.observations[0]!.row) === null
+        const how = !email(g.observations[0]!.row)
           ? "; no login email was reported here"
-          : others.some((o) => email(o.row) === null) ? " under another login email or with none reported" : " under another login email";
+          : others.some((o) => !email(o.row)) ? " under another login email or with none reported" : " under another login email";
         notes.push(`the same Codex ${idLabel(g.observations[0]!.row)} is also observed on ${[...new Set(others.map((o) => o.hostId))].join(", ")}`
           + `${how}; the source can't tell one allowance from a workspace whose members have their own limits, so these `
           + "observations are not merged");
@@ -253,54 +258,135 @@ export function selectUsageHosts(deps: Pick<UsageHostsDeps, "loadRegistry" | "se
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const strOrNull = (v: unknown): boolean => v === null || typeof v === "string";
-const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
-const LEVELS = new Set(["ok", "nearing", "exhausted", "unknown"]);
+// The checks below cover every field the CLI (`rig provider status --all-hosts`) and the TUI draw from a host's rows
+// and seats, by the types in provider-types.ts. A field a renderer reads is a typed primitive, null or absent where the
+// type allows, or an array or record of them, so nothing that reaches a template string or a join can throw or print
+// "undefined". Fields no renderer reads aren't checked; they're served as the host sent them (scrubbed, bounded).
+type Check = (v: unknown) => boolean;
+const str: Check = (v) => typeof v === "string";
+const num: Check = (v) => typeof v === "number" && Number.isFinite(v);
+const bool: Check = (v) => typeof v === "boolean";
+const nullable = (c: Check): Check => (v) => v === null || c(v);
+const optional = (c: Check): Check => (v) => v === undefined || c(v);
+const oneOf = (...values: unknown[]): Check => (v) => values.includes(v);
+const listOf = (c: Check): Check => (v) => Array.isArray(v) && v.every(c);
+const record = (fields: Record<string, Check>): Check => (v) =>
+  isRecord(v) && Object.entries(fields).every(([k, c]) => c(v[k]));
 
-/** A window as the grouping and the views read it. */
-function isWindow(w: unknown): boolean {
-  return isRecord(w) && typeof w["window"] === "string" && FRESHNESS.has(w["freshness"] as string) && LEVELS.has(w["level"] as string)
-    && strOrNull(w["resetsAt"]) && typeof w["observedAt"] === "string"
-    && (w["disagreeingSeats"] === undefined || (Array.isArray(w["disagreeingSeats"]) && w["disagreeingSeats"].every(isRecord)));
-}
+const FRESHNESS = ["fresh", "stale", "unavailable"];
+const LEVELS = ["ok", "nearing", "exhausted", "unknown"];
 
-/** Null (never read), or the provider's typed identity fields. */
-function isIdentity(provider: unknown, id: unknown): boolean {
-  if (id === null) return true;
-  if (!isRecord(id) || typeof id["limitId"] !== "string" || !strOrNull(id["email"])) return false;
-  return provider === "codex" ? strOrNull(id["accountId"]) && strOrNull(id["workspaceId"]) : strOrNull(id["orgId"]);
-}
+const disagreeingSeat = record({ seatSession: str, usedPercent: num, resetsAt: nullable(str), observedAt: str });
+const usageWindow = record({
+  window: str,
+  durationMins: nullable(num),
+  usedPercent: nullable(num),
+  remainingPercent: nullable(num),
+  resetsAt: nullable(str),
+  observedAt: str,
+  seatSession: optional(str),
+  disagreeingSeats: optional(listOf(disagreeingSeat)),
+  level: oneOf(...LEVELS),
+  levelReason: optional(str),
+  freshness: oneOf(...FRESHNESS),
+  freshnessReason: optional(str),
+});
+const codexIdentity = record({
+  accountId: nullable(str), workspaceId: nullable(str), limitId: str, email: nullable(str), planType: nullable(str), source: str,
+});
+const claudeIdentity = record({
+  orgId: nullable(str), limitId: str, email: nullable(str), orgName: nullable(str), subscriptionType: nullable(str), source: str,
+});
+const usageRowFields = {
+  observedAt: nullable(str),
+  seats: optional(str),
+  windows: listOf(usageWindow),
+  limitEvidence: nullable(str),
+  latestFromSource: bool,
+  lastRefresh: nullable(record({ at: str, outcome: oneOf("ok", "failed"), reason: optional(str), detail: optional(str) })),
+  currentAvailability: oneOf("known", "unknown"),
+  unavailableReason: optional(str),
+  identityNote: optional(str),
+  unresolved: optional(record({ note: str, keptReads: num, droppedReads: num })),
+  savedProfiles: optional(record({ names: listOf(str), note: str })),
+};
 
-/** A served row with every nested field the grouping and the views consume. */
+/** A served row with every field the grouping and the views read, typed as provider-types.ts says. */
 export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
-  return isRecord(v) && (v["provider"] === "codex" || v["provider"] === "claude") && "identity" in v
-    && isIdentity(v["provider"], v["identity"]) && Array.isArray(v["windows"]) && v["windows"].every(isWindow);
+  if (!isRecord(v) || (v["provider"] !== "codex" && v["provider"] !== "claude")) return false;
+  const identity = v["provider"] === "codex" ? codexIdentity : claudeIdentity;
+  return nullable(identity)(v["identity"]) && record(usageRowFields)(v);
 }
 
-const isSeat = (v: unknown): boolean => isRecord(v) && typeof v["seatSession"] === "string";
+const seatConfiguration: Check = (v) =>
+  record({ source: oneOf("registry"), profileRef: str, recordedAt: str, profileSaved: nullable(bool) })(v)
+  || record({ source: oneOf("default_login"), home: nullable(str), homeNote: str })(v)
+  || record({ source: oneOf("unknown"), reason: str })(v);
+
+/** A served seat account with every field the views read, typed as provider-types.ts says. */
+export const isSeat = record({
+  seatSession: str,
+  rigName: str,
+  runtime: str,
+  configured: seatConfiguration,
+  registryNotes: optional(listOf(str)),
+  allowance: record({ linked: oneOf(false), reason: str }),
+  observed: optional(record({
+    windowsSampled: optional(bool),
+    lastSampledAt: optional(str),
+    differsFrom: optional(listOf(str)),
+    withheld: optional(oneOf(true)),
+    note: optional(str),
+  })),
+});
 
 /**
  * A host's answer with any string that contains the bearer configured for that host replaced, and any key that
  * contains it dropped, so a host echoing it can't put it in the view, the CLI or the kept refresh record (the same
  * rule as the Pi charge lookup's key echo). The bearer is resolved by the transport's own resolver and never logged.
  */
-export function scrubBearer(value: unknown, bearer: string | undefined): unknown {
-  if (!bearer) return value;
-  if (typeof value === "string") return value.includes(bearer) ? BEARER_REDACTED : value;
-  if (Array.isArray(value)) return value.map((v) => scrubBearer(v, bearer));
+export function scrubBearer(value: unknown, bearer: string | undefined, depth = 0): unknown {
+  // The walk is also the depth bound, with or without a bearer: past it the answer is malformed (contained by the caller).
+  if (depth > USAGE_HOSTS_MAX_DEPTH) throw new AnswerTooDeep();
+  if (typeof value === "string") return bearer && value.includes(bearer) ? BEARER_REDACTED : value;
+  if (Array.isArray(value)) return value.map((v) => scrubBearer(v, bearer, depth + 1));
   if (isRecord(value)) {
-    return Object.fromEntries(Object.entries(value).filter(([k]) => !k.includes(bearer)).map(([k, v]) => [k, scrubBearer(v, bearer)]));
+    return Object.fromEntries(Object.entries(value)
+      .filter(([k]) => !(bearer && k.includes(bearer)))
+      .map(([k, v]) => [k, scrubBearer(v, bearer, depth + 1)]));
   }
   return value;
 }
 
-function bearerOf(host: HttpHostEntry, deps: Pick<UsageHostsDeps, "env" | "readFile">): string | undefined {
-  const resolved = resolveBearer(host, { env: deps.env, readFile: deps.readFile });
-  return resolved.ok ? resolved.token : undefined;
+/** A host's answer nested past USAGE_HOSTS_MAX_DEPTH. */
+export class AnswerTooDeep extends Error {
+  constructor() {
+    super(`answer nested deeper than ${USAGE_HOSTS_MAX_DEPTH} levels`);
+  }
 }
 
 /** The transport options every call to a host makes here: bounded bytes, redirects not followed. */
 const HOST_CALL = { maxBytes: USAGE_HOSTS_MAX_BYTES, redirect: "manual" as const };
+
+/**
+ * One call to a host, scrubbed with the bearer that call sent: the bearer is resolved by the transport's own resolver
+ * right before the call, handed to the transport to send, and the same token scrubs the answer. A rotated bearer file
+ * is read again on the next call; nothing is cached.
+ */
+async function exchange(host: HttpHostEntry, path: string, opts: { method: "GET" | "POST"; body?: unknown; timeoutMs: number },
+  deps: Pick<UsageHostsDeps, "fetchImpl" | "env" | "readFile">): Promise<RemoteJsonResult> {
+  const resolvedBearer = resolveBearer(host, { env: deps.env, readFile: deps.readFile });
+  const res = await remoteJsonRequest(host, path, {
+    ...opts,
+    ...HOST_CALL,
+    resolvedBearer,
+    fetchImpl: deps.fetchImpl,
+    env: deps.env,
+    readFile: deps.readFile,
+  });
+  const sent = resolvedBearer.ok ? resolvedBearer.token : undefined;
+  return res.ok ? { ...res, payload: scrubBearer(res.payload, sent) } : { ...res, detail: scrubBearer(res.detail, sent) as string };
+}
 const isRedirect = (res: RemoteJsonResult): boolean => !res.ok && res.kind === "http" && res.status !== undefined && res.status >= 300 && res.status < 400;
 
 /** A transport failure as a host status. A bearer that can't be resolved is named, never its env var or file. */
@@ -348,18 +434,7 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
     };
   }
   const timeoutMs = deps.readTimeoutMs ?? USAGE_HOSTS_READ_TIMEOUT_MS;
-  const bearer = bearerOf(host, deps);
-  const get = async (path: string): Promise<RemoteJsonResult> => {
-    const res = await remoteJsonRequest(host as HttpHostEntry, path, {
-      method: "GET",
-      timeoutMs,
-      ...HOST_CALL,
-      fetchImpl: deps.fetchImpl,
-      env: deps.env,
-      readFile: deps.readFile,
-    });
-    return res.ok ? { ...res, payload: scrubBearer(res.payload, bearer) } : { ...res, detail: scrubBearer(res.detail, bearer) as string };
-  };
+  const get = (path: string) => exchange(host as HttpHostEntry, path, { method: "GET", timeoutMs }, deps);
   const res = await get("/api/provider/status");
   const readAt = now();
   const ok = (usage: HostUsageCoverage, usageReason?: string): UsageHostStatus =>
@@ -401,7 +476,29 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
   const entry = entries.find((e) => e["key"] === "provider.usage_windows");
   if (!entry) return { status: ok("older", "this host doesn't know the provider.usage_windows setting (its daemon predates usage windows)"), rows: [], seats: null };
   if (entry["value"] === true) return { status: ok("unavailable", "provider.usage_windows is on there, but it served no usage windows"), rows: [], seats: null };
-  return { status: ok("off", `usage windows are off on this host (provider.usage_windows = ${String(entry["value"])})`), rows: [], seats: null };
+  const value = entry["value"];
+  const shown = value === null || ["string", "number", "boolean"].includes(typeof value) ? String(value) : "an unrecognized value";
+  return { status: ok("off", `usage windows are off on this host (provider.usage_windows = ${shown})`), rows: [], seats: null };
+}
+
+/** A host's read with anything it throws (reading, checking or scrubbing its answer) kept to that host. The thrown text
+ *  isn't shown: it can carry the host's own content. */
+async function readHostContained(host: HostEntry, deps: UsageHostsDeps, now: () => string): Promise<HostRead> {
+  try {
+    return await readHost(host, deps, now);
+  } catch (error) {
+    return {
+      status: {
+        hostId: host.id,
+        status: "ok",
+        usage: "unavailable",
+        usageReason: error instanceof AnswerTooDeep ? `this host's answer is nested deeper than ${USAGE_HOSTS_MAX_DEPTH} levels` : "this host's answer couldn't be read",
+        readAt: now(),
+      },
+      rows: [],
+      seats: null,
+    };
+  }
 }
 
 /** The view across hosts. The caller has checked that this daemon serves usage windows (`local.usage` present). */
@@ -422,7 +519,7 @@ export async function readUsageAcrossHosts(
     while (!expired && next < remotes.length) {
       const i = next;
       next += 1;
-      const read = await readHost(remotes[i]!, deps, now);
+      const read = await readHostContained(remotes[i]!, deps, now);
       if (!expired) reads[i] = read;
     }
   }));
@@ -531,7 +628,10 @@ export class UsageRefreshLegs {
       try {
         result = await start();
       } catch (error) {
-        result = { at: now(), outcome: "failed", reason: "leg_failed", detail: error instanceof Error ? error.message : String(error) };
+        // The thrown text isn't kept or shown: it can carry the host's own content.
+        result = error instanceof AnswerTooDeep
+          ? { at: now(), outcome: "failed", reason: "too_deep", detail: `the host's answer is nested deeper than ${USAGE_HOSTS_MAX_DEPTH} levels` }
+          : { at: now(), outcome: "failed", reason: "leg_failed", detail: "this leg's answer couldn't be read" };
       }
       const done: UsageRefreshLeg = { hostId, provider, ...result, coalesced: result.coalesced ?? false };
       this.last.set(hostId, { ...this.last.get(hostId), [provider]: done });
@@ -553,17 +653,9 @@ export class UsageRefreshLegs {
         return { at: now(), outcome: "failed", reason: "unsupported_transport", detail: "ssh-declared host; a refresh across hosts needs an http registry entry" };
       }
       const deadlineMs = this.deadlineFor(provider);
-      const res = await remoteJsonRequest(host, "/api/provider/usage/refresh", {
-        method: "POST",
-        body: { provider },
-        timeoutMs: deadlineMs,
-        ...HOST_CALL,
-        fetchImpl: deps.fetchImpl,
-        env: deps.env,
-        readFile: deps.readFile,
-      });
-      // Scrubbed before it's mapped, so neither the answer nor the kept record can carry the bearer.
-      return scrubBearer(remoteRefreshLeg(res, provider, deadlineMs, now()), bearerOf(host, deps)) as LegResult;
+      // Scrubbed with the bearer this call sent, before it's mapped, so neither the answer nor the kept record carries it.
+      const res = await exchange(host, "/api/provider/usage/refresh", { method: "POST", body: { provider }, timeoutMs: deadlineMs }, deps);
+      return remoteRefreshLeg(res, provider, deadlineMs, now());
     });
   }
 }
