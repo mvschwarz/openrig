@@ -33,7 +33,7 @@ import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObser
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessResult } from "./runtime-adapter.js";
-import { hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
+import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -2747,8 +2747,30 @@ export class SessionTransport {
     const checker = this.runtimeAdapters[snapshot.runtime];
     if (!checker?.checkReady) return false;
 
-    const hasIdentityWork = hasClaudeResumeIdentityWork(
-      this.sessionRegistry,
+    const hasClaudeIdentityWork = (
+      sessionId: string,
+      runtime: string,
+      currentResumeToken: string | null | undefined,
+      currentResumeType: string | null | undefined,
+    ): boolean => {
+      const failedEvent = getLatestStartupFailedEvent(this.db, snapshot.node_id, sessionId);
+      const requestedToken = failedEvent && "requestedResumeToken" in failedEvent
+        ? failedEvent.requestedResumeToken
+        : currentResumeToken;
+      const requestedType = failedEvent && "requestedResumeType" in failedEvent
+        ? failedEvent.requestedResumeType
+        : currentResumeType;
+
+      return hasClaudeResumeIdentityWork(
+        this.sessionRegistry,
+        sessionId,
+        runtime,
+        requestedToken,
+        requestedType,
+      );
+    };
+
+    const hasIdentityWork = hasClaudeIdentityWork(
       snapshot.session_id,
       snapshot.runtime,
       snapshot.resume_token,
@@ -2786,11 +2808,18 @@ export class SessionTransport {
 
     this.db.transaction(() => {
       const current = this.getReconciliationSnapshot(sessionName);
-      if (JSON.stringify(current) !== JSON.stringify(snapshot)) return;
+      if (!current || JSON.stringify(current) !== JSON.stringify(snapshot)) return;
       if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return;
 
+      const currentIdentityWork = hasClaudeIdentityWork(
+        current.session_id,
+        current.runtime,
+        current.resume_token,
+        current.resume_type,
+      );
+
       if (readiness.ready) {
-        if (hasIdentityWork) {
+        if (currentIdentityWork) {
           this.db.prepare(`
             UPDATE sessions
             SET startup_status = 'attention_required'

@@ -3113,21 +3113,73 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
 
       await new Promise((r) => setTimeout(r, 20));
 
-      // Newer startup attempt starts while probe is out
-      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'node.startup_pending', ?)").run(
-        rig.id,
-        node.id,
-        JSON.stringify({ type: "node.startup_pending", sessionId: session.id }),
-      );
+      // Real newer StartupOrchestrator attempt starts while probe is still out
+      let resolveSecondStartupReady!: (value: { ready: boolean }) => void;
+      const secondStartupReadyPromise = new Promise<{ ready: boolean }>((res) => {
+        resolveSecondStartupReady = res;
+      });
+      const secondAdapter: RuntimeAdapter = {
+        runtime: "codex",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        launchHarness: vi.fn(async () => ({ ok: true })),
+        checkReady: vi.fn().mockImplementation(() => secondStartupReadyPromise),
+      };
+
+      const orchestrator = new StartupOrchestrator({
+        db,
+        sessionRegistry,
+        eventBus,
+        tmuxAdapter: mockTmux(),
+        sleep: async () => {},
+      });
+
+      const secondStartupPromise = orchestrator.startNode({
+        rigId: rig.id,
+        nodeId: node.id,
+        sessionId: session.id,
+        binding: {
+          id: "b1",
+          nodeId: node.id,
+          attachmentType: "tmux",
+          tmuxSession: "worker-1@test-rig",
+          tmuxWindow: null,
+          tmuxPane: null,
+          cmuxWorkspace: null,
+          cmuxSurface: null,
+          updatedAt: "",
+          cwd: ".",
+        },
+        adapter: secondAdapter,
+        plan: {
+          runtime: "codex",
+          cwd: ".",
+          entries: [],
+          startup: { files: [], actions: [] },
+          conflicts: [],
+          noOps: [],
+          diagnostics: [],
+        },
+        resolvedStartupFiles: [],
+        startupActions: [],
+        isRestore: false,
+        readinessTimeoutMs: 1000,
+      });
+
+      await new Promise((r) => setTimeout(r, 20));
 
       resolveProbe({ ready: true });
       await sendPromise;
 
-      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
-      expect(sessionRow.startup_status).toBe("failed");
+      const sessionRowWhileSecondPending = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRowWhileSecondPending.startup_status).toBe("pending");
 
       const readyEvents = db.prepare("SELECT * FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id);
       expect(readyEvents).toHaveLength(0);
+
+      resolveSecondStartupReady({ ready: false });
+      await secondStartupPromise;
     });
 
     it("does not overwrite a newer startup attempt when probe returns attention code", async () => {
@@ -3335,6 +3387,107 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
       await transport.send("worker-1@test-rig", "echo ping");
       const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
       expect(sessionRow.startup_status).not.toBe("ready");
+    });
+
+    it("leaves seat failed when stored Claude session identity changes during initial readiness read and that read fails", async () => {
+      const { rig, node, session } = seedRig("claude-code");
+      db.prepare("UPDATE sessions SET resume_token = ?, resume_type = ? WHERE id = ?").run(
+        "token-A",
+        "claude_id",
+        session.id,
+      );
+
+      const adapter: RuntimeAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => {
+          // Stored Claude session identity changes while initial readiness read is in progress
+          db.prepare("UPDATE sessions SET resume_token = ?, resume_type = ? WHERE id = ?").run(
+            "token-B",
+            "claude_id",
+            session.id,
+          );
+          return { ready: false, reason: "initial readiness read failed" };
+        }),
+        launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "token-A" })),
+      };
+
+      const orchestrator = new StartupOrchestrator({
+        db,
+        sessionRegistry,
+        eventBus,
+        tmuxAdapter: mockTmux(),
+        sleep: async () => {},
+      });
+
+      const startResult = await orchestrator.startNode({
+        rigId: rig.id,
+        nodeId: node.id,
+        sessionId: session.id,
+        binding: {
+          id: "b1",
+          nodeId: node.id,
+          attachmentType: "tmux",
+          tmuxSession: "worker-1@test-rig",
+          tmuxWindow: null,
+          tmuxPane: null,
+          cmuxWorkspace: null,
+          cmuxSurface: null,
+          updatedAt: "",
+          cwd: ".",
+        },
+        adapter,
+        plan: {
+          runtime: "claude-code",
+          cwd: ".",
+          entries: [],
+          startup: { files: [], actions: [] },
+          conflicts: [],
+          noOps: [],
+          diagnostics: [],
+        },
+        resolvedStartupFiles: [],
+        startupActions: [],
+        isRestore: false,
+        resumeToken: "token-A",
+        resumeType: "claude_id",
+        readinessTimeoutMs: 1,
+      });
+
+      expect(startResult.ok).toBe(false);
+
+      const eventRow = db.prepare(
+        "SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1",
+      ).get(node.id) as { payload: string };
+      const event = JSON.parse(eventRow.payload);
+      expect(event.stage).toBe("readiness_check");
+      expect(event.hasPendingWork).toBe(true);
+      expect(event.requestedResumeToken).toBe("token-A");
+      expect(event.requestedResumeType).toBe("claude_id");
+
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: {
+          "claude-code": { checkReady: vi.fn().mockResolvedValue({ ready: true }) },
+        },
+      });
+
+      await transport.capture("worker-1@test-rig");
+      const sessionRow = db.prepare("SELECT startup_status, startup_completed_at FROM sessions WHERE id = ?").get(session.id) as {
+        startup_status: string;
+        startup_completed_at: string | null;
+      };
+      expect(sessionRow.startup_status).toBe("failed");
+      expect(sessionRow.startup_completed_at).toBeNull();
+
+      const readyEvents = db.prepare("SELECT * FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id);
+      expect(readyEvents).toHaveLength(0);
     });
   });
 

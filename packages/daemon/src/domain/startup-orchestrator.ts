@@ -80,6 +80,29 @@ export function hasPendingStartupWork(db: Database.Database, nodeId: string, ses
   }
 }
 
+export function getLatestStartupFailedEvent(db: Database.Database, nodeId: string, sessionId: string): {
+  type: string;
+  sessionId?: string;
+  freshContextPending?: boolean;
+  hasPendingWork?: boolean;
+  stage?: StartupFailureStage;
+  requestedResumeToken?: string | null;
+  requestedResumeType?: string | null;
+} | null {
+  const row = db.prepare(
+    "SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1",
+  ).get(nodeId) as { payload: string } | undefined;
+  if (!row) return null;
+  try {
+    const event = JSON.parse(row.payload);
+    if (event.type !== "node.startup_failed") return null;
+    if (!event.sessionId || event.sessionId !== sessionId) return null;
+    return event;
+  } catch {
+    return null;
+  }
+}
+
 export function isRecoverableStartupFailure(db: Database.Database, nodeId: string, sessionId: string): boolean {
   if (hasPendingFreshStartup(db, nodeId, sessionId)) return false;
   if (hasPendingStartupWork(db, nodeId, sessionId)) return false;
@@ -90,21 +113,12 @@ export function isRecoverableStartupFailure(db: Database.Database, nodeId: strin
     if (node?.runtime === "claude-code") return false;
   }
 
-  const row = db.prepare(
-    "SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1",
-  ).get(nodeId) as { payload: string } | undefined;
-  if (!row) return false;
-  try {
-    const event = JSON.parse(row.payload);
-    if (event.type !== "node.startup_failed") return false;
-    if (!event.sessionId || event.sessionId !== sessionId) return false;
-    if (event.freshContextPending === true) return false;
-    if (event.hasPendingWork !== false) return false;
-    if (event.stage !== "post_delivery_readiness" && event.stage !== "readiness_check") return false;
-    return true;
-  } catch {
-    return false;
-  }
+  const event = getLatestStartupFailedEvent(db, nodeId, sessionId);
+  if (!event) return false;
+  if (event.freshContextPending === true) return false;
+  if (event.hasPendingWork !== false) return false;
+  if (event.stage !== "post_delivery_readiness" && event.stage !== "readiness_check") return false;
+  return true;
 }
 
 // -- Types --
@@ -480,22 +494,25 @@ export class StartupOrchestrator {
     }
 
     // 6. Wait for harness readiness within the configured launch window.
-    const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
-      this.sessionRegistry,
-      input.sessionId,
-      input.adapter.runtime,
-      input.resumeToken,
-      input.resumeType,
-      input.skipHarnessLaunch,
-      continuityOutcome,
-    );
-    const hasPendingReadinessWork = postLaunchFiles.length > 0 || (input.startupActions ?? []).some(
-      (a) => a.phase === "after_files" || a.phase === "after_ready" || isSessionIdentityAction(a) || a.type === "send_text",
-    ) || hasRemainingIdentityWork;
+    const getPendingReadinessWork = () => {
+      const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
+        this.sessionRegistry,
+        input.sessionId,
+        input.adapter.runtime,
+        input.resumeToken,
+        input.resumeType,
+        input.skipHarnessLaunch,
+        continuityOutcome,
+      );
+      return postLaunchFiles.length > 0 || (input.startupActions ?? []).some(
+        (a) => a.phase === "after_files" || a.phase === "after_ready" || isSessionIdentityAction(a) || a.type === "send_text",
+      ) || hasRemainingIdentityWork;
+    };
     try {
       const readinessTimeoutMs = resolveReadinessTimeoutMs(input.readinessTimeoutMs, this.readinessSettings);
       const readiness = await this.waitForReady(input.adapter, input.binding, readinessTimeoutMs);
       if (!readiness.ready) {
+        const hasPendingReadinessWork = getPendingReadinessWork();
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
           return this.fail(input, "attention_required", errors, undefined, isFreshLaunch, undefined, false, "readiness_check", hasPendingReadinessWork);
@@ -505,7 +522,7 @@ export class StartupOrchestrator {
       }
     } catch (err) {
       errors.push(`Readiness check error: ${(err as Error).message}`);
-      return this.fail(input, "failed", errors, undefined, false, undefined, false, "readiness_check", hasPendingReadinessWork);
+      return this.fail(input, "failed", errors, undefined, false, undefined, false, "readiness_check", getPendingReadinessWork());
     }
 
     // The adapter returned the exact enforcing value it inserted, and readiness
@@ -741,6 +758,8 @@ export class StartupOrchestrator {
       ...(input.submissionDiagnostics?.length ? { submissionDiagnostics: input.submissionDiagnostics } : {}),
       ...(stage ? { stage } : {}),
       ...(hasPendingWork !== undefined ? { hasPendingWork } : {}),
+      requestedResumeToken: input.resumeToken ?? null,
+      requestedResumeType: input.resumeType ?? null,
     });
     return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}),
       ...(missingConversation ? { missingConversation: true as const } : {}) };
