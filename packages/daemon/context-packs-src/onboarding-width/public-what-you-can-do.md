@@ -188,8 +188,8 @@ your context, your compaction and your replacement — and it is the only thing 
   receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
   pickup, not proof the body was read. For a claimed row whose wake wasn't confirmed, `outcome`
   reads `claimed`; it isn't a failed handoff, so don't re-run the create. For a registered person
-  who is also a seat with a pane, it also waits, bounded, for the Slack receipt and reports it on
-  its own. With `output.compact` on (off by default), the queue write commands print a short
+  who is also a seat with a pane, it also waits for the Slack receipt and reports it on its own,
+  up to the 30-second default, even when Slack isn't set up or the row won't be posted. With `output.compact` on (off by default), the queue write commands print a short
   receipt and `--full` prints the whole row.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
@@ -205,10 +205,11 @@ your context, your compaction and your replacement — and it is the only thing 
   visible**, with a plain-language summary and a pointer to what a human must judge; `resolve`
   writes their decision onto the durable record and wakes the owner. **Closing it would be a lie
   and sitting on it silently is indistinguishable from a crash.** `--wake-after <duration>` arms
-  one wake for this park episode; a new park supersedes it and every exit route retires it. A wake
-  the typing guard holds back (`retained`) isn't counted as that wake in this release: the timer
-  can wake the owner again at each interval while the row stays parked, and a row attached to a
-  shared timer with `--wake-watchdog` can lose its wake.
+  one wake for this park episode; a new park supersedes it and every exit route retires it. In
+  this release a wake the typing guard holds back (`retained`) is recorded as that one fire and
+  later wakes aren't, so the timer isn't retired: it can wake the owner again at each interval
+  while the row stays parked. A row attached to a shared timer with `--wake-watchdog` loses its
+  one wake if that wake is held back.
 - **`rig queue overdue`** — what was claimed and never closed in time. **Defaults to the current
   rig**; ask for more if you mean more.
 - **`rig queue undelivered`** — pending create-path nudge failures only. For gateway or human
@@ -390,7 +391,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   holds; it doesn't switch accounts itself. It refuses with nothing stopped unless the seat is a
   Codex seat OpenRig launched, in a single pane, with a conversation it can prove and unchanged
   running settings. `--plan` runs every check and stops nothing; `--verify --expect-account
-  <account>` reports `moved` only when Codex's status names that account. Linux only: on macOS a
+  <account>` reports `moved` only when a tool turn has completed in the same conversation since
+  the restart and Codex's status names that account. Linux only: on macOS a
   request that reaches the running-process check refuses before stopping the seat.
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig add` takes the rig's name or ID; a name two active rigs share is refused

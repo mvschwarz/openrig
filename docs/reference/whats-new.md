@@ -12,15 +12,13 @@ after an upgrade it can still hold the previous version's note.
 - **Restart the daemon** (`rig daemon stop`, then `rig daemon start`). One migration runs on the first start: `103`
   adds one column to `sessions`, `intentionally_stopped`, which is 0 for every existing row. There are no migrations
   `100` or `102`. The bundled openrig-core plugin stays at 0.1.9; two of its files changed.
-- **Three new switches, all off by default:**
+- **Two new switches, both off by default:**
   - `output.compact` (or `OPENRIG_OUTPUT_COMPACT`): the seven queue write commands (`rig queue create`, `claim`,
     `unclaim`, `update`, `block`, `handoff` and `handoff-and-complete`) print a short receipt instead of the whole
     row, and `--full` prints the whole row. While it's off their output is unchanged, `--full` is accepted, and
     `rig config` lists the key.
   - `provider.usage_windows` (or `OPENRIG_PROVIDER_USAGE_WINDOWS` in the daemon's environment): `rig provider status
     --refresh` reads a Codex login's usage windows once. While it's off, `--refresh` says how to turn it on and exits 1.
-  - `OPENRIG_REFOCUS_WORK_PACKET`: the refocus hook's work packet lists held and next work in separate lists of up to
-    50 each.
 
 ## Output that changed shape
 
@@ -29,10 +27,13 @@ after an upgrade it can still hold the previous version's note.
 - **`rig queue create --verify` to a registered person who is also a seat with a pane reports the Slack side too.**
   Beside the terminal wake it adds a `gateway` object: `posted` (`connectorAccepted: true`), `transport-failed` or
   `never-posted` (`connectorAccepted: false`, with the detail), or `still-pending` (`connectorAccepted: null`). The
-  wait is still bounded at 30 seconds, posted isn't read, and "This is not a failed handoff" isn't shown when Slack
-  reports a failed delivery. `GET /api/queue/:qitemId` returns `ownerNotificationLevel`, or `null`.
+  wait is still bounded by the existing 30-second default, and it can use all of it even when Slack isn't set up or the
+  row won't be posted; the Slack side then reads `still-pending`. Posted isn't read, and "This is not a failed handoff"
+  isn't shown when Slack reports a failed delivery. `GET /api/queue/:qitemId` returns `ownerNotificationLevel`, or
+  `null`.
 - **`rig queue whoami --work-candidates` returns up to 50 held and 50 next rows,** with `heldTruncated` and
-  `nextTruncated`. `heldAndNextTruncated` now means either list was cut.
+  `nextTruncated`. `heldAndNextTruncated` now means either list was cut. With `OPENRIG_REFOCUS_WORK_PACKET` on (off by
+  default, as in 0.6.10), the refocus work packet lists held and next work separately, up to 50 each.
 - **`rig ps --nodes --json` carries `intentionallyStopped`,** and `rig ps --nodes` shows `usage_limit` under REASON for a
   Codex seat at its usage limit.
 
@@ -60,8 +61,9 @@ after an upgrade it can still hold the previous version's note.
   restarts it in its own pane on the same conversation, so it starts again on whatever account its Codex home now
   holds. It doesn't switch accounts itself. Before it stops anything, it checks that the seat is a Codex seat OpenRig
   launched, in a single pane, with a conversation it can prove, and that relaunching wouldn't change the running
-  settings; any doubt refuses with nothing stopped. `--plan` runs every check and stops nothing. After a real
-  tool-using turn, `--verify --expect-account <account>` reports `moved` only when Codex's status names that account.
+  settings; any doubt refuses with nothing stopped. `--plan` runs every check and stops nothing.
+  `--verify --expect-account <account>` reports `moved` only when a tool turn has completed in the same conversation
+  since the restart and Codex's status names that account.
   On macOS, a request that gets as far as reading the running process refuses before stopping the seat, because that
   reading depends on `/proc`.
 - **A forked Claude seat launches with its own session ID** (`rig fork`, or `session_source: fork`), so strict restore
@@ -69,7 +71,7 @@ after an upgrade it can still hold the previous version's note.
   which OpenRig doesn't check. Forks launched before this keep reading `mismatch` until they're relaunched.
 - **Seats no longer inherit the launching Claude Code or Herdr session's identity variables,** such as `CLAUDECODE`.
   If removing them fails, the launch goes ahead with a warning.
-- **A member's `cwd` in a rig spec can start with `~` or use `$VAR` or `${VAR}`,** expanded from the daemon's
+- **A member's `cwd` in a rig spec can be `~`, start with `~/`, or use `$VAR` or `${VAR}`,** expanded from the daemon's
   environment, when the path as written doesn't exist. `rig up` warns on stderr when it chose `/` as the launch folder
   itself.
 - **A late readiness result no longer overwrites a newer launch attempt.**
@@ -79,9 +81,10 @@ after an upgrade it can still hold the previous version's note.
 - **`rig send --wait-for-idle N` waits before it takes the seat's delivery lease,** so other sends and queue wakes to
   that seat aren't held behind a long wait. N is now a deadline from the start of the wait, including any time spent
   waiting for the lease. A timeout names the wait you asked for.
-- **A parked seat isn't woken again for the same rows after a wake was delivered,** until it updates one of them or one
-  changes state. A failed, refused or unrecorded wake still repeats at the next park, and a new occupant gets its first
-  wake. "Delivered" means the wake was typed into the seat's terminal, not that the agent read it.
+- **A parked seat whose occupant is known isn't woken again for the same rows after a wake was delivered,** until it
+  updates one of them or one changes state. A failed, refused or unrecorded wake still repeats at the next park, and a
+  new occupant gets its first wake. "Delivered" means the wake was typed into the seat's terminal, not that the agent
+  read it.
 - **`rig send --verify` confirms enveloped multi-line messages that the agent's screen indents,** and queue wakes use
   the same check.
 - **A Claude footer in auto, bypass or plan mode on the last line reads idle** when no activity hook is reporting.
@@ -113,7 +116,8 @@ after an upgrade it can still hold the previous version's note.
   project selected in the TUI uses that project's own root.
 - The chat send and topic routes return 400 before storing anything for payloads that used to fail with 500;
   `/api/wake-resolve` answers a fractional or non-numeric generation with its usual "does not exist" reply; watchdog
-  registration refuses a `scan_interval_seconds` that isn't a usable number; and unmanaged-pane discovery matches agent
+  registration refuses a `scan_interval_seconds` that can't be turned into a number (non-numeric text, a boolean, an
+  empty array); and unmanaged-pane discovery matches agent
   process names exactly, plus `claude.exe` and names cut to 15 or 16 characters.
 - The `rigs` and `openrig-skills` skill descriptions split by who is asking: a person in their own session, or an agent
   inside a rig.
@@ -142,10 +146,11 @@ after an upgrade it can still hold the previous version's note.
   prompt and the agent's reply, with no Codex working line and no input line below. It's recorded again every five
   minutes, where 0.6.10 let it age out. The case was constructed from the source and hasn't been seen in a real
   session.
-- **The keeping-a-watch page says a timer fires once; a held-back wake isn't counted.** When the typing guard holds a
-  one-shot `--wake-after` wake back (it shows as `retained`), the timer can wake the owner again at each interval while
-  the row stays set aside. A row sharing the timer through `--wake-watchdog`, after the original row was handed off or
-  stopped, can lose its wake the same way. Read the row's transitions after each wake.
+- **The keeping-a-watch page says a timer fires once; a held-back wake uses up that fire.** When the typing guard holds
+  a one-shot `--wake-after` wake back (it shows as `retained`), that held-back attempt is recorded as the timer's one
+  fire and later wakes aren't, so the timer isn't retired: it can wake the owner again at each interval while the row
+  stays set aside. A row sharing the timer through `--wake-watchdog`, after the original row was handed off or stopped,
+  loses its one wake if that wake is held back. Read the row's transitions after each wake.
 - **After `rig scope slice create` says it couldn't verify membership, the slice was kept.** Check `mission.yaml` before
   creating it again: creating it again makes a second slice with the same name.
 - **The latest first-install check before this release used 0.6.10 on Linux only.** macOS was last checked with 0.6.8,

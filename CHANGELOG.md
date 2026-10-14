@@ -64,7 +64,9 @@ tagged `v0.6.11`. The changes since 0.6.10:
   `stopped` ([#1192](https://github.com/mvschwarz/openrig/pull/1192)).
 - Read `rig queue whoami --work-candidates` as up to 50 held and 50 next rows,
   with `heldTruncated` and `nextTruncated`; `heldAndNextTruncated` now means
-  either list was cut ([#1066](https://github.com/mvschwarz/openrig/pull/1066)).
+  either list was cut. With `OPENRIG_REFOCUS_WORK_PACKET` on (off by default,
+  as in 0.6.10), the refocus work packet lists held and next work separately,
+  up to 50 each ([#1066](https://github.com/mvschwarz/openrig/pull/1066)).
 
 ### Highlights
 
@@ -74,17 +76,18 @@ tagged `v0.6.11`. The changes since 0.6.10:
   It refuses with nothing stopped unless the seat is a Codex seat OpenRig
   launched, in a single pane, with a conversation it can prove and unchanged
   running settings. `--plan` runs every check and stops nothing, and `--verify
-  --expect-account <account>` reports `moved` only when Codex's status names
-  that account after a real tool-using turn. On macOS, a request that gets as
+  --expect-account <account>` reports `moved` only when a tool turn has
+  completed in the same conversation since the restart and Codex's status names
+  that account. On macOS, a request that gets as
   far as reading the running process refuses before stopping the seat
   ([#1196](https://github.com/mvschwarz/openrig/pull/1196),
   [#1195](https://github.com/mvschwarz/openrig/pull/1195),
   [#1212](https://github.com/mvschwarz/openrig/pull/1212)).
-- Stop waking a parked seat again for the same rows after a wake was delivered,
-  until it updates one of them or one changes state. A failed, refused or
-  unrecorded wake still repeats at the next park, and a new occupant gets its
-  first wake. Delivered means typed into the seat's terminal, not read
-  ([#1142](https://github.com/mvschwarz/openrig/pull/1142)).
+- Stop waking a parked seat whose occupant is known again for the same rows
+  after a wake was delivered, until it updates one of them or one changes
+  state. A failed, refused or unrecorded wake still repeats at the next park,
+  and a new occupant gets its first wake. Delivered means typed into the
+  seat's terminal, not read ([#1142](https://github.com/mvschwarz/openrig/pull/1142)).
 - Keep a Codex seat at its usage limit `unknown` with reason `usage_limit` while
   its screen redraws, instead of `running`, with `usage_limit` under REASON in
   `rig ps --nodes`. It clears when a readable screen shows no banner, or when
@@ -93,8 +96,11 @@ tagged `v0.6.11`. The changes since 0.6.10:
 - Report the Slack receipt beside the terminal wake from `rig queue create
   --verify` for a registered person who is also a seat with a pane, in a
   `gateway` object (`posted`, `transport-failed`, `never-posted` or
-  `still-pending`); posted isn't read. `GET /api/queue/:qitemId` returns
-  `ownerNotificationLevel` ([#1085](https://github.com/mvschwarz/openrig/pull/1085)).
+  `still-pending`); posted isn't read. It waits for that receipt up to the
+  existing 30-second default, even when Slack isn't set up or the row won't be
+  posted, and then reports the Slack side as pending.
+  `GET /api/queue/:qitemId` returns `ownerNotificationLevel`
+  ([#1085](https://github.com/mvschwarz/openrig/pull/1085)).
 - Launch a forked Claude seat (`rig fork`, or `session_source: fork`) with its
   own session ID, so strict restore and clear-attention can verify it as its
   own conversation. Forking a Claude seat needs Claude Code 2.0.73 or later,
@@ -110,8 +116,9 @@ tagged `v0.6.11`. The changes since 0.6.10:
 - Warn on stderr when `rig up` chose `/` as the launch folder itself
   ([#1150](https://github.com/mvschwarz/openrig/pull/1150), from
   [#226](https://github.com/mvschwarz/openrig/pull/226)).
-- Expand a member `cwd` that starts with `~` or uses `$VAR` or `${VAR}`, from
-  the daemon's environment, when the path as written doesn't exist
+- Expand a member `cwd` that is `~`, starts with `~/` or uses `$VAR` or
+  `${VAR}`, from the daemon's environment, when the path as written doesn't
+  exist
   ([#1153](https://github.com/mvschwarz/openrig/pull/1153)).
 - Keep a late readiness result from overwriting a newer launch attempt
   ([#1188](https://github.com/mvschwarz/openrig/pull/1188)).
@@ -170,7 +177,8 @@ tagged `v0.6.11`. The changes since 0.6.10:
   ([#1122](https://github.com/mvschwarz/openrig/pull/1122)); answer a
   fractional or non-numeric generation in `/api/wake-resolve` with the usual
   "does not exist" reply ([#1129](https://github.com/mvschwarz/openrig/pull/1129));
-  refuse a watchdog `scan_interval_seconds` that isn't a usable number
+  refuse a watchdog `scan_interval_seconds` that can't be turned into a number,
+  such as non-numeric text, a boolean or an empty array
   ([#1131](https://github.com/mvschwarz/openrig/pull/1131)); and match unmanaged
   agent process names exactly, plus `claude.exe` and names cut to 15 or 16
   characters ([#1133](https://github.com/mvschwarz/openrig/pull/1133)).
@@ -185,9 +193,6 @@ tagged `v0.6.11`. The changes since 0.6.10:
   daemon's environment): `rig provider status --refresh` reads a Codex login's
   usage windows once. While it's off, `--refresh` says how to turn it on and
   exits 1 ([#1194](https://github.com/mvschwarz/openrig/pull/1194)).
-- Add `OPENRIG_REFOCUS_WORK_PACKET`: the refocus hook's work packet lists held
-  and next work in separate lists of up to 50 each
-  ([#1066](https://github.com/mvschwarz/openrig/pull/1066)).
 
 ### Guidance and docs
 
@@ -205,12 +210,13 @@ tagged `v0.6.11`. The changes since 0.6.10:
 
 ### Tests and repository checks
 
-- Pass the daemon and CLI suites on Linux
+- Fix daemon and CLI tests that failed on some Linux machines: ext4 inode
+  reuse, dash as `/bin/sh` and a 002 checkout umask
   ([#1148](https://github.com/mvschwarz/openrig/pull/1148), finishing
   [#83](https://github.com/mvschwarz/openrig/pull/83)); clean up after the
-  pane-isolation and TUI socket-path tests
-  ([#1169](https://github.com/mvschwarz/openrig/pull/1169),
-  [#1182](https://github.com/mvschwarz/openrig/pull/1182)); and run the
+  pane-isolation tests ([#1169](https://github.com/mvschwarz/openrig/pull/1169));
+  keep the TUI default socket-path test from failing on macOS
+  ([#1182](https://github.com/mvschwarz/openrig/pull/1182)); and run the
   portability report when it's started through a symlinked path
   ([#1109](https://github.com/mvschwarz/openrig/pull/1109)).
 
@@ -229,11 +235,12 @@ tagged `v0.6.11`. The changes since 0.6.10:
   case was constructed from the source and hasn't been seen in a real session
   ([#1185](https://github.com/mvschwarz/openrig/pull/1185)).
 - The keeping-a-watch page says a timer fires once. When the typing guard holds
-  a one-shot `--wake-after` wake back (it shows as `retained`), that attempt
-  isn't counted as the fire: the timer can wake the owner again at each
-  interval while the row stays set aside. A row sharing the timer through
-  `--wake-watchdog` after the original row was handed off or stopped can lose
-  its wake the same way.
+  a one-shot `--wake-after` wake back (it shows as `retained`), that held-back
+  attempt is recorded as the timer's one fire and later wakes aren't, so the
+  timer isn't retired: it can wake the owner again at each interval while the
+  row stays set aside. A row sharing the timer through `--wake-watchdog`, after
+  the original row was handed off or stopped, loses its one wake if that wake
+  is held back.
 
 Thanks to everyone whose pull requests are in this release; they are listed in
 the release notes, with how it was tested.
