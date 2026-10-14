@@ -581,6 +581,43 @@ describe("Effort precedence, latest wins: a choice saved after the snapshot (OPR
     ctx.db.close();
   });
 
+  it("Claude: snapshot authored medium, then high saved on the live node: an ordinary restore launches high, says so, keeps it", async () => {
+    const ctx = setup();
+    const rig = ctx.rigRepo.createRig("prec-claude");
+    const node = ctx.rigRepo.addNode(rig.id, "analyst", { runtime: "claude-code", model: "opus", effort: "medium", cwd: "/workspace" });
+    const session = ctx.sessionRegistry.registerSession(node.id, "analyst@prec-claude");
+    ctx.sessionRegistry.updateStatus(session.id, "running");
+    ctx.sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
+    ctx.db.prepare("UPDATE sessions SET resume_type = 'claude_name', resume_token = 'tok-prec' WHERE id = ?").run(session.id);
+    const snapshot = ctx.snapshotCapture.captureSnapshot(rig.id, "manual");
+    expect(snapshot.data.nodes[0]!.effort).toBe("medium");
+    ctx.rigRepo.setNodeEffortChoice(node.id, "high");
+
+    const mockClaudeResume = { canResume: vi.fn(() => true), resume: vi.fn(async () => ({ ok: true, code: "resumed" })) } as unknown as ClaudeResumeAdapter;
+    const mockTmux = {
+      createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })),
+      listSessions: vi.fn(async () => []), hasSession: vi.fn(async () => false),
+      sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
+      listWindows: vi.fn(async () => []), listPanes: vi.fn(async () => []), getPaneCommand: vi.fn(async () => "claude"),
+    } as any;
+    const nodeLauncher = new NodeLauncher({ db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus, tmuxAdapter: mockTmux });
+    const restoreOrch = new RestoreOrchestrator({
+      db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus,
+      snapshotRepo: ctx.snapshotRepo, snapshotCapture: ctx.snapshotCapture, checkpointStore: ctx.checkpointStore,
+      nodeLauncher, tmuxAdapter: mockTmux,
+      claudeResume: mockClaudeResume,
+      codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+    });
+
+    const result = await restoreOrch.restore(snapshot.id);
+    expect(result.ok).toBe(true);
+    // (sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, effort)
+    expect((mockClaudeResume.resume as any).mock.calls[0]![8]).toBe("high");
+    expect(JSON.stringify(result)).toContain("this restore launched the seat's saved choice high, not medium from the snapshot");
+    expect(ctx.rigRepo.getRig(rig.id)!.nodes.find((n) => n.id === node.id)!.effortChoice).toBe("high");
+    ctx.db.close();
+  });
+
   it("a choice cleared after the snapshot stays cleared: restore launches the snapshot's authored effort, silently", async () => {
     const ctx = setup();
     const rig = ctx.rigRepo.createRig("prec-clear");
