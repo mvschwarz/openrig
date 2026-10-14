@@ -483,6 +483,14 @@ export class RigRepository {
     return result.changes > 0;
   }
 
+  /** OPR.0.7.0.7: write or clear (null) a seat's explicit effort choice. Returns false when
+   *  the column isn't available or no row matched, so a caller never reports a change from it. */
+  setNodeEffortChoice(nodeId: string, choice: string | null): boolean {
+    if (!this.hasNodeColumn("effort_choice")) return false;
+    return this.db.prepare("UPDATE nodes SET effort_choice = ? WHERE id = ?")
+      .run(choice, nodeId).changes > 0;
+  }
+
   clearNodeEffort(nodeId: string): boolean {
     if (!this.hasNodeColumn("effort")) return false;
     const result = this.db
@@ -733,6 +741,7 @@ export class RigRepository {
       runtime: row.runtime,
       model: row.model,
       effort: row.effort ?? null,
+      effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       permissionPolicy: row.permission_policy ?? null,
       cwd: row.cwd,
@@ -822,6 +831,7 @@ interface NodeRow {
   runtime: string | null;
   model: string | null;
   effort?: string | null;
+  effort_choice?: string | null;
   codex_config_profile?: string | null;
   permission_policy?: string | null;
   cwd: string | null;

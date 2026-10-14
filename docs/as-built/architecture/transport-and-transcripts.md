@@ -219,32 +219,37 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 
 1. `NodeLauncher` starts transcript rotation right after tmux session
    creation, before the harness boots
-   (`packages/daemon/src/domain/node-launcher.ts:181`).
-2. Each rotation tick captures the trailing lines with
-   `capturePaneContent` (`transcript-rotation.ts:213` →
-   `adapters/tmux.ts:1082`) and atomically overwrites (temp file + rename,
-   `transcript-rotation.ts:283`–`285`)
+   (`NodeLauncher`, `startTranscriptRotation`).
+2. Each rotation tick captures the trailing lines and atomically overwrites
+   (temp file + rename in `startTranscriptRotation`)
    `transcripts/{rig-name}/{session-name}.log` under the OpenRig home (or
    the `transcripts.path` setting). It skips the write when the captured bytes
    are unchanged. Defaults: 1000 trailing lines every 2 s
-   (`transcript-rotation.ts:27`–`28`); an idle seat is captured less often,
+   (`DEFAULT_TRANSCRIPT_LINES`, `DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS`); an idle seat is captured less often,
    within the 10-second freshness window. Both are tunable with
    `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`
    or the matching `transcripts.*` settings. This bounded capture replaced the
-   earlier `tmux pipe-pane` stream (`transcript-rotation.ts:3`), so the file
-   holds a trailing window, not the whole session.
+   earlier `tmux pipe-pane` stream (see the header comment of `transcript-rotation.ts`), so the file
+   holds a trailing window, not the whole session. Sessions on one adapter
+   tick on one shared timer, and the captures due in a tick share
+   `capturePanesContent`: one chained call per chunk of 24, with a
+   `list-sessions` started beside it on every batch, whose result is consulted
+   only when the chain fails, each chunk on its own (`captureBatch` in
+   `transcript-rotation.ts` → `capturePanesContent` in `adapters/tmux.ts`).
+   A session the batch leaves out, a lone due session, or a pane or window
+   target reads per target with `capturePaneContent` (`adapters/tmux.ts`).
 3. `TranscriptStore` owns path convention, ANSI stripping for `readTail` and
    `grep`, boundary
    markers, `readTail`, `readFull`, `grep`. `readFull` returns the raw bytes
-   (`transcript-store.ts:378`); the `/full` route redacts them. The transcript
+   (`TranscriptStore.readFull`); the `/full` route redacts them. The transcript
    routes check capture health first and can start capture lazily for a seat
    that has none.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
    agent-facing access.
 5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
-   re-launch (`restore-orchestrator.ts:900`); each rotation tick keeps each
+   re-launch (`RestoreOrchestrator`); each rotation tick keeps each
    distinct boundary line once, as a header above the fresh capture
-   (`transcript-rotation.ts:254`–`257`). (Restore-side detail in
+   (`startTranscriptRotation`, boundary header). (Restore-side detail in
    `lifecycle-snapshot-restore.md`.)
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts,
    insufficiency state, and guidance.

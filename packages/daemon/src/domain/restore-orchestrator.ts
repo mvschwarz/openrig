@@ -1,4 +1,6 @@
+import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
+import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -112,11 +114,14 @@ export function launchStatusIsRunning(status: string): boolean {
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
  *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
  *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
-function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
+function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null):
   { kind: "resume" } | { kind: "fresh" | "decision" | "unrecoverable"; why: string } {
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
+  const runtimeError = restoreRuntimeCompatibilityError(runtime,
+    data.nodeStartupContext?.[nodeId]?.runtime);
+  if (runtimeError) return { kind: "decision", why: runtimeError };
   if (!session) {
     // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
     const prior = occupant.kind === "none" ? absentSeatResumeHistory(data.sessions, nodeId) : null;
@@ -556,7 +561,8 @@ export class RestoreOrchestrator {
         // Choosing a fresh versus resumed conversation belongs to the person. Stopping closes the pane, so
         // stop-then-launch is offered as a resume only when this snapshot can resume the seat; otherwise the
         // message says what that launch would do instead. The command pins the snapshot that was checked.
-        const outcome = snapshotLaunchOutcome(snapshot.data, node.id);
+        const liveNode = allNodes.find(current => current.logicalId === node.logicalId);
+        const outcome = snapshotLaunchOutcome(snapshot.data, node.id, liveNode ? liveNode.runtime : node.runtime);
         const launchCommand = `rig launch ${rigId} ${node.logicalId} --snapshot-id ${snapshot.id}`;
         const relaunch = outcome.kind === "resume"
           ? `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
@@ -831,7 +837,9 @@ export class RestoreOrchestrator {
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
+    // Compare against the live logical target without changing saved post-launch inputs.
     const node = entry.node;
+    const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId);
     const nodeId = node.id;
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -850,9 +858,15 @@ export class RestoreOrchestrator {
       };
     }
 
+    const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    const runtimeError = restoreRuntimeCompatibilityError(liveNode ? liveNode.runtime : node.runtime,
+      data.nodeStartupContext?.[nodeId]?.runtime);
+    if (runtimeError) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError };
+    }
+
     // Classify absent-seat history before the continuity short-circuit: a
     // restoring seat must not report fresh while its forecast awaits a decision.
-    const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
     const priorWithToken = occupantResolution.kind === "none" && !freshRequested
       ? absentSeatResumeHistory(data.sessions, nodeId)
       : null;
@@ -1078,6 +1092,21 @@ export class RestoreOrchestrator {
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
+    // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
+    // precedence seam (latest wins), which also says so when the snapshot held another value.
+    let restoreEffort: { effort: string | null } | undefined;
+    const effortForRestore = (): string | null => {
+      if (!restoreEffort) {
+        // The live seat is found by its logical id in this rig: a seat removed and grown back has a new node id,
+        // and its latest saved choice still wins over the older snapshot.
+        const liveRow = this.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rigId, node.logicalId) as
+          { id: string } | undefined;
+        const decided = effortPrecedence.restoreLaunchEffort({ snapshot: node, live: readSeatEffort(this.db, liveRow?.id ?? node.id) });
+        if (decided.warning) warnings?.push(`Restore: ${node.logicalId}: ${decided.warning}`);
+        restoreEffort = decided;
+      }
+      return restoreEffort.effort;
+    };
     // OPR.0.5.7.1 D1 — the active occupant is RESOLVED, never inferred from
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
@@ -1179,7 +1208,7 @@ export class RestoreOrchestrator {
             this.sessionRegistry.recordResumeLaunch(launchedSessionId, resumeToken);
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort, warnings);
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -1357,7 +1386,7 @@ export class RestoreOrchestrator {
             // found" on every resumed Pi seat). Claude/Codex silently lost
             // their -m/--model on restore the same way.
             model: node.model ?? undefined,
-            effort: node.effort ?? undefined,
+            effort: effortForRestore() ?? undefined,
           };
 
           try {

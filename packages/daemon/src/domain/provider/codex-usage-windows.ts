@@ -96,7 +96,7 @@ export function normalizeCodexUsage(account: unknown, rateLimits: unknown, obser
 }
 
 /** The replacement key of a resolved identity. Email is never part of it; an unresolved identity has none. */
-const identityKey = (i: UsageAllowanceIdentity): string | null =>
+export const codexUsageIdentityKey = (i: UsageAllowanceIdentity): string | null =>
   i.accountId !== null ? `codex:account:${i.accountId}:${i.limitId}`
     : i.workspaceId !== null ? `codex:workspace:${i.workspaceId}:${i.limitId}`
       : null;
@@ -113,7 +113,7 @@ export class CodexUsageWindows extends UsageWindows<UsageAllowanceIdentity, { ac
       sourceKind: "codex_app_server",
       read: deps.read,
       normalize: (answer) => normalizeCodexUsage(answer.account, answer.rateLimits, answer.observedAt),
-      key: identityKey,
+      key: codexUsageIdentityKey,
       ...(deps.now ? { now: deps.now } : {}),
     });
   }

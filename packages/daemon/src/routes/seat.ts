@@ -240,14 +240,17 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
+    transcripts: (c.get("contextUsageStore" as never) as ContextUsageStore | undefined) ?? undefined,
   });
 }
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
-  if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required") return 400;
+  if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
+    || code === "missing_effort" || code === "invalid_effort") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
-  if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed") return 500;
+  if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
+    || code === "effort_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -273,6 +276,29 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
   });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
+
+// OPR.0.7.0.7 — save (or, with clear: true, remove) one seat's effort choice for its next
+// managed continuation. A distinct route fails closed against daemons without it.
+seatRoutes.post("/set-effort/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const clear = body["clear"] === true;
+  if (clear && body["effort"] !== undefined) return c.json({ ok: false, code: "invalid_effort", message: "Pass an effort level or clear, not both." }, 400);
+  const result = await seatLifecycleService(c).setEffort({
+    seatRef: c.req.param("seatRef")!,
+    effort: clear ? null : typeof body["effort"] === "string" ? body["effort"] : "",
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
+
+// OPR.0.7.0.7 — read one seat's effort four ways: requested, saved, emitted at launch, observed natively.
+seatRoutes.get("/effort/:seatRef", async (c) => {
+  const result = await seatLifecycleService(c).effortReport(c.req.param("seatRef")!);
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
 });
