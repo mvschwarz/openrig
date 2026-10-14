@@ -111,8 +111,10 @@ type WriteTargetState =
   | { known: true; writeTarget: string; mode: Binding | null; posture: Binding | null }
   | { known: false; reason: string };
 
+/** A binding as stored: an id, and one of the supported mode names (the store accepts no other). */
 const isBinding = (b: unknown): b is Binding =>
-  typeof b === "object" && b !== null && typeof (b as { mode?: unknown }).mode === "string" && typeof (b as { id?: unknown }).id === "string";
+  typeof b === "object" && b !== null && typeof (b as { id?: unknown }).id === "string"
+  && (MODES as readonly unknown[]).includes((b as { mode?: unknown }).mode);
 
 /** What is stored where a write of this category would land, as the daemon resolves that target (a posture through
  *  its canonicalisation, a saved mode as given). Anything the daemon doesn't establish is unknown: a failed read, a
@@ -130,7 +132,10 @@ async function writeTargetState(client: DaemonClient, scope: string, qualifier: 
       return { known: false, reason: "this daemon doesn't report where this write lands" };
     }
     const bindings = data["bindings"];
-    if (!Array.isArray(bindings) || !bindings.every(isBinding)) return { known: false, reason: "the daemon's answer was malformed" };
+    // A successful answer is used only when it's usable: a named target, and bindings as stored.
+    if (data["writeTarget"] === "" || !Array.isArray(bindings) || !bindings.every(isBinding)) {
+      return { known: false, reason: "the daemon's answer was malformed" };
+    }
     return { known: true, writeTarget: data["writeTarget"], mode: bindings.find((b) => categoryOf(b.mode) === "mode") ?? null,
       posture: bindings.find((b) => categoryOf(b.mode) === "posture") ?? null };
   } catch {

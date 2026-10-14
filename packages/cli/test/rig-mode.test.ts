@@ -427,6 +427,7 @@ describe("rig policy unset — operator-only DELETE", () => {
 
 // Slice 04 (OPR.0.7.0.4) 04-A2 — a saved mode and a posture kept side by side at one target.
 describe("rig mode: a saved mode and a posture kept side by side (04-A2)", () => {
+  const categoryOfMode = (mode: string) => (mode === "human-led" || mode === "delegated" ? "posture" : "mode");
   const binding = (mode: string, id: string) => ({ id, mode, record: {}, qualifier: "r1", setAt: "2026-10-14T18:00:00.000Z", setBy: "operator" });
   const preview = async (getResponse: FakeResponse | "throw", extra: string[] = []) => {
     const { client, calls } = fakeClient(getResponse === "throw" ? {} : { getResponse });
@@ -470,6 +471,32 @@ describe("rig mode: a saved mode and a posture kept side by side (04-A2)", () =>
     expect(out).toContain("Proposed binding (restate-and-confirm — NOT applied)");
     expect(out).toContain(`  currently: UNKNOWN (${reason}); what this write replaces is unknown`);
     expect(out).not.toMatch(/none|replaces: /);
+  });
+
+  // A successful reply is used only when it is usable: a named write target and bindings in supported modes.
+  it.each<[string, FakeResponse]>([
+    ["an empty writeTarget", { status: 200, data: { writeTarget: "", bindings: [] } }],
+    ["a binding in an unsupported mode", { status: 200, data: { writeTarget: "rig:r1", bindings: [binding("not-a-mode", "rig:r1")] } }],
+  ])("preview with a 200 carrying %s reads UNKNOWN, in the text and the JSON; exit 2, no PUT", async (_label, response) => {
+    const text = await preview(response);
+    expect(text.out).toContain("  currently: UNKNOWN (the daemon's answer was malformed); what this write replaces is unknown");
+    expect(text.out).not.toMatch(/none|replaces: /);
+    logs.length = 0;
+    const json = await preview(response, ["--json"]);
+    expect(JSON.parse(json.out)).toMatchObject({ confirm_required: true, current: "unknown", displaces: "unknown" });
+  });
+
+  it("controls: a named target with nothing stored stays a known absence, and every supported mode name is used as stored", async () => {
+    const empty = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [] } });
+    expect(empty.out).toContain("  this write replaces: no mode binding; any posture there is kept");
+    for (const mode of ["sleep", "desk", "mobile", "away", "focus", "debug", "human-led", "delegated"]) {
+      logs.length = 0;
+      const id = categoryOfMode(mode) === "posture" ? "posture@rig:r1" : "rig:r1";
+      const { out } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [binding(mode, id)] } });
+      expect(out, mode).toContain("  currently at rig:r1, where this write lands:");
+      if (categoryOfMode(mode) === "mode") expect(out, mode).toContain(`  this write replaces: ${mode} (mode, rig:r1); any posture there is kept`);
+      else expect(out, mode).toContain(`posture=${mode}`);
+    }
   });
 
   it("unset --category goes through the category path and says what's still kept, in the text and the JSON", async () => {
