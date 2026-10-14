@@ -174,8 +174,8 @@ accounts on every machine. Run it only when the person asks for a fresh reading 
   is null (a login that hasn't been identified) can't be watched: say so, and offer to watch it once it's identified.
 - **For Codex, the login email too:** `items[].observations[].row.identity.email`, shown on each machine's line in the
   plain view. The same Codex account can appear as more than one item with the same key, one per login email (or none)
-  it was seen under. So on each fire, if the key matches more than one item, use the one item whose observations carry
-  that email. If none or several do, you can't tell.
+  it was seen under. So on each fire, use the one item whose key matches and whose observations carry the recorded
+  email. If none or several do, you can't tell.
 - **The window:** `items[].observations[].row.windows[].window`. Claude's are `five_hour` and `weekly`; Codex's are
   `primary` and `secondary`, with `items[].observations[].row.windows[].durationMins` saying which is which.
 - **The threshold:** on `items[].observations[].row.windows[].remainingPercent`. It's a percentage, and no absolute
@@ -206,8 +206,8 @@ observation of the chosen window whose `level` isn't `unknown`.
   presenting the lowest as the reading.
 - **Not met:** every usable reading is at or above the threshold, and there is at least one.
 - **Can't tell:** no usable reading: none `fresh`, or the fresh ones' `level` is `unknown`, which includes a null
-  `remainingPercent`. Also when the allowance is missing from the answer, its linkage is `unknown`, or (Codex) its key
-  matches more than one item and not exactly one carries the recorded email. Use the once-then-quiet unknown rule,
+  `remainingPercent`. Also when the allowance is missing from the answer, its linkage is `unknown`, or (Codex) no item,
+  or more than one, carries both the key and the recorded email. Use the once-then-quiet unknown rule,
   and give the reason (`freshnessReason`, `levelReason`, or the machine's `usageReason`).
 
 The task body, for the person's own allowance, window and threshold:
@@ -222,7 +222,7 @@ Met: a usable reading with remainingPercent below 20. Report the lowest, with it
 Never add machines' numbers. If the linkage is conflict, say the machines disagree (items[].notes).
 Claude: say the windows come from seats' status lines and aren't proven to be the identity's login (identityNote).
 Can't tell: no usable reading (none fresh, or level unknown: give its levelReason), the allowance missing, its linkage
-unknown, or (Codex) the key on several items without exactly one carrying the email. Give the reason.
+unknown, or (Codex) no item, or more than one, carries both the key and the recorded email. Give the reason.
 Interval: 30m.
 Tell them: <entityId>@external (human channel), once, when met.
 Stop: after telling them once, or when they say stop.
