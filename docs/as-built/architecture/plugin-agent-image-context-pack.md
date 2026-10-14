@@ -264,6 +264,14 @@ Code. Its implementation requires Claude Code, observed usage and a valid intege
 post-restore cooldown (10 minutes), the deduplication window (60 seconds) and the
 already-triggered latch; an active manual attempt also blocks it.
 
+While the policy is enabled with a valid threshold (`managedCompactionActive` in
+`packages/daemon/src/adapters/kernel-authority.ts`, using the enforcer's exported `isValidThresholdPercent`),
+`operationalLaunchArgs` merges `idleCompaction: false` into the Claude launch's one `--settings` value, adding one
+when there is none. Fresh launch, fork, resume (`claude-code-adapter.ts`) and restore (`claude-resume.ts`) all build
+their Claude arguments there. The policy is read at each launch; a running session keeps the settings it was launched
+with. Claude Code before 2.1.290 ignores the key, Claude's managed settings take precedence over `--settings`, and
+`autoCompactEnabled` is not set.
+
 `/compact` is held behind a preparation attempt:
 
 1. The first above-threshold tick starts an attempt with its own ID, the seat's occupant

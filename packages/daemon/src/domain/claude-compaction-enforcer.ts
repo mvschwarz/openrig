@@ -127,7 +127,7 @@ export type EnforcerSkipReason =
   | "no_pending_stage";
 
 /** Out-of-contract thresholds (0, 101, NaN, a non-integer) are treated as disabled. */
-function isValidThresholdPercent(value: unknown): boolean {
+export function isValidThresholdPercent(value: unknown): boolean {
   return typeof value === "number"
     && Number.isFinite(value)
     && Number.isInteger(value)
