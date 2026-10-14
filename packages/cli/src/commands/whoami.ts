@@ -492,7 +492,7 @@ async function runCrossHostWhoami(
     if (result.ok) {
       // Verbatim remote stdout passthrough — the remote `rig whoami --json`
       // already produced the correct JSON envelope; we do NOT double-wrap.
-      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stdout) process.stdout.write(withOriginPeersCommand(result.stdout, host.id, opts));
       if (result.stderr) process.stderr.write(result.stderr);
       return;
     }
@@ -658,10 +658,36 @@ async function runFanOutWhoami(opts: WhoamiCliOptions, deps: WhoamiDeps): Promis
   if (hasFailure) process.exitCode = 3;
 }
 
-/** The exact command that lists every peer, for the same identity this call resolved. */
-function allPeersCommand(opts: WhoamiCliOptions): string {
+/** The exact command that lists every peer, for the same identity this call resolved. From the origin of an SSH
+ *  `--host` call it also names that host, and the identity the remote resolved when none was asked for. */
+function allPeersCommand(opts: WhoamiCliOptions, origin?: { hostId: string; resolvedNodeId?: string }): string {
   const parts = ["rig", "whoami", "--json", "--all-peers"];
+  if (origin) parts.push("--host", shellQuote(origin.hostId));
   if (opts.nodeId) parts.push("--node-id", shellQuote(opts.nodeId));
   else if (opts.session) parts.push("--session", shellQuote(opts.session));
+  else if (origin?.resolvedNodeId) parts.push("--node-id", shellQuote(origin.resolvedNodeId));
   return parts.join(" ");
+}
+
+/**
+ * Slice 15 (OPR.0.7.0.15) P5 over SSH `--host`: the remote bounds its peer list, and its note names the full-list
+ * command as run there. Copied at the origin, that command would query this host instead, so here it gains the
+ * host (and the identity the remote resolved, when none was asked for). Only that exact command, in a bounded
+ * note, is replaced, escaped exactly as the JSON carries it; any other output (unbounded, older, malformed, or a
+ * note in another form) passes through byte for byte.
+ */
+export function withOriginPeersCommand(stdout: string, hostId: string, opts: WhoamiCliOptions): string {
+  let parsed: unknown;
+  try { parsed = JSON.parse(stdout); } catch { return stdout; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return stdout;
+  const body = parsed as Record<string, unknown>;
+  const note = body["peersNote"];
+  if (typeof body["peersOmitted"] !== "number" || body["peersOmitted"] <= 0 || typeof note !== "string") return stdout;
+  const remote = `all: ${allPeersCommand(opts)};`;
+  if (note.split(remote).length !== 2) return stdout;
+  const resolved = ((body["identity"] ?? {}) as Record<string, unknown>)["nodeId"];
+  const origin = `all: ${allPeersCommand(opts, { hostId, resolvedNodeId: typeof resolved === "string" && resolved ? resolved : undefined })};`;
+  const from = JSON.stringify(remote).slice(1, -1);
+  if (stdout.split(from).length !== 2) return stdout;
+  return stdout.replace(from, () => JSON.stringify(origin).slice(1, -1));
 }
