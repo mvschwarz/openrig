@@ -33,7 +33,7 @@ import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObser
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessResult } from "./runtime-adapter.js";
-import { isRecoverableStartupFailure } from "./startup-orchestrator.js";
+import { hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -1059,12 +1059,15 @@ interface SessionReconciliationSnapshot {
   startup_status: string;
   session_status: string;
   startup_completed_at: string | null;
+  resume_type: string | null;
+  resume_token: string | null;
   binding_session: string | null;
   binding_window: string | null;
   binding_pane: string | null;
   binding_updated_at: string | null;
   occupant_generation: string | null;
   latest_session_id: string;
+  startup_event_seq: number | null;
 }
 
 export class SessionTransport {
@@ -2699,10 +2702,12 @@ export class SessionTransport {
     return this.db.prepare(`
       SELECT n.id as node_id, r.id as rig_id, s.id as session_id, s.session_name, n.runtime, n.cwd,
              s.startup_status, s.status as session_status, s.startup_completed_at,
+             s.resume_type, s.resume_token,
              b.tmux_session as binding_session, b.tmux_window as binding_window, b.tmux_pane as binding_pane,
              b.updated_at as binding_updated_at,
              (SELECT generation_uuid FROM occupant_tenures WHERE node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) as occupant_generation,
-             (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) as latest_session_id
+             (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) as latest_session_id,
+             (SELECT MAX(seq) FROM events e WHERE e.node_id = n.id AND e.type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed')) as startup_event_seq
       FROM sessions s
       JOIN nodes n ON n.id = s.node_id
       JOIN rigs r ON r.id = n.rig_id
@@ -2742,6 +2747,14 @@ export class SessionTransport {
     const checker = this.runtimeAdapters[snapshot.runtime];
     if (!checker?.checkReady) return false;
 
+    const hasIdentityWork = hasClaudeResumeIdentityWork(
+      this.sessionRegistry,
+      snapshot.session_id,
+      snapshot.runtime,
+      snapshot.resume_token,
+      snapshot.resume_type,
+    );
+
     const probeBinding: NodeBinding = {
       id: `session-transport:${snapshot.session_id}`,
       nodeId: snapshot.node_id,
@@ -2774,9 +2787,17 @@ export class SessionTransport {
     this.db.transaction(() => {
       const current = this.getReconciliationSnapshot(sessionName);
       if (JSON.stringify(current) !== JSON.stringify(snapshot)) return;
+      if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return;
 
       if (readiness.ready) {
-        if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return;
+        if (hasIdentityWork) {
+          this.db.prepare(`
+            UPDATE sessions
+            SET startup_status = 'attention_required'
+            WHERE id = ? AND startup_status = 'failed'
+          `).run(snapshot.session_id);
+          return;
+        }
 
         const result = this.db.prepare(`
           UPDATE sessions

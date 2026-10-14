@@ -25,6 +25,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
 describe("agent pane activity classifier", () => {
   it("classifies active Working pane as agent_active", () => {
@@ -2749,19 +2751,32 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     return { rig, node, session };
   }
 
+  function seedStartupFailureEvent(rigId: string, nodeId: string, sessionId: string, overrides?: Record<string, unknown>) {
+    return db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+      rigId,
+      nodeId,
+      "node.startup_failed",
+      JSON.stringify({
+        type: "node.startup_failed",
+        sessionId,
+        stage: "readiness_check",
+        hasPendingWork: false,
+        error: "Readiness timeout after 30s — harness did not become interactive: transient auth delay",
+        ...overrides,
+      }),
+    );
+  }
+
   it("reconciles failed startup status to ready on successful send when adapter reports ready", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
 
-    // Record an initial startup_failed event in the events log with a recoverable timeout error reason
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s — harness did not become interactive: transient auth delay" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, {
+      stage: "readiness_check",
+      hasPendingWork: false,
+      error: "Readiness timeout after 30s — harness did not become interactive: transient auth delay",
+    });
 
-    // Initial inventory should reflect failed startup and latest error
     const initialInventory = getNodeInventory(db, rig.id);
     expect(initialInventory[0]?.startupStatus).toBe("failed");
     expect(initialInventory[0]?.latestError).toBe("Readiness timeout after 30s — harness did not become interactive: transient auth delay");
@@ -2785,11 +2800,8 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
 
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
-
-    // Adapter checkReady must have been called
     expect(checkReadyMock).toHaveBeenCalledTimes(1);
 
-    // Startup status in sessions table must now be ready with completion timestamp
     const sessionRow = db.prepare("SELECT startup_status, startup_completed_at FROM sessions WHERE id = ?").get(session.id) as {
       startup_status: string;
       startup_completed_at: string | null;
@@ -2797,12 +2809,10 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     expect(sessionRow.startup_status).toBe("ready");
     expect(sessionRow.startup_completed_at).not.toBeNull();
 
-    // Inventory should now show ready and cleared error
     const updatedInventory = getNodeInventory(db, rig.id);
     expect(updatedInventory[0]?.startupStatus).toBe("ready");
     expect(updatedInventory[0]?.latestError).toBeNull();
 
-    // Event bus should have received node.startup_ready carrying previousStatus: "failed"
     expect(emittedEvents).toEqual([
       expect.objectContaining({
         type: "node.startup_ready",
@@ -2816,6 +2826,12 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("reconciles attention_required startup status to ready without routing through attention-cleared path", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "attention_required");
+
+    seedStartupFailureEvent(rig.id, node.id, session.id, {
+      stage: "readiness_check",
+      hasPendingWork: false,
+      error: "Startup requires attention",
+    });
 
     const emittedReady: unknown[] = [];
     const emittedAttentionCleared: unknown[] = [];
@@ -2841,7 +2857,6 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("ready");
 
-    // Must NOT emit seat.attention_cleared on interaction-based reconciliation
     expect(emittedAttentionCleared).toHaveLength(0);
     expect(emittedReady).toEqual([
       expect.objectContaining({
@@ -2857,12 +2872,11 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const { rig, node, session } = seedRig("claude-code");
     sessionRegistry.updateStartupStatus(session.id, "failed");
 
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, {
+      stage: "readiness_check",
+      hasPendingWork: false,
+      error: "Readiness timeout after 30s",
+    });
 
     const emittedReady: unknown[] = [];
     eventBus.subscribe((evt) => {
@@ -2901,13 +2915,11 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
 
-    // Record an unrecoverable failure (missing files / post-launch actions failed)
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Post-launch file delivery failed: /workspace/file.txt: write error" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, {
+      stage: "post_launch_files",
+      hasPendingWork: true,
+      error: "Post-launch file delivery failed: /workspace/file.txt: write error",
+    });
 
     const emittedReady: unknown[] = [];
     eventBus.subscribe((evt) => {
@@ -2929,29 +2941,21 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
 
-    // Unrecoverable failures must not probe and must stay failed
     expect(checkReadyMock).not.toHaveBeenCalled();
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("failed");
     expect(emittedReady).toHaveLength(0);
   });
 
-  it("does not reconcile if startup work is still pending (files or actions remaining)", async () => {
+  it("does not reconcile if startup work is still pending according to attempt record", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
 
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
-
-    // Node has pending startup work in node_startup_context
-    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', ?, '[]', 'codex')").run(
-      node.id,
-      JSON.stringify([{ path: "instructions.md", deliveryHint: "send_text" }]),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, {
+      stage: "readiness_check",
+      hasPendingWork: true,
+      error: "Readiness timeout after 30s",
+    });
 
     const emittedReady: unknown[] = [];
     eventBus.subscribe((evt) => {
@@ -2973,24 +2977,452 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
 
+    expect(checkReadyMock).not.toHaveBeenCalled();
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("failed");
     expect(emittedReady).toHaveLength(0);
   });
 
+  it("recovers after delivered actions through send or capture without clearing the saved plan", async () => {
+    const { rig, node, session } = seedRig("codex");
+
+    // Drive real StartupOrchestrator: step 6 passes, actions delivered, step 10 post-delivery gate fails
+    let stepCount = 0;
+    const adapter: RuntimeAdapter = {
+      runtime: "codex",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 1, failed: [] })),
+      checkReady: vi.fn(async () => {
+        stepCount++;
+        if (stepCount === 1) return { ready: true };
+        return { ready: false, code: "update_gate", reason: "Native provider prerequisite failed after context delivery." };
+      }),
+      launchHarness: vi.fn(async () => ({ ok: true })),
+    };
+
+    const orchestrator = new StartupOrchestrator({
+      db,
+      sessionRegistry,
+      eventBus,
+      tmuxAdapter: mockTmux(),
+      sleep: async () => {},
+    });
+
+    const startResult = await orchestrator.startNode({
+      rigId: rig.id,
+      nodeId: node.id,
+      sessionId: session.id,
+      binding: {
+        id: "b1",
+        nodeId: node.id,
+        tmuxSession: "worker-1@test-rig",
+        tmuxWindow: null,
+        tmuxPane: null,
+        cmuxWorkspace: null,
+        cmuxSurface: null,
+        updatedAt: "",
+        cwd: ".",
+      },
+      adapter,
+      plan: {
+        runtime: "codex",
+        cwd: ".",
+        entries: [],
+        startup: { files: [], actions: [] },
+        conflicts: [],
+        noOps: [],
+        diagnostics: [],
+      },
+      resolvedStartupFiles: [
+        {
+          path: "role.md",
+          absolutePath: "/tmp/role.md",
+          ownerRoot: "/tmp",
+          deliveryHint: "auto",
+          required: true,
+          appliesOn: ["fresh_start"],
+        },
+      ],
+      startupActions: [{ type: "slash_command", value: "/init", phase: "after_files", appliesOn: ["fresh_start"], idempotent: true }],
+      isRestore: false,
+    });
+
+    expect(startResult.ok).toBe(false);
+    expect(startResult.startupStatus).toBe("attention_required");
+
+    // StartupOrchestrator recorded event with stage: "post_delivery_readiness" and hasPendingWork: false
+    const failedEventRow = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1").get(node.id) as { payload: string };
+    const failedEvent = JSON.parse(failedEventRow.payload);
+    expect(failedEvent.stage).toBe("post_delivery_readiness");
+    expect(failedEvent.hasPendingWork).toBe(false);
+
+    const planBefore = db.prepare("SELECT resolved_files_json, startup_actions_json FROM node_startup_context WHERE node_id = ?").get(node.id) as { resolved_files_json: string; startup_actions_json: string };
+    expect(planBefore.resolved_files_json).toContain("role.md");
+
+    // Gate clears: adapter reports ready on interaction
+    const transport = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      eventBus,
+      runtimeAdapters: {
+        codex: { checkReady: vi.fn().mockResolvedValue({ ready: true }) },
+      },
+    });
+
+    const result = await transport.send("worker-1@test-rig", "echo recovered");
+    expect(result.ok).toBe(true);
+
+    const sessionRow = db.prepare("SELECT startup_status, startup_completed_at FROM sessions WHERE id = ?").get(session.id) as {
+      startup_status: string;
+      startup_completed_at: string | null;
+    };
+    expect(sessionRow.startup_status).toBe("ready");
+    expect(sessionRow.startup_completed_at).not.toBeNull();
+
+    // Saved plan was not cleared, consumed, or modified
+    const planAfter = db.prepare("SELECT resolved_files_json, startup_actions_json FROM node_startup_context WHERE node_id = ?").get(node.id) as { resolved_files_json: string; startup_actions_json: string };
+    expect(planAfter).toEqual(planBefore);
+  });
+
+  describe("attempt fence across probe and write", () => {
+    it("does not overwrite a newer startup attempt when probe returns ready", async () => {
+      const { rig, node, session } = seedRig("codex");
+      sessionRegistry.updateStartupStatus(session.id, "failed");
+      seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
+
+      let resolveProbe!: (value: { ready: boolean }) => void;
+      const probePromise = new Promise<{ ready: boolean }>((res) => {
+        resolveProbe = res;
+      });
+
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: {
+          codex: { checkReady: vi.fn().mockImplementation(() => probePromise) },
+        },
+      });
+
+      const sendPromise = transport.send("worker-1@test-rig", "echo ping");
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Newer startup attempt starts while probe is out
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'node.startup_pending', ?)").run(
+        rig.id,
+        node.id,
+        JSON.stringify({ type: "node.startup_pending", sessionId: session.id }),
+      );
+
+      resolveProbe({ ready: true });
+      await sendPromise;
+
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).toBe("failed");
+
+      const readyEvents = db.prepare("SELECT * FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id);
+      expect(readyEvents).toHaveLength(0);
+    });
+
+    it("does not overwrite a newer startup attempt when probe returns attention code", async () => {
+      const { rig, node, session } = seedRig("codex");
+      sessionRegistry.updateStartupStatus(session.id, "failed");
+      seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
+
+      let resolveProbe!: (value: { ready: boolean; code?: string }) => void;
+      const probePromise = new Promise<{ ready: boolean; code?: string }>((res) => {
+        resolveProbe = res;
+      });
+
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: {
+          codex: { checkReady: vi.fn().mockImplementation(() => probePromise) },
+        },
+      });
+
+      const sendPromise = transport.send("worker-1@test-rig", "echo ping");
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Newer startup attempt starts
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'node.startup_pending', ?)").run(
+        rig.id,
+        node.id,
+        JSON.stringify({ type: "node.startup_pending", sessionId: session.id }),
+      );
+
+      resolveProbe({ ready: false, code: "update_gate" });
+      await sendPromise;
+
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).toBe("failed");
+    });
+  });
+
+  describe("remaining Claude resume identity work at both readiness points", () => {
+    it("counts remaining Claude resume identity check as required work at initial readiness check (point 1)", async () => {
+      const { rig, node, session } = seedRig("claude-code");
+      db.prepare("UPDATE sessions SET resume_token = ?, resume_type = ? WHERE id = ?").run(
+        "token-abc",
+        "codex_thread_id",
+        session.id,
+      );
+
+      const adapter: RuntimeAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: false, reason: "initial readiness timeout" })),
+        launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "token-abc" })),
+      };
+
+      const orchestrator = new StartupOrchestrator({
+        db,
+        sessionRegistry,
+        eventBus,
+        tmuxAdapter: mockTmux(),
+        sleep: async () => {},
+      });
+
+      const startResult = await orchestrator.startNode({
+        rigId: rig.id,
+        nodeId: node.id,
+        sessionId: session.id,
+        binding: {
+          id: "b1",
+          nodeId: node.id,
+          tmuxSession: "worker-1@test-rig",
+          tmuxWindow: null,
+          tmuxPane: null,
+          cmuxWorkspace: null,
+          cmuxSurface: null,
+          updatedAt: "",
+          cwd: ".",
+        },
+        adapter,
+        plan: {
+          runtime: "claude-code",
+          cwd: ".",
+          entries: [],
+          startup: { files: [], actions: [] },
+          conflicts: [],
+          noOps: [],
+          diagnostics: [],
+        },
+        resolvedStartupFiles: [],
+        startupActions: [],
+        isRestore: false,
+        resumeToken: "token-abc",
+        resumeType: "codex_thread_id",
+        readinessTimeoutMs: 1,
+      });
+
+      expect(startResult.ok).toBe(false);
+
+      const eventRow = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1").get(node.id) as { payload: string };
+      const event = JSON.parse(eventRow.payload);
+      expect(event.stage).toBe("readiness_check");
+      expect(event.hasPendingWork).toBe(true);
+
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: {
+          "claude-code": { checkReady: vi.fn().mockResolvedValue({ ready: true }) },
+        },
+      });
+
+      await transport.send("worker-1@test-rig", "echo ping");
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).not.toBe("ready");
+    });
+
+    it("counts remaining Claude resume identity check as required work at post-delivery gate (point 2)", async () => {
+      const { rig, node, session } = seedRig("claude-code");
+      db.prepare("UPDATE sessions SET resume_token = ?, resume_type = ? WHERE id = ?").run(
+        "token-abc",
+        "codex_thread_id",
+        session.id,
+      );
+
+      let stepCount = 0;
+      const adapter: RuntimeAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 1, failed: [] })),
+        checkReady: vi.fn(async () => {
+          stepCount++;
+          if (stepCount === 1) return { ready: true };
+          return { ready: false, code: "update_gate", reason: "gate after files" };
+        }),
+        launchHarness: vi.fn(async () => ({ ok: true, resumeToken: "token-abc" })),
+      };
+
+      const orchestrator = new StartupOrchestrator({
+        db,
+        sessionRegistry,
+        eventBus,
+        tmuxAdapter: mockTmux(),
+        sleep: async () => {},
+      });
+
+      const startResult = await orchestrator.startNode({
+        rigId: rig.id,
+        nodeId: node.id,
+        sessionId: session.id,
+        binding: {
+          id: "b1",
+          nodeId: node.id,
+          tmuxSession: "worker-1@test-rig",
+          tmuxWindow: null,
+          tmuxPane: null,
+          cmuxWorkspace: null,
+          cmuxSurface: null,
+          updatedAt: "",
+          cwd: ".",
+        },
+        adapter,
+        plan: {
+          runtime: "claude-code",
+          cwd: ".",
+          entries: [],
+          startup: { files: [], actions: [] },
+          conflicts: [],
+          noOps: [],
+          diagnostics: [],
+        },
+        resolvedStartupFiles: [],
+        startupActions: [{ type: "slash_command", value: "/init", phase: "after_files", appliesOn: ["fresh_start"], idempotent: true }],
+        isRestore: false,
+        resumeToken: "token-abc",
+        resumeType: "codex_thread_id",
+      });
+
+      expect(startResult.ok).toBe(false);
+
+      const eventRow = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1").get(node.id) as { payload: string };
+      const event = JSON.parse(eventRow.payload);
+      expect(event.stage).toBe("post_delivery_readiness");
+      expect(event.hasPendingWork).toBe(true);
+
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: {
+          "claude-code": { checkReady: vi.fn().mockResolvedValue({ ready: true }) },
+        },
+      });
+
+      await transport.send("worker-1@test-rig", "echo ping");
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).not.toBe("ready");
+    });
+  });
+
+  describe("missing or ambiguous provenance is not proof of completion", () => {
+    it("does not recover when event has error prefix but missing stage", async () => {
+      const { rig, node, session } = seedRig("codex");
+      sessionRegistry.updateStartupStatus(session.id, "failed");
+
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+        rig.id,
+        node.id,
+        "node.startup_failed",
+        JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
+      );
+
+      const checkReadyMock = vi.fn().mockResolvedValue({ ready: true });
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: { codex: { checkReady: checkReadyMock } },
+      });
+
+      await transport.send("worker-1@test-rig", "echo ping");
+      expect(checkReadyMock).not.toHaveBeenCalled();
+
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).toBe("failed");
+    });
+
+    it("does not recover when no startup event exists in the events table", async () => {
+      const { rig, node, session } = seedRig("codex");
+      sessionRegistry.updateStartupStatus(session.id, "failed");
+
+      const checkReadyMock = vi.fn().mockResolvedValue({ ready: true });
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: { codex: { checkReady: checkReadyMock } },
+      });
+
+      await transport.send("worker-1@test-rig", "echo ping");
+      expect(checkReadyMock).not.toHaveBeenCalled();
+
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).toBe("failed");
+    });
+
+    it("does not recover when latest event belongs to an older completed attempt or different session", async () => {
+      const { rig, node, session } = seedRig("codex");
+      sessionRegistry.updateStartupStatus(session.id, "failed");
+
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
+        rig.id,
+        node.id,
+        "node.startup_ready",
+        JSON.stringify({ type: "node.startup_ready", sessionId: "old-session-999" }),
+      );
+
+      const checkReadyMock = vi.fn().mockResolvedValue({ ready: true });
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        eventBus,
+        runtimeAdapters: { codex: { checkReady: checkReadyMock } },
+      });
+
+      await transport.send("worker-1@test-rig", "echo ping");
+      expect(checkReadyMock).not.toHaveBeenCalled();
+
+      const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
+      expect(sessionRow.startup_status).toBe("failed");
+    });
+  });
+
   it("seat rebound to another pane that sits at a trust gate while probe runs is not committed", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const checkReadyMock = vi.fn().mockImplementation(async () => {
-      // Rebind seat to another pane while probe is running
       sessionRegistry.updateBinding(node.id, { tmuxPane: "%99" });
       return { ready: false, code: "update_gate" };
     });
@@ -3009,7 +3441,6 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
 
-    // Stale result must not be committed; status stays failed, not attention_required
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("failed");
   });
@@ -3017,16 +3448,9 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("newer ready written while probe runs stays ready and is not changed to attention", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const checkReadyMock = vi.fn().mockImplementation(async () => {
-      // Newer ready written while probe is running
       sessionRegistry.updateStartupStatus(session.id, "ready");
       return { ready: false, code: "update_gate" };
     });
@@ -3045,7 +3469,6 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
 
-    // Must stay ready, not overwritten by attention_required
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("ready");
   });
@@ -3053,16 +3476,9 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("session exits while probe runs is not rewritten to ready", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const checkReadyMock = vi.fn().mockImplementation(async () => {
-      // Session exits while probe runs
       sessionRegistry.updateStatus(session.id, "exited");
       return { ready: true };
     });
@@ -3081,7 +3497,6 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
 
-    // Must not be rewritten to ready
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
     expect(sessionRow.startup_status).toBe("failed");
   });
@@ -3089,18 +3504,11 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("new occupant generation starts while probe runs is not committed", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const currentMax = (db.prepare("SELECT MAX(generation_ordinal) as m FROM occupant_tenures WHERE node_id = ?").get(node.id) as { m: number | null }).m ?? 0;
 
     const checkReadyMock = vi.fn().mockImplementation(async () => {
-      // New occupant generation starts while probe runs
       db.prepare("INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind) VALUES (?, ?, ?, ?, ?)").run(
         "g-next",
         node.id,
@@ -3132,16 +3540,9 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("new session starts while probe runs is not committed to old session", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const checkReadyMock = vi.fn().mockImplementation(async () => {
-      // New session starts for the node while probe runs
       sessionRegistry.registerSession(node.id, "worker-1-v2@test-rig");
       return { ready: true };
     });
@@ -3167,13 +3568,7 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("capture and send return normally when the readiness check itself fails or throws", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const checkReadyMock = vi.fn().mockRejectedValue(new Error("tmux probe failure"));
     const transport = new SessionTransport({
@@ -3189,11 +3584,9 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
       },
     });
 
-    // Send should complete normally without propagating probe error
     const sendResult = await transport.send("worker-1@test-rig", "echo ping");
     expect(sendResult.ok).toBe(true);
 
-    // Capture should also return normally without error
     const captureResult = await transport.capture("worker-1@test-rig");
     expect(captureResult.ok).toBe(true);
     expect(captureResult.content).toBe("output content\n");
@@ -3202,13 +3595,7 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("reuses in-flight readiness check across concurrent interactions", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     let resolveProbe!: (value: { ready: boolean }) => void;
     const probePromise = new Promise<{ ready: boolean }>((res) => {
@@ -3229,16 +3616,13 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
       },
     });
 
-    // Trigger send and capture concurrently
     const [sendPromise, capturePromise] = [
       transport.send("worker-1@test-rig", "echo ping"),
       transport.capture("worker-1@test-rig"),
     ];
 
-    // Wait a brief moment to ensure both are in-flight
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // checkReadyMock should only be called once, because the second call reuses the in-flight check
     expect(checkReadyMock).toHaveBeenCalledTimes(1);
 
     resolveProbe({ ready: true });
@@ -3252,13 +3636,11 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
 
-    // Staged fresh startup context failed before delivery
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, freshContextPending: true }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, {
+      freshContextPending: true,
+      stage: "readiness_check",
+      hasPendingWork: false,
+    });
 
     const emittedReady: unknown[] = [];
     eventBus.subscribe((evt) => {
@@ -3280,7 +3662,6 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
     const result = await transport.send("worker-1@test-rig", "echo ping");
     expect(result.ok).toBe(true);
 
-    // Must not call checkReady or update status because fresh startup context is pending
     expect(checkReadyMock).not.toHaveBeenCalled();
 
     const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
@@ -3291,13 +3672,7 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
   it("updates to attention_required if adapter checkReady returns attention code", async () => {
     const { rig, node, session } = seedRig("codex");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-
-    db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)").run(
-      rig.id,
-      node.id,
-      "node.startup_failed",
-      JSON.stringify({ type: "node.startup_failed", sessionId: session.id, error: "Readiness timeout after 30s" }),
-    );
+    seedStartupFailureEvent(rig.id, node.id, session.id, { stage: "readiness_check", hasPendingWork: false });
 
     const checkReadyMock = vi.fn().mockResolvedValue({ ready: false, code: "update_gate" });
     const transport = new SessionTransport({

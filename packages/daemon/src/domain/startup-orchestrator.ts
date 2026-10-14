@@ -40,21 +40,54 @@ export function hasPendingFreshStartup(db: Database.Database, nodeId: string, se
   return event.type === "node.startup_failed" && event.sessionId === sessionId && event.freshContextPending === true;
 }
 
+export function hasClaudeResumeIdentityWork(
+  sessionRegistry: SessionRegistry,
+  sessionId: string,
+  runtime: string | undefined,
+  resumeToken: string | undefined | null,
+  resumeType: string | undefined | null,
+  skipHarnessLaunch?: boolean,
+  continuityOutcome?: string,
+): boolean {
+  if (skipHarnessLaunch || runtime !== "claude-code" || !resumeToken) {
+    return false;
+  }
+  if (continuityOutcome !== undefined && continuityOutcome !== "resumed") {
+    return false;
+  }
+  if (resumeType !== undefined && resumeType !== null && !isClaudeResumeType(resumeType)) {
+    return true;
+  }
+  const matches = sessionRegistry.resumeTokenMatches(sessionId, "claude_id", resumeToken.trim())
+    || sessionRegistry.claudeResumeRotatedFrom(sessionId, resumeToken);
+  return !matches;
+}
+
 export function hasPendingStartupWork(db: Database.Database, nodeId: string, sessionId: string): boolean {
+  const row = db.prepare(
+    "SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1",
+  ).get(nodeId) as { payload: string } | undefined;
+  if (!row) return true;
   try {
-    const ctx = db.prepare("SELECT resolved_files_json, startup_actions_json FROM node_startup_context WHERE node_id = ?").get(nodeId) as { resolved_files_json?: string; startup_actions_json?: string } | undefined;
-    if (ctx) {
-      if (ctx.resolved_files_json) {
-        const files = JSON.parse(ctx.resolved_files_json);
-        if (Array.isArray(files) && files.length > 0) return true;
-      }
-      if (ctx.startup_actions_json) {
-        const actions = JSON.parse(ctx.startup_actions_json);
-        if (Array.isArray(actions) && actions.length > 0) return true;
-      }
-    }
+    const event = JSON.parse(row.payload);
+    if (event.type !== "node.startup_failed") return true;
+    if (event.sessionId !== sessionId) return true;
+    if (event.freshContextPending === true) return true;
+    if (event.hasPendingWork !== false) return true;
+    return false;
   } catch {
-    // ignore if table not present in test db
+    return true;
+  }
+}
+
+export function isRecoverableStartupFailure(db: Database.Database, nodeId: string, sessionId: string): boolean {
+  if (hasPendingFreshStartup(db, nodeId, sessionId)) return false;
+  if (hasPendingStartupWork(db, nodeId, sessionId)) return false;
+
+  const sess = db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(sessionId) as { resume_type?: string | null; resume_token?: string | null } | undefined;
+  if (sess?.resume_token && sess.resume_type !== null && sess.resume_type !== undefined && !isClaudeResumeType(sess.resume_type)) {
+    const node = db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime?: string } | undefined;
+    if (node?.runtime === "claude-code") return false;
   }
 
   const row = db.prepare(
@@ -64,33 +97,11 @@ export function hasPendingStartupWork(db: Database.Database, nodeId: string, ses
   try {
     const event = JSON.parse(row.payload);
     if (event.type !== "node.startup_failed") return false;
-    if (event.sessionId && event.sessionId !== sessionId) return false;
-    if (event.freshContextPending === true) return true;
-    if (event.hasPendingWork === true) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-export function isRecoverableStartupFailure(db: Database.Database, nodeId: string, sessionId: string): boolean {
-  if (hasPendingFreshStartup(db, nodeId, sessionId)) return false;
-  if (hasPendingStartupWork(db, nodeId, sessionId)) return false;
-  const row = db.prepare(
-    "SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1",
-  ).get(nodeId) as { payload: string } | undefined;
-  if (!row) return true;
-  try {
-    const event = JSON.parse(row.payload);
-    if (event.type !== "node.startup_failed") return false;
-    if (event.sessionId && event.sessionId !== sessionId) return false;
+    if (!event.sessionId || event.sessionId !== sessionId) return false;
     if (event.freshContextPending === true) return false;
-    if (event.hasPendingWork === true) return false;
-    if (event.stage) {
-      return (event.stage === "post_delivery_readiness" || event.stage === "readiness_check") && !event.hasPendingWork;
-    }
-    const errorMsg = typeof event.error === "string" ? event.error : "";
-    return errorMsg.startsWith("Readiness timeout") || errorMsg.startsWith("Startup requires attention");
+    if (event.hasPendingWork !== false) return false;
+    if (event.stage !== "post_delivery_readiness" && event.stage !== "readiness_check") return false;
+    return true;
   } catch {
     return false;
   }
@@ -469,9 +480,18 @@ export class StartupOrchestrator {
     }
 
     // 6. Wait for harness readiness within the configured launch window.
+    const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
+      this.sessionRegistry,
+      input.sessionId,
+      input.adapter.runtime,
+      input.resumeToken,
+      input.resumeType,
+      input.skipHarnessLaunch,
+      continuityOutcome,
+    );
     const hasPendingReadinessWork = postLaunchFiles.length > 0 || (input.startupActions ?? []).some(
       (a) => a.phase === "after_files" || a.phase === "after_ready" || isSessionIdentityAction(a) || a.type === "send_text",
-    );
+    ) || hasRemainingIdentityWork;
     try {
       const readinessTimeoutMs = resolveReadinessTimeoutMs(input.readinessTimeoutMs, this.readinessSettings);
       const readiness = await this.waitForReady(input.adapter, input.binding, readinessTimeoutMs);
@@ -604,7 +624,16 @@ export class StartupOrchestrator {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
-          return this.fail(deliveryInput, "attention_required", [readiness.reason ?? "The native provider prerequisite failed after context delivery."], undefined, false, undefined, false, "post_delivery_readiness", false);
+          const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
+            this.sessionRegistry,
+            input.sessionId,
+            input.adapter.runtime,
+            input.resumeToken,
+            input.resumeType,
+            input.skipHarnessLaunch,
+            continuityOutcome,
+          );
+          return this.fail(deliveryInput, "attention_required", [readiness.reason ?? "The native provider prerequisite failed after context delivery."], undefined, false, undefined, false, "post_delivery_readiness", hasRemainingIdentityWork);
         }
       } catch (error) {
         // An unavailable observation is not a positive provider prerequisite.
@@ -618,12 +647,15 @@ export class StartupOrchestrator {
     // Check after readiness/actions so a concurrent protected update is included.
     // Omitted type is inferred; claude_name may normalize to a proved claude_id.
     // An explicit type for another runtime is not that supported normalization.
-    if (!input.skipHarnessLaunch && input.adapter.runtime === "claude-code"
-      && continuityOutcome === "resumed" && input.resumeToken
-      && ((input.resumeType !== undefined && !isClaudeResumeType(input.resumeType))
-        || !(this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim())
-          // Claude continued this resume under a new id; its current-generation hook said so.
-          || this.sessionRegistry.claudeResumeRotatedFrom(input.sessionId, input.resumeToken)))) {
+    if (hasClaudeResumeIdentityWork(
+      this.sessionRegistry,
+      input.sessionId,
+      input.adapter.runtime,
+      input.resumeToken,
+      input.resumeType,
+      input.skipHarnessLaunch,
+      continuityOutcome,
+    )) {
       return this.fail(deliveryInput, "attention_required", [
         "Native resume was observed but its requested type or current session metadata conflicts or could not be retained; session preserved.",
       ], undefined, false, undefined, false, "identity_verification", false);
