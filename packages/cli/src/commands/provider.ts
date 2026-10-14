@@ -12,6 +12,13 @@ import type { StatusDeps } from "./status.js";
 // in the daemon routes/service (seams B/C/D), where seam D resolves the CLI-local auth
 // composition/package boundary. Every verb is --json-stable for agents.
 
+// The daemon answers the view across hosts within its own 15 s deadline, whatever the registry's size (hosts it hasn't
+// heard from by then are listed as such). 15 s + 5 s for its own read model and the transfer = 20 s.
+export const USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS = 20_000;
+// The refresh answers after its slowest leg (Codex 50 s; all legs run at once), with the same view by its 15 s
+// deadline: 50 s + 15 s + a 10 s margin = 75 s.
+export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
+
 export function providerCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("provider").description(
     "Provider accounts, usage signals, and interruption-safe account switching",
@@ -253,13 +260,6 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       renderSeatAccounts((s["seats"] as Array<Record<string, unknown>>) ?? [], ` on ${s["hostId"]}`);
     }
   }
-
-  // The daemon answers the view across hosts within its own 15 s deadline, whatever the registry's size (hosts it hasn't
-  // heard from by then are listed as such). 15 s + 5 s for its own read model and the transfer = 20 s.
-  const USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS = 20_000;
-  // The refresh answers after its slowest leg (Codex 50 s; all legs run at once), with the same view by its 15 s
-  // deadline: 50 s + 15 s + a 10 s margin = 75 s.
-  const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
   // A host where Claude doesn't apply (no claude, no login, not a subscription login, or no Claude refresh there) is a
   // note under a bare --refresh, as on one host; naming --provider claude makes it count.

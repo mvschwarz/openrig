@@ -104,6 +104,23 @@ describe("System → Usage across hosts", () => {
     expect(text).not.toMatch(/\d+% left \+|total|sum of/i);
   });
 
+  it("one allowance agreeing on two hosts is one entry naming both, never a sum", async () => {
+    const a = await host("a");
+    const b = await host("b");
+    const hub = await host("hub", { registry: [a.entry(), b.entry()] });
+    for (const h of [a, b]) await refreshDirect(h);
+    const tui = tuiOn(hub);
+    await tui.openView();
+    const text = tui.text();
+    // An entry's line carries its linkage in brackets; each host's row under it doesn't.
+    const entries = text.split("\n").filter((l) => / {2}codex {2}account acct-1 · bucket codex {2}\[/.test(l));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toContain("codex  account acct-1 · bucket codex  [the same allowance on 2 hosts: a, b]");
+    expect(text).toContain("    on a (read ");
+    expect(text).toContain("    on b (read ");
+    expect(text).not.toMatch(/\d+% left \+|total|sum of/i);
+  });
+
   it("says what it is: the header and hint as worded, never 'never refreshes', and no fleet-wide claim", async () => {
     const hub = await host("hub", { registry: [] });
     const tui = tuiOn(hub);

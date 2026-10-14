@@ -43,6 +43,8 @@ export interface ClaudePlan {
   orgId?: string | null;
   email?: string | null;
   fail?: { reason: "binary_not_found" | "not_logged_in" | "auth_status_failed"; detail: string };
+  /** Answer after this long (real time). */
+  delayMs?: number;
 }
 
 export type HostShape =
@@ -140,6 +142,7 @@ export class UsageHost {
   private async readClaude(): Promise<UsageReadOutcome<ClaudeAuthAnswer>> {
     this.claudeReads += 1;
     const plan = this.claude;
+    if (plan.delayMs) await new Promise((r) => setTimeout(r, plan.delayMs));
     if (plan.fail) return { ok: false, at: this.now(), reason: plan.fail.reason, detail: plan.fail.detail };
     return {
       ok: true,

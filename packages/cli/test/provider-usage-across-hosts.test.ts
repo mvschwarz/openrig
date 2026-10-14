@@ -6,12 +6,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { providerCommand } from "../src/commands/provider.js";
+import { providerCommand, USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS, USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS } from "../src/commands/provider.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 import { closedPortUrl, SEAT_SHAPES, UsageHost, usageAcrossHostsFacts, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
-import { BEARER_REDACTED } from "../../daemon/src/domain/provider/usage-across-hosts.js";
+import { BEARER_REDACTED, REMOTE_USAGE_REFRESH_DEADLINE_MS, USAGE_HOSTS_VIEW_DEADLINE_MS } from "../../daemon/src/domain/provider/usage-across-hosts.js";
+import { CODEX_USAGE_READ_DEADLINE_MS, CODEX_USAGE_READ_GRACE_MS } from "../../daemon/src/domain/provider/codex-usage-reader.js";
+import { CLAUDE_AUTH_STATUS_TIMEOUT_MS, GRACE_MS as CLAUDE_AUTH_STATUS_GRACE_MS } from "../../daemon/src/domain/provider/claude-auth-status-reader.js";
+import { USAGE_HOSTS_VIEW_WAIT_MS } from "../../tui/src/daemon-client.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
 
@@ -110,6 +113,31 @@ describe("rig provider status --all-hosts", () => {
     expect(JSON.parse(out)).toEqual(served);
   });
 
+  it("one allowance agreeing on two hosts is one entry naming both, never a sum", async () => {
+    const a = await host("a");
+    const b = await host("b");
+    const hub = await host("hub", { registry: [a.entry(), b.entry()] });
+    for (const h of [a, b]) await refreshDirect(h);
+    const { out, exitCode } = await run(["status", "--all-hosts"], hub);
+    expect(exitCode).toBeUndefined();
+    // An entry's line carries its linkage in brackets; each host's row under it doesn't.
+    const entries = out.split("\n").filter((l) => / {2}codex {2}account acct-1 · bucket codex {2}\[/.test(l));
+    expect(entries).toEqual(["  codex  account acct-1 · bucket codex  [the same allowance on 2 hosts: a, b]"]);
+    expect(out).toContain("    on a (read ");
+    expect(out).toContain("    on b (read ");
+    expect(out).not.toMatch(/\d+% left \+|total|sum of/i);
+  });
+
+  it("the view starts no native read, here or on any host, and sends only GETs: three runs", async () => {
+    const a = await host("a");
+    const off = await host("off", { usageWindows: false });
+    const hub = await host("hub", { registry: [a.entry(), off.entry()] });
+    for (let i = 0; i < 3; i++) expect((await run(["status", "--all-hosts"], hub)).exitCode).toBeUndefined();
+    expect([hub, a, off].map((h) => [h.id, h.codexReads, h.claudeReads])).toEqual([["hub", 0, 0], ["a", 0, 0], ["off", 0, 0]]);
+    expect([hub, a, off].flatMap((h) => h.requests).filter((r) => r.method !== "GET")).toEqual([]);
+    expect(hub.seen("/api/provider/usage/hosts")).toHaveLength(3);
+  });
+
   it("--hosts narrows to those hosts (this host always included)", async () => {
     const a = await host("a");
     const b = await host("b");
@@ -144,6 +172,21 @@ describe("rig provider status --all-hosts", () => {
     expect(got.out).toContain("refresh failed at 2026-10-13T23:30:00.000Z: rpc_error (the app-server said no); last reading kept, marked old");
     expect(a.codexReads).toBe(2);
   });
+
+  it("--refresh: a host whose Codex read takes longer than the 5 s read class still answers, and its new reading prints", async () => {
+    const a = await host("a", { codex: { delayMs: 6_000, secondaryUsed: 85 } });
+    const hub = await host("hub", { registry: [a.entry()] });
+    const started = Date.now();
+    const got = await run(["status", "--all-hosts", "--refresh", "--provider", "codex"], hub);
+    expect(Date.now() - started).toBeGreaterThan(5_000);
+    expect([got.exitCode, got.err]).toEqual([undefined, ""]);
+    expect(got.out).toContain("  a  answered · usage windows served");
+    expect(got.out).toContain("    refresh from here (codex) answered at ");
+    const lines = got.out.split("\n");
+    const onA = lines.findIndex((l) => l.startsWith("    on a (read "));
+    expect(lines.slice(onA + 1, onA + 5).some((l) => l.includes("weekly (secondary)  15% left"))).toBe(true);
+    expect(a.codexReads).toBe(1);
+  }, 20_000);
 
   it("--refresh: a host where Claude doesn't apply is a note under a bare --refresh, a failure when named", async () => {
     const a = await host("a", { claude: { fail: { reason: "binary_not_found", detail: "no claude on PATH" } } });
@@ -368,5 +411,22 @@ describe("round 4 through the CLI", () => {
     expect(got.out).toContain(`    refresh from here (codex) failed at ${NOW}: no reason given; this host's earlier observations are kept`);
     expect(got.out).toContain(`refresh failed at ${NOW}: no reason given; last reading kept, marked old`);
     expect(got.out).toContain("    observed: differs from dev-b@r\n");
+  });
+});
+
+describe("the bounds chain: every wait outlasts what it waits for", () => {
+  it("a host's own read and its cleanup fit its leg; the slowest leg and the view fit the CLI's refresh wait; the view fits both views' wait", () => {
+    // Codex: after the read, stopGroup waits up to the grace at each of three steps (none, TERM, KILL) and once more for
+    // the reap (codex-network-default.ts:210-218).
+    const codexWorst = CODEX_USAGE_READ_DEADLINE_MS + 4 * CODEX_USAGE_READ_GRACE_MS;
+    // Claude: up to 200 ms for its output after exit (claude-auth-status-reader.ts:153), a first wait of at most 200 ms
+    // (:102), the grace after TERM and after KILL, and the grace for the reap (:136).
+    const claudeWorst = CLAUDE_AUTH_STATUS_TIMEOUT_MS + 200 + Math.min(CLAUDE_AUTH_STATUS_GRACE_MS, 200) + 3 * CLAUDE_AUTH_STATUS_GRACE_MS;
+    expect(codexWorst).toBeLessThan(REMOTE_USAGE_REFRESH_DEADLINE_MS.codex);
+    expect(claudeWorst).toBeLessThan(REMOTE_USAGE_REFRESH_DEADLINE_MS.claude);
+    const slowestLeg = Math.max(...Object.values(REMOTE_USAGE_REFRESH_DEADLINE_MS));
+    expect(slowestLeg + USAGE_HOSTS_VIEW_DEADLINE_MS).toBeLessThan(USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS);
+    expect(USAGE_HOSTS_VIEW_DEADLINE_MS).toBeLessThan(USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS);
+    expect(USAGE_HOSTS_VIEW_DEADLINE_MS).toBeLessThan(USAGE_HOSTS_VIEW_WAIT_MS);
   });
 });

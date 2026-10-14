@@ -115,6 +115,14 @@ describe("the grouping rule", () => {
     ]);
   });
 
+  it("the same Codex login email under different account ids is two allowances, each its own entry", () => {
+    const groups = groupUsageAcrossHosts([obs("a", codexRow("acct-1", "dev@example.com")), obs("b", codexRow("acct-2", "dev@example.com"))]);
+    expect(groups.map((g) => [g.key, g.linkage, g.observations.map((o) => o.hostId), g.notes])).toEqual([
+      ["codex:account:acct-1:codex", "single", ["a"], []],
+      ["codex:account:acct-2:codex", "single", ["b"], []],
+    ]);
+  });
+
   it("an unresolved identity, or a source never read, is its own entry and never matched", () => {
     const unresolved = codexRow(null, "dev@example.com");
     const notRead: ProviderUsageAllowance = { ...codexRow(null, null), identity: null, windows: [] };
@@ -234,6 +242,16 @@ describe("GET /api/provider/usage/hosts", () => {
     expect(groups[0]!.notes.join("\n")).toContain("the hosts report resets more than 60 s apart");
   });
 
+  it("the same Codex login email under different account ids comes through the served path as two allowances", async () => {
+    const a = await host("a", { now: () => NOW });
+    const b = await host("b", { now: () => NOW, codex: { accountId: "acct-2" } });
+    const hub = await host("hub", { registry: [a.entry(), b.entry()] });
+    for (const h of [a, b]) await refreshDirect(h);
+    const { body } = await view(hub);
+    expect(["codex:account:acct-1:codex", "codex:account:acct-2:codex"].map((k) => groupFor(body, k).map((g) => [g.linkage, g.observations.map((o) => o.hostId)])))
+      .toEqual([[["single", ["a"]]], [["single", ["b"]]]]);
+  });
+
   it("every registry host appears with its status: unreachable, older, off, ssh; the rest and this host still served", async () => {
     const a = await host("a");
     const older = await host("older", { shape: "no-provider-routes" });
@@ -349,6 +367,18 @@ describe("POST /api/provider/usage/hosts/refresh", () => {
     const fromA = group!.observations.find((o) => o.hostId === "a")!.row;
     expect(fromA.windows.find((w) => w.window === "secondary")).toMatchObject({ usedPercent: 85, level: "nearing", freshness: "fresh" });
     expect(a.codexReads).toBe(1);
+  }, 20_000);
+
+  it("a Claude refresh slower than the 5 s read class still succeeds, and its identity reaches the view", async () => {
+    const a = await host("a", { claude: { delayMs: 6_000, orgId: "org-slow" } });
+    const hub = await host("hub", { registry: [a.entry()] });
+    const started = Date.now();
+    const { status, body } = await refreshVia(hub, { provider: "claude", hosts: ["a"] });
+    expect(Date.now() - started).toBeGreaterThan(5_000);
+    expect(status).toBe(200);
+    expect(body.refresh.map((l) => [l["hostId"], l["provider"], l["outcome"]])).toEqual([["local", "claude", "ok"], ["a", "claude", "ok"]]);
+    expect(body.view.items.some((g) => g.observations.some((o) => o.hostId === "a" && (o.row.identity as { orgId?: string } | null)?.orgId === "org-slow"))).toBe(true);
+    expect(a.claudeReads).toBe(1);
   }, 20_000);
 
   it("a leg past its bound fails with its own time and reason, and the host's earlier observation stays beside it", async () => {

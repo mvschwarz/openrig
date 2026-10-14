@@ -43,7 +43,7 @@ export interface ClaudeAuthReaderOptions {
 }
 
 export const CLAUDE_AUTH_STATUS_TIMEOUT_MS = 10_000;
-const GRACE_MS = 1_000;
+export const GRACE_MS = 1_000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);

@@ -5,6 +5,10 @@ import type { ProjectSelection } from "./types.js";
 // one-file read (every route below is an EXISTING, web-consumed daemon read).
 // Daemon-direct, never via the Studio serve-shell (FR-9). Phase 1 ships the
 // wrappers; Phase 2 binds the three sections to them.
+
+/** Usage across hosts: the daemon answers by its 15 s view deadline; 15 s + 5 s for its own read and the transfer. */
+export const USAGE_HOSTS_VIEW_WAIT_MS = 20_000;
+
 export interface DaemonClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -207,7 +211,7 @@ export class DaemonClient {
       // 20 s, not the usual 5 s: the daemon answers this view within its own 15 s deadline whatever the registry's
       // size (hosts it hasn't heard from by then are listed as such), plus 5 s for its own read and the transfer. The
       // page reader is per page, so a slow read here holds up neither other sections nor the live refresh of other pages.
-      res = await this.fetchImpl(`${this.baseUrl}/api/provider/usage/hosts`, { headers: this.headers, signal: AbortSignal.timeout(20_000) });
+      res = await this.fetchImpl(`${this.baseUrl}/api/provider/usage/hosts`, { headers: this.headers, signal: AbortSignal.timeout(USAGE_HOSTS_VIEW_WAIT_MS) });
     } catch (error) {
       return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
     }
