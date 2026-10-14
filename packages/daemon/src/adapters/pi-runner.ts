@@ -396,6 +396,8 @@ export class RunnerCore {
   private lastCredentialEvidence: PiCredentialEvidence | null = null;
   /** Sticky for this process: what an observation showed Pi may have loaded (see credentialTaint). */
   private credentialTainted: string | null = null;
+  /** The previous observation's uncertain reading, if any (two in a row become sticky). */
+  private lastUncertain: string | null = null;
   private readonly chargeProvenance = new Map<string, ChargeProvenance>();
   /** OPR.0.7.0.2: a fork parent read is under way (at most one at a time). */
   private parentReadInFlight = false;
@@ -426,7 +428,7 @@ export class RunnerCore {
     if (this.opts.openRouterCharge && this.runtime === "pi" && this.io.credentialEvidence) {
       // The production runner observes before it spawns Pi (launchCredentialEvidence), so Pi loads after it.
       this.lastCredentialEvidence = this.opts.launchCredentialEvidence ?? this.io.credentialEvidence();
-      this.credentialTainted = credentialTaint(this.lastCredentialEvidence);
+      this.noteTaint(this.lastCredentialEvidence);
     }
     // OMP's start is driven by the transport `ready` frame and must run once;
     // Pi keeps main's unconditional start.
@@ -555,6 +557,19 @@ export class RunnerCore {
 
   /** OPR.0.7.0.2: report usage from the persisted entries a get_entries response returned (catch-up after a
    *  restart, or the refresh after each agent_end). Pi only, and only with --usage-facts. Never live updates. */
+  /** K4: what an observation shows Pi may hold for the rest of the process. A definite sighting is sticky at
+   *  once; an uncertain one (unreadable configuration, perhaps a torn read) only when the next observation is
+   *  uncertain too. Either way the windows around an uncertain observation are unavailable (the judge). */
+  private noteTaint(e: PiCredentialEvidence): void {
+    const taint = credentialTaint(e);
+    if (taint && "sticky" in taint) this.credentialTainted ??= taint.sticky;
+    const uncertain = taint && "uncertain" in taint ? taint.uncertain : null;
+    if (uncertain && this.lastUncertain) {
+      this.credentialTainted ??= `${uncertain} in two consecutive observations (to ${new Date(e.at).toISOString()}), and Pi keeps what it loaded until it restarts or reloads`;
+    }
+    this.lastUncertain = uncertain;
+  }
+
   private reportUsageFacts(entries: unknown[]): void {
     if (!this.opts.usageFacts || this.runtime !== "pi" || !this.io.postUsageFacts) return;
     if (this.usageBoundary === null) {
@@ -566,7 +581,7 @@ export class RunnerCore {
     if (this.opts.openRouterCharge && this.io.credentialEvidence) {
       // Each entry's credential is judged once, from the observations before and after it was first seen.
       const now = this.io.credentialEvidence();
-      this.credentialTainted ??= credentialTaint(now);
+      this.noteTaint(now);
       for (const fact of facts) {
         if (!this.chargeProvenance.has(fact.entryId)) {
           this.chargeProvenance.set(fact.entryId, this.credentialTainted

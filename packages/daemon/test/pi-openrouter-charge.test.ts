@@ -205,10 +205,10 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
       const p = pipeline({ source: () => source });
       await p.refresh();
       expect(p.lookups).toEqual([]);
-      const reason = kind === "unknown"
-        ? `the generating credential isn't established: Pi's OpenRouter credential source couldn't be classified at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`
+      const reason = kind === "unknown" // unclassifiable in two consecutive observations: sticky
+        ? `the generating credential isn't established: Pi's OpenRouter credential source couldn't be classified in two consecutive observations (to ${at(1)}), and Pi keeps what it loaded until it restarts or reloads`
         : kind === "models-key" // models.json is loaded at Pi's start: sticky for the process
-        ? `the generating credential isn't established: models.json had an OpenRouter provider entry when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`
+        ? `the generating credential isn't established: models.json had a credential-bearing OpenRouter provider entry when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`
         : `the generating credential isn't established: Pi's OpenRouter credential around the request was ${kind}, not the key OpenRig forwarded`;
       expect(p.charge()).toMatchObject({ status: "unavailable", requests: { unavailable: { count: 2, reasons: { [reason]: 2 } } } });
       expect(p.charge().accountContext.credentialSources).toEqual(["not established"]);
@@ -231,7 +231,7 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
   it("F1: an extension that could supply the credential, a file that changed, or a request before the runner observed: unavailable", async () => {
     const cases: Array<[Parameters<typeof pipeline>[0], string]> = [
       [{ extensions: () => "present" }, `a Pi extension was configured when observed at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`],
-      [{ extensions: () => "unknown" }, `Pi's extension configuration couldn't be checked at ${at(0)}, and Pi keeps what it loaded until it restarts or reloads`],
+      [{ extensions: () => "unknown" }, `Pi's extension configuration couldn't be checked in two consecutive observations (to ${at(1)}), and Pi keeps what it loaded until it restarts or reloads`],
       [{ fingerprint: (() => { let n = 0; return () => `v${n++}`; })() }, "Pi's credential or extension files changed around the request"],
     ];
     for (const [opts, reason] of cases) {
@@ -275,20 +275,60 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
   it("R2-F1: an extension or a models.json key seen at launch taints every entry of the process", async () => {
     for (const [opts, words] of [
       [{ extensions: (() => { let i = 0; return () => (i++ === 0 ? "present" : "none") as PiCredentialEvidence["extensions"]; })() }, "a Pi extension was configured"],
-      [{ source: (() => { let i = 0; return (): PiCredentialSource => (i++ === 0 ? { kind: "models-key", provider: "openrouter" } : MANAGED); })() }, "models.json had an OpenRouter provider entry"],
+      [{ source: (() => { let i = 0; return (): PiCredentialSource => (i++ === 0 ? { kind: "models-key", provider: "openrouter" } : MANAGED); })() }, "models.json had a credential-bearing OpenRouter provider entry"],
       // R3-F1: masked by a stored key that outranks it, or non-literal (the source reads unknown): the entry itself taints.
       [{ source: (() => { let i = 0; return (): PiCredentialSource => (i++ === 0 ? { kind: "stored-key", provider: "openrouter" } : MANAGED); })(),
-        models: (() => { let i = 0; return () => (i++ === 0 ? "present" : "none") as PiCredentialEvidence["modelsOpenRouterEntry"]; })() }, "models.json had an OpenRouter provider entry"],
+        models: (() => { let i = 0; return () => (i++ === 0 ? "present" : "none") as PiCredentialEvidence["modelsOpenRouterEntry"]; })() }, "models.json had a credential-bearing OpenRouter provider entry"],
       [{ source: (() => { let i = 0; return (): PiCredentialSource => (i++ === 0 ? { kind: "unknown" } : MANAGED); })(),
-        models: (() => { let i = 0; return () => (i++ === 0 ? "present" : "none") as PiCredentialEvidence["modelsOpenRouterEntry"]; })() }, "models.json had an OpenRouter provider entry"],
-      [{ models: (() => { let i = 0; return () => (i++ === 0 ? "unknown" : "none") as PiCredentialEvidence["modelsOpenRouterEntry"]; })() }, "models.json couldn't be checked for an OpenRouter entry"],
-      [{ source: (() => { let i = 0; return (): PiCredentialSource => (i++ === 0 ? { kind: "unknown" } : MANAGED); })() }, "Pi's OpenRouter credential source couldn't be classified"],
+        models: (() => { let i = 0; return () => (i++ === 0 ? "present" : "none") as PiCredentialEvidence["modelsOpenRouterEntry"]; })() }, "models.json had a credential-bearing OpenRouter provider entry"],
     ] as const) {
       const p = pipeline(opts);
       await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
       await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" })]);
       expect(p.lookups).toEqual([]);
       expect(Object.keys(p.charge().requests.unavailable.reasons).every((reason) => reason.includes(words))).toBe(true);
+    }
+  });
+
+  it("R4-F1 optional: one unreadable observation (a torn read) leaves only its windows unavailable; two in a row are sticky", async () => {
+    for (const field of ["models", "extensions", "source"] as const) {
+      const once = (bad: number[]) => { let i = 0; return () => bad.includes(i++); };
+      const make = (isBad: () => boolean): Parameters<typeof pipeline>[0] => field === "models"
+        ? { models: () => (isBad() ? "unknown" : "none") }
+        : field === "extensions" ? { extensions: () => (isBad() ? "unknown" : "none") }
+        : { source: () => (isBad() ? { kind: "unknown" } : MANAGED) };
+      const torn = pipeline(make(once([1]))); // launch clean, refresh 1 unreadable, refresh 2 clean
+      await torn.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" })]);
+      await torn.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" })]);
+      expect(torn.lookups).toEqual([]); // a1's window ends at the unreadable observation, a2's starts there
+      await torn.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.01, responseId: "gen-x-2" }),
+        turn("a3", 4, { cost: 0.01, responseId: "gen-x-3" })]);
+      expect(torn.lookups).toEqual(["gen-x-3"]); // clean on both sides: charged, not tainted for the process
+      const twice = pipeline(make(once([1, 2])));
+      for (const n of [1, 2, 3]) await twice.refresh(Array.from({ length: n }, (_, k) => turn(`a${k + 1}`, k + 2, { cost: 0.01, responseId: `gen-x-${k + 1}` })));
+      expect(twice.lookups).toEqual([]);
+      expect(Object.keys(twice.charge().requests.unavailable.reasons).some((reason) => reason.includes("in two consecutive observations"))).toBe(true);
+    }
+  });
+
+  it("R4-F1: a credential-free models.json OpenRouter entry (models only) keeps the forwarded key, and charges continue", () => {
+    const files: Record<string, string> = {};
+    const base = { agentDir: "/agent", cwd: "/work", env: { OPENROUTER_API_KEY: "k" }, now: () => 5,
+      statId: (f: string) => (f in files ? `id:${files[f]!.length}` : "absent"), listDir: () => [],
+      readFile: (f: string) => { if (!(f in files)) throw Object.assign(new Error("missing"), { code: "ENOENT" }); return files[f]!; } };
+    for (const entry of [{}, { models: [{ id: "x/y", name: "Y" }] }, { modelOverrides: { "x/y": { contextWindow: 9 } } }]) {
+      files["/agent/models.json"] = JSON.stringify({ providers: { openrouter: entry } });
+      expect(piCredentialEvidence(base)).toMatchObject({ source: MANAGED, modelsOpenRouterEntry: "none" });
+      expect(piCredentialSource({ model: "openrouter/x", agentDir: "/agent", env: base.env, readFile: base.readFile })).toEqual(MANAGED);
+    }
+    for (const entry of [{ apiKey: "sk" }, { apiKey: "$OPENROUTER_API_KEY" }, { baseUrl: "https://proxy" }, { headers: { a: "b" } },
+      { authHeader: true }, { oauth: "radius" }, { models: [{ id: "x", baseUrl: "https://proxy" }] }, { modelOverrides: { x: { headers: {} } } }]) {
+      files["/agent/models.json"] = JSON.stringify({ providers: { openrouter: entry } });
+      expect(piCredentialEvidence(base).modelsOpenRouterEntry).toBe("present");
+    }
+    for (const entry of ["str", { models: "nope" }, { models: [7] }]) {
+      files["/agent/models.json"] = JSON.stringify({ providers: { openrouter: entry } });
+      expect(piCredentialEvidence(base).modelsOpenRouterEntry).toBe("unknown");
     }
   });
 
@@ -354,6 +394,20 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     }
     store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts: [{ ...same, responseId: "gen-partial" }] }, at(34));
     expect(d.prepare("SELECT api, response_id FROM pi_usage_entries").get()).toEqual({ api: "openai-completions", response_id: "gen-partial" });
+  });
+
+  it("a real pre-108 entry was persisted before the upgraded runner first observed: correlated by the backfill, but unavailable", async () => {
+    const d = createDb();
+    dbs.push(d);
+    migrate(d, ALL_MIGRATIONS.filter((m) => m.name !== "108_pi_usage_charges.sql"));
+    await pipeline({ db: d, openRouterCharge: false }).refresh([turn("old", 0, { cost: 0.01, responseId: "gen-old-1" })]);
+    migrate(d, ALL_MIGRATIONS);
+    const p = pipeline({ db: d });
+    await p.refresh([turn("old", 0, { cost: 0.01, responseId: "gen-old-1" })]); // stamped at or before the first observation
+    expect(d.prepare("SELECT response_id FROM pi_usage_entries").get()).toEqual({ response_id: "gen-old-1" });
+    expect(p.lookups).toEqual([]);
+    expect(p.charge().requests.unavailable.reasons).toEqual({
+      "the generating credential isn't established: made before this runner observed Pi's credential; the credential it used is unknown": 1 });
   });
 
   it("R2-F2: an older unknown-origin row whose replay settles it to own gets its correlation in the same replay, then its charge", async () => {

@@ -29,6 +29,27 @@ function object(value: unknown): value is JsonObject {
  * credential value. Presence is not a successful authentication claim. Pi's own loader remains authoritative
  * (including extension/custom-provider credentials). Shapes: earendil-works/pi v0.87.1 auth-storage.ts and
  * docs/models.md. */
+/** Whether a models.json provider entry can change how Pi authenticates for that provider (Pi 0.87.1
+ *  provider-composer.js): a key, OAuth, headers, an auth header, or a base URL (where the key is sent), on the
+ *  entry or on any of its custom models or model overrides. An entry that only adds or adjusts models without
+ *  these keeps the inherited credential (for OpenRouter, the environment key). */
+export function providerEntryAuth(entry: unknown): "none" | "bearing" | "unknown" {
+  if (!object(entry)) return "unknown";
+  if (["apiKey", "oauth", "headers", "authHeader", "baseUrl"].some((field) => entry[field] !== undefined)) return "bearing";
+  const carries = (model: unknown): "none" | "bearing" | "unknown" =>
+    !object(model) ? "unknown" : model.baseUrl !== undefined || model.headers !== undefined ? "bearing" : "none";
+  const parts: Array<"none" | "bearing" | "unknown"> = [];
+  if (entry.models !== undefined) {
+    if (!Array.isArray(entry.models)) return "unknown";
+    parts.push(...entry.models.map(carries));
+  }
+  if (entry.modelOverrides !== undefined) {
+    if (!object(entry.modelOverrides)) return "unknown";
+    parts.push(...Object.values(entry.modelOverrides).map(carries));
+  }
+  return parts.includes("bearing") ? "bearing" : parts.includes("unknown") ? "unknown" : "none";
+}
+
 export type PiCredentialSource =
   | { kind: "stored-sign-in" | "stored-key" | "models-key"; provider: string }
   | { kind: "managed-env"; provider: string; envVar: string }
@@ -73,7 +94,8 @@ export function piCredentialSource(opts: {
     const models = readObject("models.json");
     if (models.providers !== undefined && !object(models.providers)) return { kind: "unknown" };
     const custom = object(models.providers) ? models.providers[provider] : undefined;
-    if (custom !== undefined) {
+    // An entry that can't change authentication keeps the inherited credential: fall through to it.
+    if (custom !== undefined && providerEntryAuth(custom) !== "none") {
       if (!object(custom) || !literalKey(custom.apiKey)) return { kind: "unknown" };
       return { kind: "models-key", provider };
     }
@@ -121,8 +143,9 @@ export type PiCredentialEvidence = {
    *  <agentDir>/extensions, <cwd>/.pi/extensions, and `packages`/`extensions` entries in either settings.json.
    *  OpenRig passes no -e flags. */
   extensions: "none" | "present" | "unknown";
-  /** Whether models.json has any OpenRouter provider entry, whichever credential wins and whether or not its key
-   *  is literal: Pi's provider composer holds it from load until a reload, so its presence alone matters. */
+  /** Whether models.json has an OpenRouter provider entry that can change authentication (providerEntryAuth),
+   *  whichever credential wins and whether or not its key is literal: Pi's provider composer holds it from load
+   *  until a reload. A credential-free entry (models only) is "none". */
   modelsOpenRouterEntry: "none" | "present" | "unknown";
   /** Identity of every file and directory above, so a change between two observations is visible. */
   fingerprint: string;
@@ -152,7 +175,10 @@ export function piCredentialEvidence(opts: {
     if (!object(models)) throw new Error("Unknown metadata");
     if (models.providers !== undefined) {
       if (!object(models.providers)) throw new Error("Unknown metadata");
-      if (Object.hasOwn(models.providers, "openrouter")) modelsOpenRouterEntry = "present";
+      if (Object.hasOwn(models.providers, "openrouter")) {
+        const auth = providerEntryAuth(models.providers["openrouter"]);
+        modelsOpenRouterEntry = auth === "bearing" ? "present" : auth === "unknown" ? "unknown" : "none";
+      }
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") modelsOpenRouterEntry = "unknown";
@@ -196,16 +222,17 @@ export function piCredentialEvidence(opts: {
  *  (Pi 0.87.1 loads extensions at start and again only on an explicit /reload) or a models.json OpenRouter key
  *  (Pi loads models.json at start and again only on an explicit refresh). Clean files later don't change what
  *  the running Pi loaded, so once seen, this is sticky for the process. */
-export function credentialTaint(e: PiCredentialEvidence): string | null {
+export function credentialTaint(e: PiCredentialEvidence): { sticky: string } | { uncertain: string } | null {
   const when = new Date(e.at).toISOString();
   const kept = "and Pi keeps what it loaded until it restarts or reloads";
-  if (e.extensions === "present") return `a Pi extension was configured when observed at ${when}, ${kept}`;
-  if (e.extensions === "unknown") return `Pi's extension configuration couldn't be checked at ${when}, ${kept}`;
+  if (e.extensions === "present") return { sticky: `a Pi extension was configured when observed at ${when}, ${kept}` };
   if (e.modelsOpenRouterEntry === "present" || e.source.kind === "models-key") {
-    return `models.json had an OpenRouter provider entry when observed at ${when}, ${kept}`;
+    return { sticky: `models.json had a credential-bearing OpenRouter provider entry when observed at ${when}, ${kept}` };
   }
-  if (e.modelsOpenRouterEntry === "unknown") return `models.json couldn't be checked for an OpenRouter entry at ${when}, ${kept}`;
-  if (e.source.kind === "unknown") return `Pi's OpenRouter credential source couldn't be classified at ${when}, ${kept}`;
+  // An unreadable observation may be a torn read of a file being rewritten: sticky only when it repeats.
+  if (e.extensions === "unknown") return { uncertain: `Pi's extension configuration couldn't be checked` };
+  if (e.modelsOpenRouterEntry === "unknown") return { uncertain: `models.json couldn't be checked for an OpenRouter entry` };
+  if (e.source.kind === "unknown") return { uncertain: `Pi's OpenRouter credential source couldn't be classified` };
   return null;
 }
 
@@ -226,6 +253,11 @@ export function judgeChargeProvenance(before: PiCredentialEvidence | null, after
       return { ok: false, reason: e.extensions === "present"
         ? "a Pi extension is configured and could have supplied the credential"
         : "Pi's extension configuration couldn't be checked" };
+    }
+    if (e.modelsOpenRouterEntry !== "none") {
+      return { ok: false, reason: e.modelsOpenRouterEntry === "present"
+        ? "models.json has a credential-bearing OpenRouter entry"
+        : "models.json couldn't be checked for an OpenRouter entry" };
     }
   }
   if (before.fingerprint !== after.fingerprint) return { ok: false, reason: "Pi's credential or extension files changed around the request" };
