@@ -1079,12 +1079,16 @@ export class RestoreOrchestrator {
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
-    // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is the founder's
-    // open precedence decision; the one seam decides it (and warns once when the two differ).
+    // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
+    // precedence seam (latest wins), which also says so when the snapshot held another value.
     let restoreEffort: { effort: string | null } | undefined;
     const effortForRestore = (): string | null => {
       if (!restoreEffort) {
-        const decided = effortPrecedence.restoreLaunchEffort({ snapshot: node, live: readSeatEffort(this.db, node.id) });
+        // The live seat is found by its logical id in this rig: a seat removed and grown back has a new node id,
+        // and its latest saved choice still wins over the older snapshot.
+        const liveRow = this.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rigId, node.logicalId) as
+          { id: string } | undefined;
+        const decided = effortPrecedence.restoreLaunchEffort({ snapshot: node, live: readSeatEffort(this.db, liveRow?.id ?? node.id) });
         if (decided.warning) warnings?.push(`Restore: ${node.logicalId}: ${decided.warning}`);
         restoreEffort = decided;
       }
