@@ -209,7 +209,7 @@ export type RigEvent =
        *  record (not just the command response) carries what primed the successor:
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
-        | { mode: "fork"; forkedFrom: string }
+        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
@@ -1459,4 +1459,6 @@ export interface ContextUsage {
   sessionName: string | null;
   sampledAt: string | null;
   fresh: boolean;
+  /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
+  clientCostEstimateUsd?: number | null;
 }

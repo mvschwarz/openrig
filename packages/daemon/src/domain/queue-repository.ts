@@ -640,6 +640,10 @@ export function destinationRigTeaching(session: string): Record<string, unknown>
  * gateway resolver (how to register + "not an agent seat"). Loads the registry only for
  * the (rare) @external refusal path. Undefined for non-@external / registered / scheme.
  */
+/** Refusal teachings issued because nobody is registered yet (the load result's `noHumans`), so the refusal's
+ *  wording can say so. Kept off the teaching object itself, whose fields are unchanged. */
+const NOBODY_REGISTERED_TEACHINGS = new WeakSet<object>();
+
 export function externalAdmissionTeaching(
   session: string,
   loadRegistry: () => LoadResult = loadHumanRegistry,
@@ -648,6 +652,19 @@ export function externalAdmissionTeaching(
   if (parsed.kind !== "external") return undefined;
   if (resolveExternal(parsed.local, []).kind === "scheme") return undefined;
   const reg = loadRegistry();
+  if (!reg.ok && reg.noHumans) {
+    // Nobody registered yet: not a broken registry. Same fields as below; the hint names the registration verb.
+    const teaching = {
+      externalDomain: parsed.domain,
+      registryLoadError: true,
+      registryError: reg.error,
+      hint:
+        `human registry admission is unavailable because no human is registered yet: ${reg.error}. ` +
+        "Register the person with rig gateway human add; do not downgrade the destination to an agent seat.",
+    };
+    NOBODY_REGISTERED_TEACHINGS.add(teaching);
+    return teaching;
+  }
   if (!reg.ok) {
     return {
       externalDomain: parsed.domain,
@@ -683,7 +700,9 @@ function destinationValidationError(
   if (teaching?.registryLoadError === true) {
     return new QueueRepositoryError(
       "human_registry_unavailable",
-      `${field} ${session} cannot be admitted because the human registry failed to load: ${String(teaching.registryError)}`,
+      NOBODY_REGISTERED_TEACHINGS.has(teaching)
+        ? `${field} ${session} cannot be admitted because no human is registered yet: ${String(teaching.registryError)}`
+        : `${field} ${session} cannot be admitted because the human registry failed to load: ${String(teaching.registryError)}`,
       teaching,
     );
   }
@@ -3139,11 +3158,21 @@ export class QueueRepository {
       const firedEvents = targets.map(recordFired);
       if (deliveryStatus === "retained") return firedEvents;
       if (usageLimitBlockers.length === 0) {
-        if (parkGeneratedTimer && !backOffQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), jobId, deliveryStatus)) {
-          (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(
+        const jobsRepo = this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db);
+        if (parkGeneratedTimer && !backOffQueueWait(jobsRepo, jobId, deliveryStatus)) {
+          jobsRepo.markTerminal(
             jobId,
             "park_timer_fired_once",
           );
+        } else if (!parkGeneratedTimer) {
+          // A one-shot generated job whose original park has ended and whose last attachment this attempt just
+          // consumed is retired now, not at its next check: while it stayed active, --wake-watchdog could attach
+          // another task to it. Repeating (queue-wait) jobs keep their own lifecycle.
+          const job = jobsRepo.getById(jobId);
+          if (job && !isQueueWait(job.specYaml)) {
+            const reason = this.resolveWatchdogPreDeliveryTerminalReason(jobId);
+            if (reason) jobsRepo.markTerminal(jobId, reason);
+          }
         }
         return firedEvents;
       }

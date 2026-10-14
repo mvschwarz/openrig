@@ -12,7 +12,8 @@ orientation, and it cannot tell you what your rig is for or what you are suppose
 rig whoami --json
 ```
 
-Returns your rig, pod, member, peers, edges, and transcript path. **Treat it as ground truth.**
+Returns your rig, pod, member, peers, edges, and transcript path. If `peersNote` says some peers
+are not shown, `rig whoami --json --all-peers` lists them all. **Treat it as ground truth.**
 A startup overlay can be stale; this one is small precisely so it has less room to be wrong.
 
 Run it again after any compaction, restart or restore — **before** concluding anything about

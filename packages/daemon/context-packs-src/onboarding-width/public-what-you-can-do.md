@@ -24,7 +24,8 @@ model IDs).
 one command away. Your memory of the fleet is a claim about the past.
 
 - **`rig whoami`** — who you are, who your peers are, and the exact string you use to reach each of
-  them. Ground truth over anything your startup overlay says.
+  them. Ground truth over anything your startup overlay says. On a large rig the JSON peer list can be
+  bounded; `peersNote` says how many it left out, and `--all-peers` lists them all.
 - **`rig ps`** — what rigs exist. **`rig ps --nodes -A`** — the state of every seat everywhere,
   *including the broken ones*. **The bare form is the question you usually want:** `--active`
   filters to running and **hides detached, exited and attention states** — which are exactly the
@@ -186,7 +187,8 @@ your context, your compaction and your replacement — and it is the only thing 
   receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
   pickup, not proof the body was read. For a row the seat already claimed, `outcome` can read
   `indeterminate` while `claim` is accurate: read `claim`. It isn't a failed handoff, so don't
-  re-run the create.
+  re-run the create. For a registered person who is also a seat with a pane, it also waits,
+  bounded, for the Slack receipt and reports it on its own.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.

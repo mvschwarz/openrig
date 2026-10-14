@@ -26,7 +26,8 @@ export const SECTION_REGISTRY: readonly SectionDef[] = [
   { name: "system", sourceRead: "GET /api/health (canonical instance findings)", drillShape: "health/configuration/connections" },
   { name: "config", sourceRead: "GET /healthz + /api/config?view=browser + /api/gateway/connections (passive)", drillShape: "category>setting" },
   { name: "connections", sourceRead: "GET /healthz + /api/gateway/connections (passive projection)", drillShape: "instance>human/routes>work" },
+  { name: "usage", sourceRead: "GET /api/provider/status (memory-only read; never the refresh) + /api/config?view=browser only when usage is absent", drillShape: "provider>allowance>window; seats" },
 ];
 
 /** Display grouping only; compatible configuration/connection coordinates remain. */
-export const SYSTEM_SECTIONS = ["system", "config", "connections"];
+export const SYSTEM_SECTIONS = ["system", "config", "connections", "usage"];

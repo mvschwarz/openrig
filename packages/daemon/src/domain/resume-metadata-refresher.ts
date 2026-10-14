@@ -157,7 +157,9 @@ export class ResumeMetadataRefresher {
         }
 
         const threadId = await this.captureCodexThreadId(session.sessionName, captureOpts);
-        if (threadId) {
+        // A fork's pending id: only its own new conversation may fill it, never one an earlier
+        // row (its parent or predecessor) holds; that stays honestly pending.
+        if (threadId && !this.sessionRegistry.isForkClaimingHeldToken(session.sessionId, "codex_id", threadId)) {
           this.sessionRegistry.updateResumeToken(session.sessionId, "codex_id", threadId, "scrape");
         }
         continue;

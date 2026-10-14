@@ -422,10 +422,10 @@ export class ContextPackLibraryService {
    *  containment check that prevents path-traversal escaping the pack
    *  directory. */
   resolveFileWithinPack(packEntry: ContextPackEntry, relPath: string): string {
-    if (relPath.includes("..") || relPath.startsWith("/")) {
+    if (relPath.split(/[\\/]/).includes("..") || relPath.startsWith("/")) {
       throw new ContextPackError(
         "file_outside_pack",
-        `relative path '${relPath}' must be inside the pack directory (no '..', no leading '/')`,
+        `relative path '${relPath}' must be inside the pack directory (no '..' segments, no leading '/')`,
         { packId: packEntry.id, relPath },
       );
     }

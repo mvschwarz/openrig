@@ -127,7 +127,7 @@ interface SeatHandoverMutationResult {
   eventSeq: number;
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
   sideEffects: {
     departingSessionKilled: false;
@@ -226,6 +226,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
     console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
+    if (result.sourceOutcome.forkId === "pending") console.log(`Fork id: PENDING. ${result.sourceOutcome.limit ?? ""}`.trim());
   } else if (result.sourceOutcome?.mode === "rebuild") {
     const outcome = result.sourceOutcome;
     if (outcome.primedArtifacts.length > 0) {

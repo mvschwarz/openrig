@@ -88,10 +88,13 @@ describe("usage windows: switch on", () => {
     expect(fake.spawns()).toBe(1);
   });
 
-  it("the usage key is added after today's keys; the rest of the model is unchanged", async () => {
+  it("the usage and seatAccounts keys are added after today's keys; the rest of the model is unchanged", async () => {
     const { svc, mainSvc } = setup({ enabled: true });
-    const { usage, ...rest } = await svc.getReadModel();
+    const model = await svc.getReadModel();
+    expect(Object.keys(model).slice(-2)).toEqual(["usage", "seatAccounts"]);
+    const { usage, seatAccounts, ...rest } = model;
     expect(usage).toBeDefined();
+    expect(seatAccounts).toEqual([]);
     expect(JSON.stringify(rest)).toBe(JSON.stringify(await mainSvc.getReadModel()));
   });
 

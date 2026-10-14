@@ -165,6 +165,7 @@ export class ClaudeUsageWindows {
   private unresolvedDropped = 0;
   private lastRefresh: UsageRefreshOutcome | null = null;
   private inflight: Promise<UsageRefreshOutcome> | null = null;
+  private lastSamples: ClaudeWindowSample[] | null = null;
 
   constructor(private readonly deps: { readIdentity: ClaudeAuthReader; listSamples: () => ClaudeWindowSample[]; now?: () => string }) {
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -219,6 +220,13 @@ export class ClaudeUsageWindows {
     return this.lastRefresh;
   }
 
+  /** Each seat's own latest samples as the last project() read them, from memory (no query of its own); null
+   *  before any project() or when the samples couldn't be read. Unlike the served windows, which keep one sample
+   *  per window, every seat that reported is here. */
+  seatSamples(): ClaudeWindowSample[] | null {
+    return this.lastSamples;
+  }
+
   /** The served rows: samples and the identity in memory. It never starts a native read. */
   project(now: string): ProviderUsageAllowance[] {
     const source = { kind: "claude_statusline_samples", host: "local" } as const;
@@ -230,6 +238,7 @@ export class ClaudeUsageWindows {
       samples = [];
       unreadable = `the status-line samples could not be read: ${error instanceof Error ? error.message : String(error)}`;
     }
+    this.lastSamples = unreadable ? null : samples;
     const live = pickClaudeWindows(samples, now);
     const rows: ProviderUsageAllowance[] = [];
     const seatsOf = (picks: Pick[]) => [...new Set(picks.map((p) => p.seatSession))].join(", ");

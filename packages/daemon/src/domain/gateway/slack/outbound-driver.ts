@@ -41,6 +41,9 @@ export interface OutboundPostPayload {
   /** F: the loudness discriminators (interim rule: escalations mention, all else quiet). */
   tier?: string | null;
   tags?: string[] | null;
+  /** #1013 — the row's state, so the renderer can tell a gate PARKED on a human
+   *  (state=blocked) from the same row while an agent seat owns it. */
+  state?: string | null;
 }
 
 export interface OutboundDriverDeps {
@@ -145,6 +148,7 @@ function toPayload(q: QueueItem): OutboundPostPayload {
     evidenceRef: q.evidenceRef,
     tier: q.tier,
     tags: q.tags,
+    state: q.state,
   };
 }
 

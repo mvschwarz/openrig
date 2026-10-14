@@ -50,6 +50,10 @@
       "types": "./dist/skill-loadout-surface.d.ts",
       "import": "./dist/skill-loadout-surface.js"
     },
+    "./composer-prompts": {
+      "types": "./dist/composer-prompts-surface.d.ts",
+      "import": "./dist/composer-prompts-surface.js"
+    },
     "./instance-initialization": {
       "types": "./dist/instance-initialization-surface.d.ts",
       "import": "./dist/instance-initialization-surface.js"

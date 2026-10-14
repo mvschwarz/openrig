@@ -106,14 +106,18 @@ export class QueueWakeRepository {
     ).get(qitemId) as { state: string } | undefined)?.state;
     const kind = armed.wake_kind as ParkWakeKind;
     const expiresAt = this.wakeExpiry(qitemId, kind, armed.wake_ref);
+    const repeating = this.isRepeatingTimer(armed.wake_ref);
+    // A retained attempt (held back by the typing guard) was not delivered, so it doesn't consume a one-shot wake:
+    // the backstop is still live and nothing awaits the owner. The attempt stays in the history.
+    const heldBack = fired?.delivery_status === "retained" && !repeating;
     return {
       kind,
       ref: armed.wake_ref,
       phase: fired ? "fired" : "armed",
-      live: fired && !this.isRepeatingTimer(armed.wake_ref) ? false : this.isLive(kind, armed.wake_ref),
+      live: fired && !repeating && !heldBack ? false : this.isLive(kind, armed.wake_ref),
       deliveryStatus: fired?.delivery_status ?? null,
-      unconsumed: fired !== undefined && state === "blocked",
-      ...(this.isRepeatingTimer(armed.wake_ref) ? { recoveryOwner: "queue-stuck-sweep" as const } : {}),
+      unconsumed: fired !== undefined && !heldBack && state === "blocked",
+      ...(repeating ? { recoveryOwner: "queue-stuck-sweep" as const } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     };
   }
@@ -136,6 +140,8 @@ export class QueueWakeRepository {
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
+               -- A retained attempt was not delivered: the one-shot binding still owns the next attempt.
+               AND (f.delivery_status IS NULL OR f.delivery_status != 'retained')
           ))`,
     ).all(jobId, latestArmedOnly ? 1 : 0, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {
       const r = row as { qitem_id: string; wake_kind: "watchdog" | "timer" };
@@ -161,7 +167,7 @@ export class QueueWakeRepository {
   }
 
   /** A current attachment keeps a shared generated job alive until consumed.
-   *  Failed or retained repeating deliveries keep ownership for the next retry. */
+   *  A retained attempt never consumes it; a failed one does, except on a repeating timer, which retries. */
   findLiveQitemsByAttachedWatchdog(jobId: string): Array<{ qitemId: string; state: string }> {
     if (!this.available) return [];
     return this.db.prepare(
@@ -178,9 +184,10 @@ export class QueueWakeRepository {
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
+               -- A retained attempt never consumes an attachment; a failed one consumes it only on a one-shot timer.
+               AND (f.delivery_status IS NULL OR f.delivery_status != 'retained')
                AND (? = 0 OR f.delivery_status IS NULL OR (
                  f.delivery_status != 'failed' AND f.delivery_status NOT LIKE 'failed:%'
-                 AND f.delivery_status != 'retained'
                ))
           )`,
     ).all(jobId, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {

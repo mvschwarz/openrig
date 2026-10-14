@@ -4,6 +4,8 @@
 // is precheck-gated and NEVER fabricates success — the switch-execution + BR-1 action-record path
 // is the D seam; until it lands, switch returns an honest failed_safely with an operational reason.
 
+import nodePath from "node:path";
+import os from "node:os";
 import type Database from "better-sqlite3";
 import {
   AGENT_ACTIVITY_FRESHNESS_MS,
@@ -12,6 +14,7 @@ import {
 import { getNodeInventory } from "../node-inventory.js";
 import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-reader.js";
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
+import { configuredSeatAccounts } from "./provider-seat-accounts.js";
 import { precheckSwitch } from "./provider-policy.js";
 import { collectReactiveEventSignals } from "./reactive-tap.js";
 import type { CodexUsageWindows } from "./codex-usage-windows.js";
@@ -85,7 +88,19 @@ export class ProviderServiceImpl implements ProviderService {
       ? { names: profiles, note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" }
       : null;
     const codexRows = savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage;
-    return { ...model, usage: [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? [])] };
+    const allUsage = [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? [])];
+    // Each seat's configured account, from the same seat universe and registry metadata (names only), never
+    // linked to a usage row.
+    const seatAccounts = configuredSeatAccounts({
+      seats: listSeats(),
+      auth: readAuth(),
+      usage: allUsage,
+      claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
+      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
+      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
+      home: env.HOME ?? os.homedir(),
+    });
+    return { ...model, usage: allUsage, seatAccounts };
   }
 
   async refreshUsage(provider: "codex" | "claude"): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {

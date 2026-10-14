@@ -1,8 +1,8 @@
 # @openrig/tui — mission-control TUI
 
 The explorer / master-detail "k9s for rigs" surface: left Explorer (Topology ·
-Specs · Scopes · Terminals · Needs-You · System, Config and Connections, the
-last three grouped as System; `src/sections.ts`), right content pane, top
+Specs · Scopes · Terminals · Needs-You · System, Config, Connections and Usage,
+the last four grouped as System; `src/sections.ts`), right content pane, top
 command bar, ambient rig-stream footer. OBSERVE / NAVIGATE / DRIVE-STRUCTURE
 only — ACT / PRODUCE / REVIEW-ARTIFACT surfaces live in Studio, not here. One
 runtime dependency (`yaml`); it reads the daemon's EXISTING projections (two renderers, one projection —

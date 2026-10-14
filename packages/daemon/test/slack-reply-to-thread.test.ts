@@ -114,6 +114,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
   describe("delivery through the real wire", () => {
     let posts: Array<Record<string, unknown>>;
     let wire: ReturnType<typeof buildSlackGatewayWire>;
+    let inboundSocket: WsLike;
     beforeEach(() => {
       const secrets = join(home, "fake.env"); writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
       saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets, minimumLevelThatInterrupts: "NOTICE" }, home);
@@ -199,7 +200,8 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       });
       stops.push(() => wire.stop()); wire.startServices?.();
       await vi.waitFor(() => expect(sockets).toHaveLength(1));
-      sockets[0]!.onopen?.();
+      inboundSocket = sockets[0]!;
+      inboundSocket.onopen?.();
       const humanReply = async (threadTs: string | undefined, ts: string) => {
         sockets[0]!.onmessage?.({ data: JSON.stringify({ envelope_id: `e-${ts}`, type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "thanks", ts, thread_ts: threadTs, channel: "C-TEST" } } }) });
         await new Promise((r) => setTimeout(r, 50));
@@ -277,6 +279,75 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
       // The thread still belongs to the decision; the answer opened no root of its own.
       expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
+    });
+
+    it("interaction provenance: a completed button answer keeps its ask's thread for the seat's follow-up", async () => {
+      await connectInbound();
+      const decision = await repo.create({ ...request, humanIntent: "decision", humanQuestions: [
+        { id: "q1", question: "Ship the fix?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      ] });
+      await deliver(decision.qitemId);
+      inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: "interaction-button", type: "interactive", payload: {
+          type: "block_actions", user: { id: "UFOUNDER" }, channel: { id: "C-TEST" },
+          container: { type: "message", message_ts: "1.1", channel_id: "C-TEST" }, message: { ts: "1.1" },
+          actions: [{ type: "button", block_id: "or-q:q1", action_id: "or-opt:yes", value: "yes", action_ts: "910.1" }],
+        },
+      }) });
+      const answerId = `qitem-slack-answers-${createHash("sha256").update(decision.qitemId).digest("hex").slice(0, 20)}`;
+      await vi.waitFor(() => expect(repo.getById(answerId)).not.toBeNull());
+      await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
+      const inbound = repo.getById(answerId)!;
+      expect(inbound).toMatchObject({ destinationSession: "author@rig", replyTo: decision.qitemId });
+      expect(repo.getById(decision.qitemId)?.humanAnswers).toEqual({ q1: "yes" });
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "Shipping.", replyTo: answerId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+      expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
+    });
+
+    async function reactToAsk(decisionId: string, eventTs: string): Promise<string> {
+      const eventId = `reaction:C-TEST:1.1:UFOUNDER:eyes:${eventTs}`;
+      const qitemId = `qitem-slack-reaction-${createHash("sha256").update(eventId).digest("hex").slice(0, 20)}`;
+      inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: `interaction-reaction-${eventTs}`, type: "events_api", payload: { event: {
+          type: "reaction_added", user: "UFOUNDER", reaction: "eyes", event_ts: eventTs,
+          item: { type: "message", channel: "C-TEST", ts: "1.1" },
+        } },
+      }) });
+      await vi.waitFor(() => expect(repo.getById(qitemId)).not.toBeNull());
+      expect(repo.getById(qitemId)?.body).toContain(`In reply to: ${decisionId}`);
+      return qitemId;
+    }
+
+    it("interaction provenance: a reaction row keeps its resolved ask's thread for the seat's follow-up", async () => {
+      await connectInbound();
+      const decision = await repo.create(request);
+      await deliver(decision.qitemId);
+      resolveDecision(decision.qitemId);
+      const reactionId = await reactToAsk(decision.qitemId, "911.1");
+      expect(repo.getById(reactionId)).toMatchObject({ destinationSession: "author@rig", replyTo: decision.qitemId });
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "Acknowledged.", replyTo: reactionId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+      expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
+    });
+
+    it("interaction provenance: a reaction still neither answers nor closes a live human gate", async () => {
+      await connectInbound();
+      const decision = await repo.create({ ...request, humanIntent: "decision", humanQuestions: [
+        { id: "q1", question: "Ship the fix?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      ] });
+      await deliver(decision.qitemId);
+      const reactionId = await reactToAsk(decision.qitemId, "912.1");
+      expect(repo.getById(decision.qitemId)).toMatchObject({ state: "pending", humanAnswers: null });
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "I saw your reaction.", replyTo: reactionId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toMatch(/reference-has-live-gate/);
+      expect(repo.getById(decision.qitemId)?.state).toBe("pending");
     });
 
     it("#822: a top-level message records no thread, so its answer still posts top-level", async () => {
