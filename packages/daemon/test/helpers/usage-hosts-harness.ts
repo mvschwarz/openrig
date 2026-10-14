@@ -62,6 +62,8 @@ export interface UsageHostOptions {
   registry?: HostEntry[] | { path: string };
   routes?: ProviderRoutesOptions;
   now?: () => string;
+  /** Answer GET /api/provider/status and /api/config only after this long (real time). */
+  slowReadMs?: number;
 }
 
 const toEpoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
@@ -170,6 +172,10 @@ export class UsageHost {
     const registry = this.opts.registry;
     app.use("*", async (c, next) => {
       this.requests.push({ method: c.req.method, path: `${c.req.path}${new URL(c.req.url).search}` });
+      const slow = this.opts.slowReadMs;
+      if (slow && c.req.method === "GET" && (c.req.path === "/api/provider/status" || c.req.path === "/api/config")) {
+        await new Promise((r) => setTimeout(r, slow));
+      }
       c.set("providerService" as never, svc as never);
       c.set("settingsStore" as never, this.settings as never);
       if (registry) {

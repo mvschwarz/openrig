@@ -248,6 +248,13 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     }
   }
 
+  // The daemon reads each host's status (5 s) and, for a host that's off or older, its settings (5 s more), four hosts
+  // at a time: 20 s covers eight such hosts at worst. The CLI client's 5 s default would cut a slow host's view short.
+  const USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS = 20_000;
+  // The refresh answers after its slowest leg (Codex 50 s), then builds the same view (up to 20 s, above):
+  // 50 s + 20 s + a 5 s margin.
+  const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
+
   // A host where Claude doesn't apply (no claude, no login, not a subscription login, or no Claude refresh there) is a
   // note under a bare --refresh, as on one host; naming --provider claude makes it count.
   const CLAUDE_NOT_APPLICABLE = new Set(["binary_not_found", "not_logged_in", "not_subscription_login", "not_available"]);
@@ -264,13 +271,12 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     }
     let refreshExit = 0;
     if (opts.refresh) {
-      // Each host's leg is bounded by that host's own read (Codex 50 s, Claude 20 s), all in parallel; wait a little
-      // longer so the daemon's answer, not a transport error, arrives here.
+      // Each host's leg is bounded by that host's own read (Codex 50 s, Claude 20 s), all in parallel.
       const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
       const answered = await Promise.all(providers.map(async (provider) => ({
         provider,
         answer: await client.post<Record<string, unknown>>("/api/provider/usage/hosts/refresh",
-          { provider, ...(hosts.length > 0 ? { hosts } : {}) }, { timeoutMs: 65_000 }),
+          { provider, ...(hosts.length > 0 ? { hosts } : {}) }, { timeoutMs: USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS }),
       })));
       const off = answered.find((a) => a.answer.status === 409);
       if (off) {
@@ -292,7 +298,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         }
       }
     }
-    const res = await client.get<Record<string, unknown>>(`/api/provider/usage/hosts${hosts.length > 0 ? `?hosts=${encodeURIComponent(hosts.join(","))}` : ""}`);
+    const res = await client.get<Record<string, unknown>>(`/api/provider/usage/hosts${hosts.length > 0 ? `?hosts=${encodeURIComponent(hosts.join(","))}` : ""}`,
+      { timeoutMs: USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS });
     if (res.status === 409) {
       console.error(((res.data ?? {}) as { message?: unknown }).message ?? "usage windows are off on this daemon (provider.usage_windows)");
       process.exitCode = 1;

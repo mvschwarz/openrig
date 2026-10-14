@@ -103,6 +103,17 @@ describe("rig provider status --all-hosts", () => {
     expect(out).toContain("  off  answered · usage off: usage windows are off on this host (provider.usage_windows = false)");
   });
 
+  it("waits for a view that takes the daemon longer than 5 s: a switched-off host answering its status and settings after 4.5 s each", async () => {
+    const slow = await host("slow", { usageWindows: false, slowReadMs: 4_500 });
+    const hub = await host("hub", { registry: [slow.entry()] });
+    const started = Date.now();
+    const got = await run(["status", "--all-hosts"], hub);
+    expect(Date.now() - started).toBeGreaterThan(5_000);
+    expect([got.exitCode, got.err]).toEqual([undefined, ""]);
+    expect(got.out).toContain("  slow  answered · usage off: usage windows are off on this host (provider.usage_windows = false)");
+    expect(slow.requests.map((r) => r.path)).toEqual(["/api/provider/status", "/api/config?view=browser"]);
+  }, 20_000);
+
   it("--json prints the served body", async () => {
     const a = await host("a");
     const hub = await host("hub", { registry: [a.entry()] });
