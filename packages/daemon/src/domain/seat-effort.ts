@@ -83,9 +83,11 @@ export const UNDECIDED_EFFORT_PRECEDENCE: EffortPrecedenceRule = {
  * which. Fresh launches, successors and in-place restarts already resolve the choice first (resolveSeatEffort);
  * this rule covers the two writers that hold older values:
  * - a snapshot restore launches the seat's saved choice when it has one (saying so when the snapshot held another
- *   value); a seat without a choice (never set, or cleared) launches the snapshot's authored effort as before,
- *   so an older snapshot never brings a cleared choice back; when the seat's node row is gone, the latest
- *   explicit choice known is the one the snapshot recorded;
+ *   value); the restore finds the live seat by its logical id, so a seat grown back under a new node id counts. A
+ *   seat without a choice (never set, or cleared) launches the snapshot's authored effort as before, so an older
+ *   snapshot never brings a cleared choice back. With no live seat (`live` null), the rule answers with the
+ *   snapshot's recorded choice, else its authored effort; that answer is rule-only, since restore doesn't
+ *   launch a seat that no longer exists;
  * - a spec refresh rewrites the authored value and keeps the choice.
  * No restore option in this version picks older settings deliberately, so every restore keeps the choice.
  */
