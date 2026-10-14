@@ -472,10 +472,11 @@ describe("runner → authenticated route → SQLite → cost view", () => {
         const p = pipeline(() => forkHeader(at(7), file), () => readPiSessionEntryIds(file));
         await p.refresh(forkEntries);
         await p.refresh(forkEntries);
-        expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } }); // b1 and n7: never charged
+        // The real parent reads and posts finish after refresh returns: wait for their outcome in the store, not for ticks.
+        await eventually(() => expect(p.view()).toMatchObject({ entries: { own: 2, unknownOrigin: { count: 2 } } })); // b1 and n7: never charged
         writeFileSync(file, valid);
         await p.refresh(forkEntries);
-        expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } });
+        await eventually(() => expect(p.view()).toMatchObject({ entries: { own: 3, inherited: { count: 5 }, unknownOrigin: { count: 0 } } }));
         expect(p.view().costUsd).toBeCloseTo(0.55, 10);
         expect(p.d.prepare("SELECT origin FROM pi_usage_entries WHERE entry_id = 'b1'").get()).toEqual({ origin: "inherited" });
       }
