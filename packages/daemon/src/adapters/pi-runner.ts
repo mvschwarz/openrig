@@ -30,6 +30,7 @@ import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
+import { OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -310,6 +311,7 @@ export interface RunnerIo {
 const GET_STATE_ID = "pi-runner-get-state";
 const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
+const NEGOTIATE_ID = "omp-runner-negotiate";
 /** RPC commands that carry operator input. Their failure means the seat
  *  cannot do the requested work; other command failures are not attention. */
 const INPUT_COMMANDS: Record<string, true> = { prompt: true, steer: true, follow_up: true };
@@ -404,6 +406,9 @@ export class RunnerCore {
   /** Entry ids the daemon has accepted with a known origin. Anything else is sent again on the next refresh;
    *  the daemon stores each (session, entry) once regardless. */
   private readonly postedUsageEntryIds = new Set<string>();
+  /** #1275: OMP protocol v2. The limit offered while negotiating, then the decoder once OMP accepts. */
+  private v2Limit: number | null = null;
+  private frameDecoder: OmpFrameDecoder | null = null;
 
   constructor(
     private io: RunnerIo,
@@ -420,8 +425,8 @@ export class RunnerCore {
   /** Runner readiness is the sidecar's acknowledged get_state, not RPC transport ready. */
   isReady(): boolean { return this.ready; }
 
-  /** Kick off identity capture. Called once pi's RPC stream is up. */
-  start(): void {
+  /** Kick off identity capture. Called once pi's RPC stream is up; for OMP, with its `ready` frame. */
+  start(ready?: Record<string, unknown>): void {
     // K4: the first credential observation, before Pi can make any request of this runner's.
     if (this.opts.openRouterCharge && this.runtime === "pi" && this.io.credentialEvidence) {
       // The production runner observes before it spawns Pi (launchCredentialEvidence), so Pi loads after it.
@@ -433,6 +438,10 @@ export class RunnerCore {
     if (this.runtime === "omp") {
       if (this.started) return;
       this.started = true;
+      // #1275: v1 caps a stdout line at 1 MiB, so a longer history fails get_entries. When OMP advertises
+      // protocol v2, negotiate it first: OMP runs commands in order, so the replies below can then arrive chunked.
+      this.v2Limit = ready ? ompProtocolV2Limit(ready) : null;
+      if (this.v2Limit !== null) this.io.sendRpc({ type: "negotiate_protocol", protocolVersion: 2, id: NEGOTIATE_ID });
     }
     this.io.sendRpc({ type: "get_state", id: GET_STATE_ID });
     if (this.opts.catchUpSince) {
@@ -456,6 +465,13 @@ export class RunnerCore {
       // Non-JSON noise on pi stdout — mirror it verbatim so nothing hides.
       this.io.mirrorLine(line);
       return;
+    }
+    if (this.frameDecoder) {
+      const result = this.frameDecoder.push(record);
+      // A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was.
+      if ("dropped" in result && result.dropped) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${result.dropped}; the chunked frame was dropped`);
+      if (!("frame" in result)) return;
+      record = result.frame;
     }
 
     if (record.type === "response") {
@@ -494,12 +510,24 @@ export class RunnerCore {
   /** Child process exit — honest, loud, durable. */
   handlePiExit(code: number | null): void {
     this.ready = false;
+    const incomplete = this.frameDecoder?.incomplete();
+    if (incomplete) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${incomplete}; the chunked frame was dropped`);
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
     this.io.postActivity(this.activityPayload("Stop", `${this.runtime}_exited`));
   }
 
   private handleResponse(record: Record<string, unknown>): void {
+    if (record.id === NEGOTIATE_ID && this.v2Limit !== null) {
+      if (record.success === true) {
+        this.frameDecoder = new OmpFrameDecoder(this.v2Limit);
+      } else {
+        // Advertised but refused: v1 as before, so a reply over 1 MiB still fails, visibly.
+        const detail = typeof record.error === "string" ? record.error : "refused";
+        this.io.mirrorLine(`[omp-runner] RPC protocol v2 not negotiated (${detail}); replies over 1 MiB will fail`);
+      }
+      return;
+    }
     if (record.success === false || record.error != null) {
       const detail = typeof record.error === "string" ? record.error : "request failed";
       const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
@@ -1173,7 +1201,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         const frame = JSON.parse(line) as { type?: string };
         if (frame.type === "ready") {
           transportUp = true;
-          core.start();
+          core.start(frame as Record<string, unknown>);
         }
       } catch { /* surface non-JSON stdout through the core */ }
     }
