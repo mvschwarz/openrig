@@ -23,7 +23,7 @@
 //     §Citation Rules.
 
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -107,21 +107,34 @@ function categoryOf(mode: string): Category {
   return mode === "human-led" || mode === "delegated" ? "posture" : "mode";
 }
 
-/** Each category's binding at this exact target, or null when it couldn't be read (any failure: the preview then
- *  stays as it was). A daemon without per-category reads returns its one binding, read as that binding's category. */
-async function currentAtTarget(client: DaemonClient, scope: string, qualifier: string | null): Promise<(Record<Category, Binding | null> & { stored: string }) | null> {
+type WriteTargetState =
+  | { known: true; writeTarget: string; mode: Binding | null; posture: Binding | null }
+  | { known: false; reason: string };
+
+const isBinding = (b: unknown): b is Binding =>
+  typeof b === "object" && b !== null && typeof (b as { mode?: unknown }).mode === "string" && typeof (b as { id?: unknown }).id === "string";
+
+/** What is stored where a write of this category would land, as the daemon resolves that target (a posture through
+ *  its canonicalisation, a saved mode as given). Anything the daemon doesn't establish is unknown: a failed read, a
+ *  refusal, a malformed answer, or a daemon that doesn't name the write target (one that predates categories, where a
+ *  write replaces whatever binding is stored there). */
+async function writeTargetState(client: DaemonClient, scope: string, qualifier: string | null, category: Category): Promise<WriteTargetState> {
   try {
-    const res = await client.get<{ binding?: Binding; bindings?: Binding[] }>(`/api/rig-mode/bindings/${scope}${qualifier ? `/${encodeURIComponent(qualifier)}` : ""}`);
-    const asked = `${scope}${qualifier ? ` ${qualifier}` : ""}`;
-    if (res.status === 404) return { mode: null, posture: null, stored: asked };
-    if (res.status >= 400) return null;
-    const all = res.data.bindings ?? (res.data.binding ? [res.data.binding] : []);
-    // The daemon reads the qualifier as given and canonicalises only when nothing is stored under it, so name the
-    // stored target it answered for: a binding kept under another spelling of the same rig isn't in this answer.
-    const stored = all[0] ? `${scope}${all[0].qualifier ? ` ${all[0].qualifier}` : ""}` : asked;
-    return { mode: all.find((b) => categoryOf(b.mode) === "mode") ?? null, posture: all.find((b) => categoryOf(b.mode) === "posture") ?? null, stored };
+    const res = await client.get<Record<string, unknown>>(`/api/rig-mode/bindings/${scope}${qualifier ? `/${encodeURIComponent(qualifier)}` : ""}?for=${category}`);
+    const data = res.data;
+    if (res.status !== 200) {
+      const error = typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}`;
+      return { known: false, reason: res.status === 404 ? "this daemon doesn't report where this write lands" : error };
+    }
+    if (typeof data !== "object" || data === null || typeof data["writeTarget"] !== "string") {
+      return { known: false, reason: "this daemon doesn't report where this write lands" };
+    }
+    const bindings = data["bindings"];
+    if (!Array.isArray(bindings) || !bindings.every(isBinding)) return { known: false, reason: "the daemon's answer was malformed" };
+    return { known: true, writeTarget: data["writeTarget"], mode: bindings.find((b) => categoryOf(b.mode) === "mode") ?? null,
+      posture: bindings.find((b) => categoryOf(b.mode) === "posture") ?? null };
   } catch {
-    return null;
+    return { known: false, reason: "the read failed" };
   }
 }
 
@@ -319,22 +332,26 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         };
 
         if (!opts.confirm) {
-          // Restate-and-confirm (HG-7). No daemon write. What's at this target now is read on a best-effort basis: a
-          // read that fails leaves the preview as it was, saying so.
-          const current = await currentAtTarget(client, scope, qualifier);
+          // Restate-and-confirm (HG-7). No daemon write. What's stored where this write would land is read on a
+          // best-effort basis: anything not established leaves the preview as it was, with the current state UNKNOWN.
           const category = categoryOf(mode);
+          const current = await writeTargetState(client, scope, qualifier, category);
           if (opts.json) {
             console.log(JSON.stringify({ ok: false, proposed: { mode, scope, qualifier, record }, confirm_required: true,
-              ...(current === null ? { current: "unknown", displaces: "unknown" }
-                : { current: { mode: current.mode, posture: current.posture, stored: current.stored }, displaces: current[category] }) }, null, 2));
+              ...(!current.known ? { current: "unknown", displaces: "unknown", currentReason: current.reason }
+                : { current: { writeTarget: current.writeTarget, mode: current.mode, posture: current.posture }, displaces: current[category] }) }, null, 2));
           } else {
             console.log(`Proposed binding (restate-and-confirm — NOT applied):`);
             console.log(`  mode:      ${mode}`);
             console.log(`  scope:     ${scope}${qualifier ? ` (${qualifier})` : ""}`);
             emitRecord(`  record:`, record);
-            console.log(current === null
-              ? "  currently: UNKNOWN (this target's current bindings couldn't be read); what this write replaces is unknown"
-              : `  currently (stored as ${current.stored}): mode=${current.mode?.mode ?? "none"}, posture=${current.posture?.mode ?? "none"}; this write replaces only the ${category} binding here`);
+            if (!current.known) {
+              console.log(`  currently: UNKNOWN (${current.reason}); what this write replaces is unknown`);
+            } else {
+              const displaced = current[category];
+              console.log(`  currently at ${current.writeTarget}, where this write lands: mode=${current.mode?.mode ?? "none"}, posture=${current.posture?.mode ?? "none"}`);
+              console.log(`  this write replaces: ${displaced ? `${displaced.mode} (${category}, ${displaced.id})` : `no ${category} binding`}; any ${category === "mode" ? "posture" : "saved mode"} there is kept`);
+            }
             console.log(`\nRe-run with --confirm to apply.`);
           }
           process.exitCode = 2;
@@ -530,8 +547,23 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         const headers: Record<string, string> = {};
         const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
-        const categoryQuery = opts.category !== undefined ? `?category=${encodeURIComponent(opts.category)}` : "";
-        const res = await client.delete<{ removed: boolean; category?: Category; remaining?: Binding | null }>(`/api/rig-mode/bindings/${scope}${qualifierPath}${categoryQuery}`, { headers });
+        // One category is removed through its own path: a daemon that predates categories has no such route, so it
+        // answers 404 and removes nothing (its plain DELETE would remove whatever binding is stored there).
+        const categoryPath = opts.category !== undefined ? `/categories/${encodeURIComponent(opts.category)}` : "";
+        let res: Awaited<ReturnType<typeof client.delete<{ removed: boolean; category?: Category; remaining?: Binding | null }>>>;
+        try {
+          res = await client.delete(`/api/rig-mode/bindings/${scope}${qualifierPath}${categoryPath}`, { headers });
+        } catch (error) {
+          if (!(categoryPath && error instanceof DaemonResponseError && error.status === 404)) throw error;
+          res = { status: 404, data: { removed: false } };
+        }
+        if (categoryPath && res.status === 404) {
+          const message = "This daemon can't remove a binding by category (it predates categories); nothing was removed.";
+          if (opts.json) console.log(JSON.stringify({ ok: false, error: "category_unsupported", removed: false, hint: message }, null, 2));
+          else console.error(message);
+          process.exitCode = 1;
+          return;
+        }
         if (res.status >= 400) {
           if (opts.json) {
             console.log(JSON.stringify({ ok: false, ...(res.data as object) }, null, 2));

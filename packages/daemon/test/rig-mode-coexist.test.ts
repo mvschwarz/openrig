@@ -203,3 +203,45 @@ describe("migration 109 on surviving rows", () => {
     expect(() => db.prepare("INSERT INTO operator_context_mode_bindings VALUES ('dup', 'rig', ?, 'human-led', '{}', 'x', 'operator')").run(rig.id)).toThrow(/UNIQUE/);
   });
 });
+
+describe("round 1: the write target a preview reads, and unset by category through its own path", () => {
+  it("?for=posture reads where a posture write lands (the canonical id), so a posture written by name shows what it displaces there", async () => {
+    const t = setup();
+    await t.put("delegated", "rig", "demo");
+    await t.put("focus", "rig", "demo");
+    const posture = await t.get("/api/rig-mode/bindings/rig/demo?for=posture");
+    expect(posture.writeTarget).toBe(`rig:${t.rig.id}`);
+    expect(posture.bindings.map((b: { mode: string }) => b.mode)).toEqual(["delegated"]);
+    // A saved mode lands as given: the name's own stored target.
+    const mode = await t.get("/api/rig-mode/bindings/rig/demo?for=mode");
+    expect(mode).toMatchObject({ writeTarget: "rig:demo", bindings: [expect.objectContaining({ mode: "focus", qualifier: "demo" })] });
+    expect(await t.get("/api/rig-mode/bindings/global_host?for=mode")).toEqual({ writeTarget: "global_host:host", bindings: [] });
+    // Without ?for, main's read is unchanged: the name's stored binding.
+    expect((await t.get("/api/rig-mode/bindings/rig/demo")).binding.mode).toBe("focus");
+  });
+
+  it("?for=posture on a target a posture write can't resolve answers as that write would: scope_unresolved", async () => {
+    const t = setup();
+    const res = await t.app.request("/api/rig-mode/bindings/rig/no-such-rig?for=posture");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "scope_unresolved" });
+    expect((await t.app.request("/api/rig-mode/bindings/rig/demo?for=other")).status).toBe(400);
+  });
+
+  it("DELETE …/categories/<category> removes exactly that category, for a qualified scope and for global_host", async () => {
+    const t = setup();
+    await t.put("focus", "rig", t.rig.id);
+    await t.put("delegated", "rig", "demo");
+    const del = (path: string) => t.app.request(path, { method: "DELETE", headers: { authorization: "Bearer isolated-operator" } });
+    expect(await (await del(`/api/rig-mode/bindings/rig/${t.rig.id}/categories/mode`)).json()).toMatchObject({ removed: true, category: "mode", remaining: { mode: "delegated" } });
+    expect(await (await del(`/api/rig-mode/bindings/rig/${t.rig.id}/categories/mode`)).json()).toEqual({ removed: false });
+    // By name: nothing of that category is stored under "demo", so it canonicalises, as the plain delete does.
+    expect(await (await del("/api/rig-mode/bindings/rig/demo/categories/posture")).json()).toMatchObject({ removed: true, category: "posture", remaining: null });
+    t.modes.setBinding("global_host", null, "desk", record("desk", "global_host"));
+    t.modes.setBinding("global_host", null, "human-led", record("human-led", "global_host"));
+    expect(await (await del("/api/rig-mode/bindings/global_host/categories/posture")).json()).toMatchObject({ removed: true, category: "posture", remaining: { mode: "desk" } });
+    expect((await del("/api/rig-mode/bindings/rig/categories/mode")).status).toBe(400);
+    expect((await del(`/api/rig-mode/bindings/rig/${t.rig.id}/categories/other`)).status).toBe(400);
+    expect((await t.app.request(`/api/rig-mode/bindings/rig/${t.rig.id}/categories/mode`, { method: "DELETE" })).status).toBe(401);
+  });
+});
