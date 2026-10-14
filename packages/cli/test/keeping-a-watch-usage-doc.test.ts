@@ -116,6 +116,28 @@ describe("keeping-a-watch: the usage warning", () => {
     expect(windows.some((w) => w.window === "five_hour" && w.level === "unknown")).toBe(true);
   });
 
+  it("another login on the same Codex account: the item with the recorded key and email is found once, with a usable reading", async () => {
+    expect(page).toContain("Codex: the one item with the recorded key and email is theirs even if its linkage is unknown; say the other login's\n"
+      + "observations are unlinked (items[].notes).");
+    // The person's login on a; the same account under another login email on c.
+    const a = await host("a");
+    const c = await host("c", { codex: { email: "other@example.com" } });
+    const hub = await host("hub", { registry: [a.entry(), c.entry()] });
+    for (const h of [a, c]) await post(h.url, "/api/provider/usage/refresh", { provider: "codex" });
+    type Item = { key: string | null; linkage: string; notes: string[];
+      observations: Array<{ row: { identity: { email?: string | null } | null; windows: Array<{ window: string; freshness: string; level: string }> } }> };
+    const { items } = JSON.parse(await run(CHECK.split(" ").slice(2), hub)) as { items: Item[] };
+    const key = "codex:account:acct-1:codex", email = "dev@example.com";
+    const carries = (g: Item, e: string) => g.observations.every((o) => o.row.identity?.email === e);
+    const pinned = items.filter((g) => g.key === key && carries(g, email));
+    expect(pinned).toHaveLength(1);
+    expect(pinned[0]!.linkage).toBe("unknown");
+    expect(pinned[0]!.notes.join("\n")).toContain("is also observed on c under another login email");
+    expect(items.filter((g) => g.key === key && g !== pinned[0]).map((g) => carries(g, "other@example.com"))).toEqual([true]);
+    const usable = pinned[0]!.observations.flatMap((o) => o.row.windows).filter((w) => w.freshness === "fresh" && w.level !== "unknown");
+    expect(usable.map((w) => w.window)).toContain("secondary");
+  });
+
   it("a field the page names by itself is the last part of a path it names in full", () => {
     const section = page.slice(page.indexOf("## A usage warning"), page.indexOf("## What not to use"));
     const tails = new Set(fieldPaths(page).map((p) => p.split(".").at(-1)!.replace("[]", "")));

@@ -175,7 +175,9 @@ accounts on every machine. Run it only when the person asks for a fresh reading 
 - **For Codex, the login email too:** `items[].observations[].row.identity.email`, shown on each machine's line in the
   plain view. The same Codex account can appear as more than one item with the same key, one per login email (or none)
   it was seen under. So on each fire, use the one item whose key matches and whose observations carry the recorded
-  email. If none or several do, you can't tell.
+  email. If none or several do, you can't tell. A Codex allowance whose login email is missing can't be pinned this
+  way, so it stays can't tell. A changed email isn't followed: if the person's login email changes, set the watch
+  again with them.
 - **The window:** `items[].observations[].row.windows[].window`. Claude's are `five_hour` and `weekly`; Codex's are
   `primary` and `secondary`, with `items[].observations[].row.windows[].durationMins` saying which is which.
 - **The threshold:** on `items[].observations[].row.windows[].remainingPercent`. It's a percentage, and no absolute
@@ -186,7 +188,7 @@ accounts on every machine. Run it only when the person asks for a fresh reading 
 
 | Field | What it tells you |
 |---|---|
-| `items[].linkage` | `single`: one machine saw it. `same`: several machines saw one allowance. Compare their observations; **never add or average them**. `conflict`: the machines' fresh observations disagree (their reset times are more than 60 s apart); every observation is kept and none is chosen. `unknown`: the same id seen under another login, or with no login email. It isn't merged, so you can't tell whether it's the person's allowance. Say so plainly. `items[].notes` says why |
+| `items[].linkage` | `single`: one machine saw it. `same`: several machines saw one allowance. Compare their observations; **never add or average them**. `conflict`: the machines' fresh observations disagree (their reset times are more than 60 s apart); every observation is kept and none is chosen. `unknown`: the same id seen under another login, or with no login email, and not merged with it. `items[].notes` says why. For Codex, the one item carrying the person's recorded key and email is still theirs: its `unknown` is about the other login's item (see the decision). Any other `unknown` item is not theirs to watch |
 | `items[].observations[].hostId`, `items[].observations[].readAt` | Which machine the observation is from, and when this daemon read it |
 | `items[].observations[].row.windows[].observedAt` | When that machine's reading was taken: the time to tell the person |
 | `items[].observations[].row.windows[].resetsAt` | When that window resets: tell the person this too |
@@ -205,10 +207,14 @@ observation of the chosen window whose `level` isn't `unknown`.
   `resetsAt`. If the linkage is `conflict`, also tell them the machines disagree, from `items[].notes`, rather than
   presenting the lowest as the reading.
 - **Not met:** every usable reading is at or above the threshold, and there is at least one.
+- **Another login on the same Codex account:** when the item matched by key and recorded email has `items[].notes`
+  saying the account is also observed under another login email (or with none), its linkage reads `unknown` on one
+  machine, or `same` on several. Use its own usable readings as above. When you tell the person, say that login's
+  observations are unlinked: not added, and not merged.
 - **Can't tell:** no usable reading: none `fresh`, or the fresh ones' `level` is `unknown`, which includes a null
-  `remainingPercent`. Also when the allowance is missing from the answer, its linkage is `unknown`, or (Codex) no item,
-  or more than one, carries both the key and the recorded email. Use the once-then-quiet unknown rule,
-  and give the reason (`freshnessReason`, `levelReason`, or the machine's `usageReason`).
+  `remainingPercent`. Also when the allowance is missing from the answer or its key is null, or (Codex) no login email
+  was recorded, or no item, or more than one, carries both the key and the recorded email. Use the once-then-quiet
+  unknown rule, and give the reason (`freshnessReason`, `levelReason`, or the machine's `usageReason`).
 
 The task body, for the person's own allowance, window and threshold:
 
@@ -221,8 +227,11 @@ Usable: a fresh observation of that window whose level isn't unknown.
 Met: a usable reading with remainingPercent below 20. Report the lowest, with its machine, observedAt and resetsAt.
 Never add machines' numbers. If the linkage is conflict, say the machines disagree (items[].notes).
 Claude: say the windows come from seats' status lines and aren't proven to be the identity's login (identityNote).
-Can't tell: no usable reading (none fresh, or level unknown: give its levelReason), the allowance missing, its linkage
-unknown, or (Codex) no item, or more than one, carries both the key and the recorded email. Give the reason.
+Codex: the one item with the recorded key and email is theirs even if its linkage is unknown; say the other login's
+observations are unlinked (items[].notes).
+Can't tell: no usable reading (none fresh, or level unknown: give its levelReason), the allowance missing or its key
+null, or (Codex) no email recorded, or no item, or more than one, carries both the key and the recorded email. Give the
+reason.
 Interval: 30m.
 Tell them: <entityId>@external (human channel), once, when met.
 Stop: after telling them once, or when they say stop.
