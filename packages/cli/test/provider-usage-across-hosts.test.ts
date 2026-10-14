@@ -331,3 +331,66 @@ describe("round 3 through the CLI", () => {
     }
   });
 });
+
+describe("round 4 through the CLI", () => {
+  const TRAP = { toString: 1, valueOf: 1 };
+  type Body = Record<string, unknown>;
+  const statusRows = (patch: (r: Body) => Body) => (p: string, b: unknown) =>
+    p === "/api/provider/status" ? { ...(b as Body), usage: (b as { usage: Body[] }).usage.map(patch) } : b;
+  const withIdentity = (provider: string, patch: (id: Body) => Body) => statusRows((r) =>
+    r["provider"] === provider && r["identity"] ? { ...r, identity: patch(r["identity"] as Body) } : r);
+
+  async function refreshBoth(h: UsageHost): Promise<void> {
+    for (const provider of ["codex", "claude"]) {
+      const res = await fetch(`${h.url}/api/provider/usage/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
+      expect(res.status).toBe(200);
+    }
+  }
+
+  it("an identity carrying another provider's key with an unprintable value: named unavailable, the rest printed, exit 0", async () => {
+    const cases: Array<[string, UsageHostOptions]> = [
+      ["codex-subscriptionType", { rewrite: withIdentity("codex", (id) => ({ ...id, subscriptionType: TRAP })) }],
+      ["codex-orgId", { rewrite: withIdentity("codex", (id) => ({ ...id, accountId: null, workspaceId: null, orgId: TRAP })) }],
+      ["codex-orgName", { rewrite: withIdentity("codex", (id) => ({ ...id, accountId: null, workspaceId: null, orgId: "org-x", orgName: TRAP })) }],
+      ["claude-planType", { rewrite: withIdentity("claude", (id) => ({ ...id, planType: TRAP })) }],
+      ["claude-accountId", { rewrite: withIdentity("claude", (id) => ({ ...id, accountId: TRAP })) }],
+      ["claude-workspaceId", { rewrite: withIdentity("claude", (id) => ({ ...id, workspaceId: TRAP })) }],
+    ];
+    const good = await host("good");
+    const bad = await Promise.all(cases.map(([id, opts]) => host(id, opts)));
+    for (const h of [good, ...bad]) await refreshBoth(h);
+    const hub = await host("hub", { registry: [good.entry(), ...bad.map((h) => h.entry())] });
+    const got = await run(["status", "--all-hosts"], hub);
+    expect([got.exitCode, got.err]).toEqual([undefined, ""]);
+    expect(got.out).toContain("    on good (read ");
+    for (const [id] of cases) expect(got.out).toContain(`  ${id}  answered · usage unavailable: this host served usage rows in a shape this daemon doesn't recognize`);
+  });
+
+  it("absent optional text reads honestly: a failure without reason or detail, on a row and a leg, and differs-from without a note", async () => {
+    const quiet = await host("quiet", {
+      rewrite: (p, b) => {
+        if (p === "/api/provider/usage/refresh") return { refresh: { at: NOW, outcome: "failed", coalesced: false } };
+        if (p !== "/api/provider/status") return b;
+        const body = b as Body;
+        return {
+          ...body,
+          usage: (body["usage"] as Body[]).map((r) => (r["provider"] === "codex" ? { ...r, lastRefresh: { at: NOW, outcome: "failed" } } : r)),
+          seatAccounts: [{
+            seatSession: "dev-qa@r", rigName: "r", runtime: "claude-code",
+            configured: { source: "default_login", home: null, homeNote: "the daemon's home" },
+            allowance: { linked: false, reason: "not linked" }, observed: { windowsSampled: true, differsFrom: ["dev-b@r"] },
+          }],
+        };
+      },
+    });
+    await refreshDirect(quiet);
+    const hub = await host("hub", { registry: [quiet.entry()] });
+    const got = await run(["status", "--all-hosts", "--refresh", "--provider", "codex"], hub);
+    const text = got.out + "\n" + got.err;
+    expect(text).not.toContain("undefined");
+    expect(got.err).toBe("refresh codex on quiet failed: no reason given");
+    expect(got.out).toContain(`    refresh from here (codex) failed at ${NOW}: no reason given; this host's earlier observations are kept`);
+    expect(got.out).toContain(`refresh failed at ${NOW}: no reason given; last reading kept, marked old`);
+    expect(got.out).toContain("    observed: differs from dev-b@r\n");
+  });
+});

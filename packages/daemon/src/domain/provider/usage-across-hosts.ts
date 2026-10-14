@@ -297,6 +297,19 @@ const codexIdentity = record({
 const claudeIdentity = record({
   orgId: nullable(str), limitId: str, email: nullable(str), orgName: nullable(str), subscriptionType: nullable(str), source: str,
 });
+/** The views' identity label reads keys of both providers' identities, whatever the row's provider, so every one of
+ *  them is checked on every identity: absent, or the type the label expects. */
+const anyIdentityKeys = record({
+  accountId: optional(nullable(str)),
+  workspaceId: optional(nullable(str)),
+  orgId: optional(nullable(str)),
+  orgName: optional(nullable(str)),
+  email: optional(nullable(str)),
+  limitId: optional(str),
+  planType: optional(nullable(str)),
+  subscriptionType: optional(nullable(str)),
+  source: optional(str),
+});
 const usageRowFields = {
   observedAt: nullable(str),
   seats: optional(str),
@@ -315,7 +328,7 @@ const usageRowFields = {
 export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
   if (!isRecord(v) || (v["provider"] !== "codex" && v["provider"] !== "claude")) return false;
   const identity = v["provider"] === "codex" ? codexIdentity : claudeIdentity;
-  return nullable(identity)(v["identity"]) && record(usageRowFields)(v);
+  return nullable((id) => identity(id) && anyIdentityKeys(id))(v["identity"]) && record(usageRowFields)(v);
 }
 
 const seatConfiguration: Check = (v) =>

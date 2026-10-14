@@ -169,14 +169,25 @@ afterEach(async () => {
   await Promise.all(open.splice(0).map((h) => h.close()));
 });
 
+/** The answer's body, or its raw text when it isn't JSON (a 500's "Internal Server Error"), so a test's status
+ *  assertion is what fails, not the parse. */
+async function bodyOf<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return { unparsed: text } as T;
+  }
+}
+
 async function view(hub: UsageHost, query = ""): Promise<{ status: number; body: UsageAcrossHosts & { error?: string; message?: string } }> {
   const res = await fetch(`${hub.url}/api/provider/usage/hosts${query}`);
-  return { status: res.status, body: await res.json() };
+  return { status: res.status, body: await bodyOf(res) };
 }
 
 async function refreshVia(hub: UsageHost, body: Record<string, unknown>) {
   const res = await fetch(`${hub.url}/api/provider/usage/hosts/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  return { status: res.status, body: await res.json() as { refresh: Array<Record<string, unknown>>; view: UsageAcrossHosts; error?: string } };
+  return { status: res.status, body: await bodyOf<{ refresh: Array<Record<string, unknown>>; view: UsageAcrossHosts; error?: string }>(res) };
 }
 
 async function refreshDirect(h: UsageHost, provider: "codex" | "claude" = "codex") {
@@ -657,5 +668,45 @@ describe("round 3: every rendered field checked, failures kept to their host, a 
     const groups = groupUsageAcrossHosts([obs("a", codexRow("acct-1", "")), obs("b", codexRow("acct-1", ""))]);
     expect(groups.map((g) => [g.linkage, g.observations.map((o) => o.hostId)])).toEqual([["unknown", ["a"]], ["unknown", ["b"]]]);
     expect(groups[0]!.notes[0]).toContain("is also observed on b; no login email was reported here;");
+  });
+});
+
+describe("round 4: the identity keys the label reads, from either provider", () => {
+  const TRAP = { toString: 1, valueOf: 1 };
+  type Body = Record<string, unknown>;
+  const withIdentity = (provider: "codex" | "claude", patch: (id: Body) => Body) => (p: string, b: unknown) =>
+    p === "/api/provider/status"
+      ? { ...(b as Body), usage: (b as { usage: Body[] }).usage.map((r) => (r["provider"] === provider && r["identity"] ? { ...r, identity: patch(r["identity"] as Body) } : r)) }
+      : b;
+  const CASES: Array<[string, "codex" | "claude", (id: Body) => Body]> = [
+    ["codex-subscriptionType", "codex", (id) => ({ ...id, subscriptionType: TRAP })],
+    ["codex-orgId", "codex", (id) => ({ ...id, accountId: null, workspaceId: null, orgId: TRAP })],
+    ["codex-orgName", "codex", (id) => ({ ...id, accountId: null, workspaceId: null, orgId: "org-x", orgName: TRAP })],
+    ["claude-planType", "claude", (id) => ({ ...id, planType: TRAP })],
+    ["claude-accountId", "claude", (id) => ({ ...id, accountId: TRAP })],
+    ["claude-workspaceId", "claude", (id) => ({ ...id, workspaceId: TRAP })],
+  ];
+
+  it("an identity carrying another provider's key with an unprintable value: that host unavailable, this host and a healthy one served", async () => {
+    const good = await host("good");
+    const bad = await Promise.all(CASES.map(([id, provider, patch]) => host(id, { rewrite: withIdentity(provider, patch) })));
+    for (const h of [good, ...bad]) {
+      await refreshDirect(h, "codex");
+      await refreshDirect(h, "claude");
+    }
+    const hub = await host("hub", { registry: [good.entry(), ...bad.map((h) => h.entry())] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.map((h) => [h.hostId, h.usage, h.usageReason ?? null])).toEqual([
+      ["local", "served", null], ["good", "served", null],
+      ...CASES.map(([id]) => [id, "unavailable", "this host served usage rows in a shape this daemon doesn't recognize"]),
+    ]);
+  });
+
+  it("another provider's key with a value of the right type is served (absent or typed is fine)", async () => {
+    const extra = await host("extra", { rewrite: withIdentity("codex", (id) => ({ ...id, orgName: null, subscriptionType: "team" })) });
+    await refreshDirect(extra, "codex");
+    const hub = await host("hub", { registry: [extra.entry()] });
+    expect((await view(hub)).body.hosts.find((h) => h.hostId === "extra")).toMatchObject({ usage: "served" });
   });
 });

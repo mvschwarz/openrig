@@ -117,6 +117,12 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   // Slice 01 — each seat's configured account and its source (present only while provider.usage_windows is on).
   // Configuration, never an observed account: the allowance stays unlinked, with the reason.
+  // A failure's reason and detail as served. Both are optional in the read model: an absent reason reads "no reason
+  // given" and an absent detail drops its clause, never "undefined". When both are served the text is unchanged.
+  function failureText(f: Record<string, unknown>): string {
+    return `${f["reason"] ?? "no reason given"}${f["detail"] !== undefined ? ` (${f["detail"]})` : ""}`;
+  }
+
   function renderSeatAccounts(rows: Array<Record<string, unknown>>, where = ""): void {
     console.log(`SEATS${where} (configured account; not proof of the login a running session uses)`);
     for (const r of rows) {
@@ -132,7 +138,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       for (const note of (r["registryNotes"] as string[] | undefined) ?? []) console.log(`    ${note}`);
       const observed = r["observed"] as Record<string, unknown> | undefined;
       const differs = (observed?.["differsFrom"] as string[] | undefined) ?? [];
-      if (differs.length) console.log(`    observed: differs from ${differs.join(", ")} (${observed?.["note"]})`);
+      if (differs.length) console.log(`    observed: differs from ${differs.join(", ")}${observed?.["note"] !== undefined ? ` (${observed["note"]})` : ""}`);
       else if (observed?.["windowsSampled"] === true) console.log(`    observed: this seat's status line last reported windows at ${observed["lastSampledAt"] ?? "an unknown time"}`);
       else if (observed?.["windowsSampled"] === false) console.log("    observed: no status-line windows from this seat yet");
       else if (observed?.["note"]) console.log(`    observed: ${observed["note"]}`);
@@ -199,8 +205,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (last?.["outcome"] === "failed") {
       // Claude's refresh reads identity only; its windows keep coming from the seats' samples.
       console.log(r["provider"] === "claude"
-        ? `${pad}  identity refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); the identity shown is from the last refresh that worked, if any`
-        : `${pad}  refresh failed at ${last["at"]}: ${last["reason"]} (${last["detail"]}); last reading kept, marked old`);
+        ? `${pad}  identity refresh failed at ${last["at"]}: ${failureText(last)}; the identity shown is from the last refresh that worked, if any`
+        : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
     }
     console.log(`${pad}  current availability: ${r["currentAvailability"]}`);
   }
@@ -218,7 +224,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const last = (h["lastRefresh"] ?? {}) as Record<string, Record<string, unknown>>;
       for (const leg of Object.values(last)) {
         console.log(leg["outcome"] === "failed"
-          ? `    refresh from here (${leg["provider"]}) failed at ${leg["at"]}: ${leg["reason"]} (${leg["detail"]}); this host's earlier observations are kept`
+          ? `    refresh from here (${leg["provider"]}) failed at ${leg["at"]}: ${failureText(leg)}; this host's earlier observations are kept`
           : `    refresh from here (${leg["provider"]}) answered at ${leg["at"]}`);
       }
     }
@@ -286,7 +292,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       if (handleHttpError(answer, "refresh usage across hosts")) return;
       for (const leg of (answer.data["refresh"] as Array<Record<string, unknown>> | undefined) ?? []) {
         if (leg["outcome"] !== "failed") continue;
-        const line = `refresh ${leg["provider"]} on ${leg["hostId"]} failed: ${leg["reason"]} (${leg["detail"]})`;
+        const line = `refresh ${leg["provider"]} on ${leg["hostId"]} failed: ${failureText(leg)}`;
         if (opts.provider === undefined && leg["provider"] === "claude" && CLAUDE_NOT_APPLICABLE.has(String(leg["reason"]))) {
           console.error(`note: ${line}; exit unaffected (name --provider claude to require it)`);
         } else {
