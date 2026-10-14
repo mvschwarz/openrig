@@ -152,6 +152,21 @@ describe("OMP v2 frame decoder", () => {
     expect(feed(decoder, chunk(c, "rpc-3")).at(-1)).toEqual({ frame: c });
   });
 
+  it("ends the skipping of a rejected sequence at the next plain frame (round 2, R1-L1)", () => {
+    const decoder = new OmpFrameDecoder(64 * MiB);
+    const frames = chunk(entriesReply("x", history(2 * MiB)));
+    const bad = frames.slice(0, 3).map((frame) => ({ ...frame, chunkId: 7 }));
+    // Three malformed chunks, a plain frame, three more: one error per group, not one per chunk and not silence.
+    const results = feed(decoder, [...bad, { type: "notice", message: "between" }, ...bad]);
+    expect(results.filter((result) => "dropped" in result)).toHaveLength(2);
+    // A sequence that reuses a rejected id after a plain frame decodes.
+    const d2 = new OmpFrameDecoder(64 * MiB);
+    feed(d2, [{ ...frames[0]!, data: "!!!!" }]);
+    expect(d2.push({ type: "notice" })).toEqual({ frame: { type: "notice" } });
+    const again = entriesReply("again", history(2 * MiB));
+    expect(feed(d2, chunk(again, "rpc-1")).at(-1)).toEqual({ frame: again });
+  });
+
   it("negotiates only when ready advertises v2, never above OMP's documented 64 MiB", () => {
     expect(ompProtocolV2Limit(READY_V2)).toBe(64 * MiB);
     expect(ompProtocolV2Limit({ ...READY_V2, maxReassembledFrameBytes: 8 * MiB })).toBe(8 * MiB);
@@ -278,6 +293,26 @@ describe("OMP runner over protocol v2 (#1275)", () => {
       line({ type: "agent_end", isTerminal: true });
       for (const frame of chunk(entriesReply("pi-runner-cursor-refresh", history(2 * MiB)), "rpc-2")) line(frame);
       expect(cursor(), kind).toBe(history(2 * MiB).at(-1)!.id);
+    }
+  });
+
+  it("a blank or whitespace line interrupts a pending sequence explicitly, and is ignored otherwise (round 2, R1-F1)", () => {
+    const frames = chunk(entriesReply("pi-runner-catch-up", history(2 * MiB).slice(1)));
+    for (const blank of ["", "   \t "]) {
+      const { core, line, cursor, mirror } = negotiated();
+      const mark = mirror.length;
+      core.handlePiLine(blank); // nothing pending: ignored, as on main
+      expect(mirror.slice(mark)).toEqual([]);
+      line(frames[0]);
+      core.handlePiLine(blank);
+      for (const frame of frames.slice(1)) line(frame);
+      expect(mirror.slice(mark)).toEqual([
+        "[omp-runner] ERROR rpc frame: chunk sequence rpc-1 was interrupted by a blank line; the chunked frame was dropped",
+      ]);
+      expect(cursor()).toBe("e-1");
+      line({ type: "agent_end", isTerminal: true });
+      for (const frame of chunk(entriesReply("pi-runner-cursor-refresh", history(2 * MiB)), "rpc-2")) line(frame);
+      expect(cursor()).toBe(history(2 * MiB).at(-1)!.id);
     }
   });
 

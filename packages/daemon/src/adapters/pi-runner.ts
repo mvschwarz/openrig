@@ -466,7 +466,11 @@ export class RunnerCore {
       }
     }
     const line = rawLine.trim();
-    if (!line) return;
+    if (!line) {
+      // Ignored as before, but a blank line still interrupts a pending v2 sequence: OMP never writes one inside it.
+      this.reportDroppedFrame(this.frameDecoder?.interrupt("a blank line"));
+      return;
+    }
     let record: Record<string, unknown>;
     try {
       const parsed = JSON.parse(line);

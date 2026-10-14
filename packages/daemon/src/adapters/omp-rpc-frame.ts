@@ -43,7 +43,8 @@ interface Pending { chunkId: string; count: number; byteLength: number; nextInde
  *  than `limitBytes` of it, and checks each chunk's declared length against the limit before keeping any of it. */
 export class OmpFrameDecoder {
   private pending: Pending | null = null;
-  /** Sequences already reported as rejected (at most two: an interleaving pair); their later chunks are skipped. */
+  /** Sequences already reported as rejected (at most two: an interleaving pair); their later chunks are skipped until
+   *  a frame or line outside any sequence arrives. */
   private readonly rejected = new Set<string>();
   /** A chunk without a usable chunkId was rejected: later chunks without one are skipped, not reported again. */
   private rejectedAnonymous = false;
@@ -57,7 +58,7 @@ export class OmpFrameDecoder {
 
   /** A stdout line that isn't a frame (not JSON, or not an object) arrived: a pending sequence is interrupted. */
   interrupt(what: string): string | null {
-    if (!this.pending) return null;
+    if (!this.pending) { this.endSkipping(); return null; }
     const { chunkId } = this.pending;
     this.drop(chunkId);
     return `chunk sequence ${chunkId} was interrupted by ${what}`;
@@ -74,6 +75,13 @@ export class OmpFrameDecoder {
     return interrupted && interrupted !== chunkId ? `${reason}; chunk sequence ${interrupted} was interrupted by it` : reason;
   }
 
+  /** A frame or line outside any sequence ends the skipping of a rejected one: OMP writes each sequence
+   *  uninterrupted, so its chunks can't continue past it. A stray late chunk then gets one "index 0" error. */
+  private endSkipping(): void {
+    this.rejected.clear();
+    this.rejectedAnonymous = false;
+  }
+
   private drop(chunkId?: string): void {
     this.pending = null;
     this.rejected.clear();
@@ -83,7 +91,7 @@ export class OmpFrameDecoder {
 
   push(value: Record<string, unknown>): OmpFrameResult {
     if (value.type !== "rpc_chunk") {
-      if (!this.pending) return { frame: value };
+      if (!this.pending) { this.endSkipping(); return { frame: value }; }
       const { chunkId } = this.pending;
       this.drop(chunkId);
       return { frame: value, dropped: `chunk sequence ${chunkId} was interrupted by a ${String(value.type)} frame` };
