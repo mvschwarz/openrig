@@ -1,3 +1,4 @@
+import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
 // OPR.0.3.4.4 — read-only restore plan preview.
 //
 // `rig up --existing <rig> --plan` advertised "preview without executing" but
@@ -232,13 +233,19 @@ export function buildRestorePlanPreview(
     : deriveRehydrateSessionIdByNode(sessionRows, rig.nodes.map((n) => n.id), recorded);
   const nodes: RestorePlanPreviewNode[] = rig.nodes.map((node) => {
     const freshRequested = freshLogicalIds?.includes(node.logicalId) ?? false;
+    const savedNodeId = snapshot?.data.nodes?.find(saved => saved.logicalId === node.logicalId)?.id ?? node.id;
     const resolution = snapshot
-      ? resolveActiveSnapshotSession(snapshot.data, node.id)
+      ? resolveActiveSnapshotSession(snapshot.data, savedNodeId)
       : sessionRows.some((row) => row.nodeId === node.id)
         ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
         : { kind: "none" as const };
-    const { intendedAction, reason } = intendedActionFor(resolution, freshRequested,
-      { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, node.id) });
+    const runtimeError = resolution.kind !== "ambiguous"
+      ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[savedNodeId]?.runtime)
+      : null;
+    const { intendedAction, reason } = runtimeError
+      ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
+      : intendedActionFor(resolution, freshRequested,
+        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId) });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;
@@ -247,16 +254,16 @@ export function buildRestorePlanPreview(
     return {
       logicalId: node.logicalId,
       occupantSessionId: occupant?.id ?? null,
-      hasHistory: sessionRows.some((row) => row.nodeId === node.id),
+      hasHistory: sessionRows.some((row) => row.nodeId === savedNodeId),
       intendedAction,
       ...(reason ? { reason } : {}),
       tokenState,
       ...(provenance ? { provenance } : {}),
       ...(lastVerified ? { lastVerified } : {}),
       // no resumable token → restore needs an explicit --fresh (never
-      // silent); a broken relation is NOT fresh-able — A1 ambiguity is
-      // unrecoverable-until-resolved, so --fresh cannot be the remedy.
-      freshRequired: resolution.kind === "ambiguous" ? false : tokenState === "missing",
+      // silent); runtime mismatches and broken relations cannot be resolved
+      // by a fresh request, so --fresh must not be suggested as their remedy.
+      freshRequired: runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing",
       ...(runtimePrompt ? { runtimePrompt } : {}),
     };
   });

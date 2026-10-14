@@ -130,7 +130,7 @@ function windowRow(p: Pick, now: string, superseded: boolean): UsageWindowRow {
   };
 }
 
-const identityKey = (i: ClaudeUsageIdentity): string | null =>
+export const claudeUsageIdentityKey = (i: ClaudeUsageIdentity): string | null =>
   (i.orgId !== null && i.email !== null ? `claude:org:${i.orgId}:email:${i.email}:${i.limitId}` : null);
 
 export function claudeIdentityFromAuth(auth: ClaudeAuthAnswer["auth"]): ClaudeUsageIdentity {
@@ -195,7 +195,7 @@ export class ClaudeUsageWindows {
       return this.lastRefresh;
     }
     const identity = claudeIdentityFromAuth(outcome.auth);
-    const key = identityKey(identity);
+    const key = claudeUsageIdentityKey(identity);
     let picks: Pick[] = [];
     try {
       picks = pickClaudeWindows(this.deps.listSamples(), outcome.observedAt);

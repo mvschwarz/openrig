@@ -164,6 +164,13 @@ function isNoServerError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("no server running");
 }
 
+/** The error tmux reported, without the stdout an exec error carries: in a chain that stdout is the earlier panes'
+ *  text, which an agent controls. Errors that kept no stderr classify on their message. */
+function tmuxReportedError(err: unknown): unknown {
+  const stderr = (err as { execStderr?: unknown } | null)?.execStderr;
+  return typeof stderr === "string" ? new Error(stderr) : err;
+}
+
 function isSessionAbsenceError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message.toLowerCase();
@@ -228,11 +235,11 @@ function parentSessionEnvWarning(target: string, err: unknown): string {
 /** Shell-quote a string using single quotes (POSIX-safe). */
 /** One pane's text from a batched capture, with the time its chunk was read (#309 review). `text` is null for a
  *  session that is gone or an empty capture. */
-export interface PaneCapture { text: string | null; capturedAt: Date }
+export interface PaneCapture { text: string | null; capturedAt: Date; /** The listing lacked the session. */ missing?: true }
 
 /** The most sessions one batched capture chains (#308). Not a byte bound: a chunk whose output overflows exec's buffer
  *  fails and is split in half. */
-const CAPTURE_BATCH = 24;
+export const CAPTURE_BATCH = 24;
 
 function shellQuote(s: string): string {
   // Replace each ' with '"'"' (end quote, double-quote the apostrophe, resume quote)
@@ -1123,35 +1130,27 @@ export class TmuxAdapter {
 
   /** Capture pane content (last N lines). Returns null if unavailable. */
   /**
-   * Capture many sessions' panes with a few tmux calls instead of one per session (#308). One `list-sessions` says
-   * which targets exist: a missing one maps to null (as a failed per-target capture) without a fork. The live ones
-   * are captured in chunks of CAPTURE_BATCH chained commands (a `display-message` marker, then `capture-pane`), each
-   * pane's output delimited by a marker unique to the call, so the text equals what `capturePaneContent` returns.
-   * Targets are exact (`=<name>:`): no prefix match, and a name with a "." still resolves. tmux stops a chain at its
-   * first failing command, so a chunk that fails is split in half and retried (an oversized output, or a session gone
-   * since the listing); a single session that still fails is left OUT of the map, and the caller reads it per target.
-   * Null when tmux can't be listed at all. Each entry carries the time its own chunk was read (`capturedAt`), so a
-   * slow later chunk can't make an earlier capture look fresh.
+   * Capture many sessions' panes with a few tmux calls instead of one per session (#308). A `list-sessions` runs next
+   * to the first chained call and is read only when a chain fails: a target it lacks maps to null (as a failed
+   * per-target capture) without a fork. The targets are captured in chunks of CAPTURE_BATCH chained commands (a
+   * `display-message` marker, then `capture-pane`), each pane's output delimited by a marker unique to the call, so the
+   * text equals what `capturePaneContent` returns. Targets are exact (`=<name>:`): no prefix match, and a name with a
+   * "." still resolves. tmux stops a chain at its first failing command, so a failed chunk drops the targets the
+   * listing lacks (`missing`) and retries, or is split in half (an oversized output, or a session gone since the
+   * listing); a single session that still fails is left OUT of the map, and the caller reads it per target. A server
+   * gone since the listing maps the chunk to null without a retry. Any other chain error leaves the chunk out, so the
+   * caller reads each pane per target, as an unbatched read does. Null when a chain fails because the server is gone
+   * or its socket can't be reached, and tmux can't be listed; a chain that fails for another reason while the listing
+   * fails too leaves the chunk to per-target reads. Each entry carries the time its own chunk was read (`capturedAt`), so a slow later
+   * chunk can't make an earlier capture look fresh.
    */
   async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date()): Promise<Map<string, PaneCapture> | null> {
-    let live: Set<string>;
-    try {
-      const listing = await this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'");
-      live = new Set(listing.split(/\r?\n/).filter(Boolean));
-    } catch {
-      return null;
-    }
+    const listing = this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'")
+      .then((output) => new Set(output.split(/\r?\n/).filter(Boolean)), () => null);
     const out = new Map<string, PaneCapture>();
-    const listedAt = now();
-    const present: string[] = [];
-    for (const t of new Set(targets)) {
-      if (live.has(t)) present.push(t);
-      else out.set(t, { text: null, capturedAt: listedAt });
-    }
-    // A chunk that fails is split in half and retried, down to one session: its output overflowed exec's buffer (wide,
-    // colour-dense panes: each capture is the visible pane plus the requested history) or a session vanished since
-    // the listing. A single session that still fails is left out: the caller reads it per target.
-    /** Capture one chunk with a single chained tmux call into `out`; on failure, split it in half and retry each half. */
+    let unlisted = false;
+    /** Capture one chunk with a single chained tmux call into `out`; on failure, retry it without the unlisted targets
+     *  or split it in half. */
     const captureChunk = async (chunk: string[]): Promise<void> => {
       const nonce = randomUUID().replace(/-/g, "");
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
@@ -1167,11 +1166,39 @@ export class TmuxAdapter {
       try {
         output = await this.run(argv, legacy);
         capturedAt = now(); // when THIS chunk's panes were read, not when the sweep ends
-      } catch {
-        if (chunk.length > 1) {
+      } catch (err) {
+        const live = await listing;
+        if (!live) {
+          // A failed listing doesn't show the server is gone; the chain's own error does.
+          const cause = tmuxReportedError(err);
+          if (isNoServerError(cause) || isTmuxTransportAbsentError(cause)) unlisted = true;
+          return;
+        }
+        // The listing answered, so the server was up: the targets it lacks are dropped first.
+        const listedAt = now();
+        const present: string[] = [];
+        for (const t of chunk) {
+          if (live.has(t)) present.push(t);
+          else out.set(t, { text: null, capturedAt: listedAt, missing: true });
+        }
+        if (present.length < chunk.length) {
+          if (present.length) await captureChunk(present);
+          return;
+        }
+        const cause = tmuxReportedError(err);
+        // Every half would fail the same way: the server is gone.
+        if (isNoServerError(cause) || isTmuxTransportAbsentError(cause)) {
+          for (const t of chunk) out.set(t, { text: null, capturedAt: listedAt });
+          return;
+        }
+        // Halving helps only an output that overflowed exec's buffer (wide, colour-dense panes) or a session that
+        // vanished since the listing. Any other error would fail every half, so the chunk is left to per-target reads.
+        // Node's overflow error is the message's first line; pane text follows it.
+        if (!/^.*maxBuffer length exceeded/.test((err as Error).message) && !isSessionAbsenceError(cause) && !isPaneAbsenceError(cause)) {
+          return;
+        } else if (chunk.length > 1) {
           const half = Math.ceil(chunk.length / 2);
-          await captureChunk(chunk.slice(0, half));
-          await captureChunk(chunk.slice(half));
+          await Promise.all([captureChunk(chunk.slice(0, half)), captureChunk(chunk.slice(half))]);
         }
         return; // a single session that failed: read per target by the caller
       }
@@ -1196,8 +1223,9 @@ export class TmuxAdapter {
         out.set(t, { text: text === "" ? null : text, capturedAt });
       });
     };
-    for (let i = 0; i < present.length; i += CAPTURE_BATCH) await captureChunk(present.slice(i, i + CAPTURE_BATCH));
-    return out;
+    const unique = [...new Set(targets)];
+    for (let i = 0; i < unique.length && !unlisted; i += CAPTURE_BATCH) await captureChunk(unique.slice(i, i + CAPTURE_BATCH));
+    return unlisted && out.size === 0 ? null : out;
   }
 
   async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> {
