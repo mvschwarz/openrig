@@ -486,6 +486,7 @@ async function runCrossHostWhoami(
   if (opts.session !== undefined) argv.push("--session", opts.session);
   if (opts.json) argv.push("--json");
   if (opts.allPeers) argv.push("--all-peers");
+  if (opts.full || opts.verbose) argv.push("--full");
 
   const result = await runner(host, argv);
 
