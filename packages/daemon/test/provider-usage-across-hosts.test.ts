@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  BEARER_REDACTED,
   groupUsageAcrossHosts,
   remoteRefreshLeg,
   UsageRefreshLegs,
@@ -14,7 +15,7 @@ import {
 } from "../src/domain/provider/usage-across-hosts.js";
 import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import type { ProviderUsageAllowance, UsageWindowRow } from "../src/domain/provider/provider-types.js";
-import { closedPortUrl, UsageHost, type UsageHostOptions } from "./helpers/usage-hosts-harness.js";
+import { closedPortUrl, redirectingRelay, UsageHost, type UsageHostOptions } from "./helpers/usage-hosts-harness.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
 
@@ -85,6 +86,22 @@ describe("the grouping rule", () => {
     expect(groups[0]!.notes[0]).toBe("the same Codex account acct-1, bucket codex is also observed on b under another login email; the source can't tell "
       + "one allowance from a workspace whose members have their own limits, so these observations are not merged");
     expect(groups[1]!.notes[0]).toContain("is also observed on a under another login email");
+  });
+
+  it("a missing Codex login email links to nothing: by account id, by workspace id, and beside a reported email", () => {
+    const byWorkspace = (email: string | null): ProviderUsageAllowance => {
+      const row = codexRow(null, email);
+      return { ...row, identity: { ...(row.identity as object), accountId: null, workspaceId: "ws-1", source: "account/read workspace routing" } as never };
+    };
+    for (const [a, b] of [[codexRow("acct-1", null), codexRow("acct-1", null)], [byWorkspace(null), byWorkspace(null)]] as const) {
+      const groups = groupUsageAcrossHosts([obs("a", a), obs("b", b)]);
+      expect(groups.map((g) => [g.linkage, g.observations.map((o) => o.hostId)])).toEqual([["unknown", ["a"]], ["unknown", ["b"]]]);
+      expect(groups[0]!.notes[0]).toMatch(/^the same Codex (account acct-1|workspace ws-1), bucket codex is also observed on b; no login email was reported here; /);
+    }
+    const mixed = groupUsageAcrossHosts([obs("a", codexRow("acct-1", "dev@example.com")), obs("b", codexRow("acct-1", null))]);
+    expect(mixed.map((g) => [g.linkage, g.observations.map((o) => o.hostId)])).toEqual([["unknown", ["a"]], ["unknown", ["b"]]]);
+    expect(mixed.find((g) => g.observations[0]!.hostId === "a")!.notes[0]).toContain("is also observed on b under another login email or with none reported;");
+    expect(mixed.find((g) => g.observations[0]!.hostId === "b")!.notes[0]).toContain("is also observed on a; no login email was reported here;");
   });
 
   it("the same Claude email in two organisations is two allowances", () => {
@@ -372,6 +389,119 @@ describe("POST /api/provider/usage/hosts/refresh", () => {
     const hub = await host("hub", { registry: [] });
     expect((await refreshVia(hub, { provider: "gemini" })).status).toBe(400);
     expect((await refreshVia(hub, { provider: "codex", hosts: "a" })).status).toBe(400);
+    expect((await refreshVia(hub, { provider: "codex", hosts: [] })).body).toEqual({ error: "hosts must be a non-empty array of host ids" });
+    expect((await refreshVia(hub, { providers: [] })).status).toBe(400);
+    expect((await refreshVia(hub, { providers: ["codex", "gemini"] })).status).toBe(400);
     expect((await refreshVia(hub, { provider: "codex", hosts: ["nope"] })).body).toEqual({ error: "unknown host ids: nope" });
+  });
+});
+
+describe("round 2: linkage evidence, a partial answer, and what a host can send back", () => {
+  it("F1 through the served route: two hosts with the same Codex account and no login email stay apart as unknown", async () => {
+    const a = await host("a", { now: () => NOW, codex: { email: null } });
+    const b = await host("b", { now: () => NOW, codex: { email: null } });
+    const hub = await host("hub", { registry: [a.entry(), b.entry()] });
+    await refreshDirect(a);
+    await refreshDirect(b);
+    const groups = groupFor((await view(hub)).body, "codex:account:acct-1:codex");
+    expect(groups.map((g) => [g.linkage, g.observations.map((o) => o.hostId)])).toEqual([["unknown", ["a"]], ["unknown", ["b"]]]);
+    expect(groups[0]!.notes[0]).toContain("is also observed on b; no login email was reported here;");
+  });
+
+  it("F2: past its deadline the view answers with what it has, naming each host it didn't hear from; the refresh answers with the same view and every provider's legs", async () => {
+    const slow = await host("slow", { slowReadMs: 400 });
+    const hub = await host("hub", {
+      registry: Array.from({ length: 6 }, (_, i) => slow.entry({ id: `slow${i + 1}` })),
+      routes: { usageAcrossHosts: { viewDeadlineMs: 600 } },
+    });
+    const started = Date.now();
+    const { status, body } = await view(hub);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(status).toBe(200);
+    expect(body.hosts.map((h) => [h.hostId, h.status, h.usage, h.usageReason ?? null])).toEqual([
+      ["local", "ok", "served", null],
+      ...[1, 2, 3, 4].map((i) => [`slow${i}`, "ok", "served", null]),
+      ...[5, 6].map((i) => [`slow${i}`, "unreachable", "unavailable", "not heard from within the view's 0.6 s"]),
+    ]);
+    const refreshed = await refreshVia(hub, { providers: ["codex", "claude"] });
+    expect(refreshed.status).toBe(200);
+    expect(new Set(refreshed.body.refresh.map((l) => `${l["hostId"]}/${l["provider"]}`)).size).toBe(14);
+    expect(refreshed.body.view.hosts.filter((h) => h.usageReason === "not heard from within the view's 0.6 s").map((h) => h.hostId)).toEqual(["slow5", "slow6"]);
+  });
+
+  it("F3: a host serving a malformed window or identity is unavailable with the reason; the others are served", async () => {
+    const good = await host("good");
+    const nullWindow = await host("nullwin", { rewrite: (p, b) => p === "/api/provider/status"
+      ? { ...(b as object), usage: ((b as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, windows: [null] })) } : b });
+    const emptyIdentity = await host("noid", { rewrite: (p, b) => p === "/api/provider/status"
+      ? { ...(b as object), usage: ((b as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, identity: {} })) } : b });
+    const hub = await host("hub", { registry: [good.entry(), nullWindow.entry(), emptyIdentity.entry()] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.map((h) => [h.hostId, h.usage, h.usageReason ?? null])).toEqual([
+      ["local", "served", null], ["good", "served", null],
+      ["nullwin", "unavailable", "this host served usage rows in a shape this daemon doesn't recognize"],
+      ["noid", "unavailable", "this host served usage rows in a shape this daemon doesn't recognize"],
+    ]);
+    expect(body.items.flatMap((g) => g.observations.map((o) => o.hostId)).sort()).toEqual(["good", "good", "local", "local"]);
+  });
+
+  it("F4: a host echoing its configured bearer in a row or a refresh detail has it replaced, in the answer and the kept record", async () => {
+    const marker = "SYNTHETIC-BEARER-MARKER-7f3a9c";
+    process.env["XHOST_MARKER_BEARER"] = marker;
+    try {
+      const echo = await host("echo", {
+        rewrite: (p, b) => {
+          if (p === "/api/provider/status") {
+            return { ...(b as object), usage: ((b as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, identityNote: `seen ${marker} here`, [`k-${marker}`]: 1 })) };
+          }
+          if (p === "/api/provider/usage/refresh") return { refresh: { at: NOW, outcome: "failed", reason: "rpc_error", detail: `token was ${marker}`, coalesced: false } };
+          return b;
+        },
+      });
+      const hub = await host("hub", { registry: [echo.entry({ bearer_env: "XHOST_MARKER_BEARER" } as never)] });
+      const first = JSON.stringify((await view(hub)).body);
+      const refreshed = JSON.stringify((await refreshVia(hub, { provider: "codex" })).body);
+      const later = (await view(hub)).body;
+      for (const text of [first, refreshed, JSON.stringify(later)]) expect(text).not.toContain(marker);
+      expect(first).toContain(BEARER_REDACTED);
+      expect(later.hosts.find((h) => h.hostId === "echo")!.lastRefresh!.codex).toMatchObject({ outcome: "failed", reason: "rpc_error", detail: BEARER_REDACTED });
+    } finally {
+      delete process.env["XHOST_MARKER_BEARER"];
+    }
+  });
+
+  it("F5: an answer over the byte bound is not read further; that host is unavailable, or its leg failed, and the rest are served", async () => {
+    const big = "x".repeat(2 * 1024 * 1024);
+    const good = await host("good");
+    const huge = await host("huge", {
+      rewrite: (p, b) => p === "/api/provider/status" ? { ...(b as object), padding: big }
+        : p === "/api/provider/usage/refresh" ? { ...(b as object), padding: big } : b,
+    });
+    const hub = await host("hub", { registry: [good.entry(), huge.entry()] });
+    const { body } = await view(hub);
+    expect(body.hosts.map((h) => [h.hostId, h.status, h.usage, h.usageReason ?? null])).toEqual([
+      ["local", "ok", "served", null], ["good", "ok", "served", null], ["huge", "ok", "unavailable", "answer larger than 1048576 bytes"],
+    ]);
+    const leg = (await refreshVia(hub, { provider: "codex" })).body.refresh.find((l) => l["hostId"] === "huge");
+    expect(leg).toMatchObject({ outcome: "failed", reason: "too_large", detail: "answer larger than 1048576 bytes" });
+  });
+
+  it("F6: a registered host's redirect is not followed, for the view or the refresh; the other service sees nothing", async () => {
+    const target = await host("target");
+    const relay = await redirectingRelay(target.url);
+    try {
+      const hub = await host("hub", { registry: [{ id: "relay", transport: "http", url: relay.url }] });
+      const { body } = await view(hub);
+      expect(body.hosts.find((h) => h.hostId === "relay")).toMatchObject({ status: "ok", usage: "unavailable", usageReason: "redirected (HTTP 307); not followed" });
+      const leg = (await refreshVia(hub, { provider: "codex" })).body.refresh.find((l) => l["hostId"] === "relay");
+      expect(leg).toMatchObject({ outcome: "failed", reason: "redirected", detail: "redirected (HTTP 307); not followed" });
+      expect(JSON.stringify(body)).not.toContain(target.url);
+      expect(relay.hits.length).toBeGreaterThan(0);
+      expect(target.requests).toEqual([]);
+      expect([target.codexReads, target.claudeReads]).toEqual([0, 0]);
+    } finally {
+      await relay.close();
+    }
   });
 });

@@ -169,7 +169,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       return;
     }
     // Identity first; for Codex the email is a label.
-    const labels = [identityLabel(id), `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], "seats unknown"]
+    const labels = [identityLabel(id), `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${r["seats"] ?? "unknown"}`]
       .filter((x) => x !== null && x !== undefined);
     // Not from the latest read: say only that. A later read proves no other account (an unresolved read
     // may be this same login), so the label names the read, not an account.
@@ -248,11 +248,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     }
   }
 
-  // The daemon reads each host's status (5 s) and, for a host that's off or older, its settings (5 s more), four hosts
-  // at a time: 20 s covers eight such hosts at worst. The CLI client's 5 s default would cut a slow host's view short.
+  // The daemon answers the view across hosts within its own 15 s deadline, whatever the registry's size (hosts it hasn't
+  // heard from by then are listed as such). 15 s + 5 s for its own read model and the transfer = 20 s.
   const USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS = 20_000;
-  // The refresh answers after its slowest leg (Codex 50 s), then builds the same view (up to 20 s, above):
-  // 50 s + 20 s + a 5 s margin.
+  // The refresh answers after its slowest leg (Codex 50 s; all legs run at once), with the same view by its 15 s
+  // deadline: 50 s + 15 s + a 10 s margin = 75 s.
   const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
   // A host where Claude doesn't apply (no claude, no login, not a subscription login, or no Claude refresh there) is a
@@ -269,46 +269,47 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       process.exitCode = 1;
       return;
     }
+    const offLine = (data: unknown) =>
+      ((data ?? {}) as { message?: unknown }).message ?? "usage windows are off on this daemon (provider.usage_windows)";
+    let view: Record<string, unknown>;
     let refreshExit = 0;
     if (opts.refresh) {
-      // Each host's leg is bounded by that host's own read (Codex 50 s, Claude 20 s), all in parallel.
-      const providers = opts.provider ? [opts.provider] : ["codex", "claude"];
-      const answered = await Promise.all(providers.map(async (provider) => ({
-        provider,
-        answer: await client.post<Record<string, unknown>>("/api/provider/usage/hosts/refresh",
-          { provider, ...(hosts.length > 0 ? { hosts } : {}) }, { timeoutMs: USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS }),
-      })));
-      const off = answered.find((a) => a.answer.status === 409);
-      if (off) {
-        console.error(((off.answer.data ?? {}) as { message?: unknown }).message ?? "usage windows are off on this daemon (provider.usage_windows)");
+      // One request for every asked provider: its answer carries each leg and the view, so the view isn't read again.
+      const answer = await client.post<Record<string, unknown>>("/api/provider/usage/hosts/refresh",
+        { providers: opts.provider ? [opts.provider] : ["codex", "claude"], ...(hosts.length > 0 ? { hosts } : {}) },
+        { timeoutMs: USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS });
+      if (answer.status === 409) {
+        console.error(offLine(answer.data));
         process.exitCode = 1;
         return;
       }
-      for (const { provider, answer } of answered) {
-        if (handleHttpError(answer, `refresh ${provider} usage across hosts`)) return;
-        for (const leg of (answer.data["refresh"] as Array<Record<string, unknown>> | undefined) ?? []) {
-          if (leg["outcome"] !== "failed") continue;
-          const line = `refresh ${provider} on ${leg["hostId"]} failed: ${leg["reason"]} (${leg["detail"]})`;
-          if (opts.provider === undefined && provider === "claude" && CLAUDE_NOT_APPLICABLE.has(String(leg["reason"]))) {
-            console.error(`note: ${line}; exit unaffected (name --provider claude to require it)`);
-          } else {
-            console.error(line);
-            refreshExit = 1;
-          }
+      if (handleHttpError(answer, "refresh usage across hosts")) return;
+      for (const leg of (answer.data["refresh"] as Array<Record<string, unknown>> | undefined) ?? []) {
+        if (leg["outcome"] !== "failed") continue;
+        const line = `refresh ${leg["provider"]} on ${leg["hostId"]} failed: ${leg["reason"]} (${leg["detail"]})`;
+        if (opts.provider === undefined && leg["provider"] === "claude" && CLAUDE_NOT_APPLICABLE.has(String(leg["reason"]))) {
+          console.error(`note: ${line}; exit unaffected (name --provider claude to require it)`);
+        } else {
+          console.error(line);
+          refreshExit = 1;
         }
       }
+      view = (answer.data["view"] ?? {}) as Record<string, unknown>;
+    } else {
+      const res = await client.get<Record<string, unknown>>(`/api/provider/usage/hosts${hosts.length > 0 ? `?hosts=${encodeURIComponent(hosts.join(","))}` : ""}`,
+        { timeoutMs: USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS });
+      if (res.status === 409) {
+        console.error(offLine(res.data));
+        process.exitCode = 1;
+        return;
+      }
+      if (handleHttpError(res, "read usage across hosts")) return;
+      view = res.data;
     }
-    const res = await client.get<Record<string, unknown>>(`/api/provider/usage/hosts${hosts.length > 0 ? `?hosts=${encodeURIComponent(hosts.join(","))}` : ""}`,
-      { timeoutMs: USAGE_ACROSS_HOSTS_READ_TIMEOUT_MS });
-    if (res.status === 409) {
-      console.error(((res.data ?? {}) as { message?: unknown }).message ?? "usage windows are off on this daemon (provider.usage_windows)");
-      process.exitCode = 1;
-      return;
-    }
-    if (handleHttpError(res, "read usage across hosts")) return;
+    // A host not heard from in time is listed like any host that couldn't be read; only a failed refresh leg sets the exit.
     if (refreshExit > 0) process.exitCode = refreshExit;
-    if (opts.json) console.log(JSON.stringify(res.data));
-    else renderAcrossHosts(res.data);
+    if (opts.json) console.log(JSON.stringify(view));
+    else renderAcrossHosts(view);
   }
 
   // Shared daemon-backed read for the FILTERED blocks: --json verbatim, human = pretty JSON (§3
@@ -331,7 +332,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s; needs provider.usage_windows on)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
     .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (needs provider.usage_windows on)")
-    .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated)")
+    .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
     .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
         console.error(`--provider must be codex or claude (got ${opts.provider})`);

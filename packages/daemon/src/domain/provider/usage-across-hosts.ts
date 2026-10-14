@@ -13,7 +13,7 @@
 import type { AggregatedPayload, PerHostStatus } from "../hosts/fanout-contract.js";
 import { LOCAL_HOST_ID, resolvesToLocalHost } from "../hosts/fanout-contract.js";
 import type { HostEntry, HostRegistryLoadResult, HttpHostEntry } from "../hosts/hosts-registry-reader.js";
-import { remoteJsonRequest, type RemoteJsonResult } from "../hosts/remote-daemon-http.js";
+import { remoteJsonRequest, resolveBearer, type RemoteJsonResult } from "../hosts/remote-daemon-http.js";
 import { claudeUsageIdentityKey } from "./claude-usage-windows.js";
 import { codexUsageIdentityKey } from "./codex-usage-windows.js";
 import type {
@@ -29,6 +29,18 @@ import { USAGE_CLOCK_TOLERANCE_MS } from "./usage-windows.js";
 /** Reading a host's served model is an ordinary read: the same 5 s class as the read-through and the feed. */
 export const USAGE_HOSTS_READ_TIMEOUT_MS = 5_000;
 export const USAGE_HOSTS_READ_CONCURRENCY = 4;
+
+/** The whole view answers within this, whatever the registry's size: hosts not heard from by then are listed as such,
+ *  and the rest are served. One host takes at most 10 s (5 s status, then 5 s settings when it's off or older), so the
+ *  first four hosts always fit; a caller waiting 20 s has 5 s left for this host's own read and the transfer. */
+export const USAGE_HOSTS_VIEW_DEADLINE_MS = 15_000;
+
+/** The largest answer read from a host (status, settings or refresh), stopped at the bound and never parsed. A status
+ *  answer with both providers and a few dozen seats is tens of kilobytes; 1 MiB leaves room for hundreds of seats. */
+export const USAGE_HOSTS_MAX_BYTES = 1024 * 1024;
+
+/** What replaces any string from a host that contains the bearer configured for that host. */
+export const BEARER_REDACTED = "[redacted: contained this host's bearer]";
 
 /** A refresh leg waits for the host's own bounded native read plus stopping what it started (Codex 35 s + ~8 s;
  *  Claude's auth status 10 s + ~3 s), with a margin for the network. Never the 5 s read class. */
@@ -105,10 +117,13 @@ export function allowanceKey(row: ProviderUsageAllowance): string | null {
  * Which observations may be linked across hosts. Claude's key already includes the email. Codex's doesn't: within
  * one host a single login is read, but across hosts the same account or workspace id can come with different login
  * emails, and the source can't tell one allowance from a workspace whose members have their own limits. So across
- * hosts a Codex observation links only under the same login email too; the rest stay apart as unknown linkage.
+ * hosts a Codex observation links only under the same login email too; the rest stay apart as unknown linkage. A
+ * missing email is no evidence of the same login, so an observation without one links to nothing on another host.
  */
-export function crossHostLinkKey(row: ProviderUsageAllowance, key: string): string {
-  return row.provider === "codex" ? `${key}\u0000email:${(row.identity as UsageAllowanceIdentity).email ?? ""}` : key;
+export function crossHostLinkKey(row: ProviderUsageAllowance, key: string, hostId: string): string {
+  if (row.provider !== "codex") return key;
+  const email = (row.identity as UsageAllowanceIdentity).email;
+  return email === null ? `${key}\u0000host:${hostId}` : `${key}\u0000email:${email}`;
 }
 
 function idLabel(row: ProviderUsageAllowance): string {
@@ -146,7 +161,7 @@ export function groupUsageAcrossHosts(observations: UsageObservation[]): UsageAl
       unlinked.push({ provider: o.row.provider, key: null, linkage: "unknown", observations: [o], notes: [] });
       continue;
     }
-    const link = crossHostLinkKey(o.row, key);
+    const link = crossHostLinkKey(o.row, key, o.hostId);
     const group = linked.get(link) ?? { key, observations: [] };
     group.observations.push(o);
     linked.set(link, group);
@@ -162,13 +177,17 @@ export function groupUsageAcrossHosts(observations: UsageObservation[]): UsageAl
       const hosts = new Set(g.observations.map((o) => o.hostId));
       const notes: string[] = [];
       let linkage: UsageLinkage = hosts.size > 1 ? "same" : "single";
-      const others = siblings.filter((s) => s !== g).flatMap((s) => s.observations.map((o) => o.hostId));
+      const others = siblings.filter((s) => s !== g).flatMap((s) => s.observations);
       if (others.length > 0) {
         // The link to those other hosts is unknown; the hosts inside this group still share one login and id.
         if (hosts.size === 1) linkage = "unknown";
-        notes.push(`the same Codex ${idLabel(g.observations[0]!.row)} is also observed on ${[...new Set(others)].join(", ")} `
-          + "under another login email; the source can't tell one allowance from a workspace whose members have their own "
-          + "limits, so these observations are not merged");
+        const email = (row: ProviderUsageAllowance) => (row.identity as UsageAllowanceIdentity).email;
+        const how = email(g.observations[0]!.row) === null
+          ? "; no login email was reported here"
+          : others.some((o) => email(o.row) === null) ? " under another login email or with none reported" : " under another login email";
+        notes.push(`the same Codex ${idLabel(g.observations[0]!.row)} is also observed on ${[...new Set(others.map((o) => o.hostId))].join(", ")}`
+          + `${how}; the source can't tell one allowance from a workspace whose members have their own limits, so these `
+          + "observations are not merged");
       }
       const conflict = conflicts(g.observations);
       if (conflict.length > 0) {
@@ -193,6 +212,7 @@ export interface UsageHostsDeps {
   env?: Record<string, string | undefined>;
   readFile?: (path: string) => string;
   readTimeoutMs?: number;
+  viewDeadlineMs?: number;
   concurrency?: number;
   now?: () => string;
 }
@@ -233,8 +253,55 @@ export function selectUsageHosts(deps: Pick<UsageHostsDeps, "loadRegistry" | "se
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const isUsageRow = (v: unknown): v is ProviderUsageAllowance =>
-  isRecord(v) && (v["provider"] === "codex" || v["provider"] === "claude") && Array.isArray(v["windows"]);
+const strOrNull = (v: unknown): boolean => v === null || typeof v === "string";
+const FRESHNESS = new Set(["fresh", "stale", "unavailable"]);
+const LEVELS = new Set(["ok", "nearing", "exhausted", "unknown"]);
+
+/** A window as the grouping and the views read it. */
+function isWindow(w: unknown): boolean {
+  return isRecord(w) && typeof w["window"] === "string" && FRESHNESS.has(w["freshness"] as string) && LEVELS.has(w["level"] as string)
+    && strOrNull(w["resetsAt"]) && typeof w["observedAt"] === "string"
+    && (w["disagreeingSeats"] === undefined || (Array.isArray(w["disagreeingSeats"]) && w["disagreeingSeats"].every(isRecord)));
+}
+
+/** Null (never read), or the provider's typed identity fields. */
+function isIdentity(provider: unknown, id: unknown): boolean {
+  if (id === null) return true;
+  if (!isRecord(id) || typeof id["limitId"] !== "string" || !strOrNull(id["email"])) return false;
+  return provider === "codex" ? strOrNull(id["accountId"]) && strOrNull(id["workspaceId"]) : strOrNull(id["orgId"]);
+}
+
+/** A served row with every nested field the grouping and the views consume. */
+export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
+  return isRecord(v) && (v["provider"] === "codex" || v["provider"] === "claude") && "identity" in v
+    && isIdentity(v["provider"], v["identity"]) && Array.isArray(v["windows"]) && v["windows"].every(isWindow);
+}
+
+const isSeat = (v: unknown): boolean => isRecord(v) && typeof v["seatSession"] === "string";
+
+/**
+ * A host's answer with any string that contains the bearer configured for that host replaced, and any key that
+ * contains it dropped, so a host echoing it can't put it in the view, the CLI or the kept refresh record (the same
+ * rule as the Pi charge lookup's key echo). The bearer is resolved by the transport's own resolver and never logged.
+ */
+export function scrubBearer(value: unknown, bearer: string | undefined): unknown {
+  if (!bearer) return value;
+  if (typeof value === "string") return value.includes(bearer) ? BEARER_REDACTED : value;
+  if (Array.isArray(value)) return value.map((v) => scrubBearer(v, bearer));
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).filter(([k]) => !k.includes(bearer)).map(([k, v]) => [k, scrubBearer(v, bearer)]));
+  }
+  return value;
+}
+
+function bearerOf(host: HttpHostEntry, deps: Pick<UsageHostsDeps, "env" | "readFile">): string | undefined {
+  const resolved = resolveBearer(host, { env: deps.env, readFile: deps.readFile });
+  return resolved.ok ? resolved.token : undefined;
+}
+
+/** The transport options every call to a host makes here: bounded bytes, redirects not followed. */
+const HOST_CALL = { maxBytes: USAGE_HOSTS_MAX_BYTES, redirect: "manual" as const };
+const isRedirect = (res: RemoteJsonResult): boolean => !res.ok && res.kind === "http" && res.status !== undefined && res.status >= 300 && res.status < 400;
 
 /** A transport failure as a host status. A bearer that can't be resolved is named, never its env var or file. */
 function transportFailure(hostId: string, res: Exclude<RemoteJsonResult, { ok: true }>, timeoutMs: number): UsageHostStatus {
@@ -281,18 +348,25 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
     };
   }
   const timeoutMs = deps.readTimeoutMs ?? USAGE_HOSTS_READ_TIMEOUT_MS;
-  const get = (path: string) => remoteJsonRequest(host as HttpHostEntry, path, {
-    method: "GET",
-    timeoutMs,
-    fetchImpl: deps.fetchImpl,
-    env: deps.env,
-    readFile: deps.readFile,
-  });
+  const bearer = bearerOf(host, deps);
+  const get = async (path: string): Promise<RemoteJsonResult> => {
+    const res = await remoteJsonRequest(host as HttpHostEntry, path, {
+      method: "GET",
+      timeoutMs,
+      ...HOST_CALL,
+      fetchImpl: deps.fetchImpl,
+      env: deps.env,
+      readFile: deps.readFile,
+    });
+    return res.ok ? { ...res, payload: scrubBearer(res.payload, bearer) } : { ...res, detail: scrubBearer(res.detail, bearer) as string };
+  };
   const res = await get("/api/provider/status");
   const readAt = now();
   const ok = (usage: HostUsageCoverage, usageReason?: string): UsageHostStatus =>
     ({ hostId, status: "ok", usage, ...(usageReason ? { usageReason } : {}), readAt });
   if (!res.ok) {
+    if (isRedirect(res)) return { status: ok("unavailable", `redirected (HTTP ${res.status}); not followed`), rows: [], seats: null };
+    if (res.tooLarge) return { status: ok("unavailable", res.detail), rows: [], seats: null };
     if (res.kind === "http" && (res.status === 401 || res.status === 403)) {
       return { status: { hostId, status: "auth-failed", error: `HTTP ${res.status}`, usage: "unavailable", usageReason: "not read", readAt: null }, rows: [], seats: null };
     }
@@ -309,11 +383,15 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
     if (!model["usage"].every(isUsageRow)) {
       return { status: ok("unavailable", "this host served usage rows in a shape this daemon doesn't recognize"), rows: [], seats: null };
     }
-    const seats = Array.isArray(model["seatAccounts"]) ? (model["seatAccounts"] as SeatConfiguredAccount[]) : null;
-    return { status: ok("served"), rows: model["usage"], seats };
+    const seats = model["seatAccounts"];
+    if (seats !== undefined && !(Array.isArray(seats) && seats.every(isSeat))) {
+      return { status: ok("unavailable", "this host served seat accounts in a shape this daemon doesn't recognize"), rows: [], seats: null };
+    }
+    return { status: ok("served"), rows: model["usage"], seats: (seats as SeatConfiguredAccount[] | undefined) ?? null };
   }
   // No usage key: off, or a daemon that predates usage windows. The host's own settings tell which (the TUI's rule).
   const config = await get("/api/config?view=browser");
+  if (isRedirect(config)) return { status: ok("unavailable", `this host served no usage windows, and its settings read was redirected (HTTP ${(config as { status?: number }).status}); not followed`), rows: [], seats: null };
   const entries = config.ok && isRecord(config.payload) && Array.isArray(config.payload["entries"])
     ? (config.payload["entries"] as unknown[]).filter(isRecord)
     : null;
@@ -335,16 +413,35 @@ export async function readUsageAcrossHosts(
   const now = deps.now ?? (() => new Date().toISOString());
   const asOf = now();
   const remotes = selection.remotes;
-  const reads = new Array<HostRead>(remotes.length);
+  const reads = new Array<HostRead | undefined>(remotes.length);
+  const deadlineMs = deps.viewDeadlineMs ?? USAGE_HOSTS_VIEW_DEADLINE_MS;
+  let expired = false;
   let next = 0;
   const cap = Math.max(1, Math.min(deps.concurrency ?? USAGE_HOSTS_READ_CONCURRENCY, remotes.length));
-  await Promise.all(Array.from({ length: remotes.length === 0 ? 0 : cap }, async () => {
-    while (next < remotes.length) {
+  const work = Promise.all(Array.from({ length: remotes.length === 0 ? 0 : cap }, async () => {
+    while (!expired && next < remotes.length) {
       const i = next;
       next += 1;
-      reads[i] = await readHost(remotes[i]!, deps, now);
+      const read = await readHost(remotes[i]!, deps, now);
+      if (!expired) reads[i] = read;
     }
   }));
+  // The view answers by its deadline with what it has; a read still running finishes on its own bound, unused.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([work, new Promise<void>((resolve) => { timer = setTimeout(() => { expired = true; resolve(); }, deadlineMs); })]);
+  clearTimeout(timer);
+  const late = (host: HostEntry): HostRead => ({
+    status: {
+      hostId: host.id,
+      status: "unreachable",
+      error: `not heard from within the view's ${deadlineMs / 1000} s`,
+      usage: "unavailable",
+      usageReason: `not heard from within the view's ${deadlineMs / 1000} s`,
+      readAt: null,
+    },
+    rows: [],
+    seats: null,
+  });
 
   const withRefresh = (s: UsageHostStatus): UsageHostStatus => {
     const last = deps.lastRefresh?.(s.hostId);
@@ -355,7 +452,7 @@ export async function readUsageAcrossHosts(
     rows: local.usage ?? [],
     seats: local.seatAccounts ?? null,
   };
-  const all = [localRead, ...reads];
+  const all = [localRead, ...remotes.map((host, i) => reads[i] ?? late(host))];
   const observations = all.flatMap((r) => r.rows.map((row) => ({ hostId: r.status.hostId, readAt: r.status.readAt!, row })));
   return {
     items: groupUsageAcrossHosts(observations),
@@ -373,6 +470,8 @@ type LegResult = Omit<UsageRefreshLeg, "hostId" | "provider" | "coalesced"> & { 
 
 /** Maps a host's answer to its refresh route into a leg. The host keeps its own reading on its own failure. */
 export function remoteRefreshLeg(res: RemoteJsonResult, provider: ProviderKind, deadlineMs: number, at: string): LegResult {
+  if (isRedirect(res)) return { at, outcome: "failed", reason: "redirected", detail: `redirected (HTTP ${(res as { status?: number }).status}); not followed` };
+  if (!res.ok && res.tooLarge) return { at, outcome: "failed", reason: "too_large", detail: res.detail };
   if (res.ok) {
     const refresh = isRecord(res.payload) && isRecord(res.payload["refresh"]) ? res.payload["refresh"] : null;
     if (!refresh || (refresh["outcome"] !== "ok" && refresh["outcome"] !== "failed")) {
@@ -458,11 +557,13 @@ export class UsageRefreshLegs {
         method: "POST",
         body: { provider },
         timeoutMs: deadlineMs,
+        ...HOST_CALL,
         fetchImpl: deps.fetchImpl,
         env: deps.env,
         readFile: deps.readFile,
       });
-      return remoteRefreshLeg(res, provider, deadlineMs, now());
+      // Scrubbed before it's mapped, so neither the answer nor the kept record can carry the bearer.
+      return scrubBearer(remoteRefreshLeg(res, provider, deadlineMs, now()), bearerOf(host, deps)) as LegResult;
     });
   }
 }

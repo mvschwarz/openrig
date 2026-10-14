@@ -19,7 +19,12 @@ const VALID_PROVIDERS = new Set(["codex", "claude"]);
 
 export interface ProviderRoutesOptions {
   /** Tests shorten the deadlines and pin the clock; production uses the named defaults. */
-  usageAcrossHosts?: { readTimeoutMs?: number; refreshDeadlineMs?: Partial<Record<ProviderKind, number>>; now?: () => string };
+  usageAcrossHosts?: {
+    readTimeoutMs?: number;
+    viewDeadlineMs?: number;
+    refreshDeadlineMs?: Partial<Record<ProviderKind, number>>;
+    now?: () => string;
+  };
 }
 
 export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
@@ -108,6 +113,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     lastRefresh: (hostId) => legs.lastFor(hostId),
     fetchImpl: c.get("remoteFetchImpl" as never) as typeof fetch | undefined,
     ...(opts.usageAcrossHosts?.readTimeoutMs !== undefined ? { readTimeoutMs: opts.usageAcrossHosts.readTimeoutMs } : {}),
+    ...(opts.usageAcrossHosts?.viewDeadlineMs !== undefined ? { viewDeadlineMs: opts.usageAcrossHosts.viewDeadlineMs } : {}),
     ...(opts.usageAcrossHosts?.now ? { now: opts.usageAcrossHosts.now } : {}),
   });
   const hostList = (raw: string | undefined): string[] | undefined => {
@@ -127,9 +133,11 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     return c.json(await readUsageAcrossHosts(local, selection, deps), 200);
   });
 
-  // The explicit refresh across hosts: one bounded leg per host to its own refresh route (Codex 50 s, Claude 20 s),
-  // which starts a native usage read on that host. Overlapping requests join a running leg; each host also joins
-  // overlapping reads of its own. A failed leg is recorded here and shown beside the host's kept observations.
+  // The explicit refresh across hosts: one bounded leg per (host, provider) to that host's own refresh route (Codex 50 s,
+  // Claude 20 s), all at once, which starts a native usage read on that host. Overlapping requests join a running leg;
+  // each host also joins overlapping reads of its own. A failed leg is recorded here and shown beside the host's kept
+  // observations. The answer carries every leg and one view (by its own deadline), so it arrives within the slowest leg
+  // plus the view's deadline: 50 s + 15 s.
   router.post("/usage/hosts/refresh", async (c) => {
     const svc = svcOf(c);
     if (!svc || !svc.refreshUsage) return c.json({ error: "provider_service_unavailable" }, unavailable);
@@ -140,20 +148,23 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       raw = {};
     }
     const body = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-    const provider = body["provider"] ?? "codex";
-    if (provider !== "codex" && provider !== "claude") {
-      return c.json({ error: `usage windows can be refreshed for codex or claude (got ${String(provider)})` }, 400);
+    // `providers: ["codex", "claude"]`, or one `provider` (codex when neither is given).
+    const asked = Array.isArray(body["providers"]) ? body["providers"] : [body["provider"] ?? "codex"];
+    const bad = asked.find((p) => p !== "codex" && p !== "claude");
+    if (asked.length === 0 || bad !== undefined) {
+      return c.json({ error: `usage windows can be refreshed for codex or claude (got ${asked.length === 0 ? "none" : String(bad)})` }, 400);
     }
+    const providers = [...new Set(asked as ProviderKind[])];
     const hosts = body["hosts"];
-    if (hosts !== undefined && (!Array.isArray(hosts) || !hosts.every((h) => typeof h === "string" && h.trim() !== ""))) {
-      return c.json({ error: "hosts must be an array of host ids" }, 400);
+    if (hosts !== undefined && (!Array.isArray(hosts) || hosts.length === 0 || !hosts.every((h) => typeof h === "string" && h.trim() !== ""))) {
+      return c.json({ error: "hosts must be a non-empty array of host ids" }, 400);
     }
     if (!Array.isArray((await svc.getReadModel()).usage)) return c.json(off("A refresh across hosts"), 409);
     const deps = hostsDeps(c, (hosts as string[] | undefined)?.map((h) => h.trim()));
     const selection = selectUsageHosts(deps);
     if (!selection.ok) return c.json({ error: selection.error }, 400);
     const refreshLocal = svc.refreshUsage.bind(svc);
-    const refresh = await Promise.all([
+    const refresh = await Promise.all(providers.flatMap((provider) => [
       legs.run(LOCAL_HOST_ID, provider, async () => {
         const result = await refreshLocal(provider);
         if ("disabled" in result) return { at: new Date().toISOString(), outcome: "failed", reason: "usage_windows_off", detail: "usage windows are off on this host" };
@@ -161,7 +172,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
         return result.refresh;
       }),
       ...selection.remotes.map((host) => legs.remote(host, provider, deps)),
-    ]);
+    ]));
     return c.json({ refresh, view: await readUsageAcrossHosts(await svc.getReadModel(), selection, deps) }, 200);
   });
 

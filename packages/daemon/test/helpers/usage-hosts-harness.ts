@@ -4,6 +4,7 @@
 // claude binary, login or PATH is involved. Homes are temp folders under os.tmpdir() (usage-hosts-*), removed on
 // close. A hub is a host given a host registry naming the others.
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -64,6 +65,8 @@ export interface UsageHostOptions {
   now?: () => string;
   /** Answer GET /api/provider/status and /api/config only after this long (real time). */
   slowReadMs?: number;
+  /** Rewrite this host's JSON answers on /api/provider/* (a malformed, oversized or echoing host). */
+  rewrite?: (path: string, body: unknown) => unknown;
 }
 
 const toEpoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
@@ -183,6 +186,10 @@ export class UsageHost {
           Array.isArray(registry) ? { ok: true, registry: { hosts: registry } } : loadHostRegistry(registry.path)) as never);
       }
       await next();
+      if (this.opts.rewrite && c.req.path.startsWith("/api/provider/") && c.res.headers.get("content-type")?.includes("json")) {
+        const body = await c.res.clone().json();
+        c.res = new Response(JSON.stringify(this.opts.rewrite(c.req.path, body)), { status: c.res.status, headers: { "content-type": "application/json" } });
+      }
     });
     if (shape === "predates-usage-windows") {
       // An older daemon: status without usage windows, and settings that don't include the key.
@@ -219,6 +226,23 @@ export class UsageHost {
   seen(prefix: string): Array<{ method: string; path: string }> {
     return this.requests.filter((r) => r.path.startsWith(prefix));
   }
+}
+
+/** A loopback relay that answers every request with a 307 to the same path on `target`. */
+export async function redirectingRelay(target: string): Promise<{ url: string; hits: string[]; close: () => Promise<void> }> {
+  const hits: string[] = [];
+  const server = http.createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    res.writeHead(307, { Location: `${target}${req.url}` });
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    hits,
+    close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
+  };
 }
 
 /** A loopback port that refuses connections (bound, then closed). */

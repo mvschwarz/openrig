@@ -8,6 +8,7 @@ import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 import { closedPortUrl, UsageHost, type UsageHostOptions } from "../../daemon/test/helpers/usage-hosts-harness.js";
+import { BEARER_REDACTED } from "../../daemon/src/domain/provider/usage-across-hosts.js";
 
 const NOW = "2026-10-13T23:30:00.000Z";
 
@@ -87,10 +88,16 @@ describe("rig provider status --all-hosts", () => {
     const c = await host("c", { codex: { email: "other@example.com" } });
     const off = await host("off", { usageWindows: false });
     const down = await closedPortUrl();
-    const hub = await host("hub", { registry: [a.entry(), b.entry(), c.entry(), off.entry(), { id: "down", transport: "http", url: down }] });
-    for (const h of [a, b, c]) await refreshDirect(h);
+    // d's reading is older than its failed refresh: its windows carry a freshness reason; it serves a seats value too.
+    const d = await host("d", { codex: { accountId: "acct-d" }, rewrite: (p, body) => p === "/api/provider/status"
+      ? { ...(body as object), usage: ((body as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, seats: "configured on 2 seats" })) } : body });
+    const hub = await host("hub", { registry: [a.entry(), b.entry(), c.entry(), off.entry(), { id: "down", transport: "http", url: down }, d.entry()] });
+    for (const h of [a, b, c, d]) await refreshDirect(h);
+    d.codex = { fail: { reason: "rpc_error", detail: "the app-server said no" } };
+    await refreshDirect(d);
 
     const served = await (await fetch(`${hub.url}/api/provider/usage/hosts`)).json() as Record<string, unknown>;
+    expect(JSON.stringify(served)).toContain('"freshnessReason":"refresh failed at 2026-10-13T23:30:00.000Z; this reading is older"');
     const { out, exitCode } = await run(["status", "--all-hosts"], hub);
     expect(exitCode).toBeUndefined();
     const missing = facts(served).filter((f) => !out.includes(f));
@@ -101,6 +108,7 @@ describe("rig provider status --all-hosts", () => {
     expect(out).toContain("codex  account acct-1 · bucket codex  [linkage unknown; observed on c]");
     expect(out).toContain("  down  unreachable (");
     expect(out).toContain("  off  answered · usage off: usage windows are off on this host (provider.usage_windows = false)");
+    expect(out).toContain("codex  account acct-d · bucket codex · dev@example.com · team · seats configured on 2 seats");
   });
 
   it("waits for a view that takes the daemon longer than 5 s: a switched-off host answering its status and settings after 4.5 s each", async () => {
@@ -182,6 +190,72 @@ describe("rig provider status --all-hosts", () => {
       expect(text).toContain("b  auth-failed (the bearer configured for this host couldn't be resolved)");
     } finally {
       delete process.env["XHOST_CLI_BEARER"];
+    }
+  });
+});
+
+describe("round 2 through the CLI", () => {
+  // Nine registry entries for one host whose status and settings each answer after 4.5 s: four at a time, the view
+  // needs about 27 s, past the CLI's 20 s wait. The daemon answers at its 15 s deadline with what it has.
+  async function nineSlowEntries(): Promise<UsageHost> {
+    const slow = await host("slow", { usageWindows: false, slowReadMs: 4_500 });
+    return host("hub", { registry: Array.from({ length: 9 }, (_, i) => slow.entry({ id: `slow${i + 1}` } as never)) });
+  }
+
+  it("a registry larger than the view's deadline allows: a partial view naming the late hosts, exit 0", async () => {
+    const hub = await nineSlowEntries();
+    const started = Date.now();
+    const got = await run(["status", "--all-hosts"], hub);
+    const took = Date.now() - started;
+    expect(took).toBeGreaterThan(14_000);
+    expect(took).toBeLessThan(20_000);
+    expect([got.exitCode, got.err]).toEqual([undefined, ""]);
+    for (const i of [1, 2, 3, 4]) expect(got.out).toContain(`  slow${i}  answered · usage off: usage windows are off on this host`);
+    for (const i of [5, 6, 7, 8, 9]) {
+      expect(got.out).toContain(`  slow${i}  unreachable (not heard from within the view's 15 s) · usage unavailable: not heard from within the view's 15 s`);
+    }
+  }, 40_000);
+
+  it("--refresh prints the view its own answer carries, with both providers' legs, partial in the same way", async () => {
+    const hub = await nineSlowEntries();
+    const got = await run(["status", "--all-hosts", "--refresh", "--json"], hub);
+    expect(got.exitCode).toBe(1);
+    const view = JSON.parse(got.out) as { hosts: Array<{ hostId: string; usageReason?: string }> };
+    expect(view.hosts.filter((h) => h.usageReason === "not heard from within the view's 15 s").map((h) => h.hostId))
+      .toEqual(["slow5", "slow6", "slow7", "slow8", "slow9"]);
+    // Usage windows are off on the slow host, so each of its legs fails; one line per provider and host.
+    for (const provider of ["codex", "claude"]) expect(got.err).toContain(`refresh ${provider} on slow9 failed: usage_windows_off (usage windows are off on this host)`);
+    expect(hub.seen("/api/provider/usage/hosts")).toEqual([{ method: "POST", path: "/api/provider/usage/hosts/refresh" }]);
+  }, 40_000);
+
+  it("a host serving a malformed window: that host unavailable with the reason, the rest printed", async () => {
+    const good = await host("good");
+    const bad = await host("bad", { rewrite: (p, b) => p === "/api/provider/status"
+      ? { ...(b as object), usage: ((b as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, windows: [null] })) } : b });
+    const hub = await host("hub", { registry: [good.entry(), bad.entry()] });
+    await refreshDirect(good);
+    const got = await run(["status", "--all-hosts"], hub);
+    expect(got.exitCode).toBeUndefined();
+    expect(got.out).toContain("  bad  answered · usage unavailable: this host served usage rows in a shape this daemon doesn't recognize");
+    expect(got.out).toContain("    on good (read ");
+  });
+
+  it("a host echoing its bearer: replaced in the printed view and the failed-leg line", async () => {
+    const marker = "SYNTHETIC-BEARER-MARKER-cli-51d2";
+    process.env["XHOST_CLI_MARKER"] = marker;
+    try {
+      const echo = await host("echo", { rewrite: (p, b) => p === "/api/provider/status"
+        ? { ...(b as object), usage: ((b as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, identityNote: `seen ${marker}` })) }
+        : p === "/api/provider/usage/refresh" ? { refresh: { at: NOW, outcome: "failed", reason: "rpc_error", detail: `token ${marker}`, coalesced: false } } : b });
+      const hub = await host("hub", { registry: [echo.entry({ bearer_env: "XHOST_CLI_MARKER" } as never)] });
+      const got = await run(["status", "--all-hosts", "--refresh", "--provider", "codex"], hub);
+      const json = await run(["status", "--all-hosts", "--json"], hub);
+      const text = got.out + got.err + json.out + json.err;
+      expect(text).not.toContain(marker);
+      expect(got.err).toContain(`refresh codex on echo failed: rpc_error (${BEARER_REDACTED})`);
+      expect(json.out).toContain(BEARER_REDACTED);
+    } finally {
+      delete process.env["XHOST_CLI_MARKER"];
     }
   });
 });

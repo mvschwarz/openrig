@@ -38,6 +38,10 @@ export interface RemoteJsonOptions extends RemoteJsonDeps {
    *  cross-host forward). Merged AFTER Content-Type/Authorization so a forwarder's identity re-stamp
    *  is what the remote reads — never the inbound body claim. */
   headers?: Record<string, string>;
+  /** Stop reading an answer larger than this many bytes (a failure, never parsed). Absent: no bound (today's default). */
+  maxBytes?: number;
+  /** Absent: fetch's default (follow). "manual": a 3xx comes back as the http failure it is, never followed. */
+  redirect?: "follow" | "manual" | "error";
 }
 
 export type RemoteJsonFailureKind = "bearer" | "timeout" | "network" | "http";
@@ -54,6 +58,8 @@ export interface RemoteJsonFailure {
   status?: number;
   /** Bearer message / network error message / remote error text (may be ""). */
   detail: string;
+  /** The answer exceeded the caller's `maxBytes` and wasn't read further (kind "network"). */
+  tooLarge?: true;
 }
 
 export type RemoteJsonResult = { ok: true; status: number; payload: unknown } | RemoteJsonFailure;
@@ -80,7 +86,7 @@ export type RemoteRawResult =
  *  anonymous (URL-only) host — a tokenless daemon; ok with no token, so no
  *  Authorization header is sent. A configured-but-unresolvable pointer still
  *  fails (fail-closed). */
-function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: true; token?: string } | { ok: false; detail: string } {
+export function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: true; token?: string } | { ok: false; detail: string } {
   const env = deps.env ?? process.env;
   const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
   if (host.bearer_env) {
@@ -122,6 +128,7 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
         ...(opts.headers ?? {}),
       },
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+      ...(opts.redirect !== undefined ? { redirect: opts.redirect } : {}),
       signal: controller.signal,
     });
   } catch (err) {
@@ -140,7 +147,14 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
   let payload: unknown;
   let bodyTimedOut = false;
   try {
-    payload = await Promise.race([res.json(), abortRace]);
+    if (opts.maxBytes === undefined) payload = await Promise.race([res.json(), abortRace]);
+    else {
+      const text = await Promise.race([readBounded(res, opts.maxBytes), abortRace]);
+      if (text === null) {
+        return { ok: false, kind: "network", status: res.status, tooLarge: true, detail: `answer larger than ${opts.maxBytes} bytes` };
+      }
+      payload = JSON.parse(text);
+    }
   } catch (err) {
     if (controller.signal.aborted) bodyTimedOut = true;
     else if (!(err instanceof SyntaxError)) {
@@ -159,6 +173,30 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
     ? (payload as { error: string }).error
     : "";
   return { ok: false, kind: "http", status: res.status, detail: remoteError };
+}
+
+/** The body as text, or null once it passes `maxBytes` (the rest isn't read). */
+async function readBounded(res: Response, maxBytes: number): Promise<string | null> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /** One bounded daemon→daemon GET, body passed through as text for ANY origin
