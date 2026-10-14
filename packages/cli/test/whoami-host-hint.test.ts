@@ -249,4 +249,26 @@ describe("rig whoami --json --host (SSH): the full-peer-list hint reaches the sa
       JSON.stringify(`all: rig whoami --json --all-peers --host 'vm-a' --session ${shellQuote(opts.session)};`).slice(1, -1)));
     expect(withOriginPeersCommand(JSON.stringify({ ...body, peersOmitted: 0 }), "vm-a", opts as never)).toBe(JSON.stringify({ ...body, peersOmitted: 0 }));
   });
+
+  it("F1: only the note's own value is rewritten; differently encoded or ambiguous output passes through byte for byte", () => {
+    const opts = { session: "dev-impl@big", json: true };
+    const remote = `rig whoami --json --all-peers --session 'dev-impl@big'`;
+    const note = `peers = 8 of 11; 3 not shown; all: ${remote}; edges = ...`;
+    const escaped = JSON.stringify(note).replace(/ /g, "\\u0020"); // the note's command with Unicode escapes
+    // The reviewer's case: the note carries the command escaped, another field carries it literally.
+    const f1 = `{"identity":{"nodeId":"n"},"peersOmitted":3,"peersNote":${escaped},"debug":${JSON.stringify(`ran: all: ${remote};`)}}`;
+    expect(JSON.parse(f1).peersNote).toBe(note); // valid JSON, the same note value
+    expect(withOriginPeersCommand(f1, "vm-a", opts as never)).toBe(f1);
+    // A canonical copy elsewhere while the real note is escaped: still not rewritten anywhere.
+    const copy = `{"identity":{"nodeId":"n"},"peersOmitted":3,"peersNote":${escaped},"mirror":{"peersNote":${JSON.stringify(note)}}}`;
+    expect(withOriginPeersCommand(copy, "vm-a", opts as never)).toBe(copy);
+    // The same note twice under peersNote keys (top level and nested): ambiguous, passed through.
+    const twice = JSON.stringify({ identity: { nodeId: "n" }, peersOmitted: 3, peersNote: note, nested: { peersNote: note } });
+    expect(withOriginPeersCommand(twice, "vm-a", opts as never)).toBe(twice);
+    // The canonical note alone, with the command literal elsewhere too: only the note changes.
+    const plain = JSON.stringify({ identity: { nodeId: "n" }, peersOmitted: 3, peersNote: note, debug: `ran: all: ${remote};` });
+    const out = withOriginPeersCommand(plain, "vm-a", opts as never);
+    expect(JSON.parse(out)).toEqual({ ...JSON.parse(plain), peersNote: note.replace(remote, `rig whoami --json --all-peers --host 'vm-a' --session 'dev-impl@big'`) });
+    expect(out.replace(/"peersNote":"[^"]*"/, "")).toBe(plain.replace(/"peersNote":"[^"]*"/, "")); // every other byte kept
+  });
 });

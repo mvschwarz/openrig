@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { Command } from "commander";
 import { readOwnHostName, resolveEffectiveHost } from "../host-selection.js";
 import { execSync } from "node:child_process";
@@ -672,9 +673,11 @@ function allPeersCommand(opts: WhoamiCliOptions, origin?: { hostId: string; reso
 /**
  * Slice 15 (OPR.0.7.0.15) P5 over SSH `--host`: the remote bounds its peer list, and its note names the full-list
  * command as run there. Copied at the origin, that command would query this host instead, so here it gains the
- * host (and the identity the remote resolved, when none was asked for). Only that exact command, in a bounded
- * note, is replaced, escaped exactly as the JSON carries it; any other output (unbounded, older, malformed, or a
- * note in another form) passes through byte for byte.
+ * host (and the identity the remote resolved, when none was asked for). Only that exact command, inside the
+ * top-level `peersNote` value itself, is replaced: the note must appear once, serialized exactly as JSON.stringify
+ * writes it, and the result must parse to the same object with only that note changed. Anything else (unbounded,
+ * older, malformed, differently encoded or ambiguous output, or a note in another form) passes through byte for
+ * byte.
  */
 export function withOriginPeersCommand(stdout: string, hostId: string, opts: WhoamiCliOptions): string {
   let parsed: unknown;
@@ -687,7 +690,15 @@ export function withOriginPeersCommand(stdout: string, hostId: string, opts: Who
   if (note.split(remote).length !== 2) return stdout;
   const resolved = ((body["identity"] ?? {}) as Record<string, unknown>)["nodeId"];
   const origin = `all: ${allPeersCommand(opts, { hostId, resolvedNodeId: typeof resolved === "string" && resolved ? resolved : undefined })};`;
-  const from = JSON.stringify(remote).slice(1, -1);
-  if (stdout.split(from).length !== 2) return stdout;
-  return stdout.replace(from, () => JSON.stringify(origin).slice(1, -1));
+  const serialized = JSON.stringify(note);
+  const hits = [...stdout.matchAll(new RegExp(`"peersNote"\\s*:\\s*${serialized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"))];
+  if (hits.length !== 1) return stdout;
+  const hit = hits[0]!;
+  const rewrittenNote = note.replace(remote, () => origin);
+  const out = stdout.slice(0, hit.index) + hit[0].replace(serialized, () => JSON.stringify(rewrittenNote)) + stdout.slice(hit.index + hit[0].length);
+  try {
+    return isDeepStrictEqual(JSON.parse(out), { ...body, peersNote: rewrittenNote }) ? out : stdout;
+  } catch {
+    return stdout;
+  }
 }
