@@ -130,6 +130,45 @@ describe("RigTeardownOrchestrator", () => {
     expect(latest?.status).toBe("exited");
   });
 
+  it.each([true, false])("keeps the existing teardown result when additional intent bookkeeping throws (live=%s)", async live => {
+    const { rigId, nodeId, sessionId } = seedRig();
+    sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });
+    if (!live) sessionRegistry.markDetached(sessionId);
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => ({ state: live ? "present" : "absent" }));
+    const prepare = db.prepare.bind(db);
+    const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("s.intentionally_stopped = 0")) throw new Error("fixture eligibility query failed");
+      return prepare(sql);
+    });
+    try {
+      expect(await buildTeardown(tmux).teardown(rigId)).toEqual({
+        rigId, sessionsKilled: live ? 1 : 0, snapshotId: live ? "snap-1" : null,
+        deleted: false, deleteBlocked: false, alreadyStopped: !live, errors: [],
+      });
+      expect(sessionRegistry.getBindingForNode(nodeId) === null).toBe(live);
+      expect(tmux.killSession).toHaveBeenCalledTimes(live ? 1 : 0);
+    } finally {
+      fault.mockRestore();
+    }
+  });
+
+  it("kills live sessions before probing already-detached seats", async () => {
+    const { rigId } = seedRig();
+    const detached = rigRepo.addNode(rigId, "old");
+    const session = sessionRegistry.registerSession(detached.id, "r01-old");
+    sessionRegistry.markDetached(session.id);
+    const calls: string[] = [];
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async name => {
+      calls.push(`probe ${name}`);
+      return { state: name === "r01-dev" ? "present" : "absent" };
+    });
+    tmux.killSession = vi.fn(async name => { calls.push(`kill ${name}`); return { ok: true }; });
+    await buildTeardown(tmux).teardown(rigId);
+    expect(calls).toEqual(["probe r01-dev", "kill r01-dev", "probe r01-old"]);
+  });
+
   it("records stop intent only for a confirmed successful teardown", async () => {
     const { rigId, nodeId, sessionId } = seedRig();
     sessionRegistry.updateBinding(nodeId, { tmuxSession: "r01-dev" });

@@ -89,10 +89,11 @@ export class RigTeardownOrchestrator {
 
     // 2. Get latest session per node
     const liveSessions = this.getLatestLiveSessions(rigId);
-    await this.recordAlreadyStoppedIntent(rigId);
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
+      // Additional intent is best-effort; keep down's existing result if it cannot be recorded.
+      await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
       this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets());
       result.alreadyStopped = true;
       // Still tear down services even if no agent sessions are running
@@ -182,6 +183,8 @@ export class RigTeardownOrchestrator {
         killFailures++;
       }
     }
+    // Stop live sessions before probing historical rows; bookkeeping must not fail down.
+    await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
     this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets());
 
     // 5b. Tear down services if they exist
