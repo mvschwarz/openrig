@@ -1,5 +1,6 @@
 import type { PageRead } from "./page-read.js";
 import type { ProjectSelection } from "./types.js";
+import { readUsageCost } from "./cost/cost-read.js";
 // The TUI's ONLY daemon surface — thin typed fetch wrappers over the §4.A
 // endpoint table, ONE module by design: the R7 no-new-data source-check is a
 // one-file read (every route below is an EXISTING, web-consumed daemon read).
@@ -221,6 +222,12 @@ export class DaemonClient {
     }
     if (!data || typeof data !== "object" || Array.isArray(data)) return { status: res.status, error: "the response was not a usage-across-hosts view" };
     return { view: data };
+  }
+
+  /** Slice 02 — the cost view, as `rig usage cost --json` prints it. GET only, computed from what the daemon already
+   *  stores: no provider lookup, native read or charge lookup. A failed or absent route resolves to its status. */
+  usageCost(): Promise<import("./cost/cost-read.js").CostRead["status"]> {
+    return readUsageCost(this.fetchImpl, this.baseUrl, this.headers);
   }
 
   /** Bounded canonical findings; the TUI filters this one record set by scope. */

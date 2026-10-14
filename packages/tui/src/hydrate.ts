@@ -429,6 +429,13 @@ export async function hydrateSnapshot(
     return { ...emptySnapshot(), usageHosts: { status }, readErrors, hydratedAt: new Date().toISOString() };
   }
 
+  // COST: one GET of the daemon's cost view, computed from what it already stores. Starts no lookup of any kind.
+  if (viewContext?.section === "cost") {
+    const status = await client.usageCost();
+    if (!("body" in status)) readErrors.push(`cost: ${status.error}`);
+    return { ...emptySnapshot(), cost: { status }, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
   // USAGE: one GET of the provider read model, answered from the daemon's memory. Never the refresh route. Only
   // when the model has no usage rows does it read the config browser, to tell "off" from "not served".
   if (viewContext?.section === "usage") {
