@@ -8,6 +8,8 @@ unless they ask.
 > remind them, it reads this page (installed at `$OPENRIG_HOME/reference/keeping-a-watch.md`) first. Every step below
 > was exercised with the CLI on an isolated private daemon: create, set aside, fire, re-arm, list, change, stop, a
 > daemon restart and a handover. A native run with a real operator, install and channel has **not** been run yet.
+> The usage warning's command and field names are checked against the served command on a test fixture; it hasn't
+> been run as a watch.
 
 ## The shape
 
@@ -152,6 +154,67 @@ under some conditions, with no delay guarantee. So:
   task arrives pending, with its body and `watch` tag but no timer: the new owner sets it aside again with a fresh
   timer, as in step 3.
 
+## A usage warning: "warn me when my allowance runs low"
+
+This is a conditional watch like any other: the same task, timer, re-arm, stop and human channel. Only the check is
+specific.
+
+**The check is `rig provider status --all-hosts --json`.** It returns what every registered machine already holds,
+this one included, and never starts a read on any account. With no host registry it covers this machine only, and
+says so. Use it rather than the single-machine `rig provider status --json`: one allowance used from several
+machines appears once, with each machine's own observation beside it, so you can't count it twice. If it answers that
+usage windows are off, tell the person that before setting the watch, as you would an unreachable channel.
+
+**Never put `--refresh` in the timer's check.** `rig provider status --all-hosts --refresh` starts a native read of the
+accounts on every machine. Run it only when the person asks for a fresh reading now.
+
+**Choose the allowance with the person once, and write its identity into the body.**
+- **The allowance:** its `items[].key` and `items[].provider`, read from one run of the check. Show them the allowance
+  by its label in the plain `rig provider status --all-hosts` view, never a key they have to type.
+- **The window:** `items[].observations[].row.windows[].window`. Claude's are `five_hour` and `weekly`; Codex's are
+  `primary` and `secondary`, with `items[].observations[].row.windows[].durationMins` saying which is which.
+- **The threshold:** on `items[].observations[].row.windows[].remainingPercent`. It's a percentage, and no absolute
+  amount is served. Remaining is 100 minus `items[].observations[].row.windows[].usedPercent`, never below 0. Both are
+  null when the machine reported no usage for the window.
+
+**What each part of the answer means:**
+
+| Field | What it tells you |
+|---|---|
+| `items[].linkage` | `single`: one machine saw it. `same`: several machines saw one allowance. Compare their observations; **never add or average them**. `conflict`: the machines disagree (their reset times are more than 60 s apart); every observation is kept. `unknown`: the same id seen under another login, or with no login email. It isn't merged, so you can't tell whether it's the person's allowance. Say so plainly. `items[].notes` says why |
+| `items[].observations[].hostId`, `items[].observations[].readAt` | Which machine the observation is from, and when this daemon read it |
+| `items[].observations[].row.windows[].observedAt` | When that machine's reading was taken: the time to tell the person |
+| `items[].observations[].row.windows[].freshness` | `fresh`, `stale` or `unavailable`, with `items[].observations[].row.windows[].freshnessReason` saying why |
+| `items[].observations[].row.windows[].level` | The served level, with `items[].observations[].row.windows[].levelReason`. The person's own threshold is what you compare, not this |
+| `items[].observations[].row.lastRefresh` | That machine's last read. When `items[].observations[].row.lastRefresh.outcome` is `failed`, its reading is older evidence and reads `stale` |
+| `hosts[].usage`, `hosts[].usageReason` | Whether each machine's usage was read: `served`, `off`, `older` or `unavailable`, and why. A machine that wasn't read contributes nothing, never a zero |
+| `hosts[].lastRefresh` | The last refresh started from here for that machine, per provider. A `failed` one sits beside the older observation the machine kept |
+| `seatAccounts[].seats[].configured`, `seatAccounts[].seats[].allowance` | The account each seat is **configured** to use. `seatAccounts[].seats[].allowance.linked` is always false: configuration isn't proof of which allowance a running seat draws on. Never tell the person a seat uses this allowance because of it |
+
+**The decision on each fire,** using the table in "Every time the timer fires":
+- **Met:** a `fresh` observation of the chosen window is below the threshold. Tell them the lowest one, with its
+  machine and `observedAt`.
+- **Not met:** every `fresh` observation of it is at or above the threshold.
+- **Can't tell:** no `fresh` observation of it, a `fresh` one whose `remainingPercent` is null, the allowance missing
+  from the answer, or its linkage `unknown`. Use the once-then-quiet unknown rule, and give the reason
+  (`freshnessReason`, `levelReason` for a null reading, or the machine's `usageReason`).
+
+The task body, for the person's own allowance, window and threshold:
+
+```markdown
+Person's words: "Warn me when my Claude allowance drops below 20% of its 5-hour window; check every 30 minutes."
+Check: `rig provider status --all-hosts --json` (served readings only; never --refresh).
+Allowance: key <allowance key>, provider claude, window five_hour. Chosen with the person.
+Met: a fresh observation of that window with remainingPercent below 20. Report the lowest, with its machine and observedAt.
+Never add machines' numbers.
+Can't tell: no fresh observation of that window, a fresh one with remainingPercent null (give its levelReason), the
+allowance missing, or its linkage unknown. Give the reason.
+Interval: 30m.
+Tell them: <entityId>@external (human channel), once, when met.
+Stop: after telling them once, or when they say stop.
+Unknown: not said yet.
+```
+
 ## What not to use
 
 - **`rig watchdog register --policy periodic-reminder` for a person's watch.** It repeats every interval until it's
@@ -164,4 +227,4 @@ under some conditions, with no delay guarantee. So:
   for that task when this task is handed off or stopped, and the same rule applies to its wake. None of this is a
   delivery guarantee.
 - **Transcript bytes as "usage".** `context-usage-threshold` measures an agent's transcript, not an account's
-  allowance.
+  allowance. For an allowance, see "A usage warning" above.
