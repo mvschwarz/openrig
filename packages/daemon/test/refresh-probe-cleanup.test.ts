@@ -48,7 +48,7 @@ class FakeTmux {
       if (this.listPanesFails) throw new Error("list-panes: transient failure");
       const found = byTarget();
       if (!found) throw new Error(`can't find session: ${target}`);
-      return `${found[1].pane}|0|/tmp|80|24|1\n`;
+      return `${found[1].pane}|0|/tmp|0|80|24|1\n`;
     }
     if (command.startsWith("tmux display-message") && command.includes("session_id")) return `${byTarget()?.[1].id ?? ""}\n`;
     if (command.startsWith("tmux display-message") && command.includes("pane_current_command")) return byTarget() ? "zsh\n" : "";
@@ -119,6 +119,7 @@ describe("#188 snapshot refresh probe cleanup", () => {
     await refresher(tmux).refresh([seat]);
 
     expect(tmux.commands.some((c) => c.startsWith("tmux new-session") && c.includes("rigged-refresh-"))).toBe(true);
+    console.log("CMDS:", tmux.commands.filter((c) => c.includes("rigged-refresh")));
     expect(tmux.probes()).toEqual([]);
   });
 

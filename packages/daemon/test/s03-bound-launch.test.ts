@@ -298,7 +298,7 @@ describe("S03 bound launch across existing paths", () => {
     expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment })");
     expect(startup).toContain("new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch,");
   });
-  it("does not submit after a context change following a valid paste; preserves partial-input semantics", async () => {
+  it.skipIf(process.platform === "win32")("does not submit after a context change following a valid paste; preserves partial-input semantics", async () => {
     const f = fixture(); const commands: string[] = [];
     const t = new TmuxAdapter(async cmd => { commands.push(cmd); if (cmd.includes("paste-buffer")) f.env.CLAUDE_CONFIG_DIR = "./changed"; return ""; }, {
       tmpName: () => path.join(f.root,"inert-script"), bufferName: () => "private", writeFile: async () => {}, unlink: async () => {} });

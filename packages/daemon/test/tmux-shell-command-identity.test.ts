@@ -40,7 +40,9 @@ async function fixture() {
       // (=name:) address the same canonical session in the fixture server.
       const name = /-t '([^']+)'/.exec(command)?.[1]?.replace(/^=/, "").replace(/:$/, "");
       if (!name || !panes.has(name)) throw Error("can't find session");
-      return command.startsWith("tmux list-panes") ? `${panes.get(name)}|0|/inert|80|24|1\n` : "";
+      // Pane lines carry the window_index field the adapter's PANE_FORMAT now
+      // requests (needed for psmux-safe qualified targets).
+      return command.startsWith("tmux list-panes") ? `${panes.get(name)}|0|/inert|0|80|24|1\n` : "";
     }
     return "";
   }, {
@@ -85,8 +87,8 @@ describe("shell launch after cold pane reuse (#141)", () => {
       f.tmux.sendShellCommand("worker@fixture", "codex resume 'retained-thread'", callback ? () => { checks++; } : undefined));
     expect(result).toEqual({ ok: true });
     const pastes = f.commands.filter(c => c.includes("paste-buffer"));
-    expect(pastes).toHaveLength(1); expect(pastes[0]).toContain("-t '%0'");
-    expect(f.commands.filter(c => c.includes("send-keys"))).toEqual(["tmux send-keys -t '%0' 'Enter'"]);
+    expect(pastes).toHaveLength(1); expect(pastes[0]).toContain("-t '=worker@fixture:0.0'");
+    expect(f.commands.filter(c => c.includes("send-keys"))).toEqual(["tmux send-keys -t '=worker@fixture:0.0' 'Enter'"]);
     expect(checks).toBe(callback ? 2 : 0);
     expect(f.retained()).toEqual(before);
   });
@@ -96,7 +98,7 @@ describe("shell launch after cold pane reuse (#141)", () => {
     expect(await f.tmux.sendShellCommand(f.nodes.worker!.id, "inert launch")).toEqual({ ok: true });
     expect(await f.tmux.sendShellCommand("sibling@fixture", "inert launch")).toEqual({ ok: true });
     expect(f.commands.filter(c => c.includes("send-keys"))).toEqual([
-      "tmux send-keys -t '%0' 'Enter'", "tmux send-keys -t '%2' 'Enter'",
+      "tmux send-keys -t '=worker@fixture:0.0' 'Enter'", "tmux send-keys -t '=sibling@fixture:0.0' 'Enter'",
     ]);
     expect(f.retained()).toEqual(before);
   });
@@ -133,9 +135,14 @@ describe("shell launch after cold pane reuse (#141)", () => {
     expect(await f.tmux.sendShellCommand("sibling@fixture", "inert launch")).toEqual({ ok: true });
   });
 
+  // On win32 the non-sourcing path sends the raw command (no staged writeFile),
+  // so the script/payload write-boundary fences have no hook to fire on there;
+  // those two cases stay POSIX-only. The load/paste exec boundaries still fence.
   it.each(["script", "payload", "load", "paste"].flatMap(boundary => [
     { boundary, sourceInPane: false }, { boundary, sourceInPane: true },
-  ]))("fences an occupant replacement during $boundary preparation (source=$sourceInPane)", async ({ boundary, sourceInPane }) => {
+  ]).filter(({ boundary, sourceInPane }) => !(
+    process.platform === "win32" && !sourceInPane && (boundary === "script" || boundary === "payload")
+  )))("fences an occupant replacement during $boundary preparation (source=$sourceInPane)", async ({ boundary, sourceInPane }) => {
     const f = await fixture();
     const replace = () => f.db.prepare(`INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind)
       VALUES ('replacement',?,100,'replacement','adopt')`).run(f.nodes.worker!.id);

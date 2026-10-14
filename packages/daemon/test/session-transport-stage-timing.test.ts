@@ -152,7 +152,7 @@ describe("SessionTransport stage timing", () => {
       dbPath: ":memory:",
       tmuxExec: async (command: string) => {
         if (command.includes("capture-pane")) return "idle\n❯ ";
-        if (command.includes("list-panes")) return `${pane}|0|/fixture|80|24|1`;
+        if (command.includes("list-panes")) return `${pane}|0|/fixture|0|80|24|1`;
         return "";
       },
       cmuxExec: async () => "",

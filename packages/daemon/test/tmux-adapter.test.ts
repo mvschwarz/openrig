@@ -143,7 +143,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'=my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{window_index}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -155,14 +155,14 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'=my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{window_index}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
     it("parses output into typed TmuxPane objects", async () => {
       const output = [
-        "%1|0|/home/user/code|180|40|1",
-        "%2|1|/tmp|180|40|0",
+        "%1|0|/home/user/code|0|180|40|1",
+        "%2|1|/tmp|0|180|40|0",
       ].join("\n");
 
       const adapter = new TmuxAdapter(mockExec({ "list-panes": { stdout: output } }));
