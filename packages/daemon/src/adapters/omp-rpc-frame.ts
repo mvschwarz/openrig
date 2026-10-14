@@ -10,8 +10,10 @@
 
 /** OMP's documented reassembly ceiling; an advertised limit above it is not trusted. */
 export const OMP_MAX_REASSEMBLED_FRAME_BYTES = 64 * 1024 * 1024;
-/** OMP's documented physical frame limit; one chunk line can't carry more. */
-const OMP_MAX_FRAME_BYTES = 1024 * 1024;
+/** OMP's documented physical frame limit, the line's LF included. Under v2 no stdout line may exceed it. */
+export const OMP_MAX_FRAME_BYTES = 1024 * 1024;
+/** The most chunks one sequence can have: OMP v18.5.0 sends 256 KiB payloads, so 64 MiB is 256 chunks. */
+export const OMP_MAX_CHUNKS = 256;
 
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -43,6 +45,8 @@ export class OmpFrameDecoder {
   private pending: Pending | null = null;
   /** Sequences already reported as rejected (at most two: an interleaving pair); their later chunks are skipped. */
   private readonly rejected = new Set<string>();
+  /** A chunk without a usable chunkId was rejected: later chunks without one are skipped, not reported again. */
+  private rejectedAnonymous = false;
 
   constructor(private readonly limitBytes: number) {}
 
@@ -51,30 +55,53 @@ export class OmpFrameDecoder {
     return this.pending ? `chunk sequence ${this.pending.chunkId} ended after ${this.pending.nextIndex} of ${this.pending.count} chunks` : null;
   }
 
+  /** A stdout line that isn't a frame (not JSON, or not an object) arrived: a pending sequence is interrupted. */
+  interrupt(what: string): string | null {
+    if (!this.pending) return null;
+    const { chunkId } = this.pending;
+    this.drop(chunkId);
+    return `chunk sequence ${chunkId} was interrupted by ${what}`;
+  }
+
+  /** A line rejected before it was parsed (over the physical frame limit). A pending sequence is dropped with it, and
+   *  so is the line's own sequence when its chunkId is known, so its later chunks aren't reported again. */
+  rejectLine(reason: string, chunkId?: string): string | null {
+    // Another line of a sequence already reported: skipped, as push() skips its chunks.
+    if (chunkId && !this.pending && this.rejected.has(chunkId)) return null;
+    const interrupted = this.pending?.chunkId;
+    this.drop(interrupted);
+    if (chunkId) this.rejected.add(chunkId);
+    return interrupted && interrupted !== chunkId ? `${reason}; chunk sequence ${interrupted} was interrupted by it` : reason;
+  }
+
+  private drop(chunkId?: string): void {
+    this.pending = null;
+    this.rejected.clear();
+    this.rejectedAnonymous = false;
+    if (chunkId) this.rejected.add(chunkId);
+  }
+
   push(value: Record<string, unknown>): OmpFrameResult {
     if (value.type !== "rpc_chunk") {
       if (!this.pending) return { frame: value };
       const { chunkId } = this.pending;
-      this.pending = null;
-      this.rejected.clear();
-      this.rejected.add(chunkId);
+      this.drop(chunkId);
       return { frame: value, dropped: `chunk sequence ${chunkId} was interrupted by a ${String(value.type)} frame` };
     }
     const { chunkId, index, count, byteLength, data } = value;
-    if (typeof chunkId === "string" && this.rejected.has(chunkId)) return { skipped: true };
+    const validId = typeof chunkId === "string" && chunkId.length > 0 && chunkId.length <= 128;
+    if (validId ? this.rejected.has(chunkId) : this.rejectedAnonymous) return { skipped: true };
     const reject = (reason: string): OmpFrameResult => {
-      this.pending = null;
-      this.rejected.clear();
-      if (typeof chunkId === "string") this.rejected.add(chunkId);
+      this.drop(validId ? chunkId : undefined);
+      if (!validId) this.rejectedAnonymous = true;
       return { dropped: reason };
     };
-    if (typeof chunkId !== "string" || chunkId.length === 0 || chunkId.length > 128
-      || !Number.isSafeInteger(index) || !Number.isSafeInteger(count) || !Number.isSafeInteger(byteLength)) {
+    if (!validId || !Number.isSafeInteger(index) || !Number.isSafeInteger(count) || !Number.isSafeInteger(byteLength)) {
       return reject("a chunk with invalid metadata");
     }
     const at = index as number, of = count as number, length = byteLength as number;
     if (length > this.limitBytes) return reject(`chunk sequence ${chunkId} declares ${length} bytes, above the ${this.limitBytes}-byte reassembly limit`);
-    if (of < 2 || at < 0 || at >= of || length < 1 || of > length) return reject(`chunk sequence ${chunkId} has invalid metadata`);
+    if (of < 2 || of > OMP_MAX_CHUNKS || at < 0 || at >= of || length < 1 || of > length) return reject(`chunk sequence ${chunkId} has invalid metadata`);
     if (typeof data !== "string" || data.length === 0 || data.length > OMP_MAX_FRAME_BYTES || !BASE64.test(data)) {
       return reject(`chunk sequence ${chunkId} has invalid chunk data`);
     }
@@ -84,13 +111,13 @@ export class OmpFrameDecoder {
     if (!this.pending) {
       if (at !== 0) return reject(`chunk sequence ${chunkId} did not start at index 0`);
       this.rejected.clear();
+      this.rejectedAnonymous = false;
       this.pending = { chunkId, count: of, byteLength: length, nextIndex: 0, chunks: [], received: 0 };
     } else if (this.pending.chunkId !== chunkId) {
       const interrupted = this.pending.chunkId;
-      this.pending = null;
       // Both sequences are unusable: the interrupted one is incomplete, and the newcomer interleaved it.
-      this.rejected.clear();
-      this.rejected.add(interrupted).add(chunkId);
+      this.drop(interrupted);
+      this.rejected.add(chunkId);
       return { dropped: `chunk sequence ${interrupted} was interleaved with ${chunkId}` };
     }
     const pending = this.pending;

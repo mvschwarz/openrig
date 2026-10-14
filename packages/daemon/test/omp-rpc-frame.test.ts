@@ -17,12 +17,12 @@ const CHUNK_BYTES = 256 * 1024;
 const READY_V2 = { type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2], maxFrameBytes: MiB, maxReassembledFrameBytes: 64 * MiB };
 
 /** The rpc_chunk frames OMP v18.5.0 writes for one logical frame (encodeChunkedRpcFrames). */
-function chunk(frame: unknown, chunkId = "rpc-1"): Record<string, unknown>[] {
+function chunk(frame: unknown, chunkId = "rpc-1", payloadBytes = CHUNK_BYTES): Record<string, unknown>[] {
   const bytes = Buffer.from(JSON.stringify(frame), "utf8");
-  const count = Math.ceil(bytes.byteLength / CHUNK_BYTES);
+  const count = Math.ceil(bytes.byteLength / payloadBytes);
   return Array.from({ length: count }, (_, index) => ({
     type: "rpc_chunk", chunkId, index, count, byteLength: bytes.byteLength,
-    data: bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES).toString("base64"),
+    data: bytes.subarray(index * payloadBytes, (index + 1) * payloadBytes).toString("base64"),
   }));
 }
 
@@ -132,6 +132,26 @@ describe("OMP v2 frame decoder", () => {
     expect(feed(new OmpFrameDecoder(64 * MiB), encode(Buffer.from("[1,2,3]"))).at(-1)).toEqual({ dropped: expect.stringContaining("one JSON object") });
   });
 
+  it("bounds the chunk count at OMP's own 256 (round 1, L1)", () => {
+    // 2,041 one-byte chunks under a 4,096-byte limit: refused on the first chunk, nothing kept.
+    const tiny = { type: "rpc_chunk", chunkId: "rpc-5", index: 0, count: 2041, byteLength: 2041, data: Buffer.from("{").toString("base64") };
+    expect(new OmpFrameDecoder(4096).push(tiny)).toEqual({ dropped: expect.stringContaining("invalid metadata") });
+    expect(new OmpFrameDecoder(64 * MiB).push({ ...tiny, count: 257, byteLength: 64 * MiB })).toEqual({ dropped: expect.stringContaining("invalid metadata") });
+    // What OMP sends at its 64 MiB ceiling, 256 chunks of 256 KiB, is still accepted.
+    expect(new OmpFrameDecoder(64 * MiB).push({ ...tiny, count: 256, byteLength: 64 * MiB })).toEqual({ pending: true });
+  });
+
+  it("reports a sequence without a usable chunkId once (round 1, LOW-1)", () => {
+    const decoder = new OmpFrameDecoder(64 * MiB);
+    const [first, second, third] = chunk(entriesReply("x", history(2 * MiB)));
+    expect(decoder.push({ ...first!, chunkId: 7 })).toEqual({ dropped: "a chunk with invalid metadata" });
+    expect(decoder.push({ ...second!, chunkId: 7 })).toEqual({ skipped: true });
+    expect(decoder.push({ ...third!, chunkId: 7 })).toEqual({ skipped: true });
+    // A later, whole sequence still decodes.
+    const c = entriesReply("c", history(2 * MiB));
+    expect(feed(decoder, chunk(c, "rpc-3")).at(-1)).toEqual({ frame: c });
+  });
+
   it("negotiates only when ready advertises v2, never above OMP's documented 64 MiB", () => {
     expect(ompProtocolV2Limit(READY_V2)).toBe(64 * MiB);
     expect(ompProtocolV2Limit({ ...READY_V2, maxReassembledFrameBytes: 8 * MiB })).toBe(8 * MiB);
@@ -216,6 +236,49 @@ describe("OMP runner over protocol v2 (#1275)", () => {
     core.handlePiExit(1);
     expect(mirror).toContain(`[omp-runner] ERROR rpc frame: chunk sequence rpc-1 ended after 3 of ${frames.length} chunks; the chunked frame was dropped`);
     expect(cursor()).toBe("e-1");
+  });
+
+  it("a stdout line over OMP's 1 MiB frame is refused before parsing, and the cursor stays (round 1, F1)", () => {
+    const reply = entriesReply("pi-runner-catch-up", history(2 * MiB).slice(1));
+    const compliant = chunk(reply);
+    // review-r2's two shapes, each an otherwise consistent sequence: chunk lines carrying exactly 1,048,576 base64 characters
+    // (786,432-byte payloads), and a compliant sequence with one chunk padded by an ignored field.
+    const exact = chunk(reply, "rpc-1", 786_432);
+    const padded = compliant.map((frame, index) => index === 1 ? { ...frame, pad: "x".repeat(1_048_600) } : frame);
+    for (const frames of [exact, padded]) {
+      const { line, cursor, mirror } = negotiated();
+      const oversized = frames[frames === exact ? 0 : 1]!;
+      expect((oversized.data as string).length).toBeLessThanOrEqual(1024 * 1024);
+      const raw = JSON.stringify(oversized);
+      expect(Buffer.byteLength(raw) + 1).toBeGreaterThan(1024 * 1024);
+      for (const frame of frames) line(frame);
+      const errors = mirror.filter((l) => l.startsWith("[omp-runner] ERROR rpc frame:"));
+      expect(errors).toEqual([expect.stringContaining(`a ${Buffer.byteLength(raw) + 1}-byte line exceeds OMP's 1048576-byte frame limit`)]);
+      expect(cursor()).toBe("e-1");
+      // Recovery: the next whole reply moves the cursor.
+      line({ type: "agent_end", isTerminal: true });
+      for (const frame of chunk(entriesReply("pi-runner-cursor-refresh", history(2 * MiB)), "rpc-2")) line(frame);
+      expect(cursor()).toBe(history(2 * MiB).at(-1)!.id);
+    }
+  });
+
+  it("a null, array or non-JSON line interrupts a pending sequence explicitly (round 1, F2)", () => {
+    const frames = chunk(entriesReply("pi-runner-catch-up", history(2 * MiB).slice(1)));
+    for (const [between, kind] of [["null", "null"], ["[]", "array"], ["not json at all", "non-JSON"]] as const) {
+      const { core, line, cursor, mirror } = negotiated();
+      line(frames[0]);
+      core.handlePiLine(between);
+      for (const frame of frames.slice(1)) line(frame);
+      expect(mirror.filter((l) => l.startsWith("[omp-runner] ERROR rpc frame:")), kind).toEqual([
+        `[omp-runner] ERROR rpc frame: chunk sequence rpc-1 was interrupted by a ${kind} line; the chunked frame was dropped`,
+      ]);
+      expect(cursor(), kind).toBe("e-1");
+      // main's handling of the line itself is kept: noise is mirrored, null and arrays are not.
+      expect(mirror.includes(between), kind).toBe(kind === "non-JSON");
+      line({ type: "agent_end", isTerminal: true });
+      for (const frame of chunk(entriesReply("pi-runner-cursor-refresh", history(2 * MiB)), "rpc-2")) line(frame);
+      expect(cursor(), kind).toBe(history(2 * MiB).at(-1)!.id);
+    }
   });
 
   it("an OMP reply over the reassembly limit stays an explicit error with the cursor in place", () => {

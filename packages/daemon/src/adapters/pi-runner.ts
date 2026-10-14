@@ -30,7 +30,7 @@ import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
-import { OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
+import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -454,22 +454,37 @@ export class RunnerCore {
 
   /** One LF-delimited JSONL record from pi stdout. */
   handlePiLine(rawLine: string): void {
+    // #1275: under OMP's protocol v2 no stdout line may exceed the 1 MiB physical frame (its LF included); a longer
+    // one is refused before it is parsed. Its chunkId, if any, is read from the line's start only, so the rest of
+    // its sequence isn't reported again.
+    if (this.frameDecoder) {
+      const bytes = Buffer.byteLength(rawLine, "utf8") + 1;
+      if (bytes > OMP_MAX_FRAME_BYTES) {
+        const chunkId = /^\{"type":"rpc_chunk","chunkId":"([^"\\]{1,128})"/.exec(rawLine.slice(0, 200))?.[1];
+        this.reportDroppedFrame(this.frameDecoder.rejectLine(`a ${bytes}-byte line exceeds OMP's ${OMP_MAX_FRAME_BYTES}-byte frame limit`, chunkId));
+        return;
+      }
+    }
     const line = rawLine.trim();
     if (!line) return;
     let record: Record<string, unknown>;
     try {
       const parsed = JSON.parse(line);
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        // Not a frame: ignored as before, but it still interrupts a pending v2 sequence.
+        this.reportDroppedFrame(this.frameDecoder?.interrupt(`a ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed} line`));
+        return;
+      }
       record = parsed as Record<string, unknown>;
     } catch {
+      this.reportDroppedFrame(this.frameDecoder?.interrupt("a non-JSON line"));
       // Non-JSON noise on pi stdout — mirror it verbatim so nothing hides.
       this.io.mirrorLine(line);
       return;
     }
     if (this.frameDecoder) {
       const result = this.frameDecoder.push(record);
-      // A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was.
-      if ("dropped" in result && result.dropped) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${result.dropped}; the chunked frame was dropped`);
+      if ("dropped" in result) this.reportDroppedFrame(result.dropped);
       if (!("frame" in result)) return;
       record = result.frame;
     }
@@ -479,6 +494,11 @@ export class RunnerCore {
       return;
     }
     this.handleEvent(record);
+  }
+
+  /** A frame that can't be reassembled is lost, and said so. If it was a get_entries reply, the cursor stays where it was. */
+  private reportDroppedFrame(reason: string | null | undefined): void {
+    if (reason) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${reason}; the chunked frame was dropped`);
   }
 
   private get runtime(): RunnerRuntime { return this.opts.runtime ?? "pi"; }
@@ -510,8 +530,7 @@ export class RunnerCore {
   /** Child process exit — honest, loud, durable. */
   handlePiExit(code: number | null): void {
     this.ready = false;
-    const incomplete = this.frameDecoder?.incomplete();
-    if (incomplete) this.io.mirrorLine(`[omp-runner] ERROR rpc frame: ${incomplete}; the chunked frame was dropped`);
+    this.reportDroppedFrame(this.frameDecoder?.incomplete());
     this.io.mirrorLine(`[${this.runtime}-runner] EXITED ${this.runtime} exited (code ${code ?? "unknown"})`);
     this.writeSidecar({ exited: { code, at: this.io.now() } });
     this.io.postActivity(this.activityPayload("Stop", `${this.runtime}_exited`));
