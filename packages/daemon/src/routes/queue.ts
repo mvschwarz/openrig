@@ -337,6 +337,8 @@ export function queueRoutes(): Hono {
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
+      /** How the sender's identity was established, recorded on the source close as a local handoff records it. */
+      identityProvenance?: string | null;
     },
     createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
       (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
@@ -410,6 +412,7 @@ export function queueRoutes(): Hono {
         closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
+        identityProvenance: body.identityProvenance ?? null,
       });
     } catch (err) {
       return errorResponse(c, err);
@@ -698,6 +701,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody);
@@ -777,6 +782,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody);

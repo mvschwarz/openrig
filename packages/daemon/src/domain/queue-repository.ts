@@ -2106,6 +2106,8 @@ export class QueueRepository {
     /** `handed-off` for /handoff; `done` for /handoff-and-complete. */
     terminalState: "handed-off" | "done";
     transitionNote?: string;
+    /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
+    identityProvenance?: string | null;
   }): { item: QueueItem; absorbed: boolean } {
     const source = this.getById(input.qitemId);
     if (!source) {
@@ -2155,6 +2157,7 @@ export class QueueRepository {
         transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
         closureReason: "handed_off_to",
         closureTarget: input.closureTarget,
+        identityProvenance: input.identityProvenance ?? null,
       });
 
       // OPR.0.5.8.1 S1b — third member of the handoff family, same bypass.
@@ -2179,7 +2182,7 @@ export class QueueRepository {
         qitemId: input.qitemId,
         terminalState: input.terminalState,
         actorSession: input.fromSession,
-        identityProvenance: null,
+        identityProvenance: input.identityProvenance ?? null,
         ts,
       })) {
         events.push(dependentEvent);
