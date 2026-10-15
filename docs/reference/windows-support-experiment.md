@@ -92,7 +92,7 @@ those operator/provider acceptance requirements.
 
 ### Rebase to current main, 2026-10-15
 
-The experiment has been rebased onto main `72865f7962b6ecf951c1c9f7db028080f7fcf604`
+The experiment has been rebased onto main `2cfc5fa017cf73bf4261d7b4c4e64c34b080757c`
 (0.6.10). Build changes already integrated through #1033 were removed from the
 experiment's delta. Conflict resolution retains main's OMP protocol-v2 and charge
 tracking, Codex launcher-chain handling, tmux-server selection and Claude resume
