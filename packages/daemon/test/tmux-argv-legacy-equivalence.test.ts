@@ -31,7 +31,7 @@ function runSites(): number[] {
     .flatMap((line, i) => /this\.run\(/.test(line) ? [i + 1] : []);
 }
 
-interface RunCall { site: number; argv: string[]; legacy: string }
+interface RunCall { site: number; argv: string[]; legacy?: string }
 
 const SESSION = "seat'q a";
 const TARGET = { nodeId: "node-1", session: SESSION, occupant: "occupant-1", pane: "%1" };
@@ -55,7 +55,7 @@ function respond(cmd: string, failing: string[], composer = false): string {
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; psmux?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
   const fileOps: TmuxFileOps = {
     writeFile: async () => {},
@@ -66,7 +66,11 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   const adapter = new TmuxAdapter(async (cmd) => {
     execs.push(cmd);
     return respond(cmd, opts.failing ?? [], opts.composer);
-  }, fileOps);
+  }, fileOps, opts.psmux ? async argv => {
+    if (argv.includes("display-message")) return "$7\n";
+    if (argv.includes("has-session")) throw new Error("can't find session: missing");
+    return "";
+  } : undefined, opts.psmux ? "psmux" : "tmux");
   if (opts.guard) {
     adapter.deliveryGuard = {
       maybeTarget: () => TARGET,
@@ -83,13 +87,13 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
       notePasted: async () => {},
     } as unknown as SeatDeliveryGuard;
   }
-  const self = adapter as unknown as { run: (argv: string[], legacy?: string) => Promise<string> };
+  const self = adapter as unknown as { run: (argv: string[], legacy?: string, scope?: string) => Promise<string> };
   const original = self.run.bind(adapter);
-  self.run = async (argv, legacy) => {
+  self.run = async (argv, legacy, scope) => {
     const frame = /src\/adapters\/tmux\.ts:(\d+):\d+/.exec(new Error().stack ?? "");
     const before = execs.length;
     try {
-      return await original(argv, legacy);
+      return await original(argv, legacy, scope);
     } finally {
       calls.push({ site: Number(frame?.[1]), argv, legacy: execs[before]! });
     }
@@ -167,6 +171,9 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });
   await scoped.createSession(SESSION, "/w x", { OPENRIG_NODE_ID: "n1", Q: "it's" });
   await scoped.respawnPane("%1", "printf '$HOME'", { env: { OPENRIG_NODE_ID: "n1", A: "b c" } });
+  // Native psmux deliberately has no shell-string path. Drive its two kill
+  // call sites too, retaining complete coverage without unquoting an absent string.
+  expect(await recordingAdapter(calls, { psmux: true }).killSession(SESSION)).toEqual({ ok: true });
   return calls;
 }
 
@@ -180,9 +187,10 @@ describe.skipIf(process.platform === "win32")("tmux argv and legacy shell string
   it("every run() call site hands tmux the same arguments on both paths", async () => {
     const calls = await driveEveryMethod();
     expect([...new Set(calls.map((c) => c.site))].sort((x, y) => x - y)).toEqual(runSites());
-    const words = await shellWords(calls.map((c) => c.legacy));
-    expect(words).toHaveLength(calls.length);
-    calls.forEach((c, i) => {
+    const shellCalls = calls.filter((c): c is RunCall & { legacy: string } => c.legacy !== undefined);
+    const words = await shellWords(shellCalls.map((c) => c.legacy));
+    expect(words).toHaveLength(shellCalls.length);
+    shellCalls.forEach((c, i) => {
       expect(words[i], `tmux.ts:${c.site} ${c.legacy}`).toEqual(c.argv);
     });
   });

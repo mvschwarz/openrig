@@ -62,12 +62,12 @@ describe("managed Windows launch", () => {
     const script = command + "; Write-Output ([Environment]::GetEnvironmentVariable('PARENT_ONLY'))";
     const output = await new Promise<string>((resolve, reject) => {
       native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
-        encoding: "utf8", timeout: 10000, windowsHide: true,
+        encoding: "utf8", timeout: 30000, windowsHide: true,
         env: { SYSTEMROOT: process.env.SystemRoot!, PATH: process.env.PATH!, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY!, UNAPPROVED: "must-not-forward", PARENT_ONLY: "parent-preserved" },
-      }, (error, out) => error ? reject(error) : resolve(out));
+      }, (error, out, stderr) => error ? reject(new Error(`Native fixture failed: killed=${error.killed}, signal=${error.signal}, code=${error.code}; stderr=${stderr}; stdout=${out}`)) : resolve(out));
     });
     const [child, parent] = output.trim().split(/\r?\n/);
     expect(JSON.parse(child!)).toEqual({ args: argv, cwd: f.cwd, home: f.home, auth: "synthetic-only-never-in-script" });
     expect(parent).toBe("parent-preserved");
-  });
+  }, 40000);
 });

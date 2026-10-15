@@ -19,7 +19,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
     const script = path.join(dir, "receiver.mjs");
     const runner = pathToFileURL(path.resolve(import.meta.dirname, "../dist/adapters/pi-runner.js")).href;
     writeFileSync(script, `import fs from 'node:fs'; import {createRunnerInput} from ${JSON.stringify(runner)};
-      createRunnerInput(process.stdin, process.stdout, block => { fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify(block)); process.exit(0); });
+      createRunnerInput(process.stdin, process.stdout, block => { fs.writeFileSync(${JSON.stringify(output + ".tmp")}, JSON.stringify(block)); fs.renameSync(${JSON.stringify(output + ".tmp")}, ${JSON.stringify(output)}); process.exit(0); });
       fs.writeFileSync(${JSON.stringify(ready)}, 'ready');`);
     const invoke = async (argv: string[]) => (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { windowsHide: true })).stdout;
     const adapter = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
