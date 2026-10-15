@@ -893,6 +893,7 @@ function validateServicesBlock(raw: unknown, prefix: string): string[] {
 }
 
 function validateWaitTarget(raw: Record<string, unknown>, index: number, prefix: string): string[] {
+  if (!isMapping(raw)) return [`${prefix}.wait_for[${index}]: must be an object`];
   const errors: string[] = [];
   const targetPrefix = `${prefix}.wait_for[${index}]`;
   const hasService = typeof raw["service"] === "string" && raw["service"];
@@ -932,6 +933,10 @@ function validateSurfaces(raw: unknown, prefix: string): string[] {
     } else {
       for (let i = 0; i < (obj["urls"] as unknown[]).length; i++) {
         const url = (obj["urls"] as Record<string, unknown>[])[i]!;
+        if (!isMapping(url)) {
+          errors.push(`${prefix}.surfaces.urls[${i}]: must be an object`);
+          continue;
+        }
         if (!url["name"] || typeof url["name"] !== "string") {
           errors.push(`${prefix}.surfaces.urls[${i}].name: required non-empty string`);
         }
@@ -948,6 +953,10 @@ function validateSurfaces(raw: unknown, prefix: string): string[] {
     } else {
       for (let i = 0; i < (obj["commands"] as unknown[]).length; i++) {
         const command = (obj["commands"] as Record<string, unknown>[])[i]!;
+        if (!isMapping(command)) {
+          errors.push(`${prefix}.surfaces.commands[${i}]: must be an object`);
+          continue;
+        }
         if (!command["name"] || typeof command["name"] !== "string") {
           errors.push(`${prefix}.surfaces.commands[${i}].name: required non-empty string`);
         }
@@ -968,6 +977,10 @@ function validateCheckpointHooks(raw: unknown, prefix: string): string[] {
   const errors: string[] = [];
   for (let i = 0; i < raw.length; i++) {
     const hook = raw[i] as Record<string, unknown>;
+    if (!isMapping(hook)) {
+      errors.push(`${prefix}.checkpoints[${i}]: must be an object`);
+      continue;
+    }
     if (!hook["id"] || typeof hook["id"] !== "string") {
       errors.push(`${prefix}.checkpoints[${i}].id: required non-empty string`);
     }
