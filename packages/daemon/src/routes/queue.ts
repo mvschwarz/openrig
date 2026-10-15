@@ -182,6 +182,23 @@ export function queueRoutes(): Hono {
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
         : err.code === "workflow_frontier_packet" ? 400
+        // Park/close input the caller can fix (wake options on a non-park transition, closure
+        // fields or blocked_on on a transition that cannot store them) are client errors, not
+        // daemon faults. wake_intent_store_unavailable, outbox_db_mismatch and
+        // terminal_close_without_wake_intent describe the daemon's own state and stay 500.
+        // blocker_not_found / blocker_not_live / blocker_malformed stay 500 on purpose: the CLI
+        // tests pin their exit code 2 (queue-update-metadata-reject-cli.test.ts).
+        : err.code === "closure_fields_not_admitted" ? 400
+        : err.code === "blocked_on_not_admitted" ? 400
+        : err.code === "wake_not_admitted" ? 400
+        : err.code === "wake_ambiguous" ? 400
+        : err.code === "wake_after_invalid" ? 400
+        : err.code === "wake_max_invalid" ? 400
+        : err.code === "wake_message_not_admitted" ? 400
+        : err.code === "wake_message_invalid" ? 400
+        : err.code === "wake_watchdog_not_live" ? 400
+        : err.code === "wake_watchdog_target_mismatch" ? 400
+        : err.code === "wake_self_blocker" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
