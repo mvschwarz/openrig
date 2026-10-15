@@ -12,7 +12,7 @@ vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.clearAllMocks(); });
 
-function fixture(selected?: string) {
+function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; memberEnv: Record<string, string>; sessionMarker: string }) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rig-win-managed-"));
   cleanups.push(() => fs.rmSync(home, { recursive: true }));
   const cwd = path.join(home, "中文 space"); fs.mkdirSync(cwd);
@@ -21,13 +21,36 @@ function fixture(selected?: string) {
   db.exec("CREATE TABLE nodes(id TEXT, runtime TEXT, cwd TEXT); CREATE TABLE bindings(id TEXT,node_id TEXT,tmux_session TEXT,tmux_pane TEXT); CREATE TABLE occupant_tenures(node_id TEXT,generation_uuid TEXT,generation_ordinal INTEGER)");
   db.prepare("INSERT INTO nodes VALUES ('node','claude-code',?)").run(cwd);
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation',1)");
+  if (seat) {
+    db.exec("CREATE TABLE rigs(id TEXT,env_json TEXT); ALTER TABLE nodes ADD COLUMN rig_id TEXT; ALTER TABLE nodes ADD COLUMN env_json TEXT;");
+    db.prepare("INSERT INTO rigs VALUES ('rig', ?)").run(JSON.stringify(seat.rigEnv));
+    db.prepare("UPDATE nodes SET rig_id='rig',env_json=? WHERE id='node'").run(JSON.stringify(seat.memberEnv));
+  }
   const env: Record<string, string> = { HOME: home, PATH: home, OPENRIG_HOME: home, ANTHROPIC_API_KEY: "synthetic-only-never-in-script" };
   if (selected !== undefined) env.CLAUDE_CONFIG_DIR = selected;
   vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], _opts: unknown, done: (error: null, help: string) => void) => done(null, '--permission-mode <mode> (choices: "auto", "default")')) as never);
-  return { home, cwd, executable, db, env, managed: new ClaudeManagedLaunch(db, env, {}, "win32") };
+  return { home, cwd, executable, db, env, managed: new ClaudeManagedLaunch(db, env, {}, seat ? async () => seat.sessionMarker : undefined, "win32") };
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("forwards rig, member and one-off env through the managed child without exposing pane-only variables", async () => {
+    const f = fixture(undefined, { rigEnv: { RIG_FLAG: "declared-rig", HOME: "wrong-home", DECLARED_UNSET: "not-in-pane" }, memberEnv: { MEMBER_FLAG: "declared-member" }, sessionMarker: "ONCE_FLAG" });
+    fs.copyFileSync(process.execPath, f.executable);
+    const launch = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const source = "console.log(JSON.stringify({rig:process.env.RIG_FLAG,member:process.env.MEMBER_FLAG,once:process.env.ONCE_FLAG,unset:process.env.DECLARED_UNSET,leaked:process.env.PANE_ONLY,home:process.env.HOME}))";
+    const command = launch.command(["-e", source]);
+    expect(command).not.toContain("pane-rig-value");
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const paneEnv: NodeJS.ProcessEnv = { ...process.env, RIG_FLAG: "pane-rig-value", MEMBER_FLAG: "pane-member-value", ONCE_FLAG: "pane-once-value", PANE_ONLY: "must-not-forward" };
+    delete paneEnv.DECLARED_UNSET;
+    const output = await new Promise<string>((resolve, reject) => {
+      native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+        encoding: "utf8", timeout: 30000, windowsHide: true, env: paneEnv,
+      }, (error, out, stderr) => error ? reject(new Error(`Native seat-env fixture failed: ${error.message}; stderr=${stderr}`)) : resolve(out));
+    });
+    expect(JSON.parse(output.trim())).toEqual({ rig: "pane-rig-value", member: "pane-member-value", once: "pane-once-value", home: f.home });
+  }, 40000);
+
   it.each([undefined, "", "./config", "./config space"])("preserves native config selection %s and forwards auth by name", async selected => {
     const f = fixture(selected);
     const launch = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
