@@ -90,6 +90,30 @@ those operator/provider acceptance requirements.
 
 ## Reproduce
 
+### Native argv follow-up, 2026-10-15
+
+A fresh psmux 3.3.8 run exposed an empty-argument regression in the v0.6.7
+parity branch: PowerShell's `& executable @args` dropped `""` at the native
+program boundary. Literal launch rendering now uses `ProcessStartInfo` with
+the existing Windows argv encoder, preserving console handles and waiting for
+the child exit code. This also affects classic Claude fresh/resume/fork launch
+transport; those commands are checked with a real native Node receiver rather
+than a PowerShell function standing in for a native executable.
+
+The real psmux regression now preserves empty words, embedded double quotes,
+spaces, apostrophes, Chinese text, metacharacters and trailing backslashes.
+It also verifies that stopping the target retains its sibling session. All
+331 tests in the targeted 15-file daemon pass, including actual CIM observation,
+multiline runner input and the production graceful-stop receipt. The first
+production-drain check timed out waiting for its fixture; diagnostics were added,
+and subsequent built-tree runs passed. No production timeout was widened.
+
+These are targeted local checks on the experimental v0.6.7 branch. They do not
+refresh the earlier live Codex/Pi conversation acceptance, establish current-main
+compatibility, or complete the full-suite, GUI, kernel/operator or reboot/suspend
+requirements above. WSL's retained 0.6.6 installation reported an absent daemon
+PID on this date; its earlier ready status is historical.
+
 Install Node 22/24, Git for Windows, PowerShell and psmux 3.3.8. Put the portable
 psmux directory on PATH ahead of unrelated tmux installations. Keep USERPROFILE
 unchanged. Use a separate OPENRIG_HOME and explicitly selected CODEX_HOME; establish

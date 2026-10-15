@@ -57,7 +57,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       expect(await adapter.createSession(session, dir)).toEqual({ ok: true });
       expect(await adapter.createSession(decoy, dir)).toEqual({ ok: true });
       const q = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
-      const args = ["space word", "a'b", "中文;$HOME", "", "trailing\\"];
+      const args = ["space word", "a'b", "中文;$HOME", "", 'embedded"quote', "space trailing\\", "trailing\\"];
       const command = [process.execPath, script, output, ...args].map(q).join(" ");
       const panes = await adapter.listPanes(session);
       expect(panes).toHaveLength(1);

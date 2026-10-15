@@ -8,6 +8,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 const execute = promisify(execFile);
 const homes: string[] = [];
@@ -23,6 +24,14 @@ describe.runIf(process.platform === "win32")("classic Claude native launch comma
     vi.spyOn(tmux, "getPaneCommand").mockResolvedValue("powershell.exe");
     vi.spyOn(tmux, "getSessionEnv").mockImplementation(async (_session, key) => identity[key] ?? null);
     const launch = new SeatLaunchEnvironment(tmux, { OPENRIG_HOME: home, PATH: process.env.PATH! }, home, cli, undefined, "win32");
+    const receiver = path.join(home, "capture argv.cjs");
+    fs.writeFileSync(receiver, `console.log(JSON.stringify({argv:process.argv.slice(2), renderer:process.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, node:process.env.OPENRIG_NODE_ID, generation:process.env.OPENRIG_OCCUPANT_GENERATION}));`);
+    // Exercise the real native executable boundary without starting Claude.
+    const render = launch.command.bind(launch);
+    vi.spyOn(launch, "command").mockImplementation(async (session, value, identity) => {
+      expect(value).toMatch(/(?:^| )claude /);
+      return render(session, value.replace(/\bclaude /, `${shellQuote(process.execPath)} ${shellQuote(receiver)} `), identity);
+    });
     let command = "";
     vi.spyOn(tmux, "sendShellCommand").mockImplementation(async (_session, value) => { command = value; return { ok: true }; });
     const fsOps = { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, homedir: home };
@@ -32,9 +41,7 @@ describe.runIf(process.platform === "win32")("classic Claude native launch comma
     const binding: NodeBinding = { id: "b", nodeId: "node", tmuxSession: "seat@rig", tmuxPane: "%1", tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: home, model: "model space's", launchGeneration: "new-generation" };
     const result = await adapter.launchHarness(binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "original-session" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-session" } } : {}) });
     expect(result.ok).toBe(true);
-    // Native programs enumerate the inline argv array; the inert PowerShell
-    // function explicitly enumerates it to observe the same word values.
-    const script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; function claude { [ordered]@{argv=@($args | ForEach-Object { $_ }); renderer=$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN; node=$env:OPENRIG_NODE_ID; generation=$env:OPENRIG_OCCUPANT_GENERATION} | ConvertTo-Json -Compress }; " + command;
+    const script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; " + command;
     const { stdout } = await execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8", timeout: 10000, windowsHide: true });
     const observed = JSON.parse(stdout.trim());
     expect(observed).toMatchObject({ renderer: "1", node: "node", generation: "new-generation" });
