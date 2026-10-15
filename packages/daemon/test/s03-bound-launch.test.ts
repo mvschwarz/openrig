@@ -57,7 +57,7 @@ function fixture() {
     ANTHROPIC_API_KEY: "synthetic-secret-never-in-command", OPENRIG_HOME: path.join(root, "instance") };
   const renderer = { TERM: "dumb", COLORTERM: "daemon-value", LANG: "C",
     LC_CTYPE: "C", LC_MESSAGES: "C", UNAPPROVED_RENDERER_VALUE: "must-not-forward" };
-  const managed = new ClaudeManagedLaunch(db, env, renderer, "linux");
+  const managed = new ClaudeManagedLaunch(db, env, renderer, undefined, "linux");
   const calls: string[] = [];
   const tmux = { sendShellCommand: vi.fn(async (_target: string, command: string, check: () => void) => { check(); calls.push(command); return { ok: true as const }; }),
     sendText: vi.fn(async (_target: string, command: string) => { calls.push(command); return { ok: true as const }; }),

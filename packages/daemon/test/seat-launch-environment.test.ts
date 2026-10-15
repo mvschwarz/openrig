@@ -113,7 +113,7 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     db.exec("INSERT INTO bindings VALUES ('b','node-current','seat@rig','%1'); INSERT INTO occupant_tenures VALUES ('node-current','current-generation',1)");
     // Include the same user-tool dir in the existing managed PATH; managed PATH/HOME stay bound.
     f.env.PATH += ":" + path.join(f.root, "user-bin");
-    const managed = new ClaudeManagedLaunch(db, f.env, {}, "linux");
+    const managed = new ClaudeManagedLaunch(db, f.env, {}, undefined, "linux");
     const prepared = await managed.prepare({ nodeId: "node-current", session: "seat@rig", pane: "%1" }, "auto");
     const observed = await f.execute(prepared.command(["--permission-mode", "auto"]), true);
     expect(observed.HOME).toBe(f.env.HOME); expect(observed.PATH).toBe(f.env.PATH);
@@ -127,7 +127,7 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     db.exec("CREATE TABLE nodes(id TEXT,runtime TEXT,cwd TEXT); CREATE TABLE bindings(id TEXT,node_id TEXT,tmux_session TEXT,tmux_pane TEXT); CREATE TABLE occupant_tenures(node_id TEXT,generation_uuid TEXT,generation_ordinal INTEGER)");
     db.prepare("INSERT INTO nodes VALUES ('node-current','claude-code',?)").run(f.binding.cwd);
     db.exec("INSERT INTO bindings VALUES ('b','node-current','seat@rig','%1'); INSERT INTO occupant_tenures VALUES ('node-current','current-generation',1)");
-    const prepared = await new ClaudeManagedLaunch(db, f.env, {}, "linux").prepare({ nodeId: "node-current", session: "seat@rig", pane: "%1" }, "auto");
+    const prepared = await new ClaudeManagedLaunch(db, f.env, {}, undefined, "linux").prepare({ nodeId: "node-current", session: "seat@rig", pane: "%1" }, "auto");
     const command = prepared.command(["--permission-mode", "auto"]);
     expect(command).not.toContain(f.env.OPENRIG_URL);
     expect(command).toContain('export OPENRIG_URL="${OPENRIG_URL-}"');
