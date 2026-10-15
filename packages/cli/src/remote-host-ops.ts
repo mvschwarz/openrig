@@ -101,7 +101,8 @@ export async function runRemoteHttpOp(
 }
 
 /** How a rig handle matched a host's rig list: an exact id first (archived rigs included), else one active rig of
- *  that name. `unavailable` means the list itself couldn't be read or wasn't a list of rigs, so nothing is known. */
+ *  that name. Only rows with a string `rigId` take part, so an unrelated malformed row can't hide or block a match.
+ *  `unavailable` means the list itself couldn't be read or wasn't a list, so nothing is known. */
 export type RemoteRigLookup =
   | { kind: "resolved"; rigId: string; byName: boolean }
   | { kind: "ambiguous"; ids: string[] }
@@ -111,11 +112,11 @@ export type RemoteRigLookup =
 export async function lookupRemoteRigId(hostId: string, handle: string, deps: RemoteHostDeps): Promise<RemoteRigLookup> {
   const psResult = await runRemoteHttpOp(hostId, "GET", "/api/ps?includeArchived=true", undefined, deps, {});
   if (!psResult.ok) return { kind: "unavailable", error: psResult.error };
-  const rigs = psResult.data;
-  if (!Array.isArray(rigs) || !rigs.every((r) => r !== null && typeof r === "object" && typeof r.rigId === "string")) {
-    return { kind: "unavailable", error: "the host's rig list was not readable" };
-  }
-  const list = rigs as Array<{ rigId: string; name: string; archivedAt?: string | null }>;
+  if (!Array.isArray(psResult.data)) return { kind: "unavailable", error: "the host's rig list was not readable" };
+  const list = (psResult.data as unknown[]).filter(
+    (r): r is { rigId: string; name?: unknown; archivedAt?: string | null } =>
+      r !== null && typeof r === "object" && typeof (r as { rigId?: unknown }).rigId === "string",
+  );
 
   const exactId = list.find((r) => r.rigId === handle);
   if (exactId) return { kind: "resolved", rigId: exactId.rigId, byName: false };

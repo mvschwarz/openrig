@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launchCommand } from "../src/commands/launch.js";
 import { lookupRemoteRigId, resolveRemoteRigId } from "../src/remote-host-ops.js";
+import { downCommand } from "../src/commands/down.js";
 
 const ALPHA = "01ALPHA000000000000000000A";
 const ARCHIVED = "01ARCHIVED0000000000000000";
@@ -173,6 +174,54 @@ describe("rig launch by name: what a person sees locally", () => {
     expect(d.gets).toEqual([]);
     expect(d.posts).toEqual([]);
   });
+});
+
+/** A rig list with one malformed row (null, a primitive, a row without an id), before or after the real rows. */
+function listWithBadRow(bad: unknown, where: "before" | "after", shape: "summary" | "ps"): unknown[] {
+  const rows = shape === "summary" ? RIGS : RIGS.map(({ id, ...r }) => ({ rigId: id, ...r }));
+  return where === "before" ? [bad, ...rows] : [...rows, bad];
+}
+function daemonWithRows(rows: unknown[]) {
+  const d = daemon("rigs", "summary");
+  const get = d.client.get;
+  d.client.get = vi.fn(async (path: string) =>
+    path.startsWith("/api/rigs/summary") || path.startsWith("/api/ps") ? (d.gets.push(path), { status: 200, data: rows }) : get(path));
+  return d;
+}
+const BAD_ROWS: Array<[string, unknown]> = [["null", null], ["a primitive", 7], ["a row without an id", { name: "zzz" }]];
+
+describe("a malformed row in the rig list never refuses a valid id, and doesn't hide a match", () => {
+  for (const [badName, bad] of BAD_ROWS) {
+    for (const where of ["before", "after"] as const) {
+      for (const r of ROUTES) {
+        it(`local ${r.route}, ${badName} ${where}: by id launches that id`, async () => {
+          const d = daemonWithRows(listWithBadRow(bad, where, "summary"));
+          await launch(d, [ALPHA, ...r.args]);
+          expect(d.posts.map((p) => p.path)).toEqual([r.path(ALPHA)]);
+        });
+        it(`--host ${r.route}, ${badName} ${where}: by id and by name reach the rig`, async () => {
+          for (const handle of [ALPHA, "alpha"]) {
+            const d = daemonWithRows(listWithBadRow(bad, where, "ps"));
+            await launch(d, [handle, ...r.args, "--host", "h1"]);
+            expect(d.posts.map((p) => p.path)).toEqual([r.path(ALPHA)]);
+          }
+        });
+      }
+      it(`local, ${badName} ${where}: by name resolves over the readable rows, or keeps the raw name`, async () => {
+        const d = daemonWithRows(listWithBadRow(bad, where, "summary"));
+        await launch(d, ["alpha", "worker"]);
+        // The shared local resolver throws on a null row; the launch then keeps the raw handle, as before this change.
+        expect(d.posts.map((p) => p.path)).toEqual([`/api/rigs/${bad === null ? "alpha" : ALPHA}/nodes/worker/launch`]);
+      });
+      it(`rig down --host, ${badName} ${where}: by id and by name tear down that rig`, async () => {
+        for (const handle of [ALPHA, "alpha"]) {
+          const d = daemonWithRows(listWithBadRow(bad, where, "ps"));
+          await downCommand(deps(d.client)).parseAsync(["node", "rig", handle, "--host", "h1", "--json"]);
+          expect(d.posts).toEqual([{ path: "/api/down", body: expect.objectContaining({ rigId: ALPHA }) }]);
+        }
+      });
+    }
+  }
 });
 
 describe("remote rig lookup keeps rig down --host's results", () => {

@@ -241,7 +241,8 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         : (isSingleNodePlan && trimmedNodeRef ? [trimmedNodeRef] : []);
 
       const resolveLocalRig = async (): Promise<boolean> => {
-        const resolution = await resolveRigHandle(client, rigHandle);
+        // A rig list that can't be matched (it throws on a malformed entry) keeps the raw handle, like a failed read.
+        const resolution = await resolveRigHandle(client, rigHandle).catch(() => ({ kind: "passthrough" as const, handle: rigHandle }));
         if (resolution.kind === "ambiguous") {
           refuseAmbiguousRig(rigHandle, resolution.ids, opts.json);
           return false;
