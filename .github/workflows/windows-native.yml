@@ -2,7 +2,7 @@ name: Windows native experiment
 on:
   workflow_dispatch:
   push:
-    branches: [feat/windows-support-validation]
+    branches: [feat/windows-support-validation, feat/windows-native-main]
 permissions:
   contents: read
 jobs:
@@ -58,7 +58,7 @@ jobs:
       - run: npm run lint
       - name: Launch, context and immutable publication regression
         working-directory: packages/daemon
-        run: npx vitest run test/windows-managed-launch.test.ts test/omp-runner.test.ts test/seat-launch-environment.test.ts test/context-pack-library-service.test.ts test/workflow-guidance.test.ts test/proof-judgments.test.ts
+        run: npx vitest run test/windows-managed-launch.test.ts test/omp-runner.test.ts test/omp-rpc-frame.test.ts test/seat-launch-environment.test.ts test/context-pack-library-service.test.ts test/workflow-guidance.test.ts test/proof-judgments.test.ts test/windows-process-lineage.test.ts test/native-process-lineage.test.ts test/claude-resume-rotation-proof.test.ts test/claude-resume-rotation-process-binding.test.ts test/parent-session-env.test.ts test/tmux-server.test.ts test/tmux-adapter.test.ts test/tmux-argv-exec.test.ts
       - name: Desktop and log regression
         working-directory: packages/cli
         run: npx vitest run test/browser-launch.test.ts test/log-tail.test.ts test/ui.test.ts test/terminal-window.test.ts

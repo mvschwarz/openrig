@@ -90,6 +90,25 @@ those operator/provider acceptance requirements.
 
 ## Reproduce
 
+### Rebase to current main, 2026-10-15
+
+The experiment has been rebased onto main `72865f7962b6ecf951c1c9f7db028080f7fcf604`
+(0.6.10). Build changes already integrated through #1033 were removed from the
+experiment's delta. Conflict resolution retains main's OMP protocol-v2 and charge
+tracking, Codex launcher-chain handling, tmux-server selection and Claude resume
+rotation. It also carries the new command-scoped resume marker into the Windows
+child environment without exporting it to the pane shell. Delivery and exact
+identity checks now use Windows argv parsing for Windows process rows.
+
+On this rebased tree, the targeted daemon pass has 388 passing tests; CLI has 109
+passing tests; TUI has 62 passing and 12 explicitly skipped tests. Windows workspace
+build and typecheck pass. Extra Windows checks of main's POSIX-only fixtures still
+fail: the OMP runner-entry fixture creates a `/bin/sh` executable and a colon-separated
+PATH, and a tmux socket test assumes Unix `/tmp` identity. These are separate from
+the passing native suite; no green full native suite or live all-runtime acceptance
+is claimed. POSIX regression and native package assembly are recorded in the PR
+when their runs finish.
+
 ### Native argv follow-up, 2026-10-15
 
 A fresh psmux 3.3.8 run exposed an empty-argument regression in the v0.6.7
