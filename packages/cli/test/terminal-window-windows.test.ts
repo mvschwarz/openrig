@@ -32,9 +32,9 @@ describe("Windows desktop terminal view", () => {
     expect(args.filter(arg => arg === "new-tab")).toHaveLength(2);
     expect(args).toContain("中文  unsafe-title");
     const scripts = args.flatMap((arg, i) => arg === "-EncodedCommand" ? [Buffer.from(args[i + 1]!, "base64").toString("utf16le")] : []);
-    expect(scripts[0]).toContain("& 'C:\\Program Files\\psmux\\tmux.exe'");
-    expect(scripts[0]).toContain("'attach', '-r', '-t'");
-    expect(scripts[1]).toContain("& 'ssh'");
+    expect(scripts[0]).toContain("$openrigStart.FileName = 'C:\\Program Files\\psmux\\tmux.exe'");
+    expect(scripts[0]).toContain('$openrigStart.Arguments = \'"attach" "-r" "-t" "seat\'\'one"\'');
+    expect(scripts[1]).toContain("$openrigStart.FileName = 'ssh'");
     expect(f.deps.exec).not.toHaveBeenCalledWith("/bin/sh", expect.anything());
     expect(result.notes?.join(" ")).toContain("not visual confirmation");
   });

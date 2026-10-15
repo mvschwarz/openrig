@@ -21,13 +21,16 @@ describe.skipIf(process.platform !== "win32")("native Windows drain request", ()
     const root = path.resolve(import.meta.dirname, "../../..");
     cleanup.push(() => rmSync(home, { recursive: true, force: true }));
     const child = spawn(process.execPath, ["--experimental-loader", pathToFileURL(path.join(import.meta.dirname, "fixtures/shutdown-loader.mjs")).href,
-      path.join(import.meta.dirname, "fixtures/shutdown-child.mjs")], { windowsHide: true, stdio: "ignore",
+      path.join(import.meta.dirname, "fixtures/shutdown-child.mjs")], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, S15_SOURCE_ROOT: root, S15_CASE: "clean", OPENRIG_HOME: home, OPENRIG_DB: path.join(home, "db.sqlite"), OPENRIG_NO_KERNEL: "1", OPENRIG_URL: "" } });
+    let diagnostics = "";
+    child.stdout.on("data", chunk => { diagnostics += chunk; });
+    child.stderr.on("data", chunk => { diagnostics += chunk; });
     try {
       const ready = path.join(home, "ready.json");
       const deadline = Date.now() + 5000;
       while (!existsSync(ready) && Date.now() < deadline && child.exitCode === null) await new Promise(resolve => setTimeout(resolve, 25));
-      expect(existsSync(ready)).toBe(true);
+      expect(existsSync(ready), `fixture exit=${child.exitCode}; ${diagnostics}`).toBe(true);
       const state = JSON.parse(readFileSync(ready, "utf8"));
       const exited = once(child, "exit");
       await requestWindowsDaemonStop(home, state);

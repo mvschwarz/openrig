@@ -37,7 +37,13 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
     return `$env:${key}=${powershellQuote(value)}; `;
   }).join("");
-  return `${assignments}& ${powershellQuote(executable!)} @(${args.map(powershellQuote).join(", ")})`;
+  // Windows PowerShell's native invocation drops empty argv words. Send the
+  // literal Windows command line directly to CreateProcess instead, as the
+  // managed launch path does, and keep its console handles attached to the pane.
+  return `${assignments}& {\n$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n`
+    + `$openrigStart.UseShellExecute = $false\n$openrigStart.FileName = ${powershellQuote(executable!)}\n`
+    + `$openrigStart.Arguments = ${powershellQuote(windowsArguments(args))}\n`
+    + `$openrigChild = [Diagnostics.Process]::Start($openrigStart)\ntry { $openrigChild.WaitForExit(); $global:LASTEXITCODE = $openrigChild.ExitCode } finally { $openrigChild.Dispose() }\n}`;
 }
 
 /** Match managed env -i admission while retaining auth only by pane variable name. */
