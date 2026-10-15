@@ -35,14 +35,14 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
   const [executable, ...args] = parseLiteralLaunchWords(command);
   const assignments = Object.entries(env).map(([key, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
-    return `$env:${key}=${powershellQuote(value)}; `;
+    return `$openrigStart.EnvironmentVariables[${powershellQuote(key)}]=${powershellQuote(value)}\n`;
   }).join("");
   // Windows PowerShell's native invocation drops empty argv words. Send the
   // literal Windows command line directly to CreateProcess instead, as the
   // managed launch path does, and keep its console handles attached to the pane.
-  return `${assignments}& {\n$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n`
+  return `& {\n$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n`
     + `$openrigStart.UseShellExecute = $false\n$openrigStart.FileName = ${powershellQuote(executable!)}\n`
-    + `$openrigStart.Arguments = ${powershellQuote(windowsArguments(args))}\n`
+    + `$openrigStart.Arguments = ${powershellQuote(windowsArguments(args))}\n${assignments}`
     + `$openrigChild = [Diagnostics.Process]::Start($openrigStart)\ntry { $openrigChild.WaitForExit(); $global:LASTEXITCODE = $openrigChild.ExitCode } finally { $openrigChild.Dispose() }\n}`;
 }
 

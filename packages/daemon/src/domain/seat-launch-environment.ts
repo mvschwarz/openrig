@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { powershellQuote, renderWindowsLaunch } from "../adapters/windows-launch.js";
+import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch } from "../adapters/windows-launch.js";
+import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -162,13 +163,16 @@ export class SeatLaunchEnvironment {
       if (this.launchPlatform === "win32") {
         if (!searchPath) throw new Error("Launch PATH unavailable");
         env.PATH = `${binDir}${path.delimiter}${searchPath}`;
-        // The classic Claude builder emits this one fixed assignment for native
-        // scrollback. Move it into the child environment before literal argv
-        // parsing; arbitrary shell assignments remain unsupported.
-        const rendererPrefix = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
-        if (target.runtime === "claude-code" && command.startsWith(rendererPrefix)) {
-          env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
-          command = command.slice(rendererPrefix.length);
+        // Classic Claude emits only these command-scoped assignments. Decode
+        // their literal words, without exporting the resume marker to the pane.
+        if (target.runtime === "claude-code") {
+          const words = parseLiteralLaunchWords(command);
+          while (words[0] === "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1" || words[0]?.startsWith(`${CLAUDE_RESUME_LAUNCH_ENV}=`)) {
+            const assignment = words.shift()!;
+            const equals = assignment.indexOf("=");
+            env[assignment.slice(0, equals)] = assignment.slice(equals + 1);
+          }
+          command = words.map(shellQuote).join(" ");
         }
         return renderWindowsLaunch(command, env);
       }

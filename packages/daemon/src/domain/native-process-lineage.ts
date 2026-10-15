@@ -59,6 +59,10 @@ function executableName(token: string): string {
   return (token.split(/[\\/]/).pop() ?? token).toLowerCase().replace(/\.exe$/, "");
 }
 
+function rowArgv(row: NativeProcessRow): string[] {
+  return row.platform === "win32" ? parseWindowsCommandLine(row.command) : tokens(row.command);
+}
+
 // The native installer resolves `claude` to this versioned path. A bare version
 // number is never executable identity. A launch receipt takes precedence over
 // layout recognition, so a later PATH update cannot replace that launch's binary.
@@ -518,7 +522,7 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return null;
   const observation = chain[0]!;
   const { process } = observation;
-  const argv = process.platform === "win32" ? parseWindowsCommandLine(process.command) : tokens(process.command);
+  const argv = rowArgv(process);
   if (runtime === "claude-code") {
     if (!expectedToken) return null;
     const launched = claudeSessionToken(argv.slice(1));
@@ -528,8 +532,7 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
     // links naming different conversations stay refused. Exact resume proof
     // needs the deepest process's own argv: a launcher's token is never
     // inherited by a child that names nothing, which stays deliverable but unproved.
-    const identities = chain.map((link) => codexResumeToken((link.process.platform === "win32"
-      ? parseWindowsCommandLine(link.process.command) : tokens(link.process.command)).slice(1)));
+    const identities = chain.map((link) => codexResumeToken(rowArgv(link.process).slice(1)));
     if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return null;
     if (requireResume && (!expectedToken || identities[0] !== expectedToken)) return null;
     if (expectedToken !== undefined && identities.some((value) => value !== undefined
@@ -745,14 +748,14 @@ export async function observeClaudeDelivery(
       const native = chain[0];
       if (native) {
         const fingerprint = native.fingerprint;
-        const identities = chain.map((link) => claudeSessionIdentity(tokens(link.process.command).slice(1)));
+        const identities = chain.map((link) => claudeSessionIdentity(rowArgv(link.process).slice(1)));
         const named = new Set(identities.filter((value): value is string => typeof value === "string"));
         if (named.size > 1) {
           // A Claude can start a fork of its own conversation, and ancestry in one foreground group doesn't show which
           // of them receives input. When only a --fork-session link names the second conversation, keep the warn-and-send
           // that held before forks were read, without verifying either.
           const unforked = new Set(identities.filter((value, index): value is string =>
-            typeof value === "string" && !tokens(chain[index]!.process.command).includes("--fork-session")));
+            typeof value === "string" && !rowArgv(chain[index]!.process).includes("--fork-session")));
           if (unforked.size <= 1) return { state: "unknown", detail: "A Claude process and a fork of a conversation share the bound foreground; current conversation is unverified", fingerprint };
           return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
         }

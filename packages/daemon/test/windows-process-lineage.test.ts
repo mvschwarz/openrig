@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, observeClaudeDelivery, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const born = "2026-10-08T01:00:00Z";
 function rows(): NativeProcessRow[] {
@@ -10,6 +10,23 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("keeps the current-main Codex launcher-chain proof with Windows quoting", async () => {
+    const values = rows();
+    values[1]!.command = '"C:\\program space\\codex.exe" resume "exact-id"';
+    values.push({ ...values[1]!, pid: 102, ppid: 101, startedAt: "2026-10-08T01:00:02Z" });
+    expect((await verify(values))?.process.pid).toBe(102);
+    values[2]!.command = '"C:\\program space\\codex.exe" resume "other-id"';
+    expect(await verify(values)).toBeNull();
+  });
+  it("keeps a Claude rotation bound to the same Windows process birth time", async () => {
+    const values = rows();
+    Object.assign(values[1]!, { executableName: "claude.exe", executablePath: "C:\\program space\\claude.exe", command: '"C:\\program space\\claude.exe" --resume "exact-id"' });
+    const input = { target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => "claude" }, listProcesses: () => values, expectedToken: "rotated-id",
+      rotation: { token: "exact-id", process: { pid: 101, startedAt: values[1]!.startedAt! } } };
+    expect((await verifyClaudePaneProcess(input))?.process.pid).toBe(101);
+    expect(await verifyClaudePaneProcess({ ...input, rotation: { ...input.rotation, process: { pid: 101, startedAt: born } } })).toBeNull();
+    expect((await observeClaudeDelivery(input)).state).toBe("verified");
+  });
   it("verifies native Claude against the selected executable and exact session identity", async () => {
     const values = rows();
     Object.assign(values[1]!, { executableName: "claude.exe", executablePath: "C:\\program space\\claude.exe", command: '"C:\\program space\\claude.exe" --session-id exact-id' });

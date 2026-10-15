@@ -15,7 +15,8 @@ describe("literal Windows launch rendering", () => {
     expect(parseLiteralLaunchWords(`node 'C:\\project space\\runner.js' '' 'a'"'"'b' '中文;$HOME'`))
       .toEqual(["node", "C:\\project space\\runner.js", "", "a'b", "中文;$HOME"]);
     const launch = renderWindowsLaunch(`node 'C:\\project space\\runner.js' 'x;y'`, { OPENRIG_SESSION_NAME: "seat@rig", PATH: "C:\\bin;C:\\two" });
-    expect(launch).toContain("$env:OPENRIG_SESSION_NAME='seat@rig'; $env:PATH='C:\\bin;C:\\two';");
+    expect(launch).toContain("$openrigStart.EnvironmentVariables['OPENRIG_SESSION_NAME']='seat@rig'");
+    expect(launch).toContain("$openrigStart.EnvironmentVariables['PATH']='C:\\bin;C:\\two'");
     expect(launch).toContain("$openrigStart.FileName = 'node'");
     expect(launch).toContain('$openrigStart.Arguments = \'"C:\\project space\\runner.js" "x;y"\'');
     expect(powershellQuote("a'b")).toBe("'a''b'");
