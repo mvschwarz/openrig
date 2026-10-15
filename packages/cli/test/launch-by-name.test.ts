@@ -224,12 +224,50 @@ describe("a malformed row in the rig list never refuses a valid id, and doesn't 
   }
 });
 
+describe("a host's row without an id still counts toward a name, but is never a target", () => {
+  const ghost = { name: "alpha", archivedAt: null }; // an active row named like alpha, with no rigId
+  for (const host of ["explicit", "selected"] as const) {
+    const hostArgs = host === "explicit" ? ["--host", "h1"] : [];
+    beforeEach(() => { if (host === "selected") vi.stubEnv("OPENRIG_HOST_SELECTED", "h1"); });
+    for (const where of ["before", "after"] as const) {
+      it(`rig down --host (${host}), ${where}: the name stays ambiguous and nothing is sent`, async () => {
+        const d = daemonWithRows(listWithBadRow(ghost, where, "ps"));
+        await downCommand(deps(d.client)).parseAsync(["node", "rig", "alpha", ...hostArgs, "--json"]);
+        expect(d.posts).toEqual([]);
+        expect(process.exitCode).toBe(1);
+        expect(JSON.parse(out.join("\n"))).toEqual({ ok: false,
+          error: 'ambiguous rig name "alpha" on host h1: 2 active rigs share that name. Use the rig id instead.' });
+      });
+      it(`rig launch (${host}), ${where}: the name stays ambiguous and nothing is sent`, async () => {
+        const d = daemonWithRows(listWithBadRow(ghost, where, "ps"));
+        await launch(d, ["alpha", "worker", ...hostArgs]);
+        expect(d.posts).toEqual([]);
+        expect(err.join("\n")).toContain("'alpha' matches 2 rigs on host h1.");
+      });
+      it(`(${host}), ${where}: the exact id still selects the valid rig`, async () => {
+        const down = daemonWithRows(listWithBadRow(ghost, where, "ps"));
+        await downCommand(deps(down.client)).parseAsync(["node", "rig", ALPHA, ...hostArgs, "--json"]);
+        expect(down.posts).toEqual([{ path: "/api/down", body: expect.objectContaining({ rigId: ALPHA }) }]);
+        const up = daemonWithRows(listWithBadRow(ghost, where, "ps"));
+        await launch(up, [ALPHA, "worker", ...hostArgs]);
+        expect(up.posts.map((p) => p.path)).toEqual([`/api/rigs/${ALPHA}/nodes/worker/launch`]);
+      });
+    }
+    it(`rig down --host (${host}): a name only an id-less row carries is not found, and nothing is sent`, async () => {
+      const d = daemonWithRows(listWithBadRow({ name: "ghost", archivedAt: null }, "after", "ps"));
+      await downCommand(deps(d.client)).parseAsync(["node", "rig", "ghost", ...hostArgs, "--json"]);
+      expect(d.posts).toEqual([]);
+      expect(JSON.parse(out.join("\n"))).toEqual({ ok: false, error: 'rig "ghost" not found on host h1' });
+    });
+  }
+});
+
 describe("remote rig lookup keeps rig down --host's results", () => {
   const remote = (lookup: Lookup) => deps(daemon(lookup, "ps").client) as never;
   it("distinguishes each outcome", async () => {
     expect(await lookupRemoteRigId("h1", "alpha", remote("rigs"))).toEqual({ kind: "resolved", rigId: ALPHA, byName: true });
     expect(await lookupRemoteRigId("h1", ALPHA, remote("rigs"))).toEqual({ kind: "resolved", rigId: ALPHA, byName: false });
-    expect(await lookupRemoteRigId("h1", "dup", remote("rigs"))).toEqual({ kind: "ambiguous", ids: [DUP1, DUP2] });
+    expect(await lookupRemoteRigId("h1", "dup", remote("rigs"))).toEqual({ kind: "ambiguous", count: 2, ids: [DUP1, DUP2] });
     expect(await lookupRemoteRigId("h1", "nope", remote("rigs"))).toEqual({ kind: "not_found" });
     expect(await lookupRemoteRigId("h1", "alpha", remote("fail"))).toMatchObject({ kind: "unavailable" });
     expect(await lookupRemoteRigId("h1", "alpha", remote("malformed"))).toMatchObject({ kind: "unavailable" });

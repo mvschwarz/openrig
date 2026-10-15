@@ -51,8 +51,8 @@ function printSnapshotSelection(selection: LaunchResponse["snapshotSelection"]):
 
 /** A rig name that matches more than one active rig stops before any request: it would fail as "not found" anyway,
  *  and the candidates let the person re-run with the right id. */
-function refuseAmbiguousRig(handle: string, ids: string[], json: boolean | undefined, host?: string): void {
-  const fact = `'${handle}' matches ${ids.length} rigs${host ? ` on host ${host}` : ""}.`;
+function refuseAmbiguousRig(handle: string, ids: string[], json: boolean | undefined, host?: string, count = ids.length): void {
+  const fact = `'${handle}' matches ${count} rigs${host ? ` on host ${host}` : ""}.`;
   const consequence = "Nothing was launched.";
   const action = `Re-run with the specific rig id: ${ids.join("  |  ")}`;
   if (json) console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", error: { fact, consequence, action, candidates: ids } }));
@@ -191,7 +191,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         // After the plan-support check, so a plan the daemon can't honour costs no lookup.
         const lookup = await lookupRemoteRigId(opts.host, rigHandle, deps);
         if (lookup.kind === "ambiguous") {
-          refuseAmbiguousRig(rigHandle, lookup.ids, opts.json, opts.host);
+          refuseAmbiguousRig(rigHandle, lookup.ids, opts.json, opts.host, lookup.count);
           return;
         }
         if (lookup.kind === "resolved") rigId = lookup.rigId;
