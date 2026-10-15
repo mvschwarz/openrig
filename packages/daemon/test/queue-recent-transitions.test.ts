@@ -12,6 +12,7 @@ import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summ
 import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
 import { queueRoutes } from "../src/routes/queue.js";
 
 describe("RECENT queue transition projection", () => {
@@ -206,6 +207,78 @@ describe("RECENT queue transition projection", () => {
     expect(repo.listRecentTransitions("rig-a").map((row) => [row.transitionId, row.change])).toEqual([
       [5, "resumed"], [3, "blocked"], [4, "claimed"], [7, "failed"], [8, "failed"],
     ]);
+  });
+
+  it("walks past a long same-state blocked run without counting it", () => {
+    item("q-parked", "rig-a", "blocked");
+    transition("q-parked", "pending");
+    transition("q-parked", "blocked", { reason: "blocked_on", target: "external:ci" });
+    for (let note = 0; note < 40; note += 1) transition("q-parked", "blocked", { note: `still waiting ${note}` });
+    item("q-old", "rig-a", "in-progress");
+    db.prepare(`INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session)
+      VALUES (?, 'q-old', '2026-09-03T19:00:00.000Z', ?, 'owner@rig-a')`).run(nextTransitionId++, "pending");
+    db.prepare(`INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session)
+      VALUES (?, 'q-old', '2026-09-03T19:01:00.000Z', ?, 'owner@rig-a')`).run(nextTransitionId++, "in-progress");
+
+    expect(repo.listRecentTransitions("rig-a", 20).map((row) => [row.qitemId, row.change])).toEqual([
+      ["q-old", "claimed"], ["q-parked", "blocked on external:ci"],
+    ]);
+    expect(repo.listRecentTransitions("rig-a", 1).map((row) => row.qitemId)).toEqual(["q-parked"]);
+  });
+
+  it("selects what the full-history window query selected, across live and archived history", () => {
+    migrate(db, [queueTransitionsArchiveSchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('r-a', 'rig-a'), ('r-b', 'rig-b')").run();
+    let seed = 20261015;
+    const random = () => { // mulberry32
+      seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const states = ["pending", "in-progress", "in-progress", "blocked", "blocked", "done", "failed", "canceled", "handed-off"];
+    let id = 1;
+    for (let index = 0; index < 60; index += 1) {
+      const rig = index % 7 === 0 ? "rig-c" : index % 2 === 0 ? "rig-a" : "rig-b";
+      item(`gen-${index}`, rig, "in-progress");
+      const steps = 1 + Math.floor(random() * 12);
+      for (let step = 0; step < steps; step += 1) {
+        const state = step === 0 ? "pending" : states[Math.floor(random() * states.length)]!;
+        const reason = state === "handed-off" ? "handed_off_to" : state === "done" ? "no-follow-on"
+          : state === "blocked" && random() < 0.3 ? "escalation" : null;
+        // Coarse minutes make ts ties; a few steps go back in time; early ids land in the archive.
+        const ts = `2026-09-03T${String(10 + Math.floor(random() * 12)).padStart(2, "0")}:${String(Math.floor(random() * 4) * 15).padStart(2, "0")}:00.000Z`;
+        const table = id < 180 && random() < 0.6 ? "queue_transitions_archive" : "queue_transitions";
+        db.prepare(`INSERT INTO ${table} (transition_id, qitem_id, ts, state, actor_session, closure_reason, closure_target${table === "queue_transitions_archive" ? ", archived_at" : ""})
+          VALUES (?, ?, ?, ?, ?, ?, ?${table === "queue_transitions_archive" ? ", '2026-09-01'" : ""})`)
+          .run(id, `gen-${index}`, ts, state, `owner@${rig}`, reason, reason === "handed_off_to" ? `next@${rig}` : null);
+        id += 1;
+      }
+    }
+    // The selection the released query made: LAG over each item's full live+archive history, then the newest N.
+    const windowed = (patterns: string[], limit: number) => db.prepare(`
+      WITH h AS (
+        SELECT t.transition_id, t.ts, t.state, t.closure_reason,
+               LAG(t.state) OVER (PARTITION BY t.qitem_id ORDER BY t.transition_id) AS previous_state
+        FROM (SELECT transition_id, qitem_id, ts, state, closure_reason FROM queue_transitions
+              UNION ALL SELECT transition_id, qitem_id, ts, state, closure_reason FROM queue_transitions_archive) t
+        JOIN queue_items q ON q.qitem_id = t.qitem_id
+        WHERE ${patterns.map(() => "(q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')").join(" OR ")}
+      )
+      SELECT transition_id FROM h
+      WHERE (state = 'in-progress' AND previous_state IN ('pending', 'blocked'))
+         OR (state = 'blocked' AND previous_state IS NOT NULL AND previous_state <> 'blocked')
+         OR closure_reason = 'handed_off_to' OR (state = 'done' AND closure_reason = 'no-follow-on')
+         OR state IN ('failed', 'denied', 'canceled') OR closure_reason IN ('denied', 'canceled', 'escalation')
+      ORDER BY ts DESC, transition_id DESC LIMIT ?
+    `).all(...patterns.flatMap((pattern) => [pattern, pattern]), limit).map((row) => (row as { transition_id: number }).transition_id).reverse();
+
+    for (const limit of [1, 7, 20]) {
+      expect(repo.listRecentTransitions("rig-a", limit).map((row) => row.transitionId)).toEqual(windowed(["%@rig-a"], limit));
+      const log = new QueueTransitionLog(db);
+      expect(log.listRecent({ kind: "instance" }, limit).map((row) => row.transitionId)).toEqual(windowed(["%@rig-a", "%@rig-b"], limit));
+    }
   });
 
   it("returns only the newest 20 qualifying transitions and refuses an unscoped read", async () => {
