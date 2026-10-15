@@ -3324,34 +3324,23 @@ export class SessionTransport {
     if (!checker?.checkReady) return false;
 
     const hasClaudeIdentityWork = (
+      nodeId: string,
       sessionId: string,
       runtime: string,
-      currentResumeToken: string | null | undefined,
-      currentResumeType: string | null | undefined,
     ): boolean => {
-      const failedEvent = getLatestStartupFailedEvent(this.db, snapshot.node_id, sessionId);
-      const requestedToken = failedEvent && "requestedResumeToken" in failedEvent
-        ? failedEvent.requestedResumeToken
-        : currentResumeToken;
-      const requestedType = failedEvent && "requestedResumeType" in failedEvent
-        ? failedEvent.requestedResumeType
-        : currentResumeType;
-
+      if (runtime !== "claude-code") return false;
+      const failedEvent = getLatestStartupFailedEvent(this.db, nodeId, sessionId);
+      if (!failedEvent || failedEvent.requestedResumeToken === undefined || failedEvent.requestedResumeType === undefined) {
+        return true;
+      }
       return hasClaudeResumeIdentityWork(
         this.sessionRegistry,
         sessionId,
         runtime,
-        requestedToken,
-        requestedType,
+        failedEvent.requestedResumeToken,
+        failedEvent.requestedResumeType,
       );
     };
-
-    const hasIdentityWork = hasClaudeIdentityWork(
-      snapshot.session_id,
-      snapshot.runtime,
-      snapshot.resume_token,
-      snapshot.resume_type,
-    );
 
     const probeBinding: NodeBinding = {
       id: `session-transport:${snapshot.session_id}`,
@@ -3388,10 +3377,9 @@ export class SessionTransport {
       if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return;
 
       const currentIdentityWork = hasClaudeIdentityWork(
+        current.node_id,
         current.session_id,
         current.runtime,
-        current.resume_token,
-        current.resume_type,
       );
 
       if (readiness.ready) {
