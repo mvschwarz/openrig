@@ -25,7 +25,7 @@ describe.runIf(process.platform === "win32")("classic Claude native launch comma
     vi.spyOn(tmux, "getSessionEnv").mockImplementation(async (_session, key) => identity[key] ?? null);
     const launch = new SeatLaunchEnvironment(tmux, { OPENRIG_HOME: home, PATH: process.env.PATH! }, home, cli, undefined, "win32");
     const receiver = path.join(home, "capture argv.cjs");
-    fs.writeFileSync(receiver, `console.log(JSON.stringify({argv:process.argv.slice(2), renderer:process.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, node:process.env.OPENRIG_NODE_ID, generation:process.env.OPENRIG_OCCUPANT_GENERATION}));`);
+    fs.writeFileSync(receiver, `console.log(JSON.stringify({argv:process.argv.slice(2), renderer:process.env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, node:process.env.OPENRIG_NODE_ID, generation:process.env.OPENRIG_OCCUPANT_GENERATION, resumeLaunch:process.env.OPENRIG_RESUME_LAUNCH}));`);
     // Exercise the real native executable boundary without starting Claude.
     const render = launch.command.bind(launch);
     vi.spyOn(launch, "command").mockImplementation(async (session, value, identity) => {
@@ -37,16 +37,18 @@ describe.runIf(process.platform === "win32")("classic Claude native launch comma
     const fsOps = { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {}, homedir: home };
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps, seatLaunchEnvironment: launch, sleep: async () => {} });
     vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
-    vi.spyOn(adapter as any, "pollForResumeToken").mockResolvedValue("new-session");
     const binding: NodeBinding = { id: "b", nodeId: "node", tmuxSession: "seat@rig", tmuxPane: "%1", tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: home, model: "model space's", launchGeneration: "new-generation" };
     const result = await adapter.launchHarness(binding, { name: "seat", ...(kind === "resume" ? { resumeToken: "original-session" } : kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-session" } } : {}) });
     expect(result.ok).toBe(true);
-    const script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; " + command;
+    const script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; " + command + "; Write-Output ('parent=' + $env:OPENRIG_RESUME_LAUNCH)";
     const { stdout } = await execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8", timeout: 10000, windowsHide: true });
-    const observed = JSON.parse(stdout.trim());
+    const lines = stdout.trim().split(/\r?\n/);
+    expect(lines.at(-1)).toBe("parent=");
+    const observed = JSON.parse(lines[0]!);
     expect(observed).toMatchObject({ renderer: "1", node: "node", generation: "new-generation" });
     expect(observed.argv).toContain("model space's");
-    if (kind === "resume") expect(observed.argv).toContain("original-session");
+    if (kind === "resume") { expect(observed.argv).toContain("original-session"); expect(observed.resumeLaunch).toBe("original-session"); }
+    else expect(observed.resumeLaunch).toBeUndefined();
     if (kind === "fork") { expect(observed.argv).toContain("parent-session"); expect(observed.argv).toContain("--fork-session"); }
     if (kind === "fresh") expect(observed.argv).toContain("--session-id");
   });
