@@ -88,7 +88,7 @@ export function updateFrontmatter(
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(original);
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/.exec(original);
   if (!match) {
     const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
     const separator = original.startsWith("\n") ? "" : "\n";
@@ -97,8 +97,8 @@ export function updateFrontmatter(
   }
 
   const originalBlock = match[1]!;
-  const blockStart = match.index + match[0].length - originalBlock.length - 4;
-  const blockEnd = blockStart + originalBlock.length - (originalBlock.endsWith("\r") ? 1 : 0);
+  const blockStart = original.indexOf("\n") + 1;
+  const blockEnd = blockStart + originalBlock.length;
   const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
   let block: string;
   try {
@@ -529,16 +529,18 @@ function findOwningMission(missionsRoot: string, slicePath: string): string | nu
 // Auto-numbering
 // ---------------------------------------------------------------------
 
+export { tryClaimSliceNN } from "./slice-claims.js";
+
 /** Find the next available NN for a mission's slices/ folder. Scans
- *  BOTH slices/ AND closed/ so numbers are never reused (§3.2). */
+ *  BOTH slices/ AND closed/, including ordinal claims, so numbers are never reused (§3.2). */
 export function nextSliceNN(missionAbsPath: string): number {
   let max = 0;
   for (const subdir of ["slices", "closed"]) {
     const root = path.join(missionAbsPath, subdir);
     if (!fs.existsSync(root)) continue;
     for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const m = SLICE_DIRNAME_RE.exec(entry.name);
+      const marker = subdir === "slices" ? /^\.nn-(\d+)$/.exec(entry.name) : null;
+      const m = marker ?? (entry.isDirectory() ? SLICE_DIRNAME_RE.exec(entry.name) : null);
       if (!m) continue;
       const n = Number(m[1]);
       if (Number.isFinite(n) && n > max) max = n;

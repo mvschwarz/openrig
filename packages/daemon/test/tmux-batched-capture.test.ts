@@ -57,7 +57,8 @@ describe("TmuxAdapter.capturePanesContent (#308)", () => {
     it(`${mode}: one listing + one chained call; text as capture-pane prints it; a missing seat is null, no fork`, async () => {
       const { a, calls } = adapter({ "a@r": pane("a"), "b.x@r": pane("b.x"), "o'q@r": pane("o'q") });
       const got = await a.capturePanesContent(["a@r", "gone@r", "b.x@r", "o'q@r"], 20);
-      expect(calls).toHaveLength(2);
+      // The missing seat fails the first chain; the listing beside it drops the seat for the one retry.
+      expect(calls.map((c) => c[1])).toEqual(["list-sessions", "display-message", "display-message"]);
       expect(Object.fromEntries([...got!].map(([k, v]) => [k, v.text]))).toEqual({ "gone@r": null, "a@r": pane("a"), "b.x@r": pane("b.x"), "o'q@r": pane("o'q") });
     });
 
@@ -101,6 +102,52 @@ describe("TmuxAdapter.capturePanesContent (#308)", () => {
       const got = await a.capturePanesContent(Object.keys(panes), 20);
       for (const n of Object.keys(panes)) expect(got!.get(n)?.text).toBe(panes[n]);
       expect(calls).toHaveLength(1 + 1 + 2 + 4);
+    });
+
+    it(`${mode}: the listing runs beside the first chain, so a healthy batch costs one exec of latency`, async () => {
+      const { a, calls } = adapter({ "a@r": pane("a"), "b@r": pane("b") });
+      let inFlight = 0, peak = 0;
+      const run = (a as unknown as { run: (argv: string[], legacy?: string) => Promise<string> }).run.bind(a);
+      (a as unknown as { run: unknown }).run = async (argv: string[], legacy?: string) => {
+        peak = Math.max(peak, ++inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        try { return await run(argv, legacy); } finally { inFlight--; }
+      };
+      const got = await a.capturePanesContent(["a@r", "b@r"], 20);
+      expect(peak).toBe(2);
+      expect(calls.map((c) => c[1])).toEqual(["list-sessions", "display-message"]);
+      expect(got!.get("b@r")?.text).toBe(pane("b"));
+    });
+
+    it(`${mode}: a server gone after the listing fails the chunk at once: no halving, every target null`, async () => {
+      const panes = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`s${i}@r`, pane(`s${i}`)]));
+      let listed = false;
+      const { a, calls } = adapter(panes);
+      const run = (a as unknown as { run: (argv: string[], legacy?: string) => Promise<string> }).run.bind(a);
+      (a as unknown as { run: unknown }).run = async (argv: string[], legacy?: string) => {
+        if (argv[1] === "list-sessions") { listed = true; return run(argv, legacy); }
+        await new Promise((r) => setTimeout(r, 5));
+        if (listed) throw new Error("no server running on /tmp/tmux-501/default");
+        return run(argv, legacy);
+      };
+      const got = await a.capturePanesContent(Object.keys(panes), 20);
+      expect(calls.map((c) => c[1])).toEqual(["list-sessions"]);
+      for (const n of Object.keys(panes)) expect(got!.get(n)?.text).toBeNull();
+    });
+
+    it(`${mode}: a session that vanished after the listing is isolated by halving both halves at once`, async () => {
+      const panes = Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`s${i}@r`, pane(`s${i}`)]));
+      const { a } = adapter(panes, { vanished: new Set(["s3@r"]) });
+      let inFlight = 0, peak = 0;
+      const run = (a as unknown as { run: (argv: string[], legacy?: string) => Promise<string> }).run.bind(a);
+      (a as unknown as { run: unknown }).run = async (argv: string[], legacy?: string) => {
+        peak = Math.max(peak, ++inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        try { return await run(argv, legacy); } finally { inFlight--; }
+      };
+      const got = await a.capturePanesContent(Object.keys(panes), 20);
+      for (const n of Object.keys(panes)) expect(got!.has(n), n).toBe(n !== "s3@r");
+      expect(peak).toBeGreaterThanOrEqual(2);
     });
 
     it(`${mode}: no listing -> null; a pane printing another call's marker text can't split the output`, async () => {

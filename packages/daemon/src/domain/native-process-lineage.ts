@@ -154,10 +154,38 @@ function codexResumeToken(args: string[]): string | null | undefined {
   return null;
 }
 
-// Managed fresh/resume launches name the current Claude identity explicitly.
-// A fork's --resume names its parent, so it cannot prove the new occupant.
+/** A `ps` command line split the way identity proof splits it. */
+export function processArgv(command: string): string[] {
+  return tokens(command);
+}
+
+/** The conversation a Claude command line names (--resume, --session-id, or a fork's own --session-id);
+ *  null when it names none or can't be parsed as one. */
+export function claudeCommandSessionToken(command: string): string | null {
+  return claudeSessionToken(tokens(command).slice(1));
+}
+
+/** The conversation a Codex command line resumes: its token, null for a resume naming none, undefined
+ *  when the command is not a resume at all (a fresh `codex -C …`). */
+export function codexCommandResumeToken(command: string): string | null | undefined {
+  return codexResumeToken(tokens(command).slice(1));
+}
+
+type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
+
+/** The conversation a parsed Claude argv names. A fork's --resume names its parent, so with
+ *  --fork-session only the fork's own --session-id names it, and both must be present. Without
+ *  --fork-session one identity names it and two prove nothing. undefined: no positive proof. */
+function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | undefined {
+  if (fork) return ids.resume !== null && ids["session-id"] !== null ? ids["session-id"] : undefined;
+  if (ids.resume !== null && ids["session-id"] !== null) return undefined;
+  return ids.resume ?? ids["session-id"];
+}
+
+// Managed fresh/resume/fork launches name the current Claude identity explicitly.
 function claudeSessionToken(args: string[]): string | null {
-  let token: string | null = null;
+  const ids: ClaudeArgvIds = { resume: null, "session-id": null };
+  let fork = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
@@ -173,13 +201,15 @@ function claudeSessionToken(args: string[]): string | null {
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
-    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (arg === "--fork-session") { fork = true; continue; }
+    const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
-    const value = identity[1] ?? args[++index];
-    if (token !== null || !value || value.startsWith("-")) return null;
-    token = value;
+    const kind = identity[1] as keyof ClaudeArgvIds;
+    const value = identity[2] ?? args[++index];
+    if (ids[kind] !== null || !value || value.startsWith("-")) return null;
+    ids[kind] = value;
   }
-  return token;
+  return claudeArgvIdentity(ids, fork) ?? null;
 }
 
 // Delivery-only reading of a Claude argv. Like the strict selector, it accepts
@@ -187,7 +217,8 @@ function claudeSessionToken(args: string[]): string | null {
 // "unparsed": an argument was not recognised, so the argv proves nothing.
 function claudeSessionIdentity(args: string[]): string | null | { unparsed: true } {
   const unparsed = { unparsed: true } as const;
-  let token: string | null = null;
+  const ids: ClaudeArgvIds = { resume: null, "session-id": null };
+  let fork = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
@@ -202,13 +233,16 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
-    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (arg === "--fork-session") { fork = true; continue; }
+    const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
-    const value = identity[1] ?? args[++index];
-    if (token !== null || !value || value.startsWith("-")) return unparsed;
-    token = value;
+    const kind = identity[1] as keyof ClaudeArgvIds;
+    const value = identity[2] ?? args[++index];
+    if (ids[kind] !== null || !value || value.startsWith("-")) return unparsed;
+    ids[kind] = value;
   }
-  return token;
+  const named = claudeArgvIdentity(ids, fork);
+  return named === undefined ? unparsed : named;
 }
 
 const DELETED_WITNESS = " (deleted)";
@@ -626,7 +660,15 @@ export async function observeClaudeDelivery(
         const fingerprint = native.fingerprint;
         const identities = chain.map((link) => claudeSessionIdentity(tokens(link.process.command).slice(1)));
         const named = new Set(identities.filter((value): value is string => typeof value === "string"));
-        if (named.size > 1) return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
+        if (named.size > 1) {
+          // A Claude can start a fork of its own conversation, and ancestry in one foreground group doesn't show which
+          // of them receives input. When only a --fork-session link names the second conversation, keep the warn-and-send
+          // that held before forks were read, without verifying either.
+          const unforked = new Set(identities.filter((value, index): value is string =>
+            typeof value === "string" && !tokens(chain[index]!.process.command).includes("--fork-session")));
+          if (unforked.size <= 1) return { state: "unknown", detail: "A Claude process and a fork of a conversation share the bound foreground; current conversation is unverified", fingerprint };
+          return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
+        }
         if (!input.expectedToken) return { ...unknown, fingerprint };
         // argv records launch identity, not the current conversation: /clear can
         // rotate the hook-persisted token without replacing this process. A sole

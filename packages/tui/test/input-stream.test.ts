@@ -68,3 +68,14 @@ describe("stateful stdin decoding", () => {
     ]);
   });
 });
+
+it("treats CRLF as one activation across arbitrary input chunks", () => {
+  const enter = { type: "key", key: "enter", action: { type: "activate" } };
+  expect(decodeInput("\r\n")).toEqual([enter]);
+  const decoder = createInputDecoder();
+  expect(decoder.write("\r")).toEqual([enter]);
+  expect(decoder.flush()).toEqual([]);
+  expect(decoder.write("\n")).toEqual([]);
+  expect(decoder.write("x\n")).toEqual([{ type: "char", ch: "x" }, enter]);
+  expect(decodeInput("\r\r")).toEqual([enter, enter]);
+});

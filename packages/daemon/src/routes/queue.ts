@@ -118,7 +118,7 @@ export function queueRoutes(): Hono {
       return {
         ok: false,
         error: "unknown_target_repo",
-        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --json | jq .workspace.repos to see declared repos`,
+        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --full --json | jq .workspace.repos to see declared repos`,
         meta: { rigName, knownRepos: known },
       };
     }
@@ -859,11 +859,16 @@ export function queueRoutes(): Hono {
     } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
     // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
     // default answer is unchanged. In-progress rows are the candidate evidence, so they come
-    // from the same unbounded read as the derivation; held/next work is a bounded display list.
+    // from the same unbounded read as the derivation; held and next work are bounded display lists.
+    // Each list gets its own bound, so newer pending rows can never push a set-aside row out of
+    // "held" (a parked row silently missing there is the costliest miss).
     if (c.req.query("candidates") === "1") {
-      const heldAndNext = repo.list({ destinationSession: session, state: ["pending", "blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const held = repo.list({ destinationSession: session, state: ["blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const next = repo.list({ destinationSession: session, state: ["pending"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const heldTruncated = held.length > WORK_CANDIDATE_LIST_LIMIT;
+      const nextTruncated = next.length > WORK_CANDIDATE_LIST_LIMIT;
       const workCandidates = deriveWorkCandidates(
-        [...inProgress, ...heldAndNext.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
+        [...inProgress, ...held.slice(0, WORK_CANDIDATE_LIST_LIMIT), ...next.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
         missionsRoot,
         {
           getRow: (qitemId) => repo.getById(qitemId) ?? null,
@@ -871,7 +876,8 @@ export function queueRoutes(): Hono {
         },
       );
       return c.json({ ...position, ...derived, role,
-        workCandidates: { ...workCandidates, heldAndNextTruncated: heldAndNext.length > WORK_CANDIDATE_LIST_LIMIT } });
+        // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
+        workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
     return c.json({ ...position, ...derived, role });
   });
@@ -1093,7 +1099,13 @@ export function queueRoutes(): Hono {
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
-    return c.json({ ...item, destinationClass: repo.classifyDestinationOf(item.destinationSession).class });
+    // The owner notification level is what the Slack selector keys on: a registered person who
+    // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
+    return c.json({
+      ...item,
+      destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
+      ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
+    });
   });
 
   // ---- Inbox routes (mailbox) ----

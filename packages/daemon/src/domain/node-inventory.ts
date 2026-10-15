@@ -51,11 +51,13 @@ interface InventoryRow {
   session_name: string | null;
   session_created_at: string | null;
   session_status: string | null;
+  intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
   resume_token: string | null;
   startup_completed_at: string | null;
   binding_attachment_type: string | null;
+  binding_id: string | null;
   binding_tmux_pane: string | null;
 }
 
@@ -567,11 +569,13 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.session_name,
       s.created_at as session_created_at,
       s.status as session_status,
+      s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
       s.resume_token,
       s.startup_completed_at,
       b.attachment_type as binding_attachment_type,
+      b.id as binding_id,
       b.tmux_pane as binding_tmux_pane
     FROM nodes n
     JOIN rigs r ON r.id = n.rig_id
@@ -677,6 +681,8 @@ function buildInventoryEntry(
     runtime: row.runtime,
     sessionStatus,
     storedSessionStatus: row.session_status,
+    intentionallyStopped: row.intentionally_stopped === 1
+      && row.session_status === "exited" && row.binding_id === null,
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
@@ -1279,7 +1285,7 @@ export async function attachAgentActivity(
         },
       };
     }
-    // ACTIVITY D1+D2 — the MOTION reading, resolved once and applied to every exit below.
+    // ACTIVITY D1+D2 — the MOTION reading, resolved once for the activity ladder below.
     const motion = entry.canonicalSessionName
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
       : null;
@@ -1316,7 +1322,7 @@ export async function attachAgentActivity(
     })();
 
     /**
-     * ACTIVITY D1+D2 — ONE precedence rule, applied at EVERY exit of the ladder:
+     * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
      *
      *     needs_input > running > MOTION > idle / unknown
      *
@@ -1372,16 +1378,26 @@ export async function attachAgentActivity(
       };
     }
 
+    // Capture-free cache read; the service rejects expired observations.
+    const structural = entry.canonicalSessionName
+      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
+      : null;
+
     // #763: a typed provider-interruption row (at_limit) is positive evidence
     // even though its state is unknown by construction (it must never count
     // as waiting-on-a-person). Deliver it instead of the cached pane reading
     // so a limited seat shows the limit, not idle — but only while current.
+    // Terminal redraws are not recovery evidence and must not erase the limit.
+    // Only a strictly newer, current attention observation outranks it.
     // A demoted row (aged out or generation-mismatched) falls through to the
     // structural reading like any other stale hook.
-    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
+    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true && !(
+      structural?.state === "attention" &&
+      Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")
+    )) {
       return {
         ...entry,
-        agentActivity: withMotion(hookActivity),
+        agentActivity: hookActivity,
       };
     }
 
@@ -1392,9 +1408,6 @@ export async function attachAgentActivity(
     // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
     // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
     // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
-    const structural = entry.canonicalSessionName
-      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
-      : null;
     if (structural && structural.state !== "unknown") {
       return {
         ...entry,

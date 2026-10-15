@@ -135,6 +135,7 @@ Examples:
       const res = await client.post<AddMemberResponse>(
         `/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podNamespace)}/members`,
         body,
+        { timeoutMs: 120_000 },
       );
       const data = res.data;
 

@@ -12,6 +12,7 @@ import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { scopeAuditRoutes } from "../src/routes/scope-audit.js";
+import { isPathInsideRoot } from "../src/domain/cwd-resolution.js";
 
 function buildApp(indexer: SliceIndexer): Hono {
   const app = new Hono();
@@ -82,6 +83,102 @@ describe("GET /api/scope/audit", () => {
   it("returns 404 when mission does not exist", async () => {
     const res = await app.request("/api/scope/audit?mission=nonexistent");
     expect(res.status).toBe(404);
+  });
+
+  // Content-surfaces discipline: a `?mission=` value must never leave the
+  // configured slices root. scope-approve.ts enforces the same containment for
+  // writes; the audit route must match it for reads. The check is lexical: the
+  // name is joined onto the root the way main already does, and only a target
+  // that lands outside the root is refused.
+  it("refuses a mission that escapes the slices root via .. traversal", async () => {
+    // A real, readable directory ONE level above the missions root, with an
+    // authored node file — exactly what a `../` value would reach.
+    const outside = path.join(cleanupRoot, "outside");
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, "SPEC.md"), "---\nid: OPR.1.2.3\n---\n# outside\n", "utf8");
+    fs.writeFileSync(path.join(outside, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=..%2Foutside");
+    expect(res.status).toBe(404);
+    const body = await res.json() as { error?: string; mission?: unknown; slices?: unknown };
+    expect(body.error).toBe("mission_not_found");
+    // No audit data from the escaped directory leaks back.
+    expect(body.slices).toBeUndefined();
+  });
+
+  it("still audits a legitimate mission after the containment guard (no over-blocking)", async () => {
+    const missionDir = path.join(missionsRoot, "legit-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.1.2.5\n---\n# legit\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=legit-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { mission: { name: string } };
+    expect(body.mission.name).toBe("legit-mission");
+  });
+
+  // A leading-slash name keeps its current meaning: `path.join(root, "/x")`
+  // stays under the root, so the mission named `x` is still audited.
+  it("keeps today's meaning for a leading-slash name that stays inside the root", async () => {
+    const missionDir = path.join(missionsRoot, "slash-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.1.2.6\n---\n# slash\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=%2Fslash-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { mission: { name: string; railStatus: string } };
+    expect(body.mission.railStatus).toBe("present");
+  });
+
+  // A nested name under the root is a legitimate descendant and must audit.
+  it("audits a nested mission name that stays inside the root", async () => {
+    const missionDir = path.join(missionsRoot, "group", "nested-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.1.2.7\n---\n# nested\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=group%2Fnested-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { mission: { railStatus: string } };
+    expect(body.mission.railStatus).toBe("present");
+  });
+
+  // A name with an inner `..` that stays inside the root keeps working.
+  it("audits a name whose inner .. still lands inside the root", async () => {
+    const missionDir = path.join(missionsRoot, "keep-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.1.2.8\n---\n# keep\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=inner%2F..%2Fkeep-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { mission: { railStatus: string } };
+    expect(body.mission.railStatus).toBe("present");
+  });
+
+  // The separator-safe comparison must not over-refuse when the configured root
+  // is the filesystem root: every child under it is still inside the root. A
+  // naive `startsWith(root + path.sep)` refuses them all, because the root
+  // already ends in a separator. Driving the whole route with the root at `/`
+  // would enumerate the filesystem, so this checks the comparison directly.
+  it("does not over-refuse a child when the root is the filesystem root", () => {
+    const fsRoot = path.parse(process.cwd()).root;
+    expect(isPathInsideRoot(fsRoot, fsRoot)).toBe(true);
+    expect(isPathInsideRoot(path.join(fsRoot, "some", "nested", "child"), fsRoot)).toBe(true);
+    expect(isPathInsideRoot(path.join(fsRoot, "x"), fsRoot)).toBe(true);
+  });
+
+  // The same comparison still refuses a sibling that leaves an ordinary root.
+  it("refuses a sibling outside an ordinary root", () => {
+    const base = path.join(cleanupRoot, "contain-root");
+    const inside = path.join(base, "mission");
+    const sibling = path.join(cleanupRoot, "contain-root-neighbor");
+    expect(isPathInsideRoot(inside, base)).toBe(true);
+    expect(isPathInsideRoot(base, base)).toBe(true);
+    expect(isPathInsideRoot(sibling, base)).toBe(false);
+    expect(isPathInsideRoot(path.join(base, ".."), base)).toBe(false);
   });
 
   it("uses one notes precedence across current-only, legacy-only, both, and neither", async () => {

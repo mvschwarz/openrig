@@ -1,6 +1,6 @@
 {
   "name": "@openrig/daemon",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -49,6 +49,10 @@
     "./skill-loadout": {
       "types": "./dist/skill-loadout-surface.d.ts",
       "import": "./dist/skill-loadout-surface.js"
+    },
+    "./composer-prompts": {
+      "types": "./dist/composer-prompts-surface.d.ts",
+      "import": "./dist/composer-prompts-surface.js"
     },
     "./instance-initialization": {
       "types": "./dist/instance-initialization-surface.d.ts",

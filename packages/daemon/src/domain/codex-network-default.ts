@@ -199,7 +199,7 @@ function converse(child: ReturnType<typeof spawn>, cwd: string, deadlineMs: numb
 }
 
 /** stdin EOF first; then TERM, then KILL, to the reader's own process group while any member remains. */
-async function stopGroup(child: ReturnType<typeof spawn>, graceMs: number): Promise<void> {
+export async function stopGroup(child: ReturnType<typeof spawn>, graceMs: number): Promise<void> {
   child.stdin?.end();
   const pid = child.pid;
   if (pid === undefined) return;

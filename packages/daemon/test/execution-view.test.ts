@@ -344,6 +344,63 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.qitem_id)).toContain("qitem-lane-31");
   });
 
+  describe("a row binds to a mission by its mission: tag first and by a body mention only when it has none", () => {
+    const later = "2026-08-29T21:30:00.000Z";
+    const addRow = (id: string, tags: string[], body: string, state = "in-progress", seat = SEAT_B) =>
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at)
+         VALUES (?, ?, ?, 'lead@exec-fixture', ?, ?, 'normal', 'light', ?, ?, ?)`,
+      ).run(id, later, later, seat, state, JSON.stringify(tags), body, later);
+    const ladder31 = async () => ((await show()).q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    const laneIds = async () => ((await show()).q1_lanes as Record<string, unknown>[]).map((l) => l.qitem_id);
+
+    it("ignores a row tagged for another mission whose body mentions this one", async () => {
+      addRow("qitem-other-mission", ["mission:other-mission", "slice:31-alpha", "candidate:feedfacefeedface"], `Mission: other-mission\nSee ${MISSION}.\nworktree_path=${laneWorktree}\n`);
+      expect(await laneIds()).not.toContain("qitem-other-mission");
+      expect(((await ladder31()).built as Record<string, unknown>).resolved_commit).toBe(candidateSha);
+    });
+
+    it("ignores a row tagged for a mission whose name merely contains this one", async () => {
+      addRow("qitem-longer-name", [`mission:${MISSION}-hotfix`, "slice:31-alpha", "candidate:feedfacefeedface"], "Hotfix lane.");
+      expect(await laneIds()).not.toContain("qitem-longer-name");
+      expect(((await ladder31()).built as Record<string, unknown>).candidate_sha).toBe(candidateSha.slice(0, 9));
+    });
+
+    it("keeps binding an untagged row that names this mission in its body, and a correctly tagged row", async () => {
+      addRow("qitem-untagged", [], `Mission: ${MISSION}\nSlice: 33-gamma\n`);
+      addRow("qitem-tagged", [`mission:${MISSION}`, "slice:OPR.9.9.32"], "Tagged lane.", "in-progress", SEAT_A);
+      const ids = await laneIds();
+      expect(ids).toContain("qitem-untagged");
+      expect(ids).toContain("qitem-tagged");
+    });
+
+    it("keeps the id form of the mission as an exact tag match", async () => {
+      addRow("qitem-id-form", ["mission:OPR.9.9", "slice:OPR.9.9.33"], "Legacy id-form tag.");
+      expect(await laneIds()).toContain("qitem-id-form");
+    });
+
+    it("matches the mission tag with ASCII case folded, as the selecting LIKE does", async () => {
+      addRow("qitem-cased", [`mission:${MISSION.toUpperCase()}`, "slice:OPR.9.9.33"], "Tag written in upper case.");
+      expect(await laneIds()).toContain("qitem-cased");
+    });
+
+    it("binds a row tagged with two missions to both, because it names both", async () => {
+      addRow("qitem-two-missions", [`mission:${MISSION}`, "mission:other-mission", "slice:OPR.9.9.33"], "Names two missions.");
+      expect(await laneIds()).toContain("qitem-two-missions");
+      const other = (await projector.show("execution", { mission: "other-mission" })).rows[0] as Record<string, unknown>;
+      expect((other.q1_lanes as Record<string, unknown>[]).map((l) => l.qitem_id)).toContain("qitem-two-missions");
+    });
+
+    it("does not let another mission's wave-map row replace this mission's", async () => {
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+         VALUES ('qitem-wave-map-longer', ?, ?, 'lead@exec-fixture', 'lead@exec-fixture', 'done', 'normal', 'light', ?, ?)`,
+      ).run(later, later, JSON.stringify([`mission:${MISSION}-hotfix`, "wave-map", "format:wave-map-v1"]),
+        'Other wave map.\n```json\n{"format":"wave-map-v1","waves":[{"id":"WX","slices":["OPR.9.9.31"]}]}\n```\n');
+      expect(((await show()).sources as Record<string, Record<string, unknown>>).wave_map.row).toBe("qitem-wave-map");
+    });
+  });
+
   it("carries planned components separately from current queue ownership, including waiting and handoff", async () => {
     const file = path.join(missionsRoot, MISSION, "slices", "31-alpha", "slice.yaml");
     fs.appendFileSync(file, "sdlc:\n  components:\n    - { id: build.minimal-gap, owner: planned@fixture }\n");

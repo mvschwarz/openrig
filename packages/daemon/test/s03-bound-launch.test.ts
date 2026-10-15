@@ -227,7 +227,7 @@ if (process.argv.includes('--help')) {
 
 describe("S03 bound launch across existing paths", () => {
   it.each(["fresh", "resume", "fork", "legacy"])("uses the same context and quotes every argument on %s", async kind => {
-    const f = fixture(); vi.spyOn(f.adapter as any, "pollForResumeToken").mockResolvedValue("fork-id");
+    const f = fixture();
     vi.spyOn(f.adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
     const resume = new ClaudeResumeAdapter(f.tmux, { claudeManagedLaunch: f.managed });
     vi.spyOn(resume as any, "verifyResume").mockResolvedValue({ ok: true });
@@ -257,21 +257,21 @@ describe("S03 bound launch across existing paths", () => {
     expect(f.calls[0]).toContain("'OPENRIG_OCCUPANT_GENERATION=reserved-next'");
     expect(f.db.prepare("SELECT generation_uuid FROM occupant_tenures").get()).toEqual({ generation_uuid: "generation-1" });
   });
-  it.each(["unset", "explicit"])("captures the fork token from the %s config root and preserves call-entry arguments", async selection => {
+  it.each(["unset", "explicit"])("names the fork's own id with the %s config root, reads no session file, and preserves call-entry arguments", async selection => {
     const f = fixture(); const reads: string[] = [];
     if (selection === "unset") delete f.env.CLAUDE_CONFIG_DIR;
     const configDir = selection === "unset" ? path.join(f.env.HOME!, ".claude") : path.join(f.cwd, "config");
     const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, claudeManagedLaunch: f.managed, fsOps: { ...fsOps,
       homedir: "/different/daemon/home", exists: p => p === path.join(configDir,"sessions"), readdir: () => ["token.json"],
-      readFile: p => { reads.push(p); return JSON.stringify({ name: "original", sessionId: "new-fork-token" }); } } });
+      readFile: p => { reads.push(p); return JSON.stringify({ name: "original", sessionId: "stale-same-name-token" }); } }, sessionIdFactory: () => "fork-id" });
     const opts = { name: "original", forkSource: { kind: "native_id" as const, value: "original-parent" } };
     vi.mocked(execFile).mockImplementation(((_f: string, _a: string[], _o: any, done: any) => {
       f.binding.tmuxSession = "other-seat"; f.binding.model = "other-model"; f.binding.permissionMode = "bypassPermissions";
       opts.name = "changed"; opts.forkSource.value = "other-history"; done(null, help);
     }) as any);
-    expect(await adapter.launchHarness(f.binding, opts)).toMatchObject({ ok: true, resumeToken: "new-fork-token" });
-    expect(reads).toEqual([path.join(configDir,"sessions","token.json")]);
-    expect(f.calls[0]).toContain("'--resume' 'original-parent'"); expect(f.calls[0]).toContain("'--name' 'original'");
+    expect(await adapter.launchHarness(f.binding, opts)).toMatchObject({ ok: true, resumeToken: "fork-id" });
+    expect(reads).toEqual([]);
+    expect(f.calls[0]).toContain("'--resume' 'original-parent' '--fork-session' '--session-id' 'fork-id'"); expect(f.calls[0]).toContain("'--name' 'original'");
     expect(f.calls[0]).not.toContain("other-history"); expect(f.calls[0]).not.toContain("other-model");
   });
   it.each(["pane", "generation"])("refuses a missing %s before help or input", async missing => {

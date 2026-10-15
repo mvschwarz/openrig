@@ -190,6 +190,26 @@ function missionReferences(missionsRoot: string | null, mission: string): string
   return [...references];
 }
 
+/** The mission: tags a row carries, as written. */
+function missionTags(raw: string | null): string[] {
+  return parseTags(raw).filter((t) => t.startsWith("mission:")).map((t) => t.slice("mission:".length));
+}
+
+/** A row that carries a mission: tag binds only to the mission that tag names, by exact
+ *  match; a body mention binds only a row with no mission: tag at all. The SQL LIKE that
+ *  selects candidates is a substring match, so `mission:AB` and a body that merely
+ *  mentions `A` both reach this check and are decided here. */
+function rowBindsToMission(raw: string | null, references: readonly string[]): boolean {
+  const tagged = missionTags(raw);
+  return tagged.length === 0 || tagged.some((t) => namesMission(t, references));
+}
+
+/** Exact match, folding ASCII case the way the SQL LIKE that selects candidates does. */
+function namesMission(tag: string, references: readonly string[]): boolean {
+  const fold = (value: string): string => value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return references.some((reference) => fold(reference) === fold(tag));
+}
+
 interface SliceFacts {
   dir: string;
   specPath: string;
@@ -594,7 +614,7 @@ function readWaveMap(db: Database.Database, missions: string[], project?: string
         ORDER BY ts_created DESC`,
     )
     .all(...missions.map((mission) => `%mission:${mission}%`)) as Array<{ qitem_id: string; body: string | null; tags: string | null }>;
-  const selectedRow = row.find(r => !project || belongsToProject(r.tags, project));
+  const selectedRow = row.find(r => missionTags(r.tags).some((t) => namesMission(t, missions)) && (!project || belongsToProject(r.tags, project)));
   if (!selectedRow?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = selectedRow.body.match(WAVE_MAP_BLOCK);
   if (!block) return { rowId: INDETERMINATE, waves: [] };
@@ -729,10 +749,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const sliceIds = slices.map((s) => s.id).filter((x): x is string => x !== INDETERMINATE);
   const depCache = new Map<string, SliceFacts | null>();
 
-  // ---- queue rows bound to this mission (tag or body mention, per the binding law) ----
-  const missionLikes = mission === INDETERMINATE
-    ? ["%"]
-    : missionReferences(missionsRoot, mission).map((reference) => `%${reference}%`);
+  // ---- queue rows bound to this mission: its mission: tag by exact match, a body mention only for untagged rows ----
+  const missionRefs = mission === INDETERMINATE ? [] : missionReferences(missionsRoot, mission);
+  const missionLikes = mission === INDETERMINATE ? ["%"] : missionRefs.map((reference) => `%${reference}%`);
   const missionWhere = missionLikes.map(() => "(tags LIKE ? OR body LIKE ?)").join(" OR ");
   const candidateRows = deps.db
     .prepare(
@@ -747,7 +766,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     )
     .all(...missionLikes.flatMap((like) => [like, like])) as QueueRowLite[];
 
-  const rows = candidateRows.filter(row => !opts?.project || belongsToProject(row.tags, opts.project));
+  const rows = candidateRows
+    .filter(row => mission === INDETERMINATE || rowBindsToMission(row.tags, missionRefs))
+    .filter(row => !opts?.project || belongsToProject(row.tags, opts.project));
 
   const sliceOfRow = (r: QueueRowLite): string | null => {
     for (const t of parseTags(r.tags)) {

@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** Record client calls and return fixture responses matched by route fragment. */
 function mockClient(responses: Record<string, { status: number; data: unknown }>) {
   return {
     post: vi.fn(async (url: string, body: unknown) => {
@@ -18,6 +19,7 @@ function mockClient(responses: Record<string, { status: number; data: unknown }>
   };
 }
 
+/** Build a running-daemon fixture and expose its request spies for command assertions. */
 function makeDeps(clientResponses: Record<string, { status: number; data: unknown }>) {
   const client = mockClient(clientResponses);
   return {
@@ -75,6 +77,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver", "dev.guard"], holdReason: "codex auth expired" },
+      { timeoutMs: 120_000 },
     );
     expect(logs.some((l) => l.includes("dev.driver"))).toBe(true);
     expect(logs.some((l) => l.includes("dev.guard"))).toBe(true);
@@ -88,7 +91,7 @@ describe("rig launch --seats", () => {
     await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.pi", "--retry-startup-from", fragment, "--rig-root", directory]);
     expect(deps._client.post).toHaveBeenCalledWith("/api/rigs/rig-1/nodes/dev.pi/launch", {
       retryStartupFrom: { member: { id: "pi", runtime: "pi", agent_ref: "local:agent", profile: "default", cwd: "/project" }, rigRoot: directory },
-    });
+    }, { timeoutMs: 120_000 });
     expect(logs.join("\n")).toContain("Launched node dev.pi");
     expect(process.exitCode).toBeUndefined();
   });
@@ -138,6 +141,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver"], holdReason: "operator hold", plan: true },
+      undefined,
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
     expect(logs.join("\n")).toContain("dev.guard: operator hold");
@@ -247,6 +251,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver"], plan: true, nonTargetMode: "unchanged" },
+      undefined,
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
     expect(logs.join("\n")).toContain("Non-target effect: unchanged");
@@ -284,6 +289,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver", "dev.guard"], plan: true, holdReason: "hold other seats" },
+      undefined,
     );
     expect(process.exitCode).toBeUndefined();
   });
@@ -341,6 +347,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/dev.driver/launch",
       {},
+      { timeoutMs: 120_000 },
     );
     expect(process.exitCode).toBeUndefined();
   });

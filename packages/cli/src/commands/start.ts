@@ -23,6 +23,8 @@ interface RigSummary {
   name: string;
   nodeCount?: number;
   lifecycleState?: string;
+  // Includes intentional stops for restore selection; absent on older daemons.
+  restoreLifecycleState?: string;
 }
 
 interface PlanPreviewNode {
@@ -289,7 +291,8 @@ Examples:
       const previewErrors: Array<{ rigId: string; rigName: string; code: string; message: string }> = [];
       for (const rig of allSummaries) {
         if (rig.name === "kernel") continue;
-        if (rig.lifecycleState === "running") continue;
+        const lifecycleState = rig.restoreLifecycleState ?? rig.lifecycleState;
+        if (lifecycleState === "running") continue;
 
         try {
           const planRes = await client.post<Record<string, unknown>>(
@@ -310,7 +313,7 @@ Examples:
             candidates.push({
               rigId: rig.id,
               rigName: rig.name,
-              lifecycleState: rig.lifecycleState ?? "unknown",
+              lifecycleState: lifecycleState ?? "unknown",
               nodeCount: rig.nodeCount ?? 0,
               lastActivity,
               preview,
@@ -417,7 +420,7 @@ Examples:
         try {
           const freshSummary = await client.get<RigSummary[]>("/api/rigs/summary");
           const current = (freshSummary.data ?? []).find((r) => r.id === rigId);
-          if (current?.lifecycleState === "running") {
+          if ((current?.restoreLifecycleState ?? current?.lifecycleState) === "running") {
             if (!opts.json) console.log(`  ${rigName}: already running (skipping)`);
             results.push({ rigName, status: "already_running", nodes: [] });
             continue;

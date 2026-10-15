@@ -37,6 +37,12 @@ function isPathInsideRoot(candidate: string, root: string): boolean {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative));
 }
 
+// #226 — mirrors cwd-resolution.isFilesystemRoot in the daemon.
+function isFilesystemRoot(cwd: string): boolean {
+  const resolved = nodePath.resolve(cwd);
+  return resolved === nodePath.parse(resolved).root;
+}
+
 // OPR.0.4.4.11 (arch return R11-2) — pre-dispatch detection of a topology
 // source for the --host rejection. Mirrors the daemon's FR-1 detection
 // contract without importing the daemon package: `.rigtopology` extension,
@@ -402,6 +408,12 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           // install-internal case; the operator gets the same hint they
           // would have gotten pre-Bug-3.
         }
+      }
+
+      // #226 — the launch continues, but a cwd this command chose (not an explicit --cwd) that is the
+      // filesystem root puts every agent's project files there, which is rarely what the person meant.
+      if (defaultLibraryCwdOverride !== undefined && isFilesystemRoot(defaultLibraryCwdOverride)) {
+        console.error(`warning: launching in ${defaultLibraryCwdOverride} because it is your current directory. Agents write their project files (.claude/, .mcp.json and similar) in their working directory, and some may fail if it isn't writable. To launch in your project, run rig up again from it or pass --cwd <project dir>.`);
       }
 
       // OPR.0.3.4.4 — honest async: a client timeout / connection loss in

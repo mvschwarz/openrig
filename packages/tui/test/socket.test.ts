@@ -93,8 +93,17 @@ describe("control-socket adapter (spike-adopted; arch boundary constraint)", () 
   });
 
   it("defaults the socket home to $OPENRIG_HOME/run (herdr-style convention) and stays under the limit", () => {
-    const p = defaultSocketPath("tui-1");
-    expect(p).toMatch(/[/\\]run[/\\]tui-tui-1\.sock$/);
-    expect(Buffer.byteLength(p)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+    const prevOpenRigHome = process.env["OPENRIG_HOME"];
+    const prevUserHome = process.env["HOME"];
+    try {
+      delete process.env["OPENRIG_HOME"];
+      process.env["HOME"] = os.userInfo().homedir;
+      const p = defaultSocketPath("tui-1");
+      expect(p).toMatch(/[/\\]run[/\\]tui-tui-1\.sock$/);
+      expect(Buffer.byteLength(p)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+    } finally {
+      if (prevOpenRigHome !== undefined) process.env["OPENRIG_HOME"] = prevOpenRigHome;
+      if (prevUserHome !== undefined) process.env["HOME"] = prevUserHome;
+    }
   });
 });

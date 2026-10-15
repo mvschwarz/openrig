@@ -250,6 +250,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .addHelpText("after", [
       "",
       "Creates nothing: open the --url link yourself in a browser signed in to your Slack workspace.",
+      "If Slack shows an empty manifest or parsing error with --url, paste the plain YAML output of",
+      "`rig slack manifest` into the YAML tab in Slack's \"Create an app from an app manifest\" dialog.",
       "The app is private to that workspace (Socket Mode; OpenRig hosts nothing and publishes nothing).",
       "--json lists every requested scope and why. `rig slack verify` checks only the baseline scopes,",
       "so a READY there does not prove attachments or mentions have their grants.",

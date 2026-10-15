@@ -266,9 +266,15 @@ Intentional limits that still describe the shipped system:
 5. `rig ask` transcript search prefers `rg`, falls back to `grep -E`
    (`history-query.ts:252`, `:267`); quality/perf varies by backend.
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
-7. `--verify` on `rig send` checks pane content for message visibility, not
-   agent acknowledgement: it compares occurrences of the message's first 40
-   characters before and after the send (`session-transport.ts:1605`–`1608`).
+7. `--verify` on `rig send` reports what the pane shows, not agent
+   acknowledgement. By default it compares the message (whole for a
+   header-carrying send, the first 40 characters for a raw one) in captures
+   before and after the send, leaving out the current input box; with
+   `transport.verify_input_box` on, Claude Code and Codex sends are verified
+   only for a seat proven idle before the paste and on input-box evidence; a
+   busy or unknown seat reads unconfirmed (`transport-and-transcripts.md` §3
+   step 5).
+   When it cannot confirm, it reports `rendered-unconfirmed`, not a failure.
 8. Terminal node readiness is shell-ready only — no service health probes.
 9. Managed-app service surfaces are descriptive only — OpenRig does not
    auto-inject service URLs/tokens into agent prompts beyond authored

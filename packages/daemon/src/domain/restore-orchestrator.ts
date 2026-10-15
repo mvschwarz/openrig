@@ -1,4 +1,6 @@
+import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
+import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -75,7 +77,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
-import { resolveActiveSnapshotSession, activeOccupantAmbiguityError } from "./active-occupant.js";
+import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError } from "./active-occupant.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -112,12 +114,21 @@ export function launchStatusIsRunning(status: string): boolean {
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
  *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
  *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
-function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
+function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null):
   { kind: "resume" } | { kind: "fresh" | "decision" | "unrecoverable"; why: string } {
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
-  if (!session) return { kind: "fresh", why: "saves no session for this seat" };
+  const runtimeError = restoreRuntimeCompatibilityError(runtime,
+    data.nodeStartupContext?.[nodeId]?.runtime);
+  if (runtimeError) return { kind: "decision", why: runtimeError };
+  if (!session) {
+    // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
+    const prior = occupant.kind === "none" ? absentSeatResumeHistory(data.sessions, nodeId) : null;
+    return prior
+      ? { kind: "decision", why: `had no running occupant for this seat when it was taken, but an earlier occupant left a '${prior.resumeType}' resume token` }
+      : { kind: "fresh", why: "saves no session for this seat" };
+  }
   const policy = session.restorePolicy ?? "resume_if_possible";
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
   if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
@@ -550,7 +561,8 @@ export class RestoreOrchestrator {
         // Choosing a fresh versus resumed conversation belongs to the person. Stopping closes the pane, so
         // stop-then-launch is offered as a resume only when this snapshot can resume the seat; otherwise the
         // message says what that launch would do instead. The command pins the snapshot that was checked.
-        const outcome = snapshotLaunchOutcome(snapshot.data, node.id);
+        const liveNode = allNodes.find(current => current.logicalId === node.logicalId);
+        const outcome = snapshotLaunchOutcome(snapshot.data, node.id, liveNode ? liveNode.runtime : node.runtime);
         const launchCommand = `rig launch ${rigId} ${node.logicalId} --snapshot-id ${snapshot.id}`;
         const relaunch = outcome.kind === "resume"
           ? `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
@@ -813,6 +825,10 @@ export class RestoreOrchestrator {
     }));
   }
 
+  /**
+   * Restore one planned seat, checking continuity before launching its occupant.
+   * Preserve prior state so a failed launch or resume can be compensated.
+   */
   private async restoreNodeWithCompensation(
     entry: PlanEntry,
     rigId: string,
@@ -821,7 +837,9 @@ export class RestoreOrchestrator {
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
+    // Compare against the live logical target without changing saved post-launch inputs.
     const node = entry.node;
+    const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId);
     const nodeId = node.id;
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -829,7 +847,7 @@ export class RestoreOrchestrator {
     // a pod node in 'restoring' otherwise returns a silent status "fresh"
     // (classified running downstream) while the occupant truth is ambiguous,
     // bypassing A1's loud-failure semantics. Resolved/none/legacy states
-    // fall through and keep the restoring/degraded behavior unchanged.
+    // fall through to absent-history classification and the continuity check.
     const occupantResolution = resolveActiveSnapshotSession(data, nodeId);
     if (occupantResolution.kind === "ambiguous") {
       return {
@@ -838,6 +856,22 @@ export class RestoreOrchestrator {
         status: "failed",
         error: activeOccupantAmbiguityError(occupantResolution.candidateIds, occupantResolution.detail),
       };
+    }
+
+    const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    const runtimeError = restoreRuntimeCompatibilityError(liveNode ? liveNode.runtime : node.runtime,
+      data.nodeStartupContext?.[nodeId]?.runtime);
+    if (runtimeError) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError };
+    }
+
+    // Classify absent-seat history before the continuity short-circuit: a
+    // restoring seat must not report fresh while its forecast awaits a decision.
+    const priorWithToken = occupantResolution.kind === "none" && !freshRequested
+      ? absentSeatResumeHistory(data.sessions, nodeId)
+      : null;
+    if (priorWithToken) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name) };
     }
 
     // Consult live continuity state BEFORE clearing stale state
@@ -874,7 +908,6 @@ export class RestoreOrchestrator {
       // returned there, so only resolved/none reach here.
       const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
       const policy = snapSession?.restorePolicy ?? "resume_if_possible";
-      const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
       if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {
         const sourceNote = resumeSourceRecorded
@@ -1059,6 +1092,21 @@ export class RestoreOrchestrator {
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
+    // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
+    // precedence seam (latest wins), which also says so when the snapshot held another value.
+    let restoreEffort: { effort: string | null } | undefined;
+    const effortForRestore = (): string | null => {
+      if (!restoreEffort) {
+        // The live seat is found by its logical id in this rig: a seat removed and grown back has a new node id,
+        // and its latest saved choice still wins over the older snapshot.
+        const liveRow = this.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rigId, node.logicalId) as
+          { id: string } | undefined;
+        const decided = effortPrecedence.restoreLaunchEffort({ snapshot: node, live: readSeatEffort(this.db, liveRow?.id ?? node.id) });
+        if (decided.warning) warnings?.push(`Restore: ${node.logicalId}: ${decided.warning}`);
+        restoreEffort = decided;
+      }
+      return restoreEffort.effort;
+    };
     // OPR.0.5.7.1 D1 — the active occupant is RESOLVED, never inferred from
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
@@ -1116,9 +1164,9 @@ export class RestoreOrchestrator {
       }
     }
 
-    // Root's narrow amendment to D6a (qitem-20261009081619-d1537b0f): before either native
-    // resume path starts the harness, put back only the MISSING managed guidance blocks from
-    // the saved startup selection. Ordinary `rig down` strips them; without this the resumed
+    // A narrow exception to the replay containment below: before either native resume path
+    // starts the harness, put back only the MISSING managed guidance blocks from the saved
+    // startup selection. Ordinary `rig down` strips them; without this the resumed
     // seat came back with no role, culture or SOP. Existing blocks are never refreshed; nothing
     // reaches the conversation; no action, skill or plugin runs. Never blocks the resume.
     if (resumeRequested && resumeToken && launchResult) {
@@ -1160,7 +1208,7 @@ export class RestoreOrchestrator {
             this.sessionRegistry.recordResumeLaunch(launchedSessionId, resumeToken);
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort, warnings);
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -1248,9 +1296,9 @@ export class RestoreOrchestrator {
     // explicit+versioned+durable+idempotent contract in the D4 operation-id
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
-    // Amended narrowly (Root, 2026-10-09, qitem-20261009081619-d1537b0f): MISSING managed
-    // guidance blocks are put back before the harness starts (see restoreMissingGuidance above);
-    // existing blocks are still never rewritten, and nothing else is replayed.
+    // One narrow exception: MISSING managed guidance blocks are put back before the harness
+    // starts (see restoreMissingGuidance above); existing blocks are still never rewritten, and
+    // nothing else is replayed.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;
@@ -1338,7 +1386,7 @@ export class RestoreOrchestrator {
             // found" on every resumed Pi seat). Claude/Codex silently lost
             // their -m/--model on restore the same way.
             model: node.model ?? undefined,
-            effort: node.effort ?? undefined,
+            effort: effortForRestore() ?? undefined,
           };
 
           try {
@@ -1413,6 +1461,18 @@ export class RestoreOrchestrator {
               };
             }
             if (isPodAware && resumeRequested) {
+              // Only the runtime's own report that the conversation doesn't exist rolls the seat back
+              // as unresumable. A pane that went back to its shell for another reason stays failed,
+              // with its pane and binding kept, so its output can still be read.
+              if (startupResult.recovery === "retry_fresh" && startupResult.missingConversation) {
+                await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
+                return {
+                  nodeId: node.id,
+                  logicalId: node.logicalId,
+                  status: "awaiting-decision",
+                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
+                };
+              }
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { readSliceReadiness, readProofContract, type ScopeReadiness, type ProofPolicyRead } from "../proof/judgments.js";
 import { createHash } from "node:crypto";
 import { NODE_FILE_PRECEDENCE } from "./node-file.js";
+import { parseMarkdownSections } from "../markdown-address.js";
 
 export interface ScopeFsDeps {
   readBytes?: (path: string) => Uint8Array | null;
@@ -98,13 +99,10 @@ function fmList(fm: string, key: string): string[] {
 
 /** Extract a `## <Heading>` section's body (up to the next `## ` or EOF). */
 function sectionBody(content: string, heading: string): string {
-  const re = new RegExp(`^## ${heading}\\s*$`, "m");
-  const m = re.exec(content);
-  if (!m) return "";
-  const start = m.index + m[0].length;
-  const rest = content.slice(start);
-  const next = /^## /m.exec(rest);
-  return (next ? rest.slice(0, next.index) : rest).trim();
+  const section = parseMarkdownSections(content).find((candidate) => candidate.level === 2 && candidate.title === heading);
+  if (!section) return "";
+  // The shared parser preserves fenced examples within the section span.
+  return section.text.split("\n").slice(1).join("\n").trim();
 }
 
 /** Numbered mini-requirement lines (top-level `N.` items; continuation lines folded in). */
@@ -195,7 +193,9 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
   return createHash("sha256").update(bytes).digest("hex").slice(0, 8);
 }
 
-export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead): SliceScopeDetail | null {
+/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
+ *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
+export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
   const readmePath = NODE_FILE_PRECEDENCE
     .map((n) => path.join(sliceDir, n))
     .find((p) => fs.exists(p));
@@ -222,7 +222,7 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const heading = /^# (.+)$/m.exec(content);
   const progressPath = path.join(sliceDir, "PROGRESS.md");
   return {
-    readiness: readSliceReadiness(sliceDir, fs, readPolicy),
+    readiness: readSliceReadiness(sliceDir, fs, readPolicy, root),
     dirName: path.basename(sliceDir),
     id: fmValue(fm, "id"),
     displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
@@ -248,7 +248,7 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   };
 }
 
-export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, mission: string): MissionScopes | null {
+export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, mission: string, root?: string): MissionScopes | null {
   const missionDir = path.join(missionsRoot, mission);
   const slicesDir = path.join(missionDir, "slices");
   if (!fs.exists(missionDir)) return null;
@@ -257,7 +257,7 @@ export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, miss
     for (const entry of fs.listDir(slicesDir)) {
       const sliceDir = path.join(slicesDir, entry);
       if (!fs.isDirectory(sliceDir)) continue;
-      const detail = projectSliceScope(fs, sliceDir);
+      const detail = projectSliceScope(fs, sliceDir, undefined, root);
       if (!detail) continue;
       const { intent: _i, miniRequirements: _m, proofContract: _p, progressPath: _pp, specShaShort: _s, prdExists: _pe, ...summary } = detail;
       slices.push(summary);

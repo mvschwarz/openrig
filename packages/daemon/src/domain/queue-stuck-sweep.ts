@@ -25,7 +25,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import type Database from "better-sqlite3";
-import { deriveCrossHostSuccessorId, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { deriveCrossHostSuccessorId, matchesRecordedHandoffTarget, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -495,8 +495,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // whoever performed the registered-host read (read from active + archived transitions).
     // Historical source rows are never mutated by this detector — the disposition note is the
     // verifier's act, not ours.
-    // Real handoffs (state='handed-off') create their successor in the same transaction and cannot
-    // be missing one (#341); skipping them removes most of the scan.
+    // Internal handoffs record handed_off_to. A generic reclose can retain an old
+    // owner, so skip only recorded handoffs whose current target still matches (#341).
     // Closures outside the recent 24-hour window without open findings are skipped so upgrading
     // a real queue history does not raise a flood of historical findings.
     const custodyHours = deps.custodyWindowHours ?? STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
@@ -518,15 +518,27 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     }
     const custodyRows = deps.db
       .prepare(
-        `SELECT q.qitem_id FROM queue_items q
-          WHERE q.state IN ('done', 'canceled')
-            AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')
-            AND (q.ts_updated >= ? OR q.qitem_id IN (SELECT value FROM json_each(?)))`,
+        // Bound candidates before checking state: including handed-off in the
+        // state index scan would otherwise revisit all historical atomic handoffs.
+        `WITH custody_candidates AS MATERIALIZED (
+           SELECT qitem_id, state, handed_off_to, closure_target, closure_reason
+             FROM queue_items WHERE ts_updated >= ?
+           UNION
+           SELECT qitem_id, state, handed_off_to, closure_target, closure_reason
+             FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))
+         )
+         SELECT q.qitem_id FROM custody_candidates q
+          WHERE (q.state IN ('done', 'canceled') OR (q.state = 'handed-off'
+            AND (q.handed_off_to IS NULL OR q.closure_target IS NOT q.handed_off_to)))
+            AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')`,
       )
       .all(custodyCutoff, JSON.stringify(openDanglingIds)) as Array<{ qitem_id: string }>;
     for (const { qitem_id } of custodyRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
+      // Local recorded targets were filtered in SQL; remote keys use the same
+      // derivation as the cross-host close, without reading successor history.
+      if (row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitemId, row.handedOffTo, row.closureTarget)) continue;
       const targets = (row.closureTarget ?? row.handedOffTo ?? "")
         .split(",")
         .map((target) => target.trim())

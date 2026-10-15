@@ -188,6 +188,13 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         const configStore = new ConfigStore();
         const config = configStore.resolve();
         const effectivePort = opts.port ? parseInt(opts.port, 10) : config.daemon.port;
+        // --port abc or --port 99999 reached the preflight port check and died
+        // with Node's raw ERR_SOCKET_BAD_PORT. Refuse only ports that cannot be
+        // bound, with the same parseInt and range as the daemon.port config key,
+        // so every --port value that starts a daemon today still does.
+        if (Number.isNaN(effectivePort) || effectivePort < 0 || effectivePort > 65535) {
+          throw new Error(`Invalid --port: must be an integer in [0, 65535], got "${opts.port}"`);
+        }
         // bug-fix slice auth-bearer-tailscale-trust: distinguish
         // user-explicit from default-fallback so the daemon can
         // multi-bind (loopback + tailscale auto-detect) when the operator

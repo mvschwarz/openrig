@@ -398,6 +398,10 @@ export class BootstrapOrchestrator {
 
     const verifications = await this.deps.runtimeVerifier.verifyAll([...runtimes]);
     const runtimeBlocked: string[] = [];
+    // A runtime that isn't on PATH and one that is but failed its check (for example a probe that didn't answer
+    // within its bound) both block, and the summary says which.
+    const runtimeNotFound: string[] = [];
+    const runtimeFailed: string[] = [];
 
     for (const v of verifications) {
       if (mode === "apply") {
@@ -408,6 +412,8 @@ export class BootstrapOrchestrator {
 
       if (v.status === "not_found" || v.status === "error") {
         runtimeBlocked.push(v.runtime);
+        if (v.status === "not_found") runtimeNotFound.push(v.runtime);
+        else runtimeFailed.push(`Required runtime ${v.runtime} could not be verified: ${v.error ?? "unknown error"}`);
       }
       if (v.status === "degraded") {
         warnings.push(`${v.runtime} is degraded but not blocking`);
@@ -416,7 +422,8 @@ export class BootstrapOrchestrator {
 
     if (runtimeBlocked.length > 0 && mode === "apply") {
       stages.push({ stage: "verify_runtimes", status: "blocked", detail: { blocked: runtimeBlocked } });
-      errors.push(`Required runtimes not found: ${runtimeBlocked.join(", ")}`);
+      if (runtimeNotFound.length > 0) errors.push(`Required runtimes not found: ${runtimeNotFound.join(", ")}`);
+      errors.push(...runtimeFailed);
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
       return { runId: run.id, status: "failed", stages, errors, warnings };
     }

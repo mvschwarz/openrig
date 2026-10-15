@@ -13,6 +13,7 @@
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { rigModeCommand, __test__, type RigModeDeps } from "../src/commands/rig-mode.js";
+import { DaemonResponseError } from "../src/client.js";
 import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
@@ -421,5 +422,111 @@ describe("rig policy unset — operator-only DELETE", () => {
     expect(process.exitCode).toBeUndefined();
     const del = calls.find((c) => c.method === "DELETE")!;
     expect(del.path).toBe("/api/rig-mode/bindings/global_host");
+  });
+});
+
+// Slice 04 (OPR.0.7.0.4) 04-A2 — a saved mode and a posture kept side by side at one target.
+describe("rig mode: a saved mode and a posture kept side by side (04-A2)", () => {
+  const categoryOfMode = (mode: string) => (mode === "human-led" || mode === "delegated" ? "posture" : "mode");
+  const binding = (mode: string, id: string) => ({ id, mode, record: {}, qualifier: "r1", setAt: "2026-10-14T18:00:00.000Z", setBy: "operator" });
+  const preview = async (getResponse: FakeResponse | "throw", extra: string[] = []) => {
+    const { client, calls } = fakeClient(getResponse === "throw" ? {} : { getResponse });
+    if (getResponse === "throw") {
+      const get = (client as { get: (path: string) => Promise<unknown> }).get;
+      (client as { get: unknown }).get = vi.fn(async (path: string) => {
+        if (path.startsWith("/api/rig-mode/bindings/")) throw new Error("connection reset");
+        return get(path);
+      });
+    }
+    // (The test defaults carry only the legacy modes, so the proposal is a saved mode.)
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "set", "focus", "--scope", "rig", "--qualifier", "r1", ...extra]);
+    expect(process.exitCode).toBe(2);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+    return { out: logs.join("\n"), calls };
+  };
+
+  it("preview reads the target this write lands on and names what it replaces there; exit 2, no PUT", async () => {
+    const { out, calls } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [binding("debug", "rig:r1"), binding("delegated", "posture@rig:r1")] } });
+    expect(calls.filter((c) => c.method === "GET").map((c) => c.path)).toEqual(["/api/rig-mode/defaults", "/api/rig-mode/bindings/rig/r1?for=mode"]);
+    expect(out).toContain("  currently at rig:r1, where this write lands: mode=debug, posture=delegated");
+    expect(out).toContain("  this write replaces: debug (mode, rig:r1); any posture there is kept");
+  });
+
+  it("preview with nothing stored where the write lands says it replaces nothing there", async () => {
+    const { out } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [] } }, ["--json"]);
+    expect(JSON.parse(out)).toMatchObject({ confirm_required: true, current: { writeTarget: "rig:r1", mode: null, posture: null }, displaces: null });
+  });
+
+  it.each<[string, FakeResponse | "throw", string]>([
+    ["a daemon that predates categories (no writeTarget)", { status: 200, data: { binding: binding("focus", "rig:r1") } }, "this daemon doesn't report where this write lands"],
+    ["a daemon that predates categories (nothing stored: its 404)", { status: 404, data: { error: "not_found" } }, "this daemon doesn't report where this write lands"],
+    ["a refusal", { status: 400, data: { error: "scope_unresolved", hint: "x" } }, "scope_unresolved"],
+    ["an HTTP error", { status: 500, data: { error: "boom" } }, "boom"],
+    ["a malformed reply (bindings not a list)", { status: 200, data: { writeTarget: "rig:r1", bindings: "x" } }, "the daemon's answer was malformed"],
+    ["a malformed reply (a binding without a mode)", { status: 200, data: { writeTarget: "rig:r1", bindings: [{ id: "rig:r1" }] } }, "the daemon's answer was malformed"],
+    ["a malformed reply (not an object)", { status: 200, data: "ok" }, "this daemon doesn't report where this write lands"],
+    ["a failed request", "throw", "the read failed"],
+  ])("preview with %s restates the proposal with the current state UNKNOWN, never none; exit 2", async (_label, response, reason) => {
+    const { out } = await preview(response);
+    expect(out).toContain("Proposed binding (restate-and-confirm — NOT applied)");
+    expect(out).toContain(`  currently: UNKNOWN (${reason}); what this write replaces is unknown`);
+    expect(out).not.toMatch(/none|replaces: /);
+  });
+
+  // A successful reply is used only when it is usable: a named write target and bindings in supported modes.
+  it.each<[string, FakeResponse]>([
+    ["an empty writeTarget", { status: 200, data: { writeTarget: "", bindings: [] } }],
+    ["a binding in an unsupported mode", { status: 200, data: { writeTarget: "rig:r1", bindings: [binding("not-a-mode", "rig:r1")] } }],
+  ])("preview with a 200 carrying %s reads UNKNOWN, in the text and the JSON; exit 2, no PUT", async (_label, response) => {
+    const text = await preview(response);
+    expect(text.out).toContain("  currently: UNKNOWN (the daemon's answer was malformed); what this write replaces is unknown");
+    expect(text.out).not.toMatch(/none|replaces: /);
+    logs.length = 0;
+    const json = await preview(response, ["--json"]);
+    expect(JSON.parse(json.out)).toMatchObject({ confirm_required: true, current: "unknown", displaces: "unknown" });
+  });
+
+  it("controls: a named target with nothing stored stays a known absence, and every supported mode name is used as stored", async () => {
+    const empty = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [] } });
+    expect(empty.out).toContain("  this write replaces: no mode binding; any posture there is kept");
+    for (const mode of ["sleep", "desk", "mobile", "away", "focus", "debug", "human-led", "delegated"]) {
+      logs.length = 0;
+      const id = categoryOfMode(mode) === "posture" ? "posture@rig:r1" : "rig:r1";
+      const { out } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [binding(mode, id)] } });
+      expect(out, mode).toContain("  currently at rig:r1, where this write lands:");
+      if (categoryOfMode(mode) === "mode") expect(out, mode).toContain(`  this write replaces: ${mode} (mode, rig:r1); any posture there is kept`);
+      else expect(out, mode).toContain(`posture=${mode}`);
+    }
+  });
+
+  it("unset --category goes through the category path and says what's still kept, in the text and the JSON", async () => {
+    const deleteResponse = { status: 200, data: { removed: true, category: "posture", remaining: binding("focus", "rig:r1") } };
+    const { client, calls } = fakeClient({ deleteResponse });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "unset", "rig", "r1", "--category", "posture"]);
+    expect(calls.find((c) => c.method === "DELETE")!.path).toBe("/api/rig-mode/bindings/rig/r1/categories/posture");
+    expect(logs).toEqual(["Removed rig:r1", "  still kept: focus (mode, rig:r1)"]);
+    logs.length = 0;
+    const json = fakeClient({ deleteResponse });
+    await rigModeCommand(deps(json.client)).parseAsync(["node", "rig", "unset", "global_host", "--category", "mode", "--json"]);
+    expect(json.calls.find((c) => c.method === "DELETE")!.path).toBe("/api/rig-mode/bindings/global_host/categories/mode");
+    expect(JSON.parse(logs.join("\n"))).toEqual({ ok: true, removed: true, category: "posture", remaining: deleteResponse.data.remaining });
+  });
+
+  it("unset --category against a daemon without that route (its plain 404) removes nothing, says so and exits 1", async () => {
+    const { client } = fakeClient({});
+    (client as { delete: unknown }).delete = vi.fn(async () => { throw new DaemonResponseError(404, "404 Not Found"); });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "unset", "rig", "r1", "--category", "mode"]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toBe("This daemon can't remove a binding by category (it predates categories); nothing was removed.");
+    expect(logs).toEqual([]);
+  });
+
+  it("effective names the other category's binding when both apply", async () => {
+    const effective = { binding: { ...binding("delegated", "posture@rig:r1"), record: { scope: "rig" } }, resolvedScope: "rig" };
+    const { client } = fakeClient({ effectiveResponse: { status: 200, data: {
+      posture: "known", effective, categories: { mode: binding("focus", "rig:r1"), posture: effective.binding },
+    } } });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "effective", "--rig", "r1"]);
+    expect(logs.join("\n")).toContain("  also kept: focus (mode, rig:r1, set_at=2026-10-14T18:00:00.000Z)");
   });
 });

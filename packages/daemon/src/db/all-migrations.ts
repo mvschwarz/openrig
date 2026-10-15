@@ -95,6 +95,7 @@ import { classificationIdentityProvenanceSchema } from "./migrations/089_classif
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
 import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
 import { nodeEffortSchema } from "./migrations/092_node_effort.js";
+import { nodeEffortChoiceSchema } from "./migrations/104_node_effort_choice.js";
 import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_latest_indexes.js";
 import type { Migration } from "./migrate.js";
 
@@ -104,6 +105,11 @@ import { threadPartMapSchema } from "./migrations/097_thread_part_map.js";
 import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_transitions_qitem_id_order.js";
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
+import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
+import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
+import { piUsageEntriesSchema } from "./migrations/107_pi_usage_entries.js";
+import { piUsageChargesSchema } from "./migrations/108_pi_usage_charges.js";
+import { modePostureCoexistSchema } from "./migrations/109_mode_posture_coexist.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -207,4 +213,10 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueTransitionsQitemIdOrderSchema,
   queueItemsRecoveryTagsSchema,
   resumeRotationSchema,
+  sessionStopIntentSchema,
+  nodeEffortChoiceSchema,
+  usageSamplesClientCostSchema,
+  piUsageEntriesSchema,
+  piUsageChargesSchema,
+  modePostureCoexistSchema,
 ];

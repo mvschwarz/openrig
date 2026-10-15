@@ -30,8 +30,13 @@ been confirmed against a real creation run. Slack's form may ask for something t
 not fill in; if so, follow the form.
 
 1. Open the link from `rig slack manifest --url` in a browser.
+   > **Note on Slack's manifest dialog:** If opening the link results in an empty manifest `{}`
+   > or Slack reports an error translating the manifest, copy the output of `rig slack manifest`
+   > (run without flags) and paste it directly into the **YAML** tab in Slack's "Create an app from
+   > an app manifest" dialog.
 2. Sign in to Slack if asked, pick the workspace, review the prefilled manifest, and click
-   **Create**.
+   **Next**, then **Create**. (If **Create** stays disabled, go **Back** and check that a
+   development workspace is selected and the manifest step shows no error).
 3. Under **Socket Mode**, confirm it is enabled. Enable it if it is not.
 4. Under **Basic Information → App-Level Tokens**, generate a token with the
    `connections:write` scope and copy it (it starts with `xapp-`).
@@ -178,8 +183,9 @@ are not supported targets.
 
 ## Reconnect recovery and status
 
-The daemon scans available top-level messages in the configured channel after a
-Socket Mode connection and on its existing five-minute retry cadence. Recovered
+The daemon scans available top-level messages and replies broadcast with **Also send to
+channel** in the configured default channel after a Socket Mode connection and on its
+existing five-minute retry cadence. Broadcast replies keep their thread's routing. Recovered
 tasks say **Recovered after a gap** and show the original Slack posting time.
 They use the same sender admission, routing, attachment handling, fixed identity
 and dead-letter path as live messages. A durable dead letter is custody of a
@@ -204,8 +210,9 @@ When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.
 Missing bot credentials, history scope, membership, retention limits and API
 failures appear as recovery limitations. No additional scope is required to keep
-live delivery working. Thread-reply catch-up and dead-connection detection remain
-outside this recovery scope; global chronological order is not promised.
+live delivery working. Non-broadcast thread replies and other channels remain outside
+this recovery scope; global chronological order is not promised. This change does not
+replay intervals already checkpointed before broadcast-reply recovery was added.
 
 `rig slack status` retains local configuration checks and adds a bounded daemon
 snapshot: socket state/generation, last event, recovery interval/state/reason,

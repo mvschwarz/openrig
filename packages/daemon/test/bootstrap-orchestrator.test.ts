@@ -18,6 +18,7 @@ import { InstallRepository } from "../src/domain/install-repository.js";
 import { InstallEngine } from "../src/domain/install-engine.js";
 import { InstallVerifier } from "../src/domain/install-verifier.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import { ProbeTimeoutError, RUNTIME_PROBE_TIMEOUT_MS } from "../src/adapters/bounded-probe-exec.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
@@ -328,6 +329,31 @@ edges: []
 
     expect(result.status).toBe("failed");
     expect(result.errors.some((e) => e.includes("not found"))).toBe(true);
+  });
+
+  it("a runtime whose probe didn't answer within its bound is reported as that, not as not found", async () => {
+    const exec = createMockExec({
+      "tmux -V": "tmux 3.4",
+      "claude --version": new ProbeTimeoutError("claude --version", RUNTIME_PROBE_TIMEOUT_MS),
+    });
+    const result = await buildOrchestrator({ exec }).bootstrap({ mode: "apply", sourceRef: writeSpec(SIMPLE_SPEC_YAML), autoApprove: true });
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["Required runtime claude-code could not be verified: claude --version did not answer within 30 s; the probe was ended"]);
+    expect(result.stages.find((s) => s.stage === "verify_runtimes")).toMatchObject({ status: "blocked", detail: { blocked: ["claude-code"] } });
+  });
+
+  it("missing and unverifiable runtimes are named separately in one summary", async () => {
+    const exec = createMockExec({
+      "tmux -V": "tmux 3.4",
+      "claude --version": new ProbeTimeoutError("claude --version", RUNTIME_PROBE_TIMEOUT_MS),
+    });
+    const spec = SIMPLE_SPEC_YAML.replace("edges: []", "  - id: helper\n    runtime: codex\nedges: []");
+    const result = await buildOrchestrator({ exec }).bootstrap({ mode: "apply", sourceRef: writeSpec(spec), autoApprove: true });
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual([
+      "Required runtimes not found: codex",
+      "Required runtime claude-code could not be verified: claude --version did not answer within 30 s; the probe was ended",
+    ]);
   });
 
   // T4: Missing requirement in plan

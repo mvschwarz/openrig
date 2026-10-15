@@ -21,6 +21,15 @@ interface EligibleSession {
   resume_token: string | null;
   cwd: string | null;
   startup_status: "pending" | "ready" | "attention_required" | "failed" | null;
+  status: string;
+  startup_completed_at: string | null;
+  binding_id: string | null;
+  binding_session: string | null;
+  binding_pane: string | null;
+  binding_window: string | null;
+  binding_updated_at: string | null;
+  generation_uuid: string | null;
+  startup_event_seq: number | null;
 }
 
 interface ClaudeContextProvisioner {
@@ -111,6 +120,8 @@ export class ContextMonitor {
                   totalInputTokens: observed.totalInputTokens,
                   totalOutputTokens: observed.totalOutputTokens,
                   usedPercentage: observed.usedPercentage,
+                  nativeSessionId: observed.sessionId,
+                  clientCostEstimateUsd: observed.clientCostEstimateUsd ?? null,
                 },
                 new Date().toISOString(),
               );
@@ -206,7 +217,7 @@ export class ContextMonitor {
   }
 
   /** Query for managed runtime sessions with readable context sources. */
-  private getEligibleSessions(): EligibleSession[] {
+  private getEligibleSessions(nodeId?: string): EligibleSession[] {
     return this.db.prepare(`
       SELECT
         n.id as node_id,
@@ -215,7 +226,18 @@ export class ContextMonitor {
         n.runtime,
         s.resume_token,
         n.cwd,
-        s.startup_status
+        s.startup_status,
+        s.status,
+        s.startup_completed_at,
+        b.id AS binding_id,
+        b.tmux_session AS binding_session,
+        b.tmux_pane AS binding_pane,
+        b.tmux_window AS binding_window,
+        b.updated_at AS binding_updated_at,
+        (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id
+          ORDER BY generation_ordinal DESC LIMIT 1) AS generation_uuid,
+        (SELECT MAX(seq) FROM events e WHERE e.node_id = n.id
+          AND e.type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed')) AS startup_event_seq
       FROM nodes n
       JOIN rigs r ON r.id = n.rig_id
       JOIN sessions s ON s.node_id = n.id
@@ -235,7 +257,8 @@ export class ContextMonitor {
         AND (r.archived_at IS NULL OR s.status = 'running')
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
         AND COALESCE(b.tmux_session, s.session_name) IS NOT NULL
-    `).all() as EligibleSession[];
+        ${nodeId === undefined ? "" : "AND n.id = ?"}
+    `).all(...(nodeId === undefined ? [] : [nodeId])) as EligibleSession[];
   }
 
   private readContextUsage(session: EligibleSession) {
@@ -264,7 +287,11 @@ export class ContextMonitor {
     if (!checker?.checkReady) return;
     if (session.startup_status !== "failed" && session.startup_status !== "attention_required") return;
 
+    // A poll snapshot is not a lease: lifecycle work can run before or during
+    // the probe. The event sequence also distinguishes same-status retries.
+    const isCurrent = () => JSON.stringify(this.getEligibleSessions(session.node_id)[0]) === JSON.stringify(session);
     try {
+      if (!isCurrent()) return;
       const readiness = await checker.checkReady({
         id: `context-monitor:${session.session_id}`,
         nodeId: session.node_id,
@@ -277,26 +304,32 @@ export class ContextMonitor {
         updatedAt: "",
         cwd: session.cwd ?? "",
       });
-      if (readiness.ready) {
-        // A live prompt does not deliver saved context. Check after the await:
-        // startup may have reached an attention gate while we were observing.
-        if (hasPendingFreshStartup(this.db, session.node_id, session.session_id)) return;
-        this.db.prepare(`
-          UPDATE sessions
-          SET startup_status = 'ready',
-              startup_completed_at = ?
-          WHERE id = ? AND startup_status IN ('failed', 'attention_required')
-        `).run(new Date().toISOString(), session.session_id);
-        return;
-      }
+      // Hold no database lock while observing the runtime. Revalidation and
+      // the write share an immediate transaction, reserving the writer before the
+      // snapshot read so WAL contention cannot fail a later read-to-write upgrade.
+      this.db.transaction(() => {
+        if (!isCurrent()) return;
+        if (readiness.ready) {
+          // A live prompt does not deliver saved context. Check after the await:
+          // startup may have reached an attention gate while we were observing.
+          if (hasPendingFreshStartup(this.db, session.node_id, session.session_id)) return;
+          this.db.prepare(`
+            UPDATE sessions
+            SET startup_status = 'ready',
+                startup_completed_at = ?
+            WHERE id = ? AND startup_status IN ('failed', 'attention_required')
+          `).run(new Date().toISOString(), session.session_id);
+          return;
+        }
 
-      if (isAttentionRequiredReadinessCode(readiness.code)) {
-        this.db.prepare(`
-          UPDATE sessions
-          SET startup_status = 'attention_required'
-          WHERE id = ?
-        `).run(session.session_id);
-      }
+        if (isAttentionRequiredReadinessCode(readiness.code)) {
+          this.db.prepare(`
+            UPDATE sessions
+            SET startup_status = 'attention_required'
+            WHERE id = ?
+          `).run(session.session_id);
+        }
+      }).immediate();
     } catch {
       // Best-effort normalization only; telemetry polling still succeeds.
     }

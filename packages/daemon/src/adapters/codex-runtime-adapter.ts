@@ -18,7 +18,7 @@ import type {
 import type { CodexProfileProbeResult } from "../domain/codex-profile-preflight.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { observeCodexSandbox } from "../domain/permission-drift.js";
+import { observeCodexSandbox, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import {
   defaultResolveHomeDirByPid,
   readCodexThreadIdFromCandidateHomes,
@@ -26,7 +26,7 @@ import {
 } from "../domain/codex-thread-id.js";
 import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
-import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
+import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
@@ -44,6 +44,30 @@ interface UpdatePromptAttempt {
 }
 
 type CodexProcess = NativeProcessRow;
+
+/** What a running Codex was launched with that a launch would otherwise decide by probing (the network
+ *  reader, the --no-daemon support probe) or by preparing directories (add-dirs). A relaunch that must keep the
+ *  running Codex's effective settings takes these from its argv instead. */
+export interface RunningCodexLaunch {
+  networkOverride: boolean;
+  daemonOptOut: boolean;
+  addDirs: string[];
+}
+
+interface PreparedCodexLaunch {
+  ok: true;
+  model: string | undefined;
+  modelArg: string;
+  effort: string | undefined;
+  effortArg: string;
+  profile: string | undefined;
+  appliedLaunch: AppliedLaunchObservation;
+  postureArg: string;
+  queueStateDirArg: string;
+  daemonOptOut: boolean;
+  daemonArg: string;
+  networkArg: string;
+}
 
 export interface CodexAdapterFsOps {
   readFile(path: string): string;
@@ -352,43 +376,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     const updatePrompt: UpdatePromptAttempt = { handled: false };
-    const model = binding.model?.trim();
-    const modelArg = model ? ` -m ${shellQuote(model)}` : "";
-    const effort = binding.effort?.trim();
-    const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
-    const profile = binding.codexConfigProfile?.trim();
-    const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const posture = codexPostureArg(profileArg, process.env, binding.launchPosture);
-    const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
-
-    // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
-    // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
-    // `codex -p <profile> resume` failure. An absent .config.toml passes
-    // (Codex default-layers it; advisor Option B).
-    if (profile) {
-      const probeResult = await this.verifyProfilePreflight(profile, binding.cwd);
-      if (!probeResult.ok) {
-        return {
-          ok: false,
-          error: `${probeResult.error}${probeResult.migrationHint ? `\n  Fix: ${probeResult.migrationHint}` : ""}`,
-        };
-      }
-    }
-    const teamWorkspaceArg = binding.teamPermissionDefault && !profile
-      && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
-      ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, opts.name) : "";
-    const queueStateDirArg = teamWorkspaceArg || this.buildQueueStateAddDirArg(opts.name);
-    // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
-    // (its cwd, the launch PATH), applied to fresh, fork and resume.
-    const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd) : undefined;
-    if (daemonSupport?.kind === "unknown") {
-      return { ok: false, error: unknownDaemonSupportMessage(daemonSupport.detail) };
-    }
-    const daemonOptOut = daemonSupport?.kind === "supported";
-    const daemonArg = daemonOptOut ? " --no-daemon" : "";
-    // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
-    const networkArg = await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, opts.name);
+    const prepared = await this.prepareLaunch(binding, opts.name);
+    if (!prepared.ok) return prepared;
+    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg } = prepared;
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -409,9 +399,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
-      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
-        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
-        : this.launchCommand(cmd));
+      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -420,10 +408,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const threadId = await this.captureFreshThreadId(binding, updatePrompt);
       if (updatePrompt.failure) return updatePrompt.failure;
       if (!threadId) {
-        return {
-          ok: false,
-          error: "codex fork: could not capture new post-fork thread id",
-        };
+        // For a handover a missed capture is pending metadata, not a failed launch: the fork returns
+        // without a token and the handover's readiness checks still decide success. Every other fork
+        // caller refuses, as before.
+        if (opts.forkSource.pendingIdAllowed) return { ok: true, appliedLaunch };
+        return { ok: false, error: "codex fork: could not capture new post-fork thread id" };
       }
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
@@ -438,12 +427,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
+      ? this.resumeCore(prepared, opts.resumeToken, binding)
       : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
-    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
-        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
-        : this.launchCommand(cmd));
+    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
@@ -464,6 +451,99 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     return { ok: true, appliedLaunch };
+  }
+
+  /** The command launchHarness would type to resume `resumeToken`, wrapped in the seat launch environment,
+   *  for a caller that runs it itself (a respawned direct-native pane). Nothing is sent to the pane. */
+  async buildResumeCommand(
+    binding: NodeBinding,
+    opts: { name: string; resumeToken: string; running?: RunningCodexLaunch },
+  ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation } | { ok: false; error: string }> {
+    if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
+    const prepared = await this.prepareLaunch(binding, opts.name, opts.running);
+    if (!prepared.ok) return prepared;
+    const core = this.resumeCore(prepared, opts.resumeToken, binding);
+    return { ok: true, command: await this.seatCommand(binding, core), core, appliedLaunch: prepared.appliedLaunch };
+  }
+
+  /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as launchHarness
+   *  does. Nothing is prepared again, so the command runs exactly as it was built and checked. */
+  async sendResumeCommand(tmuxSession: string, command: string, resumeToken: string): Promise<HarnessLaunchResult> {
+    const textResult = await this.tmux.sendShellCommand(tmuxSession, command);
+    if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
+    return this.verifyResumeInPane(tmuxSession, resumeToken);
+  }
+
+  /** launchHarness's resume verification for a resume the caller started itself: dismiss a skippable update
+   *  prompt, then require a proven resumed conversation (never process-alive alone). */
+  async verifyResumeInPane(tmuxSession: string, resumeToken: string): Promise<HarnessLaunchResult> {
+    const updatePrompt: UpdatePromptAttempt = { handled: false };
+    await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt);
+    if (updatePrompt.failure) return updatePrompt.failure;
+    return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken });
+  }
+
+  /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
+   *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
+  private async prepareLaunch(binding: NodeBinding, name: string, running?: RunningCodexLaunch): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+    const model = binding.model?.trim();
+    const modelArg = model ? ` -m ${shellQuote(model)}` : "";
+    const effort = binding.effort?.trim();
+    const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
+    const profile = binding.codexConfigProfile?.trim();
+    const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
+    const posture = codexPostureArg(profileArg, process.env, binding.launchPosture);
+    const appliedLaunch = observeCodexSandbox(posture);
+    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
+
+    if (running) {
+      // The running Codex already loaded its profile; drift in -p is the caller's to compare.
+      return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
+        queueStateDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
+        daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
+        networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
+    }
+
+    // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
+    // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
+    // `codex -p <profile> resume` failure. An absent .config.toml passes
+    // (Codex default-layers it; advisor Option B).
+    if (profile) {
+      const probeResult = await this.verifyProfilePreflight(profile, binding.cwd);
+      if (!probeResult.ok) {
+        return {
+          ok: false,
+          error: `${probeResult.error}${probeResult.migrationHint ? `\n  Fix: ${probeResult.migrationHint}` : ""}`,
+        };
+      }
+    }
+    const teamWorkspaceArg = binding.teamPermissionDefault && !profile
+      && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
+      ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
+    const queueStateDirArg = teamWorkspaceArg || this.buildQueueStateAddDirArg(name);
+    // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
+    // (its cwd, the launch PATH), applied to fresh, fork and resume.
+    const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd) : undefined;
+    if (daemonSupport?.kind === "unknown") {
+      return { ok: false, error: unknownDaemonSupportMessage(daemonSupport.detail) };
+    }
+    const daemonOptOut = daemonSupport?.kind === "supported";
+    const daemonArg = daemonOptOut ? " --no-daemon" : "";
+    // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
+    const networkArg = await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, name);
+
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg, queueStateDirArg, daemonOptOut, daemonArg, networkArg };
+  }
+
+  private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
+    const { profile, queueStateDirArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
+    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort);
+  }
+
+  private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
+    return this.seatLaunchEnvironment
+      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+      : this.launchCommand(cmd);
   }
 
   private buildQueueStateAddDirArg(sessionName: string): string {
@@ -841,6 +921,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           ok: false,
           error: "Codex resume failed: no saved session found for the requested session",
           recovery: "retry_fresh",
+          missingConversation: true,
         };
       }
 

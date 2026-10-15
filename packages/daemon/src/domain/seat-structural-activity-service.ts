@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
-import { detectCodexLimitBanner, clearRecordedBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
+import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -45,7 +45,7 @@ export class SeatStructuralActivityService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
   private bannerEmitter:
-    | ((sessionName: string, banner: CodexLimitBanner, observedAt: Date) => void)
+    | ((sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void)
     | null = null;
 
   constructor(
@@ -61,7 +61,7 @@ export class SeatStructuralActivityService {
    * store is untouched: startup attaches it once the store exists.
    */
   attachCodexLimitBanner(
-    emitter: (sessionName: string, banner: CodexLimitBanner, observedAt: Date) => void,
+    emitter: (sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void,
   ): void {
     this.bannerEmitter = emitter;
   }
@@ -114,12 +114,13 @@ export class SeatStructuralActivityService {
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
     // so the reactive tap never fires for it. Report what the seat shows, on
     // transition only (the recorder skips an already-reported banner). A poll
-    // with no current banner ends the episode: the memory is cleared so a
-    // banner that appears later counts as new even with identical text.
+    // ends the episode only with positive structural evidence and no banner.
+    // Null/failed, blank and unrecognized captures cannot establish recovery.
     if (runtime === "codex" && this.bannerEmitter) {
       const banner = detectCodexLimitBanner(content);
-      if (banner) this.bannerEmitter(sessionName, banner, at);
-      else clearRecordedBanner(sessionName);
+      if (banner || (content.trim().length > 0 && c.state !== "unknown")) {
+        this.bannerEmitter(sessionName, banner, at);
+      }
     }
     return obs;
   }

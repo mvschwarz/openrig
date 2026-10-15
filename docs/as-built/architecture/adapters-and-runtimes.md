@@ -206,14 +206,16 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
   `<cwd>/.mcp.json` (`:597`).
 - **Launches**: fresh = `claude <posture> --session-id <generatedId> --name
   <name>` (`:329`); resume = `claude <posture> --resume <token> --name <name>`
-  (`:328`); fork = `claude <posture> --resume <parentId> --fork-session --name
-  <seat>` (`:298`). `<posture>` is the flag above plus any non-interruptive,
+  (`:328`); fork = `claude <posture> --resume <parentId> --fork-session
+  --session-id <generatedId> --name <seat>`, which needs Claude Code 2.0.73 or
+  later. `<posture>` is the flag above plus any non-interruptive,
   kernel operational or team default argument. Each command may carry a `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`
   env prefix (`yolo-mode.ts:101–103`; on by default, off with
   `OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0`), a `--model <model>` argument
-  (`:275`) and `--effort <effort>` (`:277`). A fresh launch returns the
-  generated `--session-id` as its `claude_id` token; a fork polls Claude's
-  session files for the new id.
+  (`:275`) and `--effort <effort>` (`:277`). A fresh launch and a fork both
+  return the generated `--session-id` as their `claude_id` token, so a forked
+  seat's process names its own conversation and strict proof can verify it.
+  Neither reads Claude's session files back.
 - **Managed launch.** When the binding selects a native permission mode, the
   command comes from `ClaudeManagedLaunch.prepare()`
   (`domain/claude-managed-launch.ts:97`), which resolves `claude` on the

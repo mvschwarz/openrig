@@ -198,6 +198,20 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
+  it("a current Codex usage limit allows an ordinary send without a prompt override", async () => {
+    const seat = seedCodexSeat();
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "at_limit" });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({
+      capturePaneContent: async () => "■ You've hit your usage limit.\n› ",
+      sendText, sendKeys,
+    }));
+    expect((await transport.send(seat, "continue when ready")).ok).toBe(true);
+    expect(sendText).toHaveBeenCalledWith(seat, "continue when ready");
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(overrideEvents()).toEqual([]);
+  });
+
   // K-5 HOOK-PRIMARY (founder expansion): a fresh Codex PermissionRequest hook is the PRIMARY signal —
   // it blocks default/raw/force even when the pane looks idle (a high-stakes guard must not depend on
   // screen-scraping). Only --dangerously-interact --reason drives it (+ audit).
