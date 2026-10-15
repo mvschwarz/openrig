@@ -46,6 +46,7 @@ function respond(cmd: string, failing: string[]): string {
       return cmd.includes("session_id") ? "$7\n" : cmd.includes("pane_pid") ? "4242\n" : "1\n";
     case "show-environment": return "OPENRIG_NODE_ID=n1\nCLAUDECODE=1\nHERDR_PANE_ID=p1\n";
     case "new-session": return "%1\n";
+    case "start-server": return cmd.includes("source-file") ? "%1\n" : "";
     default: return "";
   }
 }

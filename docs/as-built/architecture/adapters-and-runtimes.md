@@ -296,6 +296,21 @@ resume tokens; the stub refuses fork and reports `stub_session`.
 `:783`, `:788`) and creates the terminal adapter inline in the runtime adapter
 maps (`startup.ts:989`, `:1259`); see `daemon-core.md` §4 "Startup sequence".
 
+### tmux launch environment
+
+`TmuxAdapter.createSession` and `respawnPane` pass nonempty seat environment
+values through a private tmux command file. The file is created exclusively
+with mode `0600`, read by `tmux source-file`, then removed after the command
+finishes, including when tmux reports a failure. Cleanup retries once and
+reports only the file path if removal still fails; an already removed file
+needs no warning. Literal file paths are escaped for tmux's glob expansion.
+A cold launch queues
+`start-server` before `source-file` in the same client. Empty-only overrides
+can still use direct arguments. This keeps activity-hook tokens and provider
+credentials out of process arguments without changing tmux's session/pane
+environment precedence or the server's global environment. The native
+regression tests are in `packages/daemon/test/tmux-private-env-native.test.ts`.
+
 ### Terminal providers
 
 Opening a seat in a terminal app goes through `TerminalProvider`s under

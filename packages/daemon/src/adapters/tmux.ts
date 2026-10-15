@@ -26,7 +26,7 @@ interface TmuxShellCommandOptions {
 export type ArgvExecFn = (argv: string[]) => Promise<string>;
 
 /**
- * Injectable file/buffer operations for `sendText`.
+ * Injectable file/buffer operations for staged text, shell commands and seat environments.
  * Split out so tests can observe temp-file writes and unique-name generation
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
@@ -270,6 +270,17 @@ function posixJoinArgv(argv: string[]): string {
   return argv.map((a) => (SHELL_SAFE.test(a) ? a : shellQuote(a))).join(" ");
 }
 
+/** A literal word in a tmux command file, whose parser is not a POSIX shell.
+ * Double quotes need escaped dollars/backslashes; octal escapes keep control
+ * characters (including newlines) inside the word, not in the command grammar. */
+function tmuxQuote(value: string): string {
+  if (value.includes("\0")) throw new Error("tmux arguments must not contain NUL bytes.");
+  return '"' + value.replace(/[\\"$\x01-\x1f\x7f]/g, char =>
+    char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127
+      ? `\\${char.charCodeAt(0).toString(8).padStart(3, "0")}`
+      : `\\${char}`) + '"';
+}
+
 function parseSessionLine(line: string): TmuxSession | null {
   const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 4) return null;
@@ -471,6 +482,42 @@ export class TmuxAdapter {
     return this.exec(legacy ?? posixJoinArgv(argv));
   }
 
+  /** Keep all nonempty seat environment values out of process arguments (#306),
+   * without guessing which provider's variable names contain credentials.
+   * tmux itself reads the private command file: no shell has to source it and
+   * no global environment is changed. source-file completes before unlinking.
+   * Empty-only overrides contain no values and need no temporary file. */
+  private async runWithPrivateEnv(argv: string[], legacy: string, env?: Record<string, string>): Promise<string> {
+    if (!Object.values(env ?? {}).some(value => value.length > 0)) return this.run(argv, legacy);
+    const file = this.fileOps.tmpName();
+    let created = false;
+    try {
+      await this.fileOps.writeFile(file, argv.slice(1).map(tmuxQuote).join(" ") + "\n", { mode: 0o600, flag: "wx" });
+      created = true;
+      // source-file alone cannot start a cold server. Queue both commands in
+      // one client so the server does not exit before new-session is parsed.
+      // source-file expands globs even when its path is a single argv entry.
+      const sourcePath = file.replace(/[\\*?[\]]/g, "\\$&");
+      const source = ["tmux", ...(argv[1] === "new-session" ? ["start-server", ";"] : []), "source-file", sourcePath];
+      return await this.run(source);
+    } finally {
+      if (created) {
+        let removed = false;
+        for (let attempt = 0; attempt < 2 && !removed; attempt++) {
+          try {
+            await this.fileOps.unlink(file);
+            removed = true;
+          } catch (err) {
+            removed = (err as NodeJS.ErrnoException | null)?.code === "ENOENT";
+          }
+        }
+        if (!removed) {
+          console.warn(`[tmux] Could not remove private seat environment file ${JSON.stringify(file)}.`);
+        }
+      }
+    }
+  }
+
   /** Start an empty native terminal server, without inventing a seat/session. */
   async startServer(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
@@ -611,7 +658,7 @@ export class TmuxAdapter {
     legacyParts.push("-P", "-F", shellQuote("#{pane_id}"));
     let created: string;
     try {
-      created = (await this.run(argv, legacyParts.join(" "))).trim();
+      created = (await this.runWithPrivateEnv(argv, legacyParts.join(" "), seatEnv)).trim();
     } catch (err) {
       return classifyWriteError(err);
     }
@@ -876,7 +923,7 @@ export class TmuxAdapter {
    *  pane ("still active"), which is the correct guard: never respawn over a live retiree.
    *
    *  Optional `cwd`/`env` inject the successor's start-directory + OpenRig identity env onto the reused
-   *  pane via respawn-pane's `-c`/`-e` flags (tmux ≥3.0), the SAME mechanism createSession uses. Any flags
+   *  pane via respawn-pane's `-c`/`-e` flags in a private tmux command file (tmux ≥3.0), as createSession does. Any flags
    *  precede the command, which always stays LAST.
    *
    *  ⚠ KI-14: omitting `command` re-runs the pane's CREATION (or last-respawn) command — which is the
@@ -912,7 +959,7 @@ export class TmuxAdapter {
       warnings = [parentSessionEnvWarning(exact, err)];
     }
     try {
-      await this.run(argv, legacyRespawn.join(" "));
+      await this.runWithPrivateEnv(argv, legacyRespawn.join(" "), opts?.env);
       return warnings ? { ok: true, warnings } : { ok: true };
     } catch (err) {
       return classifyWriteError(err);

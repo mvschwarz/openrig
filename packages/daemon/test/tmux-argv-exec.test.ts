@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { TmuxAdapter, type ArgvExecFn } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type ArgvExecFn, type TmuxFileOps } from "../src/adapters/tmux.js";
 
 function memFs() {
   return {
-    writeFile: vi.fn(async () => {}),
+    writeFile: vi.fn<TmuxFileOps["writeFile"]>(async () => {}),
     unlink: vi.fn(async () => {}),
     tmpName: () => "/tmp/text.txt",
     bufferName: () => "buf1",
@@ -20,23 +20,22 @@ function argvAdapter(seen: string[][], impl?: (argv: string[]) => string) {
   const exec = vi.fn(async (_cmd: string) => {
     throw new Error("string exec must not run on the argv path");
   });
-  const adapter = new TmuxAdapter(exec, memFs(), argvExec);
-  return { adapter, exec };
+  const files = memFs();
+  const adapter = new TmuxAdapter(exec, files, argvExec);
+  return { adapter, exec, files };
 }
 
 describe("tmux argv exec path", () => {
-  it("createSession passes cwd/env as verbatim argv units", async () => {
+  it("createSession passes only a private file path through argv", async () => {
     const seen: string[][] = [];
-    const { adapter, exec } = argvAdapter(seen);
+    const { adapter, exec, files } = argvAdapter(seen);
     await adapter.createSession("r01-dev1-impl", "/home/user/my project/code", { PATH: "/a b:/c", EMPTY: "" });
     expect(exec).not.toHaveBeenCalled();
-    expect(seen).toEqual([[
-      "tmux", "new-session", "-d", "-s", "r01-dev1-impl",
-      "-c", "/home/user/my project/code",
-      "-e", "OPENRIG_TRANSCRIPTS_LINES=", "-e", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=",
-      "-e", "PATH=/a b:/c", "-e", "EMPTY=",
-      "-P", "-F", "#{pane_id}",
-    ], ["tmux", "show-environment", "-g"]]);
+    expect(seen).toEqual([["tmux", "start-server", ";", "source-file", "/tmp/text.txt"], ["tmux", "show-environment", "-g"]]);
+    const command = files.writeFile.mock.calls[0]![1];
+    expect(command).toContain('"-c" "/home/user/my project/code"');
+    expect(command).toContain('"PATH=/a b:/c"');
+    expect(command).toContain('"EMPTY="');
   });
 
   it("sendKeys passes key names as separate verbatim units", async () => {
@@ -55,9 +54,10 @@ describe("tmux argv exec path", () => {
 
   it("respawn keeps the command as ONE trailing unit", async () => {
     const seen: string[][] = [];
-    const { adapter } = argvAdapter(seen);
+    const { adapter, files } = argvAdapter(seen);
     await adapter.respawnPane("%1", "codex resume 'tok en'", { cwd: "/w", env: { A: "b c" } });
-    expect(seen).toEqual([["tmux", "show-environment", "-g"], ["tmux", "respawn-pane", "-t", "%1", "-c", "/w", "-e", "A=b c", "codex resume 'tok en'"]]);
+    expect(seen).toEqual([["tmux", "show-environment", "-g"], ["tmux", "source-file", "/tmp/text.txt"]]);
+    expect(files.writeFile.mock.calls[0]![1]).toBe('"respawn-pane" "-t" "%1" "-c" "/w" "-e" "A=b c" "codex resume \'tok en\'"\n');
   });
 
   it("capture and display probes build atomic argv (no shell join artifacts)", async () => {

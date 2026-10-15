@@ -1,8 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
-import type { ExecFn, TmuxResult } from "../src/adapters/tmux.js";
+import type { ExecFn, TmuxResult, TmuxFileOps } from "../src/adapters/tmux.js";
 
 const NO_SERVER_ERROR = new Error("no server running on /tmp/tmux-1000/default");
+
+function envFiles() {
+  return {
+    tmpName: () => "/private/seat-env.conf", bufferName: () => "unused",
+    writeFile: vi.fn<TmuxFileOps["writeFile"]>(async () => {}), unlink: vi.fn(async () => {}),
+  };
+}
 
 function mockExec(responses: Record<string, { stdout?: string; error?: Error }>): ExecFn {
   return (cmd: string) => {
@@ -354,20 +361,22 @@ describe("TmuxAdapter", () => {
       expect(result).toEqual({ ok: true });
     });
 
-    it("with env map constructs -e flags for each key=value", async () => {
+    it("with env map constructs private -e flags for each key=value", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
-      const adapter = new TmuxAdapter(exec);
+      const files = envFiles();
+      const adapter = new TmuxAdapter(exec, files);
 
       await adapter.createSession("dev-impl@rig", "/tmp", {
         OPENRIG_NODE_ID: "node123",
         OPENRIG_SESSION_NAME: "dev-impl@rig",
       });
 
-      const cmd = exec.mock.calls[0]![0] as string;
-      expect(cmd).toContain("-e 'OPENRIG_NODE_ID=node123'");
-      expect(cmd).toContain("-e 'OPENRIG_SESSION_NAME=dev-impl@rig'");
-      expect(cmd).toContain("-s 'dev-impl@rig'");
-      expect(cmd).toContain("-c '/tmp'");
+      expect(exec.mock.calls[0]![0]).toBe("tmux start-server ';' source-file /private/seat-env.conf");
+      const cmd = files.writeFile.mock.calls[0]![1];
+      expect(cmd).toContain('"-e" "OPENRIG_NODE_ID=node123"');
+      expect(cmd).toContain('"-e" "OPENRIG_SESSION_NAME=dev-impl@rig"');
+      expect(cmd).toContain('"-s" "dev-impl@rig"');
+      expect(cmd).toContain('"-c" "/tmp"');
     });
 
     it("without env still works as before", async () => {
@@ -1223,7 +1232,7 @@ describe("TmuxAdapter", () => {
     const POLLUTED = "CLAUDECODE=1\nCLAUDE_EFFORT=max\nHERDR_PANE_ID=p9\nCLAUDE_CODE_USE_BEDROCK=1\nPATH=/usr/bin\n-REMOVED\n";
     // new-session reports the pane it created (-P -F '#{pane_id}'); only that pane is restarted.
     const execWithGlobal = (global: string) =>
-      vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? global : cmd.startsWith("tmux new-session") ? "%9\n" : ""));
+      vi.fn<ExecFn>(async (cmd: string) => (cmd === "tmux show-environment -g" ? global : cmd.startsWith("tmux new-session") || cmd.includes("source-file") ? "%9\n" : ""));
 
     it("createSession marks only the listed names removed for this session, keeps explicit seat values, and restarts the fresh pane", async () => {
       const exec = execWithGlobal(POLLUTED);
@@ -1254,14 +1263,16 @@ describe("TmuxAdapter", () => {
 
     it("respawnPane marks the names removed on the pane's session before the respawn, without -k", async () => {
       const exec = execWithGlobal(POLLUTED);
-      await new TmuxAdapter(exec).respawnPane("%3", "codex", { env: { OPENRIG_NODE_ID: "n" } });
+      const files = envFiles();
+      await new TmuxAdapter(exec, files).respawnPane("%3", "codex", { env: { OPENRIG_NODE_ID: "n" } });
       expect(exec.mock.calls.map((c) => c[0])).toEqual([
         "tmux show-environment -g",
         "tmux set-environment -t %3 -r CLAUDECODE",
         "tmux set-environment -t %3 -r HERDR_PANE_ID",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
-        "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
+        "tmux source-file /private/seat-env.conf",
       ]);
+      expect(files.writeFile.mock.calls[0]![1]).toBe('"respawn-pane" "-t" "%3" "-e" "OPENRIG_NODE_ID=n" "codex"\n');
     });
 
     // An unreadable global environment can't show whether the seat inherits an identity: the launch
@@ -1328,7 +1339,8 @@ describe("TmuxAdapter", () => {
 
     it("with env + cwd injects -c and -e flags (successor self-identifies in the reused pane), command stays last", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
-      const adapter = new TmuxAdapter(exec);
+      const files = envFiles();
+      const adapter = new TmuxAdapter(exec, files);
 
       await adapter.respawnPane("%3", "openrig-agent --resume tok", {
         cwd: "/w",
@@ -1336,14 +1348,14 @@ describe("TmuxAdapter", () => {
       });
 
       expect(exec.mock.calls.map((c) => c[0]).slice(0, 1)).toEqual(["tmux show-environment -g"]); expect(exec).toHaveBeenCalledTimes(2);
-      expect(exec.mock.calls[1]![0]).toBe(
-        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_NODE_ID=node123' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' 'openrig-agent --resume tok'",
-      );
+      expect(exec.mock.calls[1]![0]).toBe("tmux source-file /private/seat-env.conf");
+      expect(files.writeFile.mock.calls[0]![1]).toBe('"respawn-pane" "-t" "%3" "-c" "/w" "-e" "OPENRIG_NODE_ID=node123" "-e" "OPENRIG_SESSION_NAME=dev-impl@rig" "openrig-agent --resume tok"\n');
     });
 
     it("with NO command re-runs the pane's default login shell (omits the trailing command arg)", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
-      const adapter = new TmuxAdapter(exec);
+      const files = envFiles();
+      const adapter = new TmuxAdapter(exec, files);
 
       await adapter.respawnPane("%3", undefined, {
         cwd: "/w",
@@ -1351,9 +1363,8 @@ describe("TmuxAdapter", () => {
       });
 
       expect(exec.mock.calls.map((c) => c[0]).slice(0, 1)).toEqual(["tmux show-environment -g"]); expect(exec).toHaveBeenCalledTimes(2);
-      expect(exec.mock.calls[1]![0]).toBe(
-        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_SESSION_NAME=dev-impl@rig'",
-      );
+      expect(exec.mock.calls[1]![0]).toBe("tmux source-file /private/seat-env.conf");
+      expect(files.writeFile.mock.calls[0]![1]).toBe('"respawn-pane" "-t" "%3" "-c" "/w" "-e" "OPENRIG_SESSION_NAME=dev-impl@rig"\n');
     });
 
     it("classifies a write error (no server) as a failure", async () => {

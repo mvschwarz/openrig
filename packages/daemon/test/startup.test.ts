@@ -438,19 +438,16 @@ describe("createDaemon startup composition", () => {
 
     try {
       const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const createSession = vi.spyOn(deps.tmuxAdapter, "createSession");
       const rig = deps.rigRepo.createRig("path-env-rig");
       deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
 
       const result = await deps.nodeLauncher.launchNode(rig.id, "worker");
 
       expect(result.ok).toBe(true);
-      const newSessionCmd = tmuxExec.mock.calls
-        .map((call) => call[0])
-        .find((cmd) => cmd.includes("tmux new-session"));
-      expect(newSessionCmd).toBeDefined();
-      expect(newSessionCmd).toContain("-e 'PATH=/proof/openrig/bin:/usr/bin:/bin'");
-      expect(newSessionCmd).toContain("-e 'OPENRIG_PORT=17433'");
-      expect(newSessionCmd).toContain("-e 'OPENRIG_HOST=127.0.0.1'");
+      expect(createSession.mock.calls[0]?.[2]).toMatchObject({
+        PATH: "/proof/openrig/bin:/usr/bin:/bin", OPENRIG_PORT: "17433", OPENRIG_HOST: "127.0.0.1",
+      });
 
       db.close();
     } finally {
@@ -483,14 +480,15 @@ describe("createDaemon startup composition", () => {
         OPENAI_API_KEY: "gap7-openai-key",
       });
 
+      const createSession = vi.spyOn(result.deps.tmuxAdapter, "createSession");
       const rig = result.deps.rigRepo.createRig("gap7-default");
       result.deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
       expect((await result.deps.nodeLauncher.launchNode(rig.id, "worker")).ok).toBe(true);
-      const command = tmuxExec.mock.calls.map((call) => call[0]).find((line) => line.includes("tmux new-session"));
-      expect(command).toContain(`-e 'HOME=${daemonHome}'`);
-      expect(command).toContain(`-e 'CODEX_HOME=${path.join(daemonHome, ".codex")}'`);
-      expect(command).toContain("-e 'PATH=/proof/openrig/bin:/usr/bin:/bin'");
-      expect(command).toContain("-e 'OPENAI_API_KEY=gap7-openai-key'");
+      expect(createSession.mock.calls[0]?.[2]).toMatchObject({
+        HOME: daemonHome, CODEX_HOME: path.join(daemonHome, ".codex"),
+        PATH: "/proof/openrig/bin:/usr/bin:/bin", OPENAI_API_KEY: "gap7-openai-key",
+      });
+      expect(tmuxExec.mock.calls.flat().join("\n")).not.toContain("gap7-openai-key");
     } finally {
       result?.db.close();
       restoreEnv(saved);
@@ -552,7 +550,7 @@ describe("createDaemon startup composition", () => {
       }
       expect(thrown).toBeInstanceOf(Error);
       expect((thrown as Error).message).toMatch(/CODEX_HOME.*absolute/i);
-      expect(tmuxExec.mock.calls.some((call) => call[0].includes("tmux new-session"))).toBe(false);
+      expect(tmuxExec.mock.calls.some((call) => /\b(new-session|source-file)\b/.test(call[0]))).toBe(false);
     } finally {
       result?.db.close();
       restoreEnv(saved);
@@ -574,15 +572,12 @@ describe("createDaemon startup composition", () => {
     const tmuxExec = vi.fn<ExecFn>(async () => "");
     try {
       const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const createSession = vi.spyOn(deps.tmuxAdapter, "createSession");
       const rig = deps.rigRepo.createRig("url-derive-rig");
       deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
       const result = await deps.nodeLauncher.launchNode(rig.id, "worker");
       expect(result.ok).toBe(true);
-      const newSessionCmd = tmuxExec.mock.calls
-        .map((call) => call[0])
-        .find((cmd) => cmd.includes("tmux new-session"));
-      expect(newSessionCmd).toBeDefined();
-      expect(newSessionCmd).toContain("-e 'OPENRIG_URL=http://100.64.0.5:17433'");
+      expect(createSession.mock.calls[0]?.[2]).toMatchObject({ OPENRIG_URL: "http://100.64.0.5:17433" });
       db.close();
     } finally {
       vi.unstubAllEnvs();
@@ -602,20 +597,18 @@ describe("createDaemon startup composition", () => {
 
     try {
       const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const createSession = vi.spyOn(deps.tmuxAdapter, "createSession");
       const rig = deps.rigRepo.createRig("provider-auth-env-rig");
       deps.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
 
       const result = await deps.nodeLauncher.launchNode(rig.id, "worker");
 
       expect(result.ok).toBe(true);
-      const newSessionCmd = tmuxExec.mock.calls
-        .map((call) => call[0])
-        .find((cmd) => cmd.includes("tmux new-session"));
-      expect(newSessionCmd).toBeDefined();
-      expect(newSessionCmd).toContain("-e 'ANTHROPIC_API_KEY=anthropic-test-key'");
-      expect(newSessionCmd).toContain("-e 'CLAUDE_CODE_OAUTH_TOKEN=claude-oauth-test-token'");
-      expect(newSessionCmd).toContain("-e 'OPENAI_API_KEY=openai-test-key'");
-      expect(newSessionCmd).not.toContain("BOGUS_TOKEN");
+      const env = createSession.mock.calls[0]?.[2];
+      expect(env).toMatchObject({ ANTHROPIC_API_KEY: "anthropic-test-key", CLAUDE_CODE_OAUTH_TOKEN: "claude-oauth-test-token", OPENAI_API_KEY: "openai-test-key" });
+      expect(env).not.toHaveProperty("BOGUS_TOKEN");
+      const commands = tmuxExec.mock.calls.flat().join("\n");
+      for (const token of ["anthropic-test-key", "claude-oauth-test-token", "openai-test-key"]) expect(commands).not.toContain(token);
 
       db.close();
     } finally {
@@ -624,7 +617,7 @@ describe("createDaemon startup composition", () => {
   });
 
   it("forwards the Codex Bedrock bearer token into a launched session only when the operator names it (#194)", async () => {
-    const launchCommand = async (allowlist: string) => {
+    const launchEnv = async (allowlist: string) => {
       vi.stubEnv("OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", allowlist);
       vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-bedrock-token");
       vi.stubEnv("AWS_SECRET_ACCESS_KEY", "synthetic-unrelated-secret");
@@ -633,24 +626,26 @@ describe("createDaemon startup composition", () => {
       };
       const tmuxExec = vi.fn<ExecFn>(async () => "");
       const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      const createSession = vi.spyOn(deps.tmuxAdapter, "createSession");
       try {
         const rig = deps.rigRepo.createRig("bedrock-forwarding-rig");
         deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
         expect((await deps.nodeLauncher.launchNode(rig.id, "worker")).ok).toBe(true);
-        return tmuxExec.mock.calls.map((call) => call[0]).find((cmd) => cmd.includes("tmux new-session")) ?? "";
+        expect(tmuxExec.mock.calls.flat().join("\n")).not.toContain("synthetic-bedrock-token");
+        expect(createSession).toHaveBeenCalledOnce();
+        return createSession.mock.calls[0]![2]!;
       } finally {
         db.close();
       }
     };
 
     try {
-      const optedIn = await launchCommand("AWS_BEARER_TOKEN_BEDROCK,AWS_SECRET_ACCESS_KEY");
-      expect(optedIn).toContain("-e 'AWS_BEARER_TOKEN_BEDROCK=synthetic-bedrock-token'");
-      expect(optedIn).not.toContain("AWS_SECRET_ACCESS_KEY");
+      const optedIn = await launchEnv("AWS_BEARER_TOKEN_BEDROCK,AWS_SECRET_ACCESS_KEY");
+      expect(optedIn).toHaveProperty("AWS_BEARER_TOKEN_BEDROCK", "synthetic-bedrock-token");
+      expect(optedIn).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
 
-      const notNamed = await launchCommand("OPENAI_API_KEY");
-      expect(notNamed).toContain("tmux new-session");
-      expect(notNamed).not.toContain("AWS_BEARER_TOKEN_BEDROCK");
+      const notNamed = await launchEnv("OPENAI_API_KEY");
+      expect(notNamed).not.toHaveProperty("AWS_BEARER_TOKEN_BEDROCK");
     } finally {
       vi.unstubAllEnvs();
     }
