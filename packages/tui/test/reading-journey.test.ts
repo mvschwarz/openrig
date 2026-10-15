@@ -95,7 +95,7 @@ describe("current-file reading through real routes and TUI state", () => {
   it.runIf(fileSymlinksSupported)("resolves links from an internal symlink's actual source, never an unrelated root", async () => {
     open({ root: "project", path: "alias.md", anchor: "second-act" }); await refresh();
     const result = snap.fileRead!.result;
-    expect(result).toHaveProperty("resolvedPath", "docs/chapter.md");
+    expect(result).toHaveProperty("resolvedPath", join("docs", "chapter.md"));
     const link = fileLines(result, view.get().file!, 100).find((line) => line.text.includes("Back to outline") && line.action)?.action;
     expect(link).toEqual({ type: "file-open", target: { root: "project", path: "outline.md" } });
   });

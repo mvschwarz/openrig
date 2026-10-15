@@ -96,7 +96,11 @@ export function fileLines(result: FileReadResult | null | undefined, target: Fil
     else { start = found; lines.push({ text: `Showing from #${target.anchor} · source line ${start + 1}` }); }
     lines.push(listItem("Read from start", { type: "file-open", target: { root: target.root, path: target.path } }));
   }
-  const origin = { ...target, path: result.resolvedPath ?? result.path };
+  const sourcePath = result.resolvedPath ?? result.path;
+  // The reader returns native paths; links use slash-separated paths even
+  // when this TUI is connected to a Windows daemon from another OS.
+  const origin = { ...target, path: /^(?:[a-z]:[\\/]|\\\\)/i.test(result.absolutePath)
+    ? sourcePath.replace(/\\/g, "/") : sourcePath };
   lines.push({ text: "" });
   for (const row of sourceRows.slice(start)) {
     lines.push({ text: row }, ...referenceLines(row, origin));

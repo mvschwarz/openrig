@@ -1,5 +1,16 @@
 import { expect, it } from "vitest";
-import { fileTargetForPath } from "../src/reading.js";
+import { fileLines, fileTargetForPath, type FileRead } from "../src/reading.js";
+
+it.each(["C:\\work\\project\\docs\\chapter.md", "\\\\host\\share\\project\\docs\\chapter.md"])("resolves links from a Windows reader's actual source: %s", (absolutePath) => {
+  const result: FileRead = {
+    root: "project", path: "alias.md", absolutePath, resolvedPath: "docs\\chapter.md",
+    content: "[Back to outline](../outline.md)", mtime: "", contentHash: "",
+    size: 0, truncated: false, truncatedAtBytes: null, totalBytes: 0,
+  };
+  const link = fileLines(result, { root: "project", path: "alias.md" }, 100)
+    .find((line) => line.text.includes("Back to outline") && line.action)?.action;
+  expect(link).toEqual({ type: "file-open", target: { root: "project", path: "outline.md" } });
+});
 
 it("maps served Windows sources including mixed separators and UNC shares from any TUI host", () => {
   const roots = [{ name: "project", path: "C:\\work\\project" }, { name: "docs", path: "C:/work/project/docs" }];
