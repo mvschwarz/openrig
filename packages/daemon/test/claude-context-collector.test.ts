@@ -500,7 +500,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(Object.keys(mcpConfig.mcpServers)).toEqual(["existing"]);
   });
 
-  it("deliverStartup recovers from array-valued settings.local.json for context collector only", async () => {
+  it("deliverStartup leaves an array-valued settings.local.json (and .mcp.json) as they are", async () => {
     written["/project/.claude/settings.local.json"] = "[]";
     written["/project/.mcp.json"] = "[]";
 
@@ -513,9 +513,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
-    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    expect(settings.statusLine.type).toBe("command");
-    expect(settings.permissions).toBeUndefined();
+    // Valid JSON that isn't an object is the owner's: the status line isn't installed over it.
+    expect(written["/project/.claude/settings.local.json"]).toBe("[]");
     expect(written["/project/.mcp.json"]).toBe("[]");
   });
 

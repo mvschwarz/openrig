@@ -505,9 +505,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[]): boolean {
-    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, cwd)) {
-      return true;
-    }
+    // A skipped fragment is reported skipped; it never falls through to the generic extensions copy.
+    const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings) : false;
+    if (handled) return handled === true;
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(cwd, managedBlockFile);
@@ -600,14 +600,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  private applyRuntimeResource(entry: ProjectionEntry, cwd: string): boolean {
+  /** true when applied, "skipped" when handled but not applied, false when this isn't a resource it handles. */
+  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[]): boolean | "skipped" {
     switch (entry.resourceType) {
       case "claude_settings_fragment":
-        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"));
-        return true;
+        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"), warnings) || "skipped";
       case "claude_mcp_fragment":
-        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"));
-        return true;
+        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"), warnings) || "skipped";
       case "claude_activity_hooks":
         // Handled (no generic .claude/extensions copy): the relay asset is
         // delivered + the settings hooks reconciled by reconcileClaudeActivityHooks
@@ -618,12 +617,32 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  private mergeJsonFragment(sourcePath: string, targetPath: string): void {
+  /** Merge a JSON fragment into a project file. An existing target that isn't a JSON object (it doesn't parse, or it
+   *  holds an array or a single value) belongs to its owner: it's left byte-for-byte, nothing is merged, and a warning
+   *  says so. Returns whether the fragment was applied. */
+  private mergeJsonFragment(sourcePath: string, targetPath: string, warnings: string[]): boolean {
     const fragment = this.readJsonObjectStrict(sourcePath);
-    const existing = this.readJsonObject(targetPath);
+    let existing: Record<string, unknown> = {};
+    if (this.fs.exists(targetPath)) {
+      const text = this.fs.readFile(targetPath);
+      if (text.trim() !== "") {
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch (err) {
+          warnings.push(`Left ${targetPath} as it is: it isn't valid JSON (${(err as Error).message.split("\n")[0]}). The fragment ${sourcePath} wasn't applied; fix the file and launch again to apply it.`);
+          return false;
+        }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          const held = Array.isArray(parsed) ? "a JSON array" : parsed === null ? "JSON null" : `a JSON ${typeof parsed}`;
+          warnings.push(`Left ${targetPath} as it is: it holds ${held}, not an object. The fragment ${sourcePath} wasn't applied; fix the file and launch again to apply it.`);
+          return false;
+        }
+        existing = parsed as Record<string, unknown>;
+      }
+    }
     const merged = mergeJsonObjects(existing, fragment);
     this.fs.mkdirp(nodePath.dirname(targetPath));
     this.fs.writeFile(targetPath, JSON.stringify(merged, null, 2));
+    return true;
   }
 
   /**
@@ -742,18 +761,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return Array.from(keys);
   }
 
-  private readJsonObject(path: string): Record<string, unknown> {
-    try {
-      if (!this.fs.exists(path)) return {};
-      const parsed = JSON.parse(this.fs.readFile(path));
-      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : {};
-    } catch {
-      return {};
-    }
-  }
-
   private readJsonObjectStrict(path: string): Record<string, unknown> {
     const parsed = JSON.parse(this.fs.readFile(path));
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
@@ -803,16 +810,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
     // The seat cwd can be a shared repo whose project-local settings other sessions read (#421).
-    // Like the activity hooks, never clobber text we cannot parse. An empty file holds no settings
-    // and is treated as `{}`. Valid JSON that is not an object (for example `[]`) is still
-    // replaced, as before.
+    // Like the activity hooks, never clobber text we cannot parse, nor valid JSON that isn't an
+    // object (for example `[]`): the status line isn't installed there. An empty file holds no
+    // settings and is treated as `{}`.
     let existing: Record<string, unknown> = {};
     if (this.fs.exists(settingsPath)) {
       const text = this.fs.readFile(settingsPath);
       if (text.trim() !== "") {
         let parsed: unknown;
         try { parsed = JSON.parse(text); } catch { return; }
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+        existing = parsed as Record<string, unknown>;
       }
     }
     const statusLine = typeof existing["statusLine"] === "object" && existing["statusLine"] !== null
