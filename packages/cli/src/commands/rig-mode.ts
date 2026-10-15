@@ -621,7 +621,8 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
           console.log(`${mode}  (default scope: ${res.data.recommendedDefaultScope[mode]})`);
           emitRecord("  ", res.data.recommendedModeDefaults[mode] as unknown as Record<string, string>, false);
         }
-        console.log(`\ndefault stale rule: ${res.data.defaultStaleRule}  ${NOT_APPLIED}`);
+        // The served default, not a stored field: nothing applies it, but it isn't stored either.
+        console.log(`\ndefault stale rule: ${res.data.defaultStaleRule}  (not applied)`);
         console.log(NOT_APPLIED_LEGEND);
       });
     });

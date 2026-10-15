@@ -563,7 +563,7 @@ describe("rig mode: legacy record fields marked stored, not applied (04-A3)", ()
     expect(logs.join("\n")).toBe(JSON.stringify(effectiveResponse.data, null, 2));
   });
 
-  it("defaults marks the seven fields of every mode and the default stale rule, with one legend line; --json is unchanged", async () => {
+  it("defaults marks the seven fields of every mode, says the served default stale rule isn't applied, and has one legend line; --json is unchanged", async () => {
     // The daemon serves all eight modes (the six legacy names and both postures).
     const seven = { autonomy_scope: "a", heartbeat_cadence: "b", inspection_depth: "c", update_detail: "d", escalation_threshold: "e", concurrency_limit: "f", permission_prompt_posture: "g" };
     const modes = ["sleep", "desk", "mobile", "away", "focus", "debug", "human-led", "delegated"];
@@ -571,8 +571,10 @@ describe("rig mode: legacy record fields marked stored, not applied (04-A3)", ()
       recommendedDefaultScope: Object.fromEntries(modes.map((m) => [m, "rig"])), defaultStaleRule: "re_confirm_on_long_gap" } };
     await rigModeCommand(deps(fakeClient({ defaultsResponse }).client)).parseAsync(["node", "rig", "defaults"]);
     const marked = logs.filter((l) => l.endsWith(`  ${MARK}`));
-    expect(marked).toHaveLength(8 * 7 + 1); // seven fields for each of the eight modes, plus the default stale rule
-    for (const l of marked) expect([...MARKED.map((f) => `${f}: `), "\ndefault stale rule: "].some((p) => l.trimStart().startsWith(p.trimStart()))).toBe(true);
+    expect(marked).toHaveLength(8 * 7); // seven fields for each of the eight modes
+    for (const l of marked) expect(MARKED.some((f) => l.trimStart().startsWith(`${f}: `))).toBe(true);
+    // The served default isn't a stored field, so it reads "(not applied)" without "stored".
+    expect(logs).toContain("\ndefault stale rule: re_confirm_on_long_gap  (not applied)");
     expect(logs.filter((l) => l.trim() === LEGEND)).toHaveLength(1);
     logs.length = 0;
     await rigModeCommand(deps(fakeClient({ defaultsResponse }).client)).parseAsync(["node", "rig", "defaults", "--json"]);
