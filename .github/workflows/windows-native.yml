@@ -43,6 +43,7 @@ jobs:
         run: npm run build:package
   regression:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
