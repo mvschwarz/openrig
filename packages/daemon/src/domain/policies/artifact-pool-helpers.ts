@@ -85,14 +85,16 @@ function readFrontmatter(filePath: string): {
   frontmatter_parse_error: string | null;
 } {
   const raw = readFileSync(filePath, "utf-8");
-  if (!raw.startsWith(FRONTMATTER_OPEN)) {
+  // Accept CRLF files and a closing `---` at end of file, like frontmatter-validator.
+  const text = raw.replace(/\r\n/g, "\n");
+  if (!text.startsWith(FRONTMATTER_OPEN)) {
     return { raw, frontmatter: {}, frontmatter_parse_error: null };
   }
-  const endIdx = raw.indexOf("\n---\n", FRONTMATTER_OPEN.length);
-  if (endIdx === -1) {
+  const close = /\n---(?:\n|$)/.exec(text.slice(FRONTMATTER_OPEN.length - 1));
+  if (!close) {
     return { raw, frontmatter: {}, frontmatter_parse_error: null };
   }
-  const block = raw.slice(FRONTMATTER_OPEN.length, endIdx);
+  const block = text.slice(FRONTMATTER_OPEN.length, FRONTMATTER_OPEN.length - 1 + close.index);
   let parsed: unknown;
   try {
     parsed = parseYaml(block);
