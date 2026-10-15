@@ -21,7 +21,7 @@ import { runWakeLadderTick, makePromptStateReader, classifyPromptAfterRefusal, q
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function fixture(runtime = "claude-code") {
+function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName: string) => Promise<boolean | null>) {
   const db = createFullTestDb(); databases.push(db);
   const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), bus = new EventBus(db);
   const rig = rigRepo.createRig("r1001"), node = rigRepo.addNode(rig.id, "worker.a", { role: "worker", runtime });
@@ -40,7 +40,14 @@ function fixture(runtime = "claude-code") {
     listPanes: async () => [], hasSessionEnv: async () => false, capturePaneContent: async () => "unrecognized provider content",
     sendText: paste, sendKeys: enter, readPaneLastActivity: async () => now().getTime() / 1000 - 120,
   };
-  const newOracle = () => new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now });
+  const newOracle = () => new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now,
+    permissionPromptReader,
+    permissionPromptChanged: permissionPromptReader ? (sessionName, confirmed) => {
+      const latest = store.getLatestForNode({ sessionName });
+      store.recordHookEvent({ sessionName, runtime: "codex", generation: latest?.generation,
+        hookEvent: confirmed ? "PermissionPromptConfirmed" : "PermissionPromptCleared" });
+    } : undefined,
+  });
   let oracle = newOracle();
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -49,10 +56,10 @@ function fixture(runtime = "claude-code") {
     await next();
   });
   app.route("/activity", activityRoutes);
-  async function hook(event: string, subtype: string | null, ageMs: number) {
+  async function hook(event: string, subtype: string | null, ageMs: number, turnId?: string) {
     const r = await app.request("/activity/hooks", { method: "POST", headers: { "content-type": "application/json",
       "x-openrig-activity-token": "local-fixture-token" }, body: JSON.stringify({ runtime, sessionName: name,
-        generation, hookEvent: event, subtype, occurredAt: new Date(now().getTime() - ageMs).toISOString() }) });
+        generation, hookEvent: event, subtype, turnId, occurredAt: new Date(now().getTime() - ageMs).toISOString() }) });
     expect(r.status).toBe(200);
   }
   const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux as never, agentActivityStore: store,
@@ -149,6 +156,39 @@ it.each([["codex", "PermissionRequest", null, "Stop"], ["claude-code", "Notifica
     expect(alerts()).toHaveLength(0);
     expect((await policy.evaluate(job as never)).action).toBe("send");
   });
+
+it.each(["turn-a", "turn-b"])("an in-flight all-clear cannot retire a refused-wake alert after request %s, even after reconstruction", async turnId => {
+  const reader = vi.fn(async (): Promise<boolean | null> => true);
+  const f = fixture("codex", reader);
+  await f.hook("PermissionRequest", null, 0, "turn-a");
+  f.clock.value = new Date(f.clock.value.getTime() + 3_000);
+  await f.oracle().pollAllRunningTmuxSeats(f.db);
+  expect(f.oracle().getSeatState(f.node.id)?.needsInput.count).toBe(1);
+  const { repo, targets } = await refuseAndClimb(f, "blocked");
+  const alerts = () => repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 })
+    .filter(row => row.tags?.includes("wake-prompt-refusal"));
+  expect(alerts()).toHaveLength(1);
+  let finishCapture!: (visible: boolean) => void;
+  reader.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve; }));
+  f.clock.value = new Date(f.clock.value.getTime() + 1_000);
+  const polling = f.oracle().pollAllRunningTmuxSeats(f.db);
+  await vi.waitFor(() => expect(finishCapture).toBeTypeOf("function"));
+  f.clock.value = new Date(f.clock.value.getTime() + 1);
+  await f.hook("PermissionRequest", null, 0, turnId);
+  f.clock.value = new Date(f.clock.value.getTime() + 1);
+  finishCapture(false);
+  await polling;
+  f.reconstruct();
+  await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value,
+    resolveOrchestrator: () => "lead@r1001", readPromptState: f.readPromptState, retryIntervalSeconds: 1,
+    attemptWake: async (_id, target) => { targets.push(target); return "verified"; }, log: () => {} });
+  expect(alerts()).toHaveLength(1);
+  expect(f.store.getLatestForNode({ sessionName: f.name })?.rawEvent).toBe("PermissionPromptConfirmed");
+  expect(f.readPromptState(f.name, new Date(f.clock.value.getTime() - 1).toISOString())).toBe("blocked");
+  expect(targets).not.toContain(f.name);
+  expect(f.paste).not.toHaveBeenCalled();
+  expect(f.enter).not.toHaveBeenCalled();
+});
 
 it.each([0, 600_000])("a confirmed permission clear survives %sms of clock aging without claiming idle or bypassing generation", async ageMs => {
   const f = fixture("codex");

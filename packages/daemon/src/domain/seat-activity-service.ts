@@ -163,10 +163,12 @@ export class SeatActivityService {
     const snapshot = [...seat.permissions].filter(([, request]) =>
       nowMs - request.sinceMs >= PERMISSION_REQUEST_GRACE_MS && nowMs >= request.nextCheckMs);
     if (snapshot.length === 0) return;
+    const permissionRevision = seat.permissionRevision;
     const visible = canCapture && this.permissionPromptReader
       ? await this.permissionPromptReader(sessionName).catch(() => null)
       : null;
     if (seat.retired || seat.sessionName !== sessionName) return;
+    if (visible === false && seat.permissionRevision !== permissionRevision) return;
     let updated = false;
     for (const [id, request] of snapshot) {
       if (seat.permissions.get(id) !== request) continue;
@@ -351,6 +353,7 @@ export class SeatActivityService {
     const prior = seat.sources.get(evidence.sourceId);
     if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
     if (evidence.permissionRequest) {
+      seat.permissionRevision++;
       const request = evidence.permissionRequest;
       if (!seat.permissions.has(request.id)) {
         seat.permissions.set(request.id, { sinceMs: this.now().getTime(), confirmed: false, nextCheckMs: 0 });
@@ -465,6 +468,7 @@ export class SeatActivityService {
         inventory: null,
         sources: new Map(),
         permissions: new Map(),
+        permissionRevision: 0,
         permissionObservedAt: null,
         trust: new Map(),
         promotion: new Map(),
@@ -748,6 +752,7 @@ interface NeedsInputShape {
 
 interface SeatLadderState {
   permissions: Map<string, { sinceMs: number; confirmed: boolean; nextCheckMs: number }>;
+  permissionRevision: number;
   permissionObservedAt: string | null;
   sessionName: string;
   retired: boolean;

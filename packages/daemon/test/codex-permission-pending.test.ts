@@ -157,6 +157,29 @@ describe("Codex pending permission requests", () => {
     expect(fixture.service.getSeatState("seat")!.needsInput).toEqual({ count: 1, reason: "elicitation_dialog" });
   });
 
+  it.each(["turn-a", "turn-b"])("discards an all-clear read overtaken by request %s, then accepts a fresh read", async id => {
+    const fixture = setup();
+    fixture.request("turn-a");
+    fixture.visible(true);
+    fixture.advance(3_000);
+    await fixture.service.pollSeat("session");
+    let finishCapture!: (visible: boolean) => void;
+    fixture.reader.mockImplementationOnce(() => new Promise(resolve => { finishCapture = resolve; }));
+    fixture.advance(4_000);
+    const polling = fixture.service.pollSeat("session");
+    await vi.waitFor(() => expect(fixture.reader).toHaveBeenCalledTimes(2));
+    fixture.request(id);
+    finishCapture(false);
+    await polling;
+    expect(fixture.count()).toBe(1);
+    expect(fixture.changes).not.toContain(false);
+    fixture.visible(false);
+    fixture.advance(7_000);
+    await fixture.service.pollSeat("session");
+    expect(fixture.count()).toBe(0);
+    expect(fixture.changes.at(-1)).toBe(false);
+  });
+
   it("does not resurrect a permission when Stop arrives during capture", async () => {
     let finishCapture!: (visible: boolean) => void;
     const fixture = setup({ reader: () => new Promise(resolve => { finishCapture = resolve; }) });
