@@ -59,11 +59,14 @@ describe("managed Windows launch", () => {
     const command = renderWindowsManagedLaunch(process.execPath, ["-e", source, ...argv], f.cwd, { HOME: f.home, SYSTEMROOT: process.env.SystemRoot!, PATH: path.dirname(process.execPath) }, ["ANTHROPIC_API_KEY"]);
     expect(command).not.toContain("synthetic-only-never-in-script");
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
-    const script = command + "; Write-Output ([Environment]::GetEnvironmentVariable('PARENT_ONLY'))";
+    const script = "[Console]::Error.WriteLine('fixture: PowerShell ready'); " + command
+      + "; [Console]::Error.WriteLine('fixture: native child completed'); Write-Output ([Environment]::GetEnvironmentVariable('PARENT_ONLY'))";
     const output = await new Promise<string>((resolve, reject) => {
       native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
         encoding: "utf8", timeout: 30000, windowsHide: true,
-        env: { SYSTEMROOT: process.env.SystemRoot!, PATH: process.env.PATH!, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY!, UNAPPROVED: "must-not-forward", PARENT_ONLY: "parent-preserved" },
+        // PowerShell is the parent pane, not the isolated runtime. Keep its OS
+        // profile/environment; renderWindowsManagedLaunch isolates only its child.
+        env: { ...process.env, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY!, UNAPPROVED: "must-not-forward", PARENT_ONLY: "parent-preserved" },
       }, (error, out, stderr) => error ? reject(new Error(`Native fixture failed: killed=${error.killed}, signal=${error.signal}, code=${error.code}; stderr=${stderr}; stdout=${out}`)) : resolve(out));
     });
     const [child, parent] = output.trim().split(/\r?\n/);
