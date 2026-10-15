@@ -201,7 +201,12 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
   // Profile startup + lifecycle + effort advisory
   if (obj["profiles"] && typeof obj["profiles"] === "object" && !Array.isArray(obj["profiles"])) {
     for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
-      if (profileRaw && typeof profileRaw === "object") {
+      // A bare `default:` parses to null and used to validate, then crash normalizeAgentSpec.
+      if (!profileRaw || typeof profileRaw !== "object" || Array.isArray(profileRaw)) {
+        errors.push(`profiles.${profileName}: must be a map (an empty profile is {})`);
+        continue;
+      }
+      {
         const p = profileRaw as Record<string, unknown>;
         errors.push(...validateStartupBlock(p["startup"], `profiles.${profileName}.startup`));
         if (p["lifecycle"]) {
