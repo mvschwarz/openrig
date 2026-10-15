@@ -81,8 +81,18 @@ their bindings and ten-field records. They do not imply either operating posture
 Only human-led/delegated bindings participate in posture precedence. The legacy
 `effective` and `posture: known|unknown_posture` fields remain for compatibility;
 `unknown_posture` there means no legacy mode binding and does not override the
-new `operatingPosture.source: product-default` result. Setting another mode at the
-same scope replaces that row; inspect effective posture after any mode change.
+new `operatingPosture.source: product-default` result. A saved legacy mode and a
+posture are kept side by side at the same target: a write replaces only the
+binding of its own kind. Inspect effective posture after any mode change.
+
+Eight of the record's fields are stored, validated and shown, but nothing in
+OpenRig acts on them yet: `autonomy_scope`, `heartbeat_cadence`,
+`inspection_depth`, `update_detail`, `escalation_threshold`, `concurrency_limit`,
+`permission_prompt_posture` and `expiry_or_stale_rule`. `rig mode effective`,
+`rig mode defaults` and the `rig mode set` preview mark them `(stored; not applied)`.
+`scope` is the binding's key, and the posture reads `evidence_citation` into its
+`binding.evidence`. `permission_prompt_posture` never changes a native permission
+prompt.
 
 ## Diagnosis effects
 
