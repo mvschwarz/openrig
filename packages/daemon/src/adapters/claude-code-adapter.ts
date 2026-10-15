@@ -617,24 +617,25 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  /** Merge a JSON fragment into a project file. An existing target that isn't a JSON object (it doesn't parse, or it
-   *  holds an array or a single value) belongs to its owner: it's left byte-for-byte, nothing is merged, and a warning
-   *  says so. Returns whether the fragment was applied. */
+  /** Merge a JSON fragment into a project file. An existing target that can't be read, or isn't a JSON object (it
+   *  doesn't parse, or it holds an array or a single value), belongs to its owner: it's left as it is, nothing is
+   *  merged, and a warning says so. Returns whether the fragment was applied. */
   private mergeJsonFragment(sourcePath: string, targetPath: string, warnings: string[]): boolean {
     const fragment = this.readJsonObjectStrict(sourcePath);
+    // The reasons are fixed text: a parser message can quote the file's content.
+    const leave = (reason: string) => {
+      warnings.push(`Left ${targetPath} as it is: ${reason}. The fragment ${sourcePath} wasn't applied; once the file is fixed, the next fresh launch applies it (resuming or restoring the session doesn't).`);
+      return false;
+    };
     let existing: Record<string, unknown> = {};
     if (this.fs.exists(targetPath)) {
-      const text = this.fs.readFile(targetPath);
+      let text: string;
+      try { text = this.fs.readFile(targetPath); } catch { return leave("it couldn't be read"); }
       if (text.trim() !== "") {
         let parsed: unknown;
-        try { parsed = JSON.parse(text); } catch (err) {
-          warnings.push(`Left ${targetPath} as it is: it isn't valid JSON (${(err as Error).message.split("\n")[0]}). The fragment ${sourcePath} wasn't applied; fix the file and launch again to apply it.`);
-          return false;
-        }
+        try { parsed = JSON.parse(text); } catch { return leave("it isn't valid JSON"); }
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-          const held = Array.isArray(parsed) ? "a JSON array" : parsed === null ? "JSON null" : `a JSON ${typeof parsed}`;
-          warnings.push(`Left ${targetPath} as it is: it holds ${held}, not an object. The fragment ${sourcePath} wasn't applied; fix the file and launch again to apply it.`);
-          return false;
+          return leave(`it holds ${Array.isArray(parsed) ? "a JSON array" : parsed === null ? "JSON null" : `a JSON ${typeof parsed}`}, not an object`);
         }
         existing = parsed as Record<string, unknown>;
       }

@@ -1,21 +1,36 @@
-// A project's .claude/settings.local.json or .mcp.json that isn't a JSON object (it doesn't parse, or it holds an
-// array or a single value) belongs to its owner. Projecting a Claude settings or MCP fragment leaves it byte-for-byte,
+// A project's .claude/settings.local.json or .mcp.json that can't be read, or isn't a JSON object (it doesn't parse, or
+// it holds an array or a single value), belongs to its owner. Projecting a Claude settings or MCP fragment leaves it as it is,
 // reports the fragment skipped with a warning, and doesn't fail the projection; the context collector that runs before
 // launch, and again later, leaves it alone too. Valid objects, missing, empty and whitespace-only files behave as
-// before. Through the adapter's project(), deliverStartup() and ensureContextCollector(), with the daemon's real
-// filesystem operations in a temporary seat directory.
+// before. Through the adapter's project(), deliverStartup() and ensureContextCollector(), and StartupOrchestrator.startNode()
+// up to the harness launch, with the daemon's real filesystem operations in a temporary seat directory.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+const dbs: ReturnType<typeof createFullTestDb>[] = [];
+afterEach(() => {
+  for (const db of dbs.splice(0)) db.close();
+  // Give back write and read permission so the temp seat can be removed.
+  for (const root of roots.splice(0)) {
+    for (const rel of ["seat/.claude/settings.local.json", "seat/.mcp.json"]) { try { fs.chmodSync(nodePath.join(root, rel), 0o700); } catch { /* absent */ } }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const SENTENCE = "once the file is fixed, the next fresh launch applies it (resuming or restoring the session doesn't).";
 
 const TARGETS = [
   { type: "claude_settings_fragment", rel: ".claude/settings.local.json", fragment: { permissions: { allow: ["Bash(npm test:*)"] } }, key: "permissions" },
@@ -60,13 +75,13 @@ async function sequence(s: ReturnType<typeof seat>) {
   return { projection, afterProjection, afterStartup, afterLater: s.read() };
 }
 
-const UNUSABLE: Array<[string, string, RegExp]> = [
-  ["truncated JSON", '{ "owner_note": "keep me", "env": { "A": "1" ', /isn't valid JSON \(/],
-  ["a trailing comma", '{ "owner_note": "keep me", }', /isn't valid JSON \(/],
-  ["a JSON array", '[ { "owner_note": "keep me" } ]', /holds a JSON array, not an object/],
-  ["a JSON number", "42", /holds a JSON number, not an object/],
-  ["JSON null", "null", /holds JSON null, not an object/],
-  ["a JSON string", '"keep me"', /holds a JSON string, not an object/],
+const UNUSABLE: Array<[string, string, string]> = [
+  ["truncated JSON", '{ "owner_note": "keep me", "env": { "A": "1" ', "it isn't valid JSON"],
+  ["a trailing comma", '{ "owner_note": "keep me", }', "it isn't valid JSON"],
+  ["a JSON array", '[ { "owner_note": "keep me" } ]', "it holds a JSON array, not an object"],
+  ["a JSON number", "42", "it holds a JSON number, not an object"],
+  ["JSON null", "null", "it holds JSON null, not an object"],
+  ["a JSON string", '"keep me"', "it holds a JSON string, not an object"],
 ];
 
 describe("a project file that isn't a JSON object is left as it is", () => {
@@ -78,13 +93,71 @@ describe("a project file that isn't a JSON object is left as it is", () => {
       expect(r.projection.failed).toEqual([]);
       expect(r.projection.projected).not.toContain("spec-fragment");
       expect(r.projection.skipped).toContain("spec-fragment");
-      expect(r.projection.warnings).toHaveLength(1);
-      const warning = r.projection.warnings![0]!;
-      expect(warning).toMatch(new RegExp(`^Left ${s.targetPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} as it is: `));
-      expect(warning).toMatch(reason);
-      expect(warning).toContain(`The fragment ${s.fragmentPath} wasn't applied; fix the file and launch again to apply it.`);
+      // A fixed reason: no parser message, which could quote the file.
+      expect(r.projection.warnings).toEqual([`Left ${s.targetPath} as it is: ${reason}. The fragment ${s.fragmentPath} wasn't applied; ${SENTENCE}`]);
       // Nothing was copied to the generic extensions directory instead.
       expect(fs.existsSync(nodePath.join(s.cwd, ".claude", "extensions"))).toBe(false);
+    });
+  }
+});
+
+// Mode bits only stop a reader who isn't root, so each case first checks that the file really can't be read.
+const UNREADABLE: Array<[string, (p: string) => void]> = [
+  ["mode 0200 (write-only)", p => { fs.writeFileSync(p, '{ "owner_note": "keep me" }'); fs.chmodSync(p, 0o200); }],
+  ["mode 0000", p => { fs.writeFileSync(p, '{ "owner_note": "keep me" }'); fs.chmodSync(p, 0o000); }],
+  ["a directory", p => { fs.mkdirSync(p); fs.writeFileSync(nodePath.join(p, "owner-file"), "keep me"); }],
+];
+
+function snapshot(p: string) {
+  const st = fs.statSync(p);
+  return { dir: st.isDirectory(), mode: st.mode & 0o777, ino: st.ino, mtimeMs: st.mtimeMs, size: st.size };
+}
+
+describe.skipIf(process.getuid?.() === 0)("a project file that can't be read is left as it is", () => {
+  for (const target of TARGETS) for (const [label, make] of UNREADABLE) {
+    it(`${target.rel} that is ${label}: untouched through projection and both collector calls; the fragment is skipped with a warning`, async () => {
+      const s = seat(target, null);
+      make(s.targetPath);
+      expect(() => fs.readFileSync(s.targetPath, "utf-8")).toThrow();
+      const before = snapshot(s.targetPath);
+      const projection = await s.adapter.project(s.plan, s.binding);
+      expect(snapshot(s.targetPath)).toEqual(before);
+      await s.adapter.deliverStartup([], s.binding);
+      expect(snapshot(s.targetPath)).toEqual(before);
+      try { s.adapter.ensureContextCollector(s.binding); } catch { /* the later poll's caller catches this, as before */ }
+      expect(snapshot(s.targetPath)).toEqual(before);
+      expect(projection.failed).toEqual([]);
+      expect(projection.projected).not.toContain("spec-fragment");
+      expect(projection.skipped).toContain("spec-fragment");
+      expect(projection.warnings).toEqual([`Left ${s.targetPath} as it is: it couldn't be read. The fragment ${s.fragmentPath} wasn't applied; ${SENTENCE}`]);
+      expect(fs.existsSync(nodePath.join(s.cwd, ".claude", "extensions"))).toBe(false);
+      if (!before.dir) {
+        fs.chmodSync(s.targetPath, 0o600);
+        expect(fs.readFileSync(s.targetPath, "utf-8")).toBe('{ "owner_note": "keep me" }');
+      } else {
+        expect(fs.readdirSync(s.targetPath)).toEqual(["owner-file"]);
+      }
+    });
+
+    it(`${target.rel} that is ${label}: startNode reaches the harness launch, with the warning in its result`, async () => {
+      const s = seat(target, null);
+      make(s.targetPath);
+      const db = createFullTestDb(); dbs.push(db);
+      const rigRepo = new RigRepository(db), rig = rigRepo.createRig("preserve");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: s.cwd });
+      const registry = new SessionRegistry(db);
+      const session = registry.registerSession(node.id, "dev-impl@preserve");
+      const binding = { ...s.binding, nodeId: node.id, tmuxSession: session.sessionName } as NodeBinding;
+      const launchHarness = vi.spyOn(s.adapter, "launchHarness").mockResolvedValue({ ok: false, error: "inert boundary" });
+      const orchestrator = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus: new EventBus(db), tmuxAdapter: {} as TmuxAdapter });
+      const result = await orchestrator.startNode({ rigId: rig.id, nodeId: node.id, sessionId: session.id, binding, adapter: s.adapter,
+        plan: s.plan, resolvedStartupFiles: [], startupActions: [], isRestore: false });
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+      // The only error is the stubbed harness boundary: the skipped fragment didn't fail the start.
+      expect(result).toMatchObject({ errors: ["Harness launch failed: inert boundary"],
+        warnings: [`Left ${s.targetPath} as it is: it couldn't be read. The fragment ${s.fragmentPath} wasn't applied; ${SENTENCE}`] });
+      const st = fs.statSync(s.targetPath);
+      expect([st.isDirectory(), st.mode & 0o777]).toEqual(label === "a directory" ? [true, expect.any(Number)] : [false, label === "mode 0000" ? 0 : 0o200]);
     });
   }
 });
