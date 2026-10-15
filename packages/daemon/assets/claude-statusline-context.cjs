@@ -44,6 +44,8 @@ process.stdin.on("end", () => {
       session_name: raw.session_name ?? null,
       occupant_generation: process.env.OPENRIG_OCCUPANT_GENERATION || process.env.RIGGED_OCCUPANT_GENERATION || null,
       transcript_path: raw.transcript_path ?? null,
+      // Claude's own client-side cost estimate for this session (cumulative; not an invoice).
+      cost: raw.cost && typeof raw.cost.total_cost_usd === "number" ? { total_cost_usd: raw.cost.total_cost_usd } : null,
       sampled_at: new Date().toISOString(),
     };
 

@@ -505,9 +505,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile, warnings: string[]): boolean {
-    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, cwd)) {
-      return true;
-    }
+    // A skipped fragment is reported skipped; it never falls through to the generic extensions copy.
+    const handled = entry.category === "runtime_resource" ? this.applyRuntimeResource(entry, cwd, warnings) : false;
+    if (handled) return handled === true;
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(cwd, managedBlockFile);
@@ -600,14 +600,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  private applyRuntimeResource(entry: ProjectionEntry, cwd: string): boolean {
+  /** true when applied, "skipped" when handled but not applied, false when this isn't a resource it handles. */
+  private applyRuntimeResource(entry: ProjectionEntry, cwd: string, warnings: string[]): boolean | "skipped" {
     switch (entry.resourceType) {
       case "claude_settings_fragment":
-        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"));
-        return true;
+        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".claude", "settings.local.json"), warnings) || "skipped";
       case "claude_mcp_fragment":
-        this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"));
-        return true;
+        return this.mergeJsonFragment(entry.absolutePath, nodePath.join(cwd, ".mcp.json"), warnings) || "skipped";
       case "claude_activity_hooks":
         // Handled (no generic .claude/extensions copy): the relay asset is
         // delivered + the settings hooks reconciled by reconcileClaudeActivityHooks
@@ -618,12 +617,33 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  private mergeJsonFragment(sourcePath: string, targetPath: string): void {
+  /** Merge a JSON fragment into a project file. An existing target that can't be read, or isn't a JSON object (it
+   *  doesn't parse, or it holds an array or a single value), belongs to its owner: it's left as it is, nothing is
+   *  merged, and a warning says so. Returns whether the fragment was applied. */
+  private mergeJsonFragment(sourcePath: string, targetPath: string, warnings: string[]): boolean {
     const fragment = this.readJsonObjectStrict(sourcePath);
-    const existing = this.readJsonObject(targetPath);
+    // The reasons are fixed text: a parser message can quote the file's content.
+    const leave = (reason: string) => {
+      warnings.push(`Left ${targetPath} as it is: ${reason}. The fragment ${sourcePath} wasn't applied; once the file is fixed, the next fresh launch applies it (resuming or restoring the session doesn't).`);
+      return false;
+    };
+    let existing: Record<string, unknown> = {};
+    if (this.fs.exists(targetPath)) {
+      let text: string;
+      try { text = this.fs.readFile(targetPath); } catch { return leave("it couldn't be read"); }
+      if (text.trim() !== "") {
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch { return leave("it isn't valid JSON"); }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          return leave(`it holds ${Array.isArray(parsed) ? "a JSON array" : parsed === null ? "JSON null" : `a JSON ${typeof parsed}`}, not an object`);
+        }
+        existing = parsed as Record<string, unknown>;
+      }
+    }
     const merged = mergeJsonObjects(existing, fragment);
     this.fs.mkdirp(nodePath.dirname(targetPath));
     this.fs.writeFile(targetPath, JSON.stringify(merged, null, 2));
+    return true;
   }
 
   /**
@@ -742,18 +762,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return Array.from(keys);
   }
 
-  private readJsonObject(path: string): Record<string, unknown> {
-    try {
-      if (!this.fs.exists(path)) return {};
-      const parsed = JSON.parse(this.fs.readFile(path));
-      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : {};
-    } catch {
-      return {};
-    }
-  }
-
   private readJsonObjectStrict(path: string): Record<string, unknown> {
     const parsed = JSON.parse(this.fs.readFile(path));
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
@@ -803,16 +811,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
     // The seat cwd can be a shared repo whose project-local settings other sessions read (#421).
-    // Like the activity hooks, never clobber text we cannot parse. An empty file holds no settings
-    // and is treated as `{}`. Valid JSON that is not an object (for example `[]`) is still
-    // replaced, as before.
+    // Like the activity hooks, never clobber text we cannot parse, nor valid JSON that isn't an
+    // object (for example `[]`): the status line isn't installed there. An empty file holds no
+    // settings and is treated as `{}`.
     let existing: Record<string, unknown> = {};
     if (this.fs.exists(settingsPath)) {
       const text = this.fs.readFile(settingsPath);
       if (text.trim() !== "") {
         let parsed: unknown;
         try { parsed = JSON.parse(text); } catch { return; }
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+        existing = parsed as Record<string, unknown>;
       }
     }
     const statusLine = typeof existing["statusLine"] === "object" && existing["statusLine"] !== null
@@ -823,6 +832,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const collectorCmd = `node ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
+    // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a
+    // change. This avoids rewriting on every poll; it doesn't make a needed write safe against a concurrent writer.
+    if (statusLine["type"] === "command" && current === collectorCmd) return;
 
     existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
 

@@ -64,6 +64,30 @@ function bindingId(scope: OperatorContextScope, qualifier: string | null): strin
   return `${scope}:${qualifier ?? "host"}`;
 }
 
+/** A saved legacy mode and an operating posture are separate categories at one scope and qualifier (migration 109). */
+export type BindingCategory = "mode" | "posture";
+export function bindingCategory(mode: string): BindingCategory {
+  return mode === "human-led" || mode === "delegated" ? "posture" : "mode";
+}
+
+/** The ids a binding at this scope and qualifier can carry: today's id, or, when that id is held by the other category,
+ *  `<category>@<today's id>`. A legacy id always begins with a scope name and a colon, so the second form can't be one. */
+function bindingIds(scope: OperatorContextScope, qualifier: string | null, category: BindingCategory): [string, string] {
+  const plain = bindingId(scope, qualifier);
+  return [plain, `${category}@${plain}`];
+}
+
+/** Every row at this scope and qualifier, at most one per category, in the one order that every single-binding read
+ *  and an unqualified delete use: latest set first, then by id, so a same-millisecond tie never depends on insertion. */
+function rowsAt(db: Database.Database, scope: OperatorContextScope, qualifier: string | null): BindingRow[] {
+  return db.prepare(`
+    SELECT id, scope, qualifier, mode, record_json, set_at, set_by
+    FROM operator_context_mode_bindings
+    WHERE scope = ? AND qualifier IS ?
+    ORDER BY set_at DESC, id
+  `).all(scope, qualifier) as BindingRow[];
+}
+
 export interface SetBindingResult {
   ok: true;
   binding: OperatorContextModeBinding;
@@ -133,16 +157,23 @@ export class RigModeStore {
       };
     }
 
-    const id = bindingId(scope, qualifier);
+    // A write replaces only the row of its own category here; the other category's row is kept.
+    const category = bindingCategory(modeCheck.mode);
     const setAt = this.now().toISOString();
-    this.db.prepare(`
-      INSERT INTO operator_context_mode_bindings (id, scope, qualifier, mode, record_json, set_at, set_by)
-      VALUES (?, ?, ?, ?, ?, ?, 'operator')
-      ON CONFLICT(id) DO UPDATE SET
-        mode = excluded.mode,
-        record_json = excluded.record_json,
-        set_at = excluded.set_at
-    `).run(id, scope, qualifier, modeCheck.mode, JSON.stringify(record), setAt);
+    const id = this.db.transaction(() => {
+      const same = rowsAt(this.db, scope, qualifier).find((r) => bindingCategory(r.mode) === category);
+      if (same) {
+        this.db.prepare("UPDATE operator_context_mode_bindings SET mode = ?, record_json = ?, set_at = ? WHERE id = ?")
+          .run(modeCheck.mode, JSON.stringify(record), setAt, same.id);
+        return same.id;
+      }
+      const [plain, qualified] = bindingIds(scope, qualifier, category);
+      const taken = this.db.prepare("SELECT 1 FROM operator_context_mode_bindings WHERE id = ?").get(plain);
+      const fresh = taken ? qualified : plain;
+      this.db.prepare(`INSERT INTO operator_context_mode_bindings (id, scope, qualifier, mode, record_json, set_at, set_by)
+        VALUES (?, ?, ?, ?, ?, ?, 'operator')`).run(fresh, scope, qualifier, modeCheck.mode, JSON.stringify(record), setAt);
+      return fresh;
+    })();
 
     return {
       ok: true,
@@ -157,16 +188,18 @@ export class RigModeStore {
     };
   }
 
+  /** The binding at this scope and qualifier: the latest set, when a mode and a posture are both kept there. */
   getBinding(
     scope: OperatorContextScope,
     qualifier: string | null,
   ): OperatorContextModeBinding | null {
-    const row = this.db.prepare(`
-      SELECT id, scope, qualifier, mode, record_json, set_at, set_by
-      FROM operator_context_mode_bindings
-      WHERE id = ?
-    `).get(bindingId(scope, qualifier)) as BindingRow | undefined;
+    const row = rowsAt(this.db, scope, qualifier)[0];
     return row ? rowToBinding(row) : null;
+  }
+
+  /** Each category's binding at this scope and qualifier, latest set first. */
+  getBindings(scope: OperatorContextScope, qualifier: string | null): OperatorContextModeBinding[] {
+    return rowsAt(this.db, scope, qualifier).map(rowToBinding);
   }
 
   listBindings(): OperatorContextModeBinding[] {
@@ -178,11 +211,21 @@ export class RigModeStore {
     return rows.map(rowToBinding);
   }
 
-  deleteBinding(scope: OperatorContextScope, qualifier: string | null): boolean {
-    const info = this.db.prepare(`
-      DELETE FROM operator_context_mode_bindings WHERE id = ?
-    `).run(bindingId(scope, qualifier));
-    return info.changes > 0;
+  /** Delete one binding: the given category's, or without one the latest set (the one getBinding returns). A row of
+   *  the other category at the same target is kept. */
+  deleteBinding(scope: OperatorContextScope, qualifier: string | null, category?: BindingCategory): boolean {
+    return this.removeBinding(scope, qualifier, category) !== null;
+  }
+
+  /** As deleteBinding, returning the removed binding. */
+  removeBinding(scope: OperatorContextScope, qualifier: string | null, category?: BindingCategory): OperatorContextModeBinding | null {
+    return this.db.transaction(() => {
+      const rows = rowsAt(this.db, scope, qualifier);
+      const row = category ? rows.find((r) => bindingCategory(r.mode) === category) : rows[0];
+      if (!row) return null;
+      this.db.prepare("DELETE FROM operator_context_mode_bindings WHERE id = ?").run(row.id);
+      return rowToBinding(row);
+    })();
   }
 
   /**
@@ -197,33 +240,18 @@ export class RigModeStore {
    * scope wins.
    */
   resolveEffective(ctx: OperatorContextReadContext, modes?: readonly OperatorContextMode[]): EffectiveOperatorContextMode | null {
+    // Each scope contributes every category kept there, latest set first.
     const candidates: OperatorContextModeBinding[] = [];
-    if (ctx.qitemId) {
-      const b = this.getBinding("qitem", ctx.qitemId);
-      if (b) candidates.push(b);
-    }
-    if (ctx.workstreamId) {
-      const b = this.getBinding("workstream", ctx.workstreamId);
-      if (b) candidates.push(b);
-    }
-    if (ctx.projectId && ctx.missionId) {
-      const b = this.getBinding("mission", missionModeQualifier(ctx.projectId, ctx.missionId));
-      if (b) candidates.push(b);
-    }
-    if (ctx.projectId) {
-      const b = this.getBinding("project", ctx.projectId);
-      if (b) candidates.push(b);
-    }
-    if (ctx.rigId) {
-      const b = this.getBinding("rig", ctx.rigId);
-      if (b) candidates.push(b);
-    }
-    const host = this.getBinding("global_host", null);
-    if (host) candidates.push(host);
+    if (ctx.qitemId) candidates.push(...this.getBindings("qitem", ctx.qitemId));
+    if (ctx.workstreamId) candidates.push(...this.getBindings("workstream", ctx.workstreamId));
+    if (ctx.projectId && ctx.missionId) candidates.push(...this.getBindings("mission", missionModeQualifier(ctx.projectId, ctx.missionId)));
+    if (ctx.projectId) candidates.push(...this.getBindings("project", ctx.projectId));
+    if (ctx.rigId) candidates.push(...this.getBindings("rig", ctx.rigId));
+    candidates.push(...this.getBindings("global_host", null));
 
     if (candidates.length === 0) return null;
     if (modes && candidates.some((b) => !validateModeName(b.mode).ok || !validateRecord(b.record).ok
-      || b.id !== bindingId(b.record.scope, b.qualifier))) {
+      || !bindingIds(b.record.scope, b.qualifier, bindingCategory(b.mode)).includes(b.id))) {
       throw new Error("stored mode binding is invalid");
     }
 

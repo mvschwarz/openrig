@@ -14,7 +14,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import { setImmediate as yieldToLoop } from "node:timers/promises";
+import { CAPTURE_BATCH, type TmuxAdapter } from "../adapters/tmux.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 
 export interface TranscriptRotationOptions {
@@ -110,7 +111,72 @@ export function getTranscriptCaptureStats() {
   };
 }
 
-const activeTimers = new Map<string, NodeJS.Timeout>();
+// Sessions on one timer step tick together, so the captures due in a tick can share one batched call (#161).
+const tickers = new Map<number, { timer: NodeJS.Timeout; ticks: Map<string, () => void> }>();
+const activeSteps = new Map<string, number>();
+
+interface CaptureRequest { sessionName: string; isCurrent: () => boolean; resolve: (content: string | null) => void }
+
+// Sessions a batch's listing lacked: a seat that exited on its own keeps rotating until teardown. They read per target,
+// one fork that fails alone, instead of failing their chunk's chain every round. One that captures again rejoins.
+let unlistedSessions = new Set<string>();
+let pendingCaptures = new Map<TmuxAdapter, Map<number, CaptureRequest[]>>();
+
+/** Queue a capture until the microtasks queued now have run. Ticks that share one timer and one activity-hint promise
+ *  reach this point in the same microtask round, so their captures share one batch; a later one gets its own. */
+function captureSoon(adapter: TmuxAdapter, sessionName: string, lines: number, isCurrent: () => boolean): Promise<string | null> {
+  // The batch lists sessions by name, so pane, window and `session:window` targets read per target.
+  if (typeof adapter.capturePanesContent !== "function" || /^[%@$]\d+$/.test(sessionName) || sessionName.includes(":")) {
+    return Promise.resolve().then(() => adapter.capturePaneContent(sessionName, lines));
+  }
+  if (unlistedSessions.has(sessionName)) {
+    return Promise.resolve().then(() => adapter.capturePaneContent(sessionName, lines)).then((content) => {
+      if (content !== null) unlistedSessions.delete(sessionName);
+      return content;
+    });
+  }
+  return new Promise((resolve) => {
+    if (pendingCaptures.size === 0) queueMicrotask(flushCaptures);
+    let byLines = pendingCaptures.get(adapter);
+    if (!byLines) pendingCaptures.set(adapter, byLines = new Map());
+    let requests = byLines.get(lines);
+    if (!requests) byLines.set(lines, requests = []);
+    requests.push({ sessionName, isCurrent, resolve });
+  });
+}
+
+function flushCaptures(): void {
+  const batches = pendingCaptures;
+  pendingCaptures = new Map();
+  for (const [adapter, byLines] of batches) {
+    for (const [lines, requests] of byLines) {
+      // One batch per chunk, so a stalled chain holds only its own sessions.
+      for (let i = 0; i < requests.length; i += CAPTURE_BATCH) void captureBatch(adapter, lines, requests.slice(i, i + CAPTURE_BATCH));
+    }
+  }
+}
+
+/** One chained call, with a listing beside it. A session the batch left out reads per target. */
+async function captureBatch(adapter: TmuxAdapter, lines: number, requests: CaptureRequest[]): Promise<void> {
+  const perTarget = (r: CaptureRequest) => Promise.resolve().then(() => adapter.capturePaneContent(r.sessionName, lines)).then(r.resolve, () => r.resolve(null));
+  if (requests.length === 1) return void perTarget(requests[0]!);
+  const panes = await Promise.resolve().then(() => adapter.capturePanesContent(requests.map((r) => r.sessionName), lines)).catch(() => null);
+  for (const r of requests) {
+    const pane = panes?.get(r.sessionName);
+    if (pane) {
+      // A stopped or replaced start must not mark the name for its successor.
+      if (pane.missing && r.isCurrent()) unlistedSessions.add(r.sessionName);
+      r.resolve(pane.text);
+      // Each session writes its transcript as it resumes. Yielding to the loop between them keeps a chunk's writes
+      // out of one task; a burst of immediates queued at once would still run in one check phase.
+      await yieldToLoop();
+    }
+    // No listing means tmux is unreachable: each session records a failed capture without a fork each.
+    else if (!panes) r.resolve(null);
+    else void perTarget(r);
+  }
+}
+
 // Shared across replacing starts: a stopped capture can still own a child.
 // ponytail: bound overlap per session, leaving normal non-overlapping cost unchanged.
 const capturingSessions = new Set<string>();
@@ -203,14 +269,15 @@ export function startTranscriptRotation(
         idleIntervalMs = opts.pollIntervalMs;
         nextCaptureAt = Math.min(nextCaptureAt, lastCaptureStartedAt + opts.pollIntervalMs);
       }
-      if (Date.now() < nextCaptureAt) return;
+      // Due at the nearest shared tick: a session started between ticks keeps its cadence instead of slipping a step.
+      if (Date.now() + timerStepMs / 2 < nextCaptureAt) return;
       // Schedule from this tick, not its eventual completion: work inside a
       // fixed-step timer must not shift an active capture past the next tick.
       lastCaptureStartedAt = tickStartedAt;
       captureStartedAt = performance.now();
       stats.captures += 1;
       captureStillRunning = true;
-      const request = Promise.resolve().then(() => tmuxAdapter.capturePaneContent(sessionName, opts.lines))
+      const request = captureSoon(tmuxAdapter, sessionName, opts.lines, isCurrent)
         .finally(() => {
           captureStillRunning = false;
           // A result deadline never releases ownership of an unfinished child.
@@ -306,19 +373,27 @@ export function startTranscriptRotation(
   };
 
   void tick();
-  const timer = setInterval(tick, timerStepMs);
-  // Don't keep the daemon process alive solely on transcript timers.
-  if (typeof timer.unref === "function") timer.unref();
-  activeTimers.set(sessionName, timer);
+  let ticker = tickers.get(timerStepMs);
+  if (!ticker) {
+    const ticks = new Map<string, () => void>();
+    const timer = setInterval(() => { for (const t of ticks.values()) t(); }, timerStepMs);
+    // Don't keep the daemon process alive solely on transcript timers.
+    if (typeof timer.unref === "function") timer.unref();
+    tickers.set(timerStepMs, ticker = { timer, ticks });
+  }
+  ticker.ticks.set(sessionName, () => void tick());
+  activeSteps.set(sessionName, timerStepMs);
 }
 
 /** Clear the rotation timer for a session. Safe to call when no timer
  *  is registered. */
 export function stopTranscriptRotation(sessionName: string): void {
-  const timer = activeTimers.get(sessionName);
-  if (timer) {
-    clearInterval(timer);
-    activeTimers.delete(sessionName);
+  const step = activeSteps.get(sessionName);
+  const ticker = step === undefined ? undefined : tickers.get(step);
+  activeSteps.delete(sessionName);
+  if (ticker) {
+    ticker.ticks.delete(sessionName);
+    if (ticker.ticks.size === 0) { clearInterval(ticker.timer); tickers.delete(step!); }
   }
   // Drop the liveness record: once rotation stops, capture really has stopped,
   // so getIngestHealth should fall back to mtime (which correctly reads stale).
@@ -327,23 +402,26 @@ export function stopTranscriptRotation(sessionName: string): void {
   // after its async capture instead of resurrecting liveness / writing.
   activeGeneration.delete(sessionName);
   captureStats.delete(sessionName);
+  unlistedSessions.delete(sessionName);
 }
 
 /** Test-only: count of active rotators. Production code should not
  *  depend on this. */
 export function getActiveRotationCount(): number {
-  return activeTimers.size;
+  return activeSteps.size;
 }
 
 /** Test-only: clear all active rotators. Production code should not
  *  call this; use stopTranscriptRotation for individual sessions. */
 export function clearAllTranscriptRotationsForTest(): void {
-  for (const timer of activeTimers.values()) clearInterval(timer);
-  activeTimers.clear();
+  for (const { timer } of tickers.values()) clearInterval(timer);
+  tickers.clear();
+  activeSteps.clear();
   lastCaptureAtBySession.clear();
   activeGeneration.clear();
   captureStats.clear();
   settingsReloadError = null;
   liveOptions = createTranscriptRotationOptionsResolver(new SettingsStore(), (error) => { settingsReloadError = error; });
   activitySnapshots = new WeakMap();
+  unlistedSessions = new Set();
 }

@@ -83,6 +83,25 @@ truth is reconciled to main. Continuous integration to main and a
 release-line fold followed by one explicit merge are both valid; leaving the
 choice implicit is not.
 
+A candidate that merges by squash or rebase is never an ancestor of that ref, so
+ancestry alone cannot read it as merged. A `merged:<pr-number>` tag on a queue row
+bound to the slice (the `slice:` tag, like `candidate:`) is a recorded report of a
+merge, not a verified one: `rig view show execution` shows it on the "merged" rung
+(`folded`) as `merge_report` (`pr`, `row`, `recorded_at`, `linked`) and in the basis
+text, and `recorded_at` is when the row recorded the merge, not when it happened.
+A report never changes the merged answer by itself: without a candidate, with an
+unresolvable candidate, with an unusable declared integration ref or with no
+repository context, the answer, next-up and dependent slices stay as ancestry gives
+them. A row that carries a `merged:` tag is a report, not a build, so it never picks
+which commit counts as built: that stays the newest `candidate:<sha>` tag on a row
+without a `merged:` tag. A report is `linked: true` when its own row's `candidate:<sha>`
+resolves, through the repository context, to that built commit, and `linked: false`
+otherwise (no candidate on the row, or a different commit). The answer changes only
+for a linked report when ancestry answered false (not an ancestor): then the rung
+reads merged and the basis says so. A linked report never turns an answer ancestry
+could not give into merged. The report never changes which commit counts as built
+or reviewed.
+
 **The heavier flow — proof contracts, plan-lock, C1 drops, proof-lock — is PART B and is not in
 force unless assigned.**
 

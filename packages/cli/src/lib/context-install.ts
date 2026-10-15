@@ -122,7 +122,7 @@ export function validateContextPackManifestForInstall(manifestPath: string): voi
     if (typeof relPath !== "string" || relPath.length === 0) {
       throw new Error(`manifest at ${manifestPath} files[${i}] missing 'path' (string)`);
     }
-    if (relPath.includes("..") || isAbsolute(relPath) || relPath.startsWith("\\")) {
+    if (relPath.split(/[\\/]/).includes("..") || isAbsolute(relPath) || relPath.startsWith("\\")) {
       throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' must be a relative path inside the pack (no '..' segments, no leading '/')`);
     }
     if (!ALLOWED_CONTEXT_PACK_SUFFIXES.has(extname(relPath))) {

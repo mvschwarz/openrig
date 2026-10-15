@@ -1375,3 +1375,77 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     minDb.close();
   });
 });
+
+describe("QueueRepository.listOpenObligations: the parked query's lean read", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema, queueItemSummarySchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+    repo.attachOutbox(new OutboxHandler(db));
+  });
+  afterEach(() => db.close());
+
+  it("returns exactly what list() returns for the open states, newest first, with one statement", () => {
+    for (let i = 0; i < 6; i++) {
+      repo.create({ sourceSession: "a@r", destinationSession: i % 3 ? "b@r" : "c@r", body: `task ${i}`, priority: "routine", tier: "mode-0", summary: `s${i}` });
+    }
+    const ids = repo.list({ destinationSession: "b@r" }).map((r) => r.qitemId);
+    repo.claim({ qitemId: ids[0]!, destinationSession: "b@r" });
+    const want = repo.list({ destinationSession: "b@r", state: ["pending", "in-progress", "blocked"], limit: 500 })
+      .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+    const prepare = vi.spyOn(db, "prepare");
+    const got = repo.listOpenObligations("b@r", 500);
+    expect(got).toEqual(want);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(repo.listOpenObligations("b@r", 2)).toEqual(want.slice(0, 2));
+    expect(repo.listOpenObligations("nobody@r", 500)).toEqual([]);
+  });
+});
+
+describe("QueueRepository.listOpenObligations: same rows, order and limit as list() over random queue states", () => {
+  it("40 seeded random histories of creates, claims, blocks, closes and notes", async () => {
+    const states = new Set<string>(); const seen = new Set<string>();
+    for (let seed = 1; seed <= 40; seed++) {
+      const db = createDb();
+      migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema, queueItemSummarySchema]);
+      const repo = new QueueRepository(db, new EventBus(db));
+      repo.attachOutbox(new OutboxHandler(db));
+      let x = seed;
+      const rand = (n: number) => { x = (x * 1103515245 + 12345) % 2147483648; return (x >>> 16) % n; };
+      const seats = ["a@r", "b@r", "c@r", "d@r"];
+      const ids: string[] = [];
+      for (let step = 0; step < 60; step++) {
+        const op = rand(12);
+        try {
+          // create is async; every other repository call is synchronous.
+          if (op < 5 || ids.length === 0) {
+            const item = await repo.create({ sourceSession: seats[rand(4)]!, destinationSession: seats[rand(4)]!, body: `t${step}`,
+              priority: "routine", tier: "mode-0", ...(rand(3) ? { summary: `s${step}` } : {}) });
+            ids.push(item.qitemId);
+          } else {
+            const id = ids[rand(ids.length)]!;
+            const row = repo.getById(id)!;
+            if (op === 5 || op >= 9) repo.claim({ qitemId: id, destinationSession: row.destinationSession });
+            else if (op === 6) repo.update({ qitemId: id, actorSession: row.destinationSession, state: "blocked", transitionNote: "hold" });
+            else if (op === 7) repo.update({ qitemId: id, actorSession: row.destinationSession, state: "done", closureReason: "no-follow-on", transitionNote: "done" });
+            else repo.update({ qitemId: id, actorSession: row.destinationSession, transitionNote: "note" });
+          }
+        } catch { /* an illegal transition for this row's state: the history just skips it */ }
+      }
+      for (const s of ["pending", "in-progress", "blocked", "done"]) states.add(s);
+      for (const r of db.prepare("SELECT DISTINCT state FROM queue_items").all() as Array<{ state: string }>) seen.add(r.state);
+      for (const seat of [...seats, "nobody@r"]) {
+        for (const limit of [1, 3, 500]) {
+          const want = repo.list({ destinationSession: seat, state: ["pending", "in-progress", "blocked"], limit })
+            .map((r) => ({ qitemId: r.qitemId, state: r.state, summary: r.summary ?? null }));
+          expect(repo.listOpenObligations(seat, limit), `seed ${seed} ${seat} limit ${limit}`).toEqual(want);
+        }
+      }
+      db.close();
+    }
+    // The histories reach every state the parked read filters on, and a closed one it must drop.
+    expect([...seen].sort()).toEqual([...states].sort());
+  });
+});

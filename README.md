@@ -181,6 +181,8 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   selected MCP resources configure those external services. Built-in bootstrap
   no longer writes a command allowlist to `~/.claude/settings.json` or removes
   older allowances. `CLAUDE_CONFIG_DIR` does not relocate the project-local writes.
+  To keep your own status line alongside the collector, see
+  [Custom Claude status line](docs/reference/claude-status-line.md).
 - **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
   `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
   commands and pre-writes trust hashes for those commands. Seat startup adds

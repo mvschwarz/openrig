@@ -30,6 +30,8 @@ interface CodexResumeOptions {
   detectDaemonSupport?: CodexDaemonSupportDetector;
   /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
   readNetworkDefault?: CodexNetworkDefaultReader;
+  /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does. */
+  ensureManagedConfig?: () => Promise<void>;
 }
 
 export class CodexResumeAdapter {
@@ -68,6 +70,8 @@ export class CodexResumeAdapter {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
     }
+
+    await this.options.ensureManagedConfig?.();
 
     if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");

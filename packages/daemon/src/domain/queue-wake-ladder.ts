@@ -1,5 +1,5 @@
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
-import { latestHookMovedOn, latestHookWaitsOnPerson } from "./agent-activity-store.js";
+import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
 import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
 import { openPromptRefusals, CLOSE_PREFIX, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
@@ -939,8 +939,8 @@ export function classifyPromptAfterRefusal(
 /** The production prompt read for a refused destination. The activity oracle answers first; when it has no
  *  evidence, the ladder reads the same retained runtime hook the send gate refused on, so a held wake still
  *  escalates after the activity service is rebuilt, or when the oracle does not yet trust the hook source
- *  (Codex's). A generation-valid hook observed after the refusal that means work started or the turn ended
- *  answers "clear" from the same evidence, as does the oracle's clear; anything else stays "unknown". */
+ *  (Codex's). A generation-valid hook observed after the refusal that means work started, the turn ended,
+ *  or a Codex permission prompt cleared answers "clear", as does the oracle; anything else stays "unknown". */
 export function makePromptStateReader(deps: {
   db: Database.Database;
   getSeatState?: (nodeId: string) => Pick<ArbitratedSeatState, "activity" | "needsInput" | "needsInputEvidence"> | null | undefined;
@@ -952,7 +952,13 @@ export function makePromptStateReader(deps: {
     if (verdict !== "unknown" || !nodeId) return verdict;
     const node = deps.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(nodeId) as { runtime: string | null } | undefined;
     const hook = deps.getLatestHook?.(destination), runtime = node?.runtime ?? null;
-    if (latestHookWaitsOnPerson(hook, runtime)) return "blocked";
+    if (latestHookWaitsOnPerson(hook, runtime) || latestHookPermissionPending(hook, runtime)) return "blocked";
+    if (
+      runtime === "codex" && hook?.rawEvent === "PermissionPromptCleared" &&
+      hook.evidenceSource === "runtime_hook" &&
+      (hook.stale !== true || hook.reason === "stale_runtime_hook") &&
+      Date.parse(hook.eventAt ?? "") > Date.parse(refusedAt)
+    ) return "clear";
     return latestHookMovedOn(hook, refusedAt, runtime) ? "clear" : "unknown";
   };
 }

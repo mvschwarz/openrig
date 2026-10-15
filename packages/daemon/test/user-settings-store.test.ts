@@ -159,6 +159,9 @@ describe("SettingsStore (User Settings v0)", () => {
       "output.whoami_peers",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
+      "usage.pi_cost_facts",
+      "usage.pi_openrouter_charge",
+      "transport.verify_input_box",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -356,6 +359,23 @@ describe("SettingsStore (User Settings v0)", () => {
     process.env.OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED = "true";
     expect(store.resolveOne("onboarding.default_pack.enabled"))
       .toMatchObject({ value: true, source: "env", defaultValue: true });
+  });
+
+  it("transport.verify_input_box is off by default and resolves file, then env", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("transport.verify_input_box"))
+      .toMatchObject({ value: false, source: "default", defaultValue: false });
+
+    store.set("transport.verify_input_box", "true");
+    expect(store.resolveOne("transport.verify_input_box")).toMatchObject({ value: true, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf-8")).transport).toEqual({ verifyInputBox: true });
+
+    try {
+      process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "0";
+      expect(store.resolveOne("transport.verify_input_box")).toMatchObject({ value: false, source: "env" });
+    } finally {
+      delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
+    }
   });
 
   it("env > file > default for daemon.port", () => {

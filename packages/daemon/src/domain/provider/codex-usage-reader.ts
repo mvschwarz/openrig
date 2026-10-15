@@ -45,6 +45,8 @@ export const CODEX_USAGE_READER_ARGS = ["-c", "features.plugins=false", "-c", "f
 
 /** Native reads take 25–35 s (Ops' readers); the refresh is bounded by the upper end. */
 export const CODEX_USAGE_READ_DEADLINE_MS = 35_000;
+/** How long the reader's process group gets at each stop step (and for the reap) once the read ends. */
+export const CODEX_USAGE_READ_GRACE_MS = 2_000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,7 +54,7 @@ const firstLine = (error: unknown): string => String(error instanceof Error ? er
 
 export function codexUsageReader(options: CodexUsageReaderOptions = {}): CodexUsageReader {
   const deadlineMs = options.deadlineMs ?? CODEX_USAGE_READ_DEADLINE_MS;
-  const graceMs = options.graceMs ?? 2_000;
+  const graceMs = options.graceMs ?? CODEX_USAGE_READ_GRACE_MS;
   const maxOutputBytes = options.maxOutputBytes ?? 1024 * 1024;
   const now = options.now ?? (() => new Date().toISOString());
   return async () => {

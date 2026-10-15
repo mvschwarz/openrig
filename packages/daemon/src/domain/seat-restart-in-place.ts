@@ -18,11 +18,13 @@ import { isShellForeground } from "./shell-classifier.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
+import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
- * conversation, resumed in the same pane, with the settings it is running with now. It never launches fresh,
+ * conversation, resumed in the same pane, with the settings it is running with now, except reasoning effort,
+ * which follows the seat's saved choice like every managed continuation (OPR.0.7.0.7). It never launches fresh,
  * forks, re-delivers startup context or retries; it never switches an account or reads token-bearing files.
  *
  * Reusable primitive: gates, the in-place resume for both pane shapes, and the per-seat report. Callers
@@ -87,8 +89,11 @@ export interface InPlaceRestartTarget {
   seat: { rigId: string; rigName: string; logicalId: string; nodeId: string };
   sessionId: string;
   sessionName: string;
-  /** Saved choices for the seat's next managed launch. The restart keeps EFFECTIVE settings instead. */
-  saved: { model: string | null; effort: string | null; codexConfigProfile: string | null };
+  /** Saved choices for the seat's next managed launch. The restart keeps EFFECTIVE settings, except effort,
+   *  which the binding carries from the shared resolver (seat-effort.ts). */
+  saved: { model: string | null; effort: string | null; codexConfigProfile: string | null;
+    /** Where the saved effort comes from. Only an explicit seat choice may change effort in place. */
+    effortSource?: "seat_choice" | "authored" | "runtime_default" };
   binding: NodeBinding;
 }
 
@@ -120,7 +125,11 @@ export interface InPlaceRestartReport {
   conversationProof: "argv" | "native_logs";
   activity: { state: "working" | "needs_input" | "idle" | "unknown"; needsInput: number | null; detail: string };
   childProcesses: Array<{ pid: number; name: string }>;
-  settings: { effective: EffectiveSettings; saved: InPlaceRestartTarget["saved"]; note: string };
+  settings: {
+    effective: EffectiveSettings; saved: InPlaceRestartTarget["saved"]; note: string;
+    /** OPR.0.7.0.7: the effort flag the running Codex was launched with, and the one the relaunch sends. */
+    effort: { running: string | null; relaunch: string | null; changes: boolean; source: "seat_choice" | "authored" | "runtime_default" };
+  };
   codexHome: string;
   billingRoute: { state: "unknown"; detail: string; apiKeyEnvNames: string[] };
   account: AccountEvidence;
@@ -427,15 +436,29 @@ export class CodexInPlaceRestart {
 
     const effective = parseEffectiveSettings(runningArgv);
     const relaunched = parseEffectiveSettings(shellWords(relaunch.core));
+    // The relaunch sends the seat's resolved effort. Only an explicit saved seat choice may change effort
+    // in place; with none (never set, or cleared) an effort difference is drift, as for any setting.
+    const runningEffort = emittedEffortFromArgv("codex", runningArgv);
+    const relaunchEffort = emittedEffortFromArgv("codex", shellWords(relaunch.core));
+    const effort = {
+      running: runningEffort.flag === "present" ? runningEffort.value : null,
+      relaunch: relaunchEffort.flag === "present" ? relaunchEffort.value : null,
+      changes: false,
+      source: target.saved.effortSource ?? (target.saved.effort ? "authored" as const : "runtime_default" as const),
+    };
+    effort.changes = effort.running !== effort.relaunch;
+    const applyChoice = effort.changes && effort.source === "seat_choice";
     const drift = [
-      ...settingsDrift(effective, relaunched),
+      ...settingsDrift(effective, relaunched).filter((key) => key !== "effort" || !applyChoice),
       ...(facts.cwd && facts.cwd !== cwd ? ["cwd"] : []),
       ...(relaunchHome !== codexHome ? ["codex home"] : []),
     ];
     if (drift.length > 0) {
       return { ok: false, code: "settings_drift", detail: { differs: drift },
         message: `Relaunching now would change ${drift.join(", ")} from what the running Codex uses, so this account-only restart refuses. Nothing was stopped.`,
-        guidance: "A saved model/effort/profile choice applies at a managed launch that is meant to change settings, not here. Run rig seat restart --plan to compare." };
+        guidance: drift.includes("effort")
+          ? "This seat has no saved effort choice (never set, or cleared), so an account-only restart keeps the running effort and won't change it. Save one with rig seat set-effort to apply it here; otherwise the next ordinary managed launch or resume resolves effort. Run rig seat restart --plan to compare."
+          : "A saved model/profile choice applies at a managed launch that is meant to change settings, not here. Run rig seat restart --plan to compare." };
     }
 
     let priorRemainOnExit: string | null = null;
@@ -450,8 +473,10 @@ export class CodexInPlaceRestart {
       conversationId: token, conversationProof,
       activity: this.activity(seat.nodeId),
       childProcesses: descendants(rows, process.pid, chain).map((row) => ({ pid: row.pid, name: executableBase(row) })),
-      settings: { effective, saved: target.saved,
-        note: "The restart keeps the settings the running Codex uses (effective). Saved choices for the next managed launch are shown, not applied." },
+      settings: { effective, saved: target.saved, effort,
+        note: applyChoice
+          ? `The restart keeps the settings the running Codex uses (effective), except effort: it sends the seat's saved effort choice ${effort.relaunch} in place of ${effort.running ?? "no flag"}. Other saved choices are shown, not applied.`
+          : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied." },
       codexHome,
       billingRoute: { state: "unknown", apiKeyEnvNames: facts.apiKeyEnvNames,
         detail: "Which billing route Codex uses is not observable without reading credentials; API-key variable names alone don't establish it." },

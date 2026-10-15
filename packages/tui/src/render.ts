@@ -6,6 +6,9 @@ import { DEFAULT_TIME_ZONE, displayTime } from "./time.js";
 import { startupLines, type StartupState } from "./startup.js";
 import { configLines } from "./config/config-model.js";
 import { connectionsLines } from "./connections/connections-model.js";
+import { usageLines } from "./usage/usage-model.js";
+import { usageHostsLines } from "./usage/usage-hosts-model.js";
+import { costLines } from "./cost/cost-model.js";
 // Hand-rolled ANSI renderer (Phase-0 substrate decision). Pure function:
 // (state, snapshot) → {lines, hitMap, explorerRows}. BOTH panes emit hit
 // targets — explorer rows AND content-pane surfaces (table rows, view tabs,
@@ -720,6 +723,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   if (state.section === "terminals") return terminalLines(state, snap, contentWidth);
   if (state.section === "config") return configLines(state, snap, contentWidth);
   if (state.section === "connections") return connectionsLines(snap, contentWidth, state.timeZone, state.expanded);
+  if (state.section === "usage") return usageLines(snap, contentWidth);
+  if (state.section === "usage-hosts") return usageHostsLines(snap, contentWidth);
+  if (state.section === "cost") return costLines(snap.cost, contentWidth);
   if (state.healthOpen) return healthDetailLines(snap, state.healthOpen, contentWidth, state.timeZone);
   if (state.section === "system") return [{ text: "System · Instance health" }, { text: "" }, ...healthListLines(snap, { kind: "instance", local: true }, contentWidth)];
   // PULSE is a FULL-WIDTH view handled by an early return in renderScreen

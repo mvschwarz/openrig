@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
-import { runtimeProbeFailure } from "../adapters/preflight-exec.js";
+import { runtimeProbeFailure, runtimeProbeTimeout } from "../adapters/preflight-exec.js";
 import { piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
@@ -107,7 +107,7 @@ export class RigSpecPreflight {
           if (node.runtime === "pi") warnings.push(piVersionNotice(output));
         } catch (err) {
           if (node.runtime === "pi") errors.push(...piAvailabilityFailure(err, warnings));
-          else errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
+          else errors.push(runtimeProbeTimeout(err) ?? `Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
         }
       }
     }
@@ -448,6 +448,11 @@ export async function verifyPiRuntimeAvailable(
 }
 
 function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
+  const timedOut = runtimeProbeTimeout(err);
+  if (timedOut) {
+    warnings.push(timedOut);
+    return [];
+  }
   const detail = runtimeProbeFailure(err);
   if (detail === "ENOENT" || detail.includes("executable not found on PATH")) {
     warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
@@ -464,6 +469,8 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     await exec(RUNTIME_COMMANDS["omp"]!);
     return [];
   } catch (err) {
+    const timedOut = runtimeProbeTimeout(err);
+    if (timedOut) return [timedOut];
     return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
   }
 }

@@ -152,7 +152,14 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig status` | — | — |
+| `rig status` | — | `--json` |
+
+`rig status --json` prints one object: `daemon`, `kernel`, `workspaceRoot`, `rigs` and `cmux`.
+`daemon.reachable` has three values. `true`: the daemon answered its health probe (it may still
+report `healthy: false`, and may carry a `reason` and `eventLoop` evidence). `false`: positively down
+(`state` is `stopped` or `stale`). `null`: not confirmed (`state` is `unverified`, or `running`
+with `reason: "unresponsive"` because `/healthz` did not answer). When `reachable` is not `true`,
+the sections that were not read are `null`.
 
 ### snapshot
 

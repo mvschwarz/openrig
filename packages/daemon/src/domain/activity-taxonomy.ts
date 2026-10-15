@@ -122,6 +122,7 @@ export interface ActivityEvidence {
   observedAt: string;
   activity?: ActivityValue;
   needsInput?: NeedsInput;
+  permissionRequest?: { id: string };
 }
 
 /** A visible rung-health transition (AM-1): arbitration can never make a silently-dead
@@ -180,6 +181,7 @@ export const CODEX_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   runtime: "codex",
   rungs: [
     { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "trial" },
+    { rung: "needs-input-chrome", lifecycleCoverage: "full", initialTrust: "authoritative" },
     { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
   ],
 };

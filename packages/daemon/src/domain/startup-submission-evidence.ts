@@ -12,10 +12,10 @@ const normalize = (text: string): string => text.replace(/\s+/g, "");
 const isComposerFooter = (line: string): boolean => /(?:shift\+tab to cycle|\? for shortcuts)/i.test(line)
   || /^paste again to expand(?:\s{2,}◐ medium · \/effort)?$/.test(line);
 // This placeholder occupies an empty composer while submitted text is queued.
-const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
+export const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
 /** The same composer region used by the startup Enter guard. No transcript fallback. */
-function composerRegion(pane: string | null, runtime: string | null = null) {
+export function composerRegion(pane: string | null, runtime: string | null = null) {
   const promptClass = composerPromptClassForRuntime(runtime);
   const lines = (pane ?? "").split("\n");
   const inputAt = findComposerInputLineIndex(lines, promptClass);
@@ -48,7 +48,7 @@ export function inspectStartupStagedText(pane: string | null, expected: string, 
 
 // Claude 2.1.289 shows a long bracketed paste as this label until it is submitted; +M is the number of
 // newlines in the pasted text (8 of 8 pastes in retained native runs). Matched on the normalized body.
-const COLLAPSED_PASTE = /^\[Pastedtext#\d+\+(\d+)lines\]$/;
+export const COLLAPSED_PASTE = /^\[Pastedtext#\d+\+(\d+)lines\]$/;
 
 /** Whether the composer holds only Claude's collapsed label for a paste with the expected text's newline count. */
 export function startupOwnCollapsedPaste(pane: string | null, expected: string, runtime: string | null = null): boolean {

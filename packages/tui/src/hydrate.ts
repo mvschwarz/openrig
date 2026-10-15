@@ -17,6 +17,7 @@ import { fileTargetForPath } from "./reading.js";
 import { emptySnapshot } from "./state.js";
 import type { ConfigRead } from "./config/config-model.js";
 import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./connections/connections-model.js";
+import type { UsageRead } from "./usage/usage-model.js";
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
@@ -418,6 +419,35 @@ export async function hydrateSnapshot(
   if (viewContext?.section === "terminals") {
     const terminals = await readTerminals(client, viewContext.terminalView);
     return { ...emptySnapshot(), terminals, hydratedAt: new Date().toISOString(), readErrors: terminals.error ? [terminals.error] : [] };
+  }
+
+  // USAGE ACROSS HOSTS: one GET of the daemon's view across registered hosts, answered from memory there and on every
+  // host. Never the refresh route.
+  if (viewContext?.section === "usage-hosts") {
+    const status = await client.usageAcrossHosts();
+    if (!("view" in status)) readErrors.push(`usage across hosts: ${status.error}`);
+    return { ...emptySnapshot(), usageHosts: { status }, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
+  // COST: one GET of the daemon's cost view, computed from what it already stores. Starts no lookup of any kind.
+  if (viewContext?.section === "cost") {
+    const status = await client.usageCost();
+    if (!("body" in status)) readErrors.push(`cost: ${status.error}`);
+    return { ...emptySnapshot(), cost: { status }, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
+  // USAGE: one GET of the provider read model, answered from the daemon's memory. Never the refresh route. Only
+  // when the model has no usage rows does it read the config browser, to tell "off" from "not served".
+  if (viewContext?.section === "usage") {
+    const status = await client.providerStatus();
+    if (!("model" in status)) readErrors.push(`provider status: ${status.error}`);
+    let switchSetting: UsageRead["switchSetting"];
+    if ("model" in status && !Array.isArray(status.model["usage"])) {
+      const config = await safe<ConfigRead>("CONFIG", () => client.configBrowser());
+      const entry = config?.entries.find((e) => e.key === "provider.usage_windows");
+      switchSetting = config ? (entry ? { value: entry.value, source: entry.source } : "absent") : null;
+    }
+    return { ...emptySnapshot(), usage: { status, ...(switchSetting !== undefined ? { switchSetting } : {}) }, readErrors, hydratedAt: new Date().toISOString() };
   }
 
   // CONFIG never invokes fleet aggregation, host probes, queue enrichment or provider checks.

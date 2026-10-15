@@ -9,6 +9,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeQueuePorts, seedBacklogAsHistory } from "../src/domain/gateway/slack/queue-access.js";
 import { SlackOutboundDriver } from "../src/domain/gateway/slack/outbound-driver.js";
+import { buildOutboundMessage } from "../src/domain/gateway/slack/message.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 
@@ -151,5 +152,24 @@ describe("Slack sweep selection", () => {
     try { expect((await next.sweepOnce()).dispatched).toEqual([]); expect(dispatch).toHaveBeenCalledTimes(2); }
     finally { next.stop(); }
     expect(repo.transitionLog.hasOwnerNotificationReceipt("retry", key)).toBe(false);
+  });
+
+  it("#1013 — a gate parked on a human sweeps with state + gate tag, and its payload renders the question, not the packet", async () => {
+    row("gate", "blocked", "worker@rig");
+    db.prepare("UPDATE queue_items SET blocked_on='human-owner@kernel', tags=? WHERE qitem_id='gate'")
+      .run(JSON.stringify(["workflow", "gate", "workflow:mission"]));
+    db.prepare("UPDATE queue_items SET body=?, evidence_ref='https://example.invalid/plan.md' WHERE qitem_id='gate'").run(
+      "### Workflow gate: mission@1 step plan_signoff\n\nWorkflow instance: 01M4EXAMPLE\nContinuation: rig workflow project --instance 01M4EXAMPLE",
+    );
+    notify("gate");
+    const seen = new SeenStore(join(home, "seen"));
+    const dispatch = vi.fn(() => ({ ok: true as const, decisionId: "d" }));
+    expect((await new SlackOutboundDriver({ home, queue: ports(), seen, filter: {}, dispatch }).sweepOnce()).dispatched).toEqual(["gate"]);
+    const payload = dispatch.mock.calls[0]?.[2] as import("../src/domain/gateway/slack/outbound-driver.js").OutboundPostPayload;
+    expect(payload).toMatchObject({ state: "blocked", tags: ["workflow", "gate", "workflow:mission"], summary: "summary gate" });
+    const m = buildOutboundMessage(payload, { sourceLabel: "vm", evidenceLink: payload.evidenceRef! });
+    expect(m.text).toContain("*summary gate*");
+    expect(m.text).not.toContain("Workflow instance:");
+    expect(m.text).not.toContain("Continuation:");
   });
 });

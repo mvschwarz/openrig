@@ -158,3 +158,186 @@ describe("M1 A5b — outbound image attachments (the wired T1076 seam)", () => {
     expect(plain.text).not.toContain("image attachment");
   });
 });
+
+describe("#1013 — a workflow gate parked on a human seat renders the question, not the agent packet", () => {
+  // The packet exactly as workflowHandoffBody builds it (projector :1781-1825): agent-facing
+  // instance/step lines + Ask/Evidence + the continuation block for the resuming seat.
+  const gatePacket = [
+    "### Workflow gate: tianqi-mission@1 step plan_signoff",
+    "",
+    "Workflow instance: 01M4EXAMPLEINSTANCE",
+    "Prior step: plan (orchestrator) closed by orch@kernel",
+    "This step: plan_signoff (orchestrator)",
+    "Gate: human sign-off — the workflow is PARKED (waiting) until this item is resolved/closed; the flow then continues from this step.",
+    "Ask: Approve the plan at https://example.invalid/plan.md",
+    "Evidence: https://example.invalid/plan.md",
+    "Objective: reach plan sign-off",
+    "",
+    "Continuation: rig workflow project --instance 01M4EXAMPLEINSTANCE",
+    "Context: this workflow packet is a shortcut, not the whole story; open the instance for the full plan.",
+  ].join("\n");
+  const gateRow = {
+    qitemId: "q-gate",
+    summary: "Approve the plan at https://example.invalid/plan.md",
+    body: gatePacket,
+    state: "blocked",
+    tags: ["workflow", "gate", "workflow:tianqi-mission", "instance:01M4EXAMPLEINSTANCE"],
+    destinationSession: "orch@kernel",
+  };
+  const opts = { sourceLabel: "vm-openrig-build", evidenceLink: "https://example.invalid/plan.md" };
+
+  it("posts the headline (gate.summary) and evidence link, never the agent packet lines", () => {
+    const m = buildOutboundMessage(gateRow, opts);
+    expect(m.text).toContain("*Approve the plan at https://example.invalid/plan.md*");
+    expect(m.text).toContain("Evidence: https://example.invalid/plan.md");
+    for (const agentLine of ["### Workflow gate", "Workflow instance:", "Prior step:", "This step:", "Objective:", "Continuation:"]) {
+      expect(m.text).not.toContain(agentLine);
+      expect(JSON.stringify(m.blocks)).not.toContain(agentLine);
+    }
+  });
+
+  it("keeps the packet body for a gate row NOT parked on a human (state or gate tag absent)", () => {
+    expect(buildOutboundMessage({ ...gateRow, state: "pending" }, opts).text).toContain("Workflow instance:");
+    expect(buildOutboundMessage({ ...gateRow, tags: ["workflow", "handoff"] }, opts).text).toContain("Workflow instance:");
+  });
+
+  it("falls back to the packet body when the parked gate row carries no plain-language summary", () => {
+    expect(buildOutboundMessage({ ...gateRow, summary: null }, opts).text).toContain("Workflow instance:");
+  });
+
+  it("keeps the packet body for a hand-tagged [\"gate\"] row that carries no workflow tag", () => {
+    expect(buildOutboundMessage({ ...gateRow, tags: ["gate"] }, opts).text).toContain("Workflow instance:");
+  });
+
+  it("renders a single Evidence: line when the gate's evidence is a local path (the common case)", () => {
+    const m = buildOutboundMessage({ ...gateRow, evidenceRef: "/srv/rig/retained/plan.md" }, { sourceLabel: opts.sourceLabel });
+    expect(m.text).toContain("*Approve the plan at https://example.invalid/plan.md*");
+    expect((m.text.match(/Evidence:/g) ?? []).length).toBe(1);
+    expect(m.text).toContain("Evidence: /srv/rig/retained/plan.md");
+    expect(m.text).not.toContain("Workflow instance:");
+  });
+
+  it("keeps the Evidence line when the attached media is a different artifact than the evidence", () => {
+    const m = buildOutboundMessage(
+      { ...gateRow, evidenceRef: "/srv/rig/retained/plan.md" },
+      { sourceLabel: opts.sourceLabel, mediaRefs: [{ imageUrl: "https://example.invalid/screenshot.png", altText: "screenshot" }] },
+    );
+    expect(m.text).toContain("Evidence: /srv/rig/retained/plan.md");
+  });
+
+  it("suppresses the Evidence path only when the rendered media carries that same reference", () => {
+    const m = buildOutboundMessage(
+      { ...gateRow, evidenceRef: "https://example.invalid/plan.md" },
+      { sourceLabel: opts.sourceLabel, mediaRefs: [{ imageUrl: "https://example.invalid/plan.md", altText: "the plan" }] },
+    );
+    expect(m.text).not.toContain("Evidence:");
+  });
+
+  it("names the workflow and instance so two instances parked at the same gate are distinguishable", () => {
+    const instanceA = buildOutboundMessage(
+      { ...gateRow, tags: [...gateRow.tags, "step:plan_signoff"] },
+      opts,
+    );
+    const instanceB = buildOutboundMessage(
+      { ...gateRow, tags: ["workflow", "gate", "workflow:tianqi-mission", "instance:01M4OTHERINSTANCE", "step:plan_signoff"] },
+      opts,
+    );
+    expect(instanceA.text).toContain("Workflow tianqi-mission · instance 01M4EXAMPLEINSTANCE · step plan_signoff");
+    expect(instanceB.text).toContain("Workflow tianqi-mission · instance 01M4OTHERINSTANCE · step plan_signoff");
+    expect(instanceA.text).not.toBe(instanceB.text);
+    // The context line rides in a block too, not only the fallback text.
+    expect(JSON.stringify(instanceA.blocks)).toContain("instance 01M4EXAMPLEINSTANCE");
+    // Still no agent packet — the context line only, not the instance/step packet lines.
+    expect(instanceA.text).not.toContain("Workflow instance:");
+    expect(instanceA.text).not.toContain("Continuation:");
+  });
+
+  it("shortens very long workflow, instance and step tags so the gate still posts", () => {
+    const m = buildOutboundMessage({
+      ...gateRow,
+      tags: ["workflow", "gate", `workflow:${"w".repeat(5000)}`, `instance:${"<".repeat(2000)}`, `step:${"\u{1F600}".repeat(200)}`],
+    }, opts);
+    // Each value keeps 32 characters, an ellipsis, its last 33 and a 12-hex digest, cut before escaping, so no escape or emoji is split.
+    expect(m.text).toMatch(new RegExp(`Workflow w{32}…w{33} #[0-9a-f]{12} · instance (&lt;){32}…(&lt;){33} #[0-9a-f]{12} · step (\u{1F600}){32}…(\u{1F600}){33} #[0-9a-f]{12}`, "u"));
+    expect(m.text).not.toContain("w".repeat(34));
+    const context = m.blocks[1] as { type: string; elements: Array<{ text: string }> };
+    expect(context.type).toBe("context");
+    expect(m.text).toContain(context.elements[0]!.text);
+    expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
+  });
+
+  it("keeps two long instance labels that differ only at the end distinct", () => {
+    const instance = (suffix: string) => buildOutboundMessage(
+      { ...gateRow, tags: ["workflow", "gate", "workflow:tianqi-mission", `instance:${"p".repeat(79)}${suffix}`, "step:plan_signoff"] },
+      opts,
+    );
+    const a = instance("-A");
+    const b = instance("-B");
+    expect(a.text).toContain(`${"p".repeat(31)}-A #`);
+    expect(b.text).toContain(`${"p".repeat(31)}-B #`);
+    expect(a.text).not.toBe(b.text);
+    expect(JSON.stringify(a.blocks)).not.toBe(JSON.stringify(b.blocks));
+    // An instance label of ordinary length (a ULID) is shown whole.
+    expect(buildOutboundMessage(gateRow, opts).text).toContain("instance 01M4EXAMPLEINSTANCE");
+  });
+
+  it("keeps two long instance labels that differ only in the middle distinct", () => {
+    // These two labels share their first 6 digest characters (b20078), so a 6-character digest posted them identically.
+    const instance = (middle: string) => buildOutboundMessage(
+      { ...gateRow, tags: ["workflow", "gate", "workflow:tianqi-mission", `instance:${"p".repeat(35)}${middle}${"z".repeat(36)}`, "step:plan_signoff"] },
+      opts,
+    );
+    const a = instance("label-00000219");
+    const b = instance("label-00004669");
+    expect(a.text).toContain(`instance ${"p".repeat(32)}…${"z".repeat(33)} #b200786b3a4e`);
+    expect(b.text).toContain(`instance ${"p".repeat(32)}…${"z".repeat(33)} #b200784519a9`);
+    expect(a.text).not.toBe(b.text);
+    expect(JSON.stringify(a.blocks)).not.toBe(JSON.stringify(b.blocks));
+  });
+
+  it("never cuts the redaction marker in a shortened tag value", () => {
+    // Short leads keep the marker whole in the shortened value; longer ones leave it out. Never a part of it.
+    let keptWhole = 0;
+    for (let lead = 0; lead <= 40; lead++) {
+      const m = buildOutboundMessage({
+        ...gateRow,
+        tags: ["workflow", "gate", "workflow:tianqi-mission", `instance:${"x".repeat(lead)}xoxb-${"1".repeat(30)} ${"y".repeat(100)}`],
+      }, opts);
+      expect(m.text).not.toMatch(/\[redacted-se(?!cret\])/);
+      expect(m.text).not.toContain("xoxb-");
+      if (m.text.includes("[redacted-secret]")) keptWhole++;
+    }
+    expect(keptWhole).toBeGreaterThan(0);
+  });
+
+  it("shows only the instance when the whole context line would push a near-limit gate over budget", () => {
+    const tags = ["workflow", "gate", `workflow:${"&".repeat(100)}`, `instance:${"&".repeat(100)}`, `step:${"&".repeat(100)}`];
+    const summary = "s".repeat(2990);
+    const m = buildOutboundMessage({ ...gateRow, summary, tags }, opts);
+    expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
+    expect(m.text).toContain(summary);
+    expect(m.text).not.toContain("Workflow ");
+    expect(m.text).toMatch(/instance (&amp;){32}…(&amp;){33} #[0-9a-f]{12}/);
+    expect(JSON.stringify(m.blocks)).toContain("instance &amp;");
+    // The same tags with an ordinary summary keep the whole line.
+    expect(buildOutboundMessage({ ...gateRow, tags }, opts).text).toContain("Workflow &amp;");
+  });
+
+  it("leaves the context line out when even the instance part would push the gate over budget", () => {
+    const tags = ["workflow", "gate", `workflow:${"&".repeat(100)}`, `instance:${"&".repeat(100)}`];
+    const m = buildOutboundMessage(
+      { ...gateRow, summary: "s".repeat(2990), evidenceRef: `/tmp/${"e".repeat(850)}`, tags },
+      { sourceLabel: "vm-openrig-build" },
+    );
+    expect(m.text.length).toBeLessThanOrEqual(SLACK_TEXT_CAP);
+    expect(m.text).toContain(`Evidence: /tmp/${"e".repeat(850)}`);
+    expect(m.text).not.toContain("instance ");
+    expect(JSON.stringify(m.blocks)).not.toContain("instance ");
+  });
+
+  it("omits the step from the context line when the row carries no step tag", () => {
+    const m = buildOutboundMessage(gateRow, opts);
+    expect(m.text).toContain("Workflow tianqi-mission · instance 01M4EXAMPLEINSTANCE");
+    expect(m.text).not.toContain("step ");
+  });
+});

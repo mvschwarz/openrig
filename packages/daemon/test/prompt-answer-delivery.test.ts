@@ -62,7 +62,7 @@ describe("explicit prompt answer delivery", () => {
       : `────────────────────\n❯\u00a0${state.input}\n────────────────────\n\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents`;
     const transport = new SessionTransport({ db, rigRepo, sessionRegistry: registry, eventBus,
       agentActivityStore: activity, tmuxAdapter: tmux, sleep: async () => {} });
-    return { name, state, tmux, transport, eventBus };
+    return { name, state, tmux, transport, eventBus, activity };
   }
 
   it("delivers the intended choice instead of the focused choice, with no Enter into the next prompt", async () => {
@@ -77,8 +77,11 @@ describe("explicit prompt answer delivery", () => {
     expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'transport.prompt_override'").get()).toEqual({ n: 1 });
   });
 
-  it.each(["claude-code", "codex"] as const)("submits a complete still-staged text answer for %s", async runtime => {
+  it.each(["claude-code", "codex"] as const)("uses a pending permission to deliver an explicit still-staged text answer for %s", async runtime => {
     const f = fixture("text", runtime);
+    if (runtime === "codex") {
+      expect(f.activity.getLatestForNode({ sessionName: f.name })).toMatchObject({ state: "unknown", reason: "permission_request_pending" });
+    }
     const result = await f.transport.send(f.name, "green please", { dangerouslyInteract: true, reason: "answer the text field" });
     expect(result.ok).toBe(true);
     expect(f.state.submitted).toEqual(["green please"]);

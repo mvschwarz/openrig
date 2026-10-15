@@ -256,6 +256,10 @@ export interface PiRunnerLaunchOpts {
   trust: "approve" | "no-approve";
   /** Exact session file to resume (FR-6). Mutually exclusive with forkRef. */
   sessionFile?: string;
+  /** OPR.0.7.0.2: Pi only — the runner reports usage facts from persisted entries (usage.pi_cost_facts). */
+  usageFacts?: boolean;
+  /** OPR.0.7.0.2 K4: Pi only, with usageFacts — the runner looks up OpenRouter's charge (usage.pi_openrouter_charge). */
+  openRouterCharge?: boolean;
   /** Session file path or id to fork from via CLI --fork (FR-6). */
   forkRef?: string;
   /** Launch-attempt scope stamped into every runner sidecar write. */
@@ -284,6 +288,10 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   }
   if (opts.forkRef) {
     parts.push("--fork", shellQuote(opts.forkRef));
+  }
+  if (opts.usageFacts && opts.runtime !== "omp") {
+    parts.push("--usage-facts");
+    if (opts.openRouterCharge) parts.push("--openrouter-charge");
   }
   return parts.join(" ");
 }
