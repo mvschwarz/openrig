@@ -100,23 +100,43 @@ export async function runRemoteHttpOp(
   }
 }
 
+/** How a rig handle matched a host's rig list: an exact id first (archived rigs included), else one active rig of
+ *  that name. `unavailable` means the list itself couldn't be read or wasn't a list of rigs, so nothing is known. */
+export type RemoteRigLookup =
+  | { kind: "resolved"; rigId: string; byName: boolean }
+  | { kind: "ambiguous"; ids: string[] }
+  | { kind: "not_found" }
+  | { kind: "unavailable"; error: string | undefined };
+
+export async function lookupRemoteRigId(hostId: string, handle: string, deps: RemoteHostDeps): Promise<RemoteRigLookup> {
+  const psResult = await runRemoteHttpOp(hostId, "GET", "/api/ps?includeArchived=true", undefined, deps, {});
+  if (!psResult.ok) return { kind: "unavailable", error: psResult.error };
+  const rigs = psResult.data;
+  if (!Array.isArray(rigs) || !rigs.every((r) => r !== null && typeof r === "object" && typeof r.rigId === "string")) {
+    return { kind: "unavailable", error: "the host's rig list was not readable" };
+  }
+  const list = rigs as Array<{ rigId: string; name: string; archivedAt?: string | null }>;
+
+  const exactId = list.find((r) => r.rigId === handle);
+  if (exactId) return { kind: "resolved", rigId: exactId.rigId, byName: false };
+
+  const byName = list.filter((r) => r.name === handle && !r.archivedAt);
+  if (byName.length === 1) return { kind: "resolved", rigId: byName[0]!.rigId, byName: true };
+  if (byName.length > 1) return { kind: "ambiguous", ids: byName.map((r) => r.rigId) };
+  return { kind: "not_found" };
+}
+
 export async function resolveRemoteRigId(
   hostId: string,
   handle: string,
   deps: RemoteHostDeps,
 ): Promise<{ ok: true; rigId: string } | { ok: false; error: string }> {
-  const psResult = await runRemoteHttpOp(hostId, "GET", "/api/ps?includeArchived=true", undefined, deps, {});
-  if (!psResult.ok) return { ok: false, error: `cannot resolve rig on host ${hostId}: ${psResult.error}` };
-
-  const rigs = psResult.data as Array<{ rigId: string; name: string; archivedAt?: string | null }>;
-
-  const exactId = rigs.find((r) => r.rigId === handle);
-  if (exactId) return { ok: true, rigId: exactId.rigId };
-
-  const byName = rigs.filter((r) => r.name === handle && !r.archivedAt);
-  if (byName.length === 1) return { ok: true, rigId: byName[0]!.rigId };
-  if (byName.length > 1) {
-    return { ok: false, error: `ambiguous rig name "${handle}" on host ${hostId}: ${byName.length} active rigs share that name. Use the rig id instead.` };
+  const lookup = await lookupRemoteRigId(hostId, handle, deps);
+  switch (lookup.kind) {
+    case "resolved": return { ok: true, rigId: lookup.rigId };
+    case "unavailable": return { ok: false, error: `cannot resolve rig on host ${hostId}: ${lookup.error}` };
+    case "ambiguous":
+      return { ok: false, error: `ambiguous rig name "${handle}" on host ${hostId}: ${lookup.ids.length} active rigs share that name. Use the rig id instead.` };
+    case "not_found": return { ok: false, error: `rig "${handle}" not found on host ${hostId}` };
   }
-  return { ok: false, error: `rig "${handle}" not found on host ${hostId}` };
 }
