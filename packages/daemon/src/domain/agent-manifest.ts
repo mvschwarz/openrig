@@ -201,12 +201,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
   // Profile startup + lifecycle + effort advisory
   if (obj["profiles"] && typeof obj["profiles"] === "object" && !Array.isArray(obj["profiles"])) {
     for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
-      // A bare `default:` parses to null and used to validate, then crash normalizeAgentSpec.
-      if (!profileRaw || typeof profileRaw !== "object" || Array.isArray(profileRaw)) {
-        errors.push(`profiles.${profileName}: must be a map (an empty profile is {})`);
-        continue;
-      }
-      {
+      if (profileRaw && typeof profileRaw === "object") {
         const p = profileRaw as Record<string, unknown>;
         errors.push(...validateStartupBlock(p["startup"], `profiles.${profileName}.startup`));
         if (p["lifecycle"]) {
@@ -350,7 +345,8 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
   const profiles: Record<string, ProfileSpec> = {};
   if (raw["profiles"] && typeof raw["profiles"] === "object" && !Array.isArray(raw["profiles"])) {
     for (const [name, profileRaw] of Object.entries(raw["profiles"] as Record<string, unknown>)) {
-      profiles[name] = normalizeProfile(profileRaw as Record<string, unknown>);
+      // A bare `default:` parses to null; treat it as an empty profile, same as `default: {}`.
+      profiles[name] = normalizeProfile((profileRaw ?? {}) as Record<string, unknown>);
     }
   }
 
