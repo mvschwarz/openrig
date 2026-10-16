@@ -7,6 +7,7 @@ import type { SessionRegistry } from "../domain/session-registry.js";
 import type { ResumeMetadataRefresher } from "../domain/resume-metadata-refresher.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import { deriveRestoreAttemptReceipt } from "../domain/restore-attempt-receipt.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const snapshotsRoutes = new Hono();
 export const restoreRoutes = new Hono();
@@ -26,7 +27,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
 // POST /api/rigs/:rigId/snapshots
 snapshotsRoutes.post("/", async (c) => {
   const rigId = c.req.param("rigId")!;
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const kind = typeof body["kind"] === "string" ? body["kind"] : "manual";
   const { snapshotCapture, resumeMetadataRefresher, sessionRegistry, rigRepo } = getDeps(c);
 

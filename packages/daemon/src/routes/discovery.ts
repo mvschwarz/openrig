@@ -3,6 +3,7 @@ import type { DiscoveryCoordinator } from "../domain/discovery-coordinator.js";
 import type { DiscoveryRepository } from "../domain/discovery-repository.js";
 import type { ClaimService } from "../domain/claim-service.js";
 import { generateDraftRig } from "../domain/draft-rig-generator.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const discoveryRoutes = new Hono();
 
@@ -77,7 +78,7 @@ discoveryRoutes.post("/draft-rig", (c) => {
 discoveryRoutes.post("/:id/bind", async (c) => {
   const { claimService } = getDeps(c);
   const id = c.req.param("id")!;
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const rigId = typeof body["rigId"] === "string" ? body["rigId"] : "";
   const logicalId = typeof body["logicalId"] === "string" ? body["logicalId"] : "";
   const podNamespace = typeof body["podNamespace"] === "string" ? body["podNamespace"] : "";
@@ -139,7 +140,7 @@ discoveryRoutes.post("/:id/bind", async (c) => {
 discoveryRoutes.post("/:id/adopt", async (c) => {
   const { claimService } = getDeps(c);
   const id = c.req.param("id")!;
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const rigId = typeof body["rigId"] === "string" ? body["rigId"] : "";
   const target = body["target"] && typeof body["target"] === "object" ? body["target"] as Record<string, unknown> : null;
 

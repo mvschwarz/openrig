@@ -12,6 +12,7 @@ import type { FsOps } from "../domain/package-resolver.js";
 import type { EngineFsOps } from "../domain/install-engine.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const packagesRoutes = new Hono();
 
@@ -59,7 +60,7 @@ function realEngineFsOps(): EngineFsOps {
 
 // POST /api/packages/validate
 packagesRoutes.post("/validate", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const cwd = typeof body["cwd"] === "string" ? body["cwd"] : undefined;
 
@@ -104,7 +105,7 @@ packagesRoutes.post("/validate", async (c) => {
 
 // POST /api/packages/plan
 packagesRoutes.post("/plan", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const cwd = typeof body["cwd"] === "string" ? body["cwd"] : undefined;
   const targetRoot = typeof body["targetRoot"] === "string" ? body["targetRoot"] : "";
@@ -181,7 +182,7 @@ packagesRoutes.post("/plan", async (c) => {
 // POST /api/packages/install
 packagesRoutes.post("/install", async (c) => {
   const { packageRepo, installEngine, installVerifier } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const cwd = typeof body["cwd"] === "string" ? body["cwd"] : undefined;
   const targetRoot = typeof body["targetRoot"] === "string" ? body["targetRoot"] : "";

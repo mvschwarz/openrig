@@ -39,6 +39,7 @@ import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
 const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
@@ -260,7 +261,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json({ ok: false, code: "node_not_found", error: `Node "${logicalId}" not found in rig "${rigId}"` }, 404);
   }
 
-  const body = await c.req.json().catch(() => ({})) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string } };
+  const body = await readJsonObject(c) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string } };
   if (body.retryStartupFrom !== undefined) {
     const retry = body.retryStartupFrom;
     if (body.snapshotId || !retry || !retry.member || typeof retry.member !== "object" || Array.isArray(retry.member) || typeof retry.rigRoot !== "string") {
@@ -327,7 +328,7 @@ nodesRoutes.post("/launch-subset", async (c) => {
   if (!restoreOrchestrator) {
     return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
   }
-  const body = await c.req.json().catch(() => ({})) as { seats?: string[]; holdReason?: string; snapshotId?: string; plan?: boolean; nonTargetMode?: "unchanged" | "detach_and_hold" };
+  const body = await readJsonObject(c) as { seats?: string[]; holdReason?: string; snapshotId?: string; plan?: boolean; nonTargetMode?: "unchanged" | "detach_and_hold" };
   if (!Array.isArray(body.seats) || body.seats.length === 0) {
     return c.json({ ok: false, code: "invalid_request", error: "Request body must include a non-empty 'seats' array of logical IDs" }, 400);
   }
@@ -543,7 +544,7 @@ sessionAdminRoutes.post("/:sessionName/reconcile", terminalAuthGuard(), async (c
     return c.json({ error: "Reconcile unavailable: claim service not configured on this daemon." }, 503);
   }
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const rigId = typeof body["rigId"] === "string" ? body["rigId"] : undefined;
   const logicalId = typeof body["logicalId"] === "string" ? body["logicalId"] : undefined;
   if ((rigId && !logicalId) || (!rigId && logicalId)) {
@@ -584,7 +585,7 @@ sessionAdminRoutes.post("/:sessionName/clear-attention", terminalAuthGuard(), as
   if (!reconciler) {
     return c.json({ error: "Seat attention reconciler not configured on this daemon." }, 503);
   }
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const reason = typeof body["reason"] === "string" ? body["reason"].trim() : undefined;
   const result = await reconciler.clearAttention(sessionName, reason ? { reason } : undefined);
   if (!result.ok) {
@@ -605,7 +606,7 @@ sessionAdminRoutes.post("/:sessionName/resume-token", terminalAuthGuard(), async
   const { sessionRegistry } = getDeps(c);
   const eventBus = c.get("eventBus" as never) as EventBus | undefined;
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const reason = typeof body["reason"] === "string" ? body["reason"].trim() : "";
   if (!reason) {
     return c.json({ error: "missing_reason", message: "set-resume-token requires --reason (operator attestation)." }, 400);

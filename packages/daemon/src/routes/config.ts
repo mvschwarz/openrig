@@ -24,6 +24,7 @@ import {
 import {
   ensureDefaultWorkspace,
 } from "../domain/workspace/default-workspace-scaffold.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 interface InitWorkspaceBody {
   root?: string;
@@ -56,7 +57,7 @@ export function configRoutes(opts: { home?: string } = {}): Hono {
   router.post("/init-workspace", async (c) => {
     const store = c.get("settingsStore" as never) as SettingsStore | undefined;
     if (!store) return c.json({ error: "settings_unavailable" }, 503);
-    const body = (await c.req.json<InitWorkspaceBody>().catch(() => ({}))) as InitWorkspaceBody;
+    const body = await readJsonObject<InitWorkspaceBody>(c);
     const root = body.root ?? (store.resolveOne("workspace.root").value as string);
     const dryRun = !!body.dryRun;
     const result = ensureDefaultWorkspace({ root, dryRun });
@@ -94,7 +95,7 @@ export function configRoutes(opts: { home?: string } = {}): Hono {
     if (!isDynamic && !isSettingsValidKey(key)) {
       return c.json({ error: `Unknown config key '${key}'`, validKeys: SETTINGS_VALID_KEYS }, 400);
     }
-    const body = (await c.req.json<{ value?: string }>().catch(() => ({}))) as { value?: string };
+    const body = await readJsonObject<{ value?: string }>(c);
     if (typeof body.value !== "string") {
       return c.json({ error: "value_required", hint: "POST body must be { \"value\": <string> }" }, 400);
     }

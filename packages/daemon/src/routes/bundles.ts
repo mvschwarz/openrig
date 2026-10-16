@@ -218,6 +218,7 @@ function provenanceFromRequestBody(raw: unknown): BundleProvenance | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 import type { FsOps } from "../domain/package-resolver.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const bundleRoutes = new Hono();
 
@@ -725,7 +726,7 @@ function bundleBuildIdentity(manifest: { provenance?: BundleProvenance; configur
 // POST /api/bundles/create
 bundleRoutes.post("/create", async (c) => {
   const { eventBus } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const specPath = typeof body["specPath"] === "string" ? body["specPath"] : "";
   const bundleName = typeof body["bundleName"] === "string" ? body["bundleName"] : "";
   const bundleVersion = typeof body["bundleVersion"] === "string" ? body["bundleVersion"] : "";
@@ -942,7 +943,7 @@ bundleRoutes.post("/create", async (c) => {
 
 // POST /api/bundles/inspect
 bundleRoutes.post("/inspect", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const bundlePath = typeof body["bundlePath"] === "string" ? body["bundlePath"] : "";
 
   if (!bundlePath) return c.json({ error: "bundlePath is required" }, 400);
@@ -1118,7 +1119,7 @@ bundleRoutes.get("/history", async (c) => {
 // POST /api/bundles/install — reuses full bootstrap lifecycle
 bundleRoutes.post("/install", async (c) => {
   const { bootstrapOrchestrator, bootstrapRepo, eventBus, rigRepo } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const bundlePath = typeof body["bundlePath"] === "string" ? body["bundlePath"] : "";
   const plan = body["plan"] === true;
   const autoApprove = body["autoApprove"] === true;

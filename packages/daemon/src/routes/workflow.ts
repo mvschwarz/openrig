@@ -13,6 +13,7 @@ import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 import { declaredProject } from "../domain/workspace/project-read.js";
 import { WorkflowSpecError } from "../domain/workflow-spec-cache.js";
 import { WorkflowHumanDestinationError } from "../domain/workflow-human-destination.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 /**
  * Workflow runtime HTTP routes (PL-004 Phase D). Backs `rig workflow` CLI.
@@ -133,7 +134,7 @@ export function workflowRoutes(): Hono {
   }
 
   app.post("/validate", async (c) => {
-    const body = await c.req.json<{ specPath?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ specPath?: string }>(c);
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     try {
       const result = getRuntime(c).validate(body.specPath);
@@ -144,7 +145,7 @@ export function workflowRoutes(): Hono {
   });
 
   app.post("/compile", async (c) => {
-    const body = await c.req.json<{ missionPath?: string; operationKey?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ missionPath?: string; operationKey?: string }>(c);
     if (!body.missionPath) return c.json({ error: "missionPath is required" }, 400);
     try {
       return c.json(getRuntime(c).compileLifecycle(body.missionPath, body.operationKey));
@@ -194,7 +195,7 @@ export function workflowRoutes(): Hono {
   });
 
   app.post("/:instance_id/revision", async (c) => {
-    const body = await c.req.json<Parameters<WorkflowRuntime["reviseGraph"]>[0]>().catch(() => ({} as never));
+    const body = await readJsonObject<Parameters<WorkflowRuntime["reviseGraph"]>[0]>(c);
     try { return c.json(getRuntime(c).reviseGraph({ ...body, instanceId: c.req.param("instance_id") })); }
     catch (err) { return errorResponse(c, err); }
   });
@@ -415,7 +416,7 @@ export function workflowRoutes(): Hono {
 
   app.post("/:instance_id/abort", async (c) => {
     const instanceId = c.req.param("instance_id");
-    const body = await c.req.json<{ reason?: string; actorSession?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ reason?: string; actorSession?: string }>(c);
     if (!body.reason) return c.json({ error: "reason is required" }, 400);
     if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
     try {

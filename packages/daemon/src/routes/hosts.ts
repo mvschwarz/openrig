@@ -47,6 +47,7 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { existsSync } from "node:fs";
 import { loadHumanRegistry, type LoadResult } from "../domain/gateway/human-registry.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 const PAIR_TTL_MS = 10 * 60 * 1000;
 const PAIR_PRUNE_GRACE_MS = 60 * 60 * 1000;
@@ -159,7 +160,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         message: "this daemon runs without OPENRIG_AUTH_BEARER_TOKEN; pairing has no credential to issue. Set OPENRIG_AUTH_BEARER_TOKEN on the target daemon and retry.",
       }, 409);
     }
-    const body = (await c.req.json<{ requester?: string; human?: string }>().catch(() => ({}))) as { requester?: string; human?: string };
+    const body = await readJsonObject<{ requester?: string; human?: string }>(c);
     const registry = (opts?.humanRegistry ?? loadHumanRegistry)();
     if (!registry.ok) return c.json({ error: "pair_human_registry_unavailable", message: registry.error }, 409);
     const humans = body.human ? registry.entities.filter((human) => human.address === body.human) : registry.entities;
@@ -260,7 +261,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   });
 
   router.post("/pair", async (c) => {
-    const body = (await c.req.json<{ url?: string; id?: string; requester?: string; human?: string }>().catch(() => ({}))) as { url?: string; id?: string; requester?: string; human?: string };
+    const body = await readJsonObject<{ url?: string; id?: string; requester?: string; human?: string }>(c);
     const rawUrl = (body.url ?? "").trim();
     if (!rawUrl) return c.json({ error: "pair_url_required", message: "body.url is required (the target daemon's address)" }, 400);
     let target: URL;

@@ -1,4 +1,4 @@
-import type { ErrorHandler, MiddlewareHandler } from "hono";
+import type { Context, ErrorHandler, MiddlewareHandler } from "hono";
 
 // Errors thrown by c.req.json() while parsing the request body. Kept by
 // identity, so no other SyntaxError is ever mistaken for a bad body.
@@ -41,3 +41,14 @@ export const jsonBodyErrorHandler: ErrorHandler = (err, c) => {
   console.error(err);
   return c.text("Internal Server Error", 500);
 };
+
+/**
+ * Reads an optional JSON object body. A missing or malformed body, and valid
+ * JSON that is not an object (`null`, a number, a list), all read as `{}`, so
+ * the route answers with its own "field is required" refusal instead of
+ * throwing on `null["field"]`.
+ */
+export async function readJsonObject<T = Record<string, unknown>>(c: Context): Promise<T> {
+  const body: unknown = await c.req.json().catch(() => null);
+  return body !== null && typeof body === "object" && !Array.isArray(body) ? (body as T) : ({} as T);
+}

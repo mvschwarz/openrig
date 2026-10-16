@@ -24,6 +24,7 @@ import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../d
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 interface SubsystemHandle {
   restart: () => void;
@@ -77,7 +78,7 @@ export function gatewayRoutes(opts: {
   app.post("/slack/:operation", async (c) => {
     const operation = c.req.param("operation");
     if (operation !== "enable" && operation !== "disable") return c.notFound();
-    const body = (await c.req.json<{ actor?: string; reason?: string }>().catch(() => ({} as { actor?: string; reason?: string }))) ?? {};
+    const body = await readJsonObject<{ actor?: string; reason?: string }>(c);
     const actor = requireSenderIdentity(c, { verb: `slack ${operation}`, bodyClaim: typeof body.actor === "string" ? body.actor : null });
     if (!actor.ok) return actor.response;
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";

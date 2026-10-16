@@ -25,6 +25,7 @@ import { composeNamedProfile, composeProfile, ProfileComposeError, type ComposeI
 import { isSeatRecapAddress, makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
 import { AddressResolutionError, parseAddress, resolveAddress } from "../domain/markdown-address.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 interface ComposeBody {
   outRef?: string;
@@ -78,7 +79,7 @@ export function contextPacksRoutes(): Hono {
   router.post("/library/compose", async (c) => {
     const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
     if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
-    const body = await c.req.json<ComposeBody>().catch(() => ({} as ComposeBody));
+    const body = await readJsonObject<ComposeBody>(c);
     if (
       typeof body.outRef !== "string" ||
       !Array.isArray(body.sources) ||

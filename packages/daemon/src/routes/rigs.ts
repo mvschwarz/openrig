@@ -39,6 +39,7 @@ import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { convergeOp } from "../domain/topology-converge.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 import type { SelfAttachService } from "../domain/self-attach-service.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const rigsRoutes = new Hono();
 
@@ -303,7 +304,7 @@ rigsRoutes.post("/:id/launch-plan", async (c) => {
   const rig = repo.getRig(c.req.param("id"));
   if (!rig) return c.json({ error: `Rig "${c.req.param("id")}" not found` }, 404);
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const freshLogicalIds = Array.isArray(body["freshLogicalIds"])
     ? (body["freshLogicalIds"] as unknown[]).filter((v): v is string => typeof v === "string")
     : undefined;
@@ -317,7 +318,7 @@ rigsRoutes.post("/:id/launch-plan", async (c) => {
 });
 
 rigsRoutes.post("/", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const name = body["name"];
   if (!name || typeof name !== "string") {
     return c.json({ error: "name is required" }, 400);
@@ -478,7 +479,7 @@ rigsRoutes.post("/:id/archive", async (c) => {
   if (!rig) {
     return c.json({ error: "rig not found" }, 404);
   }
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const force = body["force"] === true;
 
   // Preserve main's action decision: only a stored running session with
@@ -542,7 +543,7 @@ rigsRoutes.post("/:id/release", async (c) => {
     return c.json({ error: "Rig lifecycle service not available" }, 500);
   }
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await rigLifecycleService.releaseRig(rigId, {
     delete: body["delete"] === true,
   });
@@ -569,7 +570,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
     return c.json({ error: "Self-attach service not available" }, 500);
   }
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const logicalId = typeof body["logicalId"] === "string" ? body["logicalId"].trim() : "";
   const podNamespace = typeof body["podNamespace"] === "string" ? body["podNamespace"].trim() : "";
   const memberName = typeof body["memberName"] === "string" ? body["memberName"].trim() : "";
@@ -646,7 +647,7 @@ rigsRoutes.post("/:id/up", async (c) => {
 
   // OPR.0.3.4.4 — this independent Explorer restore route previously parsed
   // NO body, so plan:true was silently ignored and the route always mutated.
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const plan = body["plan"] === true;
   // OPR.0.3.4.1 — thread freshLogicalIds so the id-based route supports
   // the awaiting-decision fresh-prime retry (operation B).
@@ -754,7 +755,7 @@ rigsRoutes.post("/:rigId/expand", async (c) => {
     return c.json({ error: "Expansion service not available" }, 500);
   }
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const pod = normalizeExpansionPodFragment((body["pod"] ?? {}) as Record<string, unknown>);
   if (!pod) {
     return c.json({ error: "pod is required with id and members[]" }, 400);
@@ -796,7 +797,7 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
     return c.json({ error: "Pod instantiator not available" }, 500);
   }
 
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const member = body["member"];
   if (!member || typeof member !== "object" || Array.isArray(member)) {
     return c.json({ error: "member is required (a member fragment with id, runtime, agent_ref)" }, 400);

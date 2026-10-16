@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { RigTeardownOrchestrator } from "../domain/rig-teardown.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import { RigNotFoundError } from "../domain/errors.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const downRoutes = new Hono();
 
@@ -22,7 +23,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
  */
 downRoutes.post("/", async (c) => {
   const { teardownOrchestrator } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const rigId = typeof body["rigId"] === "string" ? body["rigId"] : "";
   const deleteRig = body["delete"] === true;
   const force = body["force"] === true;

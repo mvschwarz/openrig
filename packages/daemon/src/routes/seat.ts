@@ -19,6 +19,7 @@ import { buildRebuildPrimingChain } from "../domain/rebuild-priming-chain.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const seatRoutes = new Hono();
 
@@ -92,7 +93,7 @@ seatRoutes.get("/status/:seatRef", (c) => {
 });
 
 seatRoutes.post("/handover/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatHandoverService({
     db: rigRepo.db,
@@ -257,7 +258,7 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
 }
 
 seatRoutes.post("/set-permissions/:seatRef", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const body = await readJsonObject<Record<string, unknown>>(c);
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   if (!body || Array.isArray(body) || typeof body.mode !== "string") return c.json({ error: "mode is required" }, 400);
@@ -270,7 +271,7 @@ seatRoutes.post("/set-permissions/:seatRef", async (c) => {
 
 // `rig policy apply <name> --seat`: re-point an existing seat's stored permission_policy; the running process is unchanged.
 seatRoutes.post("/set-policy/:seatRef", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const body = await readJsonObject<Record<string, unknown>>(c);
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   if (!body || Array.isArray(body) || typeof body.ref !== "string") return c.json({ error: "ref is required" }, 400);
@@ -281,7 +282,7 @@ seatRoutes.post("/set-policy/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/set-model/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).setModel({
     seatRef: c.req.param("seatRef")!,
     model: typeof body["model"] === "string" ? body["model"] : "",
@@ -295,7 +296,7 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
 // OPR.0.7.0.7 — save (or, with clear: true, remove) one seat's effort choice for its next
 // managed continuation. A distinct route fails closed against daemons without it.
 seatRoutes.post("/set-effort/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const clear = body["clear"] === true;
   if (clear && body["effort"] !== undefined) return c.json({ ok: false, code: "invalid_effort", message: "Pass an effort level or clear, not both." }, 400);
   const result = await seatLifecycleService(c).setEffort({
@@ -317,7 +318,7 @@ seatRoutes.get("/effort/:seatRef", async (c) => {
 
 // A distinct route fails closed against older daemons that do not support previews.
 seatRoutes.post("/launch-plan/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).planFresh({
     seatRef: c.req.param("seatRef")!, fresh: body["fresh"] === true, stop: body["stop"] === true,
   });
@@ -325,7 +326,7 @@ seatRoutes.post("/launch-plan/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/launch/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).launchFresh({
     seatRef: c.req.param("seatRef")!,
     fresh: body["fresh"] === true,
@@ -346,7 +347,7 @@ seatRoutes.post("/restart-plan/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/restart/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).restartInPlace({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
@@ -356,7 +357,7 @@ seatRoutes.post("/restart/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/restart-verify/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).verifyRestartInPlace({
     seatRef: c.req.param("seatRef")!,
     expectAccount: typeof body["expectAccount"] === "string" ? body["expectAccount"] : null,
@@ -370,7 +371,7 @@ seatRoutes.post("/continue/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/stop/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).stopSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
@@ -381,7 +382,7 @@ seatRoutes.post("/stop/:seatRef", async (c) => {
 });
 
 seatRoutes.post("/clean/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const result = await seatLifecycleService(c).cleanSeat({
     seatRef: c.req.param("seatRef")!,
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
@@ -398,7 +399,7 @@ seatRoutes.post("/clean/:seatRef", async (c) => {
 // ClaimService and never routes through converge/reconcile — no routing,
 // binding, session, transcript, or identity mutation is possible here.
 seatRoutes.post("/switch-client/:seatRef", async (c) => {
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatSwitchClientService({
     rigRepo,

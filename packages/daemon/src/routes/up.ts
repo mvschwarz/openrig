@@ -19,6 +19,7 @@ import { remoteUpLeaf } from "../domain/topology/remote-up-leaf.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { HttpHostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const upRoutes = new Hono();
 
@@ -202,7 +203,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
 // POST /api/up — the hero route
 upRoutes.post("/", async (c) => {
   const { bootstrapOrchestrator, bootstrapRepo, eventBus, upRouter } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const plan = body["plan"] === true;
   const autoApprove = body["autoApprove"] === true;

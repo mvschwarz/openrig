@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
 import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const bootstrapRoutes = new Hono();
 
@@ -34,7 +35,7 @@ function planFailureStatus(result: { stages: Array<{ stage: string; status: stri
 // POST /api/bootstrap/plan
 bootstrapRoutes.post("/plan", async (c) => {
   const { bootstrapOrchestrator, eventBus } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
 
@@ -76,7 +77,7 @@ bootstrapRoutes.post("/plan", async (c) => {
 // POST /api/bootstrap/apply
 bootstrapRoutes.post("/apply", async (c) => {
   const { bootstrapOrchestrator, bootstrapRepo, eventBus } = getDeps(c);
-  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const body: Record<string, unknown> = await readJsonObject(c);
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
 
   if (!sourceRef) {

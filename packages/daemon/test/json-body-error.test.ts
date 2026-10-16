@@ -25,6 +25,31 @@ describe("malformed request bodies", () => {
   }
 });
 
+describe("JSON bodies that are not objects", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  it("read as an empty body, so routes answer with their own refusal instead of a 500", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const rigId = rigRepo.createRig("r").id;
+    const paths = [
+      "/api/down", "/api/rigs", "/api/up", "/api/bootstrap", "/api/packages/validate", "/api/packages/install",
+      "/api/bundles/create", "/api/bundles/inspect", "/api/bundles/install", "/api/startup/kernel",
+      `/api/rigs/${rigId}/up`, `/api/rigs/${rigId}/release`, `/api/rigs/${rigId}/expand`, `/api/rigs/${rigId}/snapshots`,
+      "/api/sessions/x/clear-attention",
+      "/api/queue/q1/claim", "/api/queue/q1/fallback", "/api/queue/inbox/i1/absorb",
+      "/api/compaction/trigger", "/api/config/init-workspace", "/api/workflow/validate", "/api/agent-images/snapshot",
+    ];
+    for (const path of paths) {
+      for (const body of ["null", "5", "[]", "\"text\""]) {
+        const res = await app.request(path, post(body));
+        expect(res.status, `${path} ${body}`).not.toBe(500);
+      }
+    }
+  });
+});
+
 describe("jsonBodyErrorHandler", () => {
   function app(route: (c: Context) => Promise<Response> | Response): Hono {
     const app = new Hono();

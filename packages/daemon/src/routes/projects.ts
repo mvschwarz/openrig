@@ -15,6 +15,7 @@ import { ClassificationAttemptError } from "../domain/classification-attempts.js
 
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 /**
  * Coordination L2 — Project (Classifier) HTTP routes (PL-004 Phase B).
@@ -114,14 +115,14 @@ export function projectsRoutes(): Hono {
     return c.json(capture?.status() ?? {enabled: false, error: c.get("shadowCaptureError" as never) ?? null});
   });
   app.post("/shadow/drain", async c => {
-    const body = await c.req.json<{ actor?: unknown }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ actor?: unknown }>(c);
     const actor = sender(c, body.actor, "actor"); if (!actor.ok) return actor.response;
     const capture = c.get("shadowCapture" as never) as ShadowCapture | undefined;
     if (!capture) return c.json({enabled: false, error: c.get("shadowCaptureError" as never) ?? null}, 409);
     return c.json(await capture.drain());
   });
   app.post("/shadow/stop", async c => {
-    const body = await c.req.json<{ actor?: unknown }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ actor?: unknown }>(c);
     const actor = sender(c, body.actor, "actor"); if (!actor.ok) return actor.response;
     const capture = c.get("shadowCapture" as never) as ShadowCapture | undefined;
     return c.json(capture ? await capture.stop() : {enabled: false, error: c.get("shadowCaptureError" as never) ?? null});
@@ -136,7 +137,7 @@ export function projectsRoutes(): Hono {
   // evaluateDeadness call). Default OFF — operators / classifiers
   // explicitly request the proactive cleanup.
   app.post("/lease/acquire", async (c) => {
-    const body = await c.req.json<{ classifierSession?: string; evaluateDeadnessFirst?: boolean }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ classifierSession?: string; evaluateDeadnessFirst?: boolean }>(c);
     const actor = sender(c, body.classifierSession);
     if (!actor.ok) return actor.response;
     try {
@@ -152,7 +153,7 @@ export function projectsRoutes(): Hono {
 
   // POST /lease/heartbeat — update last_heartbeat + extend expires_at.
   app.post("/lease/heartbeat", async (c) => {
-    const body = await c.req.json<{ leaseId?: string; classifierSession?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ leaseId?: string; classifierSession?: string }>(c);
     if (typeof body.leaseId !== "string" || !body.leaseId.trim()) return c.json({ error: "invalid_field", field: "leaseId" }, 400);
     const actor = sender(c, body.classifierSession);
     if (!actor.ok) return actor.response;
@@ -246,7 +247,7 @@ export function projectsRoutes(): Hono {
     const ledger = getAttempts(c);
     if (!ledger) return attemptsUnavailable(c);
     // The ledger validates remaining consumed fields after sender resolution.
-    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as never));
+    const body = await readJsonObject<Record<string, unknown>>(c);
     const actor = sender(c, body.classifierSession);
     if (!actor.ok) return actor.response;
     try {
@@ -268,7 +269,7 @@ export function projectsRoutes(): Hono {
       const ledger = getAttempts(c);
       if (!ledger) return attemptsUnavailable(c);
       // The ledger shape-checks the remaining fields (invalid_field).
-      const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as never));
+      const body = await readJsonObject<Record<string, unknown>>(c);
       const actor = sender(c, body.classifierSession);
       if (!actor.ok) return actor.response;
       if (body.reason === undefined) return c.json({ error: "reason is required" }, 400);

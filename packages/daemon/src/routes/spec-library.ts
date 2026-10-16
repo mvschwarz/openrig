@@ -14,6 +14,7 @@ import {
 } from "../domain/spec-library-workflow-scanner.js";
 import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
 import type { EventBus } from "../domain/event-bus.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export function specLibraryRoutes(): Hono {
   const router = new Hono();
@@ -61,7 +62,7 @@ export function specLibraryRoutes(): Hono {
   router.post("/active-lens", async (c) => {
     const store = c.get("activeLensStore" as never) as ActiveLensStore | undefined;
     if (!store) return c.json({ error: "active_lens_unavailable" }, 503);
-    const body = await c.req.json<{ specName?: string; specVersion?: string }>().catch(() => ({} as { specName?: string; specVersion?: string }));
+    const body = await readJsonObject<{ specName?: string; specVersion?: string }>(c);
     if (!body.specName || !body.specVersion) {
       return c.json({ error: "specName and specVersion are required" }, 400);
     }
@@ -202,7 +203,7 @@ export function specLibraryRoutes(): Hono {
   // POST /:id/rename — rename a user-file library entry
   router.post("/:id/rename", async (c) => {
     const lib = c.get("specLibraryService" as never) as SpecLibraryService;
-    const body = await c.req.json().catch(() => ({}));
+    const body = await readJsonObject(c);
     const name = body["name"];
     if (typeof name !== "string" || name.trim().length === 0) {
       return c.json({ ok: false, code: "invalid_spec", error: "name is required" }, 400);

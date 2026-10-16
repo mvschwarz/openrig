@@ -26,6 +26,7 @@ import { discoverResumeToken } from "../domain/agent-images/resume-token-discove
 import { convergeOp } from "../domain/topology-converge.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { AgentImageError, type AgentImageEntry } from "../domain/agent-images/agent-image-types.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 interface PruneBody {
   dryRun?: boolean;
@@ -132,7 +133,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.post("/snapshot", async (c) => {
     const capturer = c.get("snapshotCapturer" as never) as SnapshotCapturer | undefined;
     if (!capturer) return c.json({ error: "snapshot_capturer_unavailable" }, 503);
-    const body = (await c.req.json<SnapshotBody>().catch(() => ({}))) as SnapshotBody;
+    const body = await readJsonObject<SnapshotBody>(c);
     if (!body.sourceSession || !body.name) {
       return c.json({
         error: "missing_required_fields",
@@ -186,7 +187,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
     const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
     if (!db || !podInstantiator) return c.json({ error: "fork_composer_unavailable" }, 503);
 
-    const body = (await c.req.json<ForkBody>().catch(() => ({}))) as ForkBody;
+    const body = await readJsonObject<ForkBody>(c);
     const sourceSession = body.sourceSession;
     const rigId = body.rigId;
     const pod = body.pod;
@@ -305,7 +306,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.post("/prune", async (c) => {
     const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
     if (!lib) return c.json({ error: "agent_image_library_unavailable" }, 503);
-    const body = (await c.req.json<PruneBody>().catch(() => ({}))) as PruneBody;
+    const body = await readJsonObject<PruneBody>(c);
     const dryRun = body.dryRun !== false;
     const force = !!body.force;
     const images = lib.list();

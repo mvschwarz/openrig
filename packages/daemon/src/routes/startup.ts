@@ -27,6 +27,7 @@ import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { seatLifecycleService } from "./seat.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 export const startupRoutes = new Hono();
 startupRoutes.use("*", async (c, next) => {
@@ -100,7 +101,7 @@ startupRoutes.post("/terminal", (c) => exclusive(c, "terminal", async () => {
 
 // First setup materializes the builtin topology only. No occupant is launched.
 startupRoutes.post("/kernel", (c) => exclusive(c, "kernel", async () => {
-  const body = await c.req.json().catch(() => ({}));
+  const body = await readJsonObject(c);
   if (body.runtime !== "codex" && body.runtime !== "claude-code") return c.json({ ok: false, message: "Choose an authenticated runtime for the new kernel." }, 400);
   const existing = repo(c).findRigsByName("kernel");
   if (existing.length > 1) return c.json({ ok: false, message: "More than one kernel exists; select an exact rig before continuing." }, 409);
@@ -144,8 +145,8 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
   const node = rig?.nodes.find((entry) => entry.logicalId === c.req.param("logicalId"));
   if (!rig || !node) return c.json({ ok: false, message: "Selected seat is no longer available." }, 404);
   return exclusive(c, node.id, async () => {
-    const body = await c.req.json().catch(() => ({}));
-    if (!["resume", "start", "fresh", "continue"].includes(body.action) || typeof body.revision !== "string") return c.json({ ok: false, message: "A named action and current seat revision are required." }, 400);
+    const body = await readJsonObject(c);
+    if (!["resume", "start", "fresh", "continue"].includes(body.action as string) || typeof body.revision !== "string") return c.json({ ok: false, message: "A named action and current seat revision are required." }, 400);
     if (body.revision !== startupRevision(repo(c).db, node)) return c.json({ ok: false, code: "selection_changed", message: "The seat changed since this choice was displayed. Refresh and make a new decision." }, 409);
     const observed = await observeSeat(c, rig, node);
     if (body.action === "continue") {

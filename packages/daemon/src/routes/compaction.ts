@@ -5,6 +5,7 @@ import type { ClaudeCompactionEnforcer, ManualCompactionOutcome } from "../domai
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { SessionTransport } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 /**
  * OPR.0.4.3.14 — manual configurable compaction trigger route.
@@ -36,7 +37,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       }, 503);
     }
 
-    const body = await c.req.json<{ session?: string; skipMap?: boolean }>().catch(() => ({} as { session?: string; skipMap?: boolean }));
+    const body = await readJsonObject<{ session?: string; skipMap?: boolean }>(c);
     if (!body.session) {
       return c.json({ ok: false, error: "Missing required field: session" }, 400);
     }
@@ -119,7 +120,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;
     const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
     if (!enforcer || !transport) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
-    const body = await c.req.json<{ session?: string }>().catch(() => ({} as { session?: string }));
+    const body = await readJsonObject<{ session?: string }>(c);
     if (!body.session) return c.json({ ok: false, error: "Missing required field: session" }, 400);
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, resolved.code === "ambiguous" ? 409 : 404);

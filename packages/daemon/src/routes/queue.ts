@@ -25,6 +25,7 @@ import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import type { HumanQuestion } from "../domain/human-questions.js";
 import { queryLimit } from "./query-limit.js";
+import { readJsonObject } from "../middleware/json-body-error.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -550,7 +551,7 @@ export function queueRoutes(): Hono {
   // POST /:qitemId/claim
   app.post("/:qitemId/claim", async (c) => {
     const qitemId = c.req.param("qitemId");
-    const body = await c.req.json<{ destinationSession?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ destinationSession?: string }>(c);
     // P21 I3: the claimant is the transport-derived sender, never body.destinationSession.
     const identity = requireSenderIdentity(c, { verb: "queue claim", bodyClaim: body.destinationSession });
     if (!identity.ok) return identity.response;
@@ -566,7 +567,7 @@ export function queueRoutes(): Hono {
   // POST /:qitemId/unclaim
   app.post("/:qitemId/unclaim", async (c) => {
     const qitemId = c.req.param("qitemId");
-    const body = await c.req.json<{ destinationSession?: string; reason?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ destinationSession?: string; reason?: string }>(c);
     // P21 I3: the claimant is the transport-derived sender, never body.destinationSession.
     const identity = requireSenderIdentity(c, { verb: "queue unclaim", bodyClaim: body.destinationSession });
     if (!identity.ok) return identity.response;
@@ -820,7 +821,7 @@ export function queueRoutes(): Hono {
   // POST /:qitemId/fallback
   app.post("/:qitemId/fallback", async (c) => {
     const qitemId = c.req.param("qitemId");
-    const body = await c.req.json<{ fallbackDestination?: string; reason?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ fallbackDestination?: string; reason?: string }>(c);
     if (!body.fallbackDestination) return c.json({ error: "fallbackDestination is required" }, 400);
     try {
       const item = getRepo(c).routeToFallback(qitemId, body.fallbackDestination, body.reason ?? "manual");
@@ -1174,7 +1175,7 @@ export function queueRoutes(): Hono {
 
   app.post("/inbox/:inboxId/absorb", async (c) => {
     const inboxId = c.req.param("inboxId");
-    const body = await c.req.json<{ receiverSession?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ receiverSession?: string }>(c);
     // P21 I3: the receiver is the transport-derived sender, never body.receiverSession.
     const identity = requireSenderIdentity(c, { verb: "inbox absorb", bodyClaim: body.receiverSession });
     if (!identity.ok) return identity.response;
@@ -1188,7 +1189,7 @@ export function queueRoutes(): Hono {
 
   app.post("/inbox/:inboxId/deny", async (c) => {
     const inboxId = c.req.param("inboxId");
-    const body = await c.req.json<{ receiverSession?: string; reason?: string }>().catch(() => ({} as never));
+    const body = await readJsonObject<{ receiverSession?: string; reason?: string }>(c);
     // P21 I3: the receiver is the transport-derived sender, never body.receiverSession.
     const identity = requireSenderIdentity(c, { verb: "inbox deny", bodyClaim: body.receiverSession });
     if (!identity.ok) return identity.response;
