@@ -72,7 +72,7 @@ export interface MissionScopes {
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
+  const match = /^---\s*\n([\s\S]*?)\r?\n---/.exec(content);
   return match ? match[1]! : null;
 }
 
@@ -83,7 +83,7 @@ function fmValue(fm: string, key: string): string | null {
 
 /** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. */
 function fmList(fm: string, key: string): string[] {
-  const lines = fm.split("\n");
+  const lines = fm.split(/\r?\n/);
   const out: string[] = [];
   let inKey = false;
   for (const line of lines) {
@@ -110,7 +110,7 @@ function miniRequirements(content: string): string[] {
   const body = sectionBody(content, "Mini-requirements");
   const items: string[] = [];
   let current: string | null = null;
-  for (const line of body.split("\n")) {
+  for (const line of body.split(/\r?\n/)) {
     const m = /^(\d+)\.\s+(.*)$/.exec(line);
     if (m) {
       if (current !== null) items.push(current.trim());
@@ -178,7 +178,7 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
     entryPath = null;
     entryIsSpec = false;
   };
-  for (const line of fm.split("\n")) {
+  for (const line of fm.split(/\r?\n/)) {
     if (/^\s+-\s/.test(line)) closeEntry();
     const p = /^\s+(?:-\s+)?path:\s*(.+)$/.exec(line);
     if (p) entryPath = p[1]!.trim();
