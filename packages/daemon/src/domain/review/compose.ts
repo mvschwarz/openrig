@@ -146,7 +146,7 @@ export function parseC1Header(content: string, relPath: string, droppedAtIso: st
     mediaRefs: [],
     droppedAt: droppedAtIso,
   };
-  const m = content.match(/^---\n([\s\S]*?)\n---/);
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   out.mediaRefs = extractMediaRefs(m ? content.slice(m[0].length) : content);
   if (!m) return out;
   let fm: Record<string, unknown>;
