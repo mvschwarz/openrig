@@ -24,9 +24,9 @@ export interface ParseError {
   error: string;
 }
 
-// Leading `---\n<yaml>\n---\n<body>` frontmatter block. Non-greedy YAML capture so the FIRST closing
-// `---` ends the frontmatter; everything after is the body (preserved exactly).
-const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
+// Leading `---\n<yaml>\n---\n<body>` frontmatter block (LF or CRLF line ends). Non-greedy YAML capture so the
+// FIRST closing `---` ends the frontmatter; everything after is the body (preserved exactly).
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?([\s\S]*)$/;
 
 /** Parse a policy spec into its frontmatter contract + preserved body. Never throws. */
 export function parsePolicySpec(raw: string): ParsedPolicySpec | ParseError {
