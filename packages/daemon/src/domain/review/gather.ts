@@ -323,7 +323,7 @@ export class ReviewGatherer {
 
   private parseFrontmatter(content: string | null): Record<string, unknown> {
     if (!content) return {};
-    const m = content.match(/^---\n([\s\S]*?)\n---/);
+    const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (!m) return {};
     try {
       return (YAML.parse(m[1]!) ?? {}) as Record<string, unknown>;
