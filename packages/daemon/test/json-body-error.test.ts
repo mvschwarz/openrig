@@ -25,6 +25,41 @@ describe("malformed request bodies", () => {
   }
 });
 
+describe("a request body of JSON null", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  // Routes that read the body with a bare `await c.req.json()` then read a field
+  // off the result, so `null` used to die as `null.field`: a 500.
+  for (const path of ["/api/ask", "/api/transport/send", "/api/transport/capture", "/api/transport/broadcast", "/api/specs/review/rig", "/api/specs/review/agent"]) {
+    it(`${path} answers 400, not 500`, async () => {
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { app } = createTestApp(db);
+        const res = await app.request(path, post("null"));
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "invalid_json", message: "Request body must be a JSON object, not null." });
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+  }
+});
+
+describe("a JSON null body on routes that catch a bad body themselves", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = createFullTestDb(); });
+  afterEach(() => { db.close(); });
+
+  for (const path of ["/api/stream/emit", "/api/scope/approve"]) {
+    it(`${path} keeps its own 400 refusal`, async () => {
+      const { app } = createTestApp(db);
+      expect((await app.request(path, post("null"))).status).toBe(400);
+    });
+  }
+});
+
 describe("jsonBodyErrorHandler", () => {
   function app(route: (c: Context) => Promise<Response> | Response): Hono {
     const app = new Hono();
