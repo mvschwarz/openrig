@@ -48,4 +48,49 @@ describe("fetchWithTimeout", () => {
       }),
     ).rejects.toThrow(FetchTimeoutError);
   });
+
+  it("removes the abort listener from externalSignal once the request completes or fails", async () => {
+    const { getEventListeners } = await import("node:events");
+    const parent = new AbortController();
+    const fakeFetch: typeof fetch = async () => new Response("ok");
+
+    for (let i = 0; i < 5; i++) {
+      await fetchWithTimeout(fakeFetch, "https://example.test/", { signal: parent.signal }, {
+        timeoutMs: 1000,
+        timeoutMessage: "timed out",
+        consumeResponse: async (response) => {
+          await response.text();
+        },
+      });
+      expect(getEventListeners(parent.signal, "abort").length).toBe(0);
+    }
+
+    const failingFetch: typeof fetch = async () => {
+      throw new Error("network error");
+    };
+
+    await expect(
+      fetchWithTimeout(failingFetch, "https://example.test/", { signal: parent.signal }, {
+        timeoutMs: 1000,
+        timeoutMessage: "timed out",
+      }),
+    ).rejects.toThrow("network error");
+
+    expect(getEventListeners(parent.signal, "abort").length).toBe(0);
+  });
+
+  it("handles pre-aborted external signal without leaking listeners", async () => {
+    const { getEventListeners } = await import("node:events");
+    const parent = new AbortController();
+    parent.abort(new Error("pre-aborted"));
+
+    await expect(
+      fetchWithTimeout(async () => new Response("ok"), "https://example.test/", { signal: parent.signal }, {
+        timeoutMs: 1000,
+        timeoutMessage: "timed out",
+      }),
+    ).rejects.toThrow("pre-aborted");
+
+    expect(getEventListeners(parent.signal, "abort").length).toBe(0);
+  });
 });
