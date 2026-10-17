@@ -42,9 +42,9 @@ function fixture(runtime = "claude-code", permissionPromptReader?: (sessionName:
   };
   const newOracle = () => new SeatActivityService({ tmux: tmux as never, defaultWindowSeconds: 3, now,
     permissionPromptReader,
-    permissionPromptChanged: permissionPromptReader ? (sessionName, confirmed) => {
+    permissionPromptChanged: permissionPromptReader ? (sessionName, confirmed, permissionRuntime) => {
       const latest = store.getLatestForNode({ sessionName });
-      store.recordHookEvent({ sessionName, runtime: "codex", generation: latest?.generation,
+      store.recordHookEvent({ sessionName, runtime: permissionRuntime, generation: latest?.generation,
         hookEvent: confirmed ? "PermissionPromptConfirmed" : "PermissionPromptCleared" });
     } : undefined,
   });
@@ -190,8 +190,8 @@ it.each(["turn-a", "turn-b"])("an in-flight all-clear cannot retire a refused-wa
   expect(f.enter).not.toHaveBeenCalled();
 });
 
-it.each([0, 600_000])("a confirmed permission clear survives %sms of clock aging without claiming idle or bypassing generation", async ageMs => {
-  const f = fixture("codex");
+it.each([["codex", 0], ["codex", 600_000], ["claude-code", 0], ["claude-code", 600_000]] as const)("a confirmed %s permission clear survives %sms of clock aging without claiming idle or bypassing generation", async (runtime, ageMs) => {
+  const f = fixture(runtime);
   const refusedAt = f.clock.value.toISOString();
   f.clock.value = new Date(f.clock.value.getTime() + 10_000);
   await f.hook("PermissionPromptCleared", null, 0);
@@ -205,6 +205,31 @@ it.each([0, 600_000])("a confirmed permission clear survives %sms of clock aging
   expect(f.readPromptState(f.name, refusedAt)).toBe("unknown");
   f.changeGeneration(null);
   expect(f.readPromptState(f.name, refusedAt)).toBe("unknown");
+});
+
+it("a Claude pane clearance persists through reconstruction and retires the refused-wake alert without sending", async () => {
+  let visible = true;
+  const f = fixture("claude-code", async () => visible);
+  await f.hook("UserPromptSubmit", null, 0);
+  await f.hook("PreToolUse", null, 0);
+  await f.hook("Notification", "permission_prompt", 0);
+  const { repo, targets } = await refuseAndClimb(f, "blocked");
+  await f.hook("PreToolUse", null, 0);
+  expect(f.store.getLatestForNode({ sessionName: f.name })?.state).toBe("needs_input");
+  expect(await f.transport.send(f.name, "must not land on the open approval")).toMatchObject({ ok: false, reason: "target_needs_input" });
+  visible = false;
+  f.clock.value = new Date(f.clock.value.getTime() + 1_000);
+  await f.oracle().pollAllRunningTmuxSeats(f.db);
+  expect(f.store.getLatestForNode({ sessionName: f.name })).toMatchObject({ state: "unknown", rawEvent: "PermissionPromptCleared" });
+  f.reconstruct();
+  await runWakeLadderTick({ db: f.db, queueRepo: repo, now: f.clock.value,
+    resolveOrchestrator: () => "lead@r1001", readPromptState: f.readPromptState, retryIntervalSeconds: 1,
+    attemptWake: async (_id, target) => { targets.push(target); return "verified"; }, log: () => {} });
+  expect(repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 })
+    .filter(row => row.tags?.includes("wake-prompt-refusal"))).toHaveLength(0);
+  expect(targets).not.toContain(f.name);
+  expect(f.paste).not.toHaveBeenCalled();
+  expect(f.enter).not.toHaveBeenCalled();
 });
 
 it("the reader keeps the oracle's verdicts; only a newer, generation-valid moved-on hook clears", async () => {
