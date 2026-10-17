@@ -36,9 +36,9 @@ const SETTINGS = "/project/.claude/settings.local.json";
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
 const OWNED_CMD = `node ${shellQuote(RELAY_DEST)}`;
 const OWNED_MARKER = "state/claude-activity-hooks/activity-relay.cjs";
-const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
+const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification", "PreToolUse"] as const;
 
-// A faithful subset of the canonical claude.json: the 4 relay events (unscoped
+// A faithful subset of the canonical claude.json: the 5 relay events (unscoped
 // relay group) interleaved with compaction/bridge groups that must be excluded.
 const CANONICAL_MANIFEST = JSON.stringify({
   hooks: {
@@ -54,6 +54,7 @@ const CANONICAL_MANIFEST = JSON.stringify({
     PostCompact: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs"', timeout: 5 }] }],
     Stop: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] }],
     Notification: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] }],
+    PreToolUse: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] }],
   },
 });
 
@@ -194,7 +195,7 @@ describe("Claude activity-hook delivery — ENABLE (entry present, source + mani
     expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
   });
 
-  it("upserts the owned relay command for exactly the 4 relay events with the concrete absolute command", async () => {
+  it("upserts the owned relay command for exactly the 5 relay events with the concrete absolute command", async () => {
     const fs = enableFs();
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     const settings = readSettings(fs);
