@@ -679,6 +679,30 @@ describe("Send CLI", () => {
     expect(argv[ri + 1]).toBe("why now");
   });
 
+
+  it.each(["\r", "\x1b", "\t", " "])("preserves an explicit interaction byte in SSH argv (%#)", async answer => {
+    let captured: readonly string[] = [];
+    const deps: SendDeps = { ...runningDeps(port),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "vm-test", transport: "ssh", target: "vm.local" }] } }),
+      crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "remote ok", stderr: "" }; } };
+    const result = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", answer,
+        "--host", "vm-test", "--dangerously-interact", "--reason", "explicit key"]);
+    });
+    expect(result.exitCode).toBeFalsy();
+    expect(captured.slice(0, 4)).toEqual(["rig", "send", "dev-impl@my-rig", answer]);
+    expect(captured).toContain("--dangerously-interact");
+    expect(captured[captured.indexOf("--reason") + 1]).toBe("explicit key");
+  });
+
+  it.each(["\r", "\t", " "])("--raw alone retains whitespace refusal (%#)", async answer => {
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", answer, "--raw"]);
+    });
+    expect(result.exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
+  });
+
   // Slice-03 Atom 6b QA fix — the agent@rig@host SUGAR host folds in AFTER the
   // early --context guard, so --context must be re-rejected after the fold: it
   // must NEVER reach the cross-host argv (which would ship literal null with no
