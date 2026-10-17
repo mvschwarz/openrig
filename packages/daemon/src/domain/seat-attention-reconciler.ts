@@ -9,7 +9,7 @@ import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
+import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
@@ -30,6 +30,87 @@ function storedRotation(db: Database.Database, nodeId: string, expectedToken: st
   } catch { return null; }
 }
 
+/** Which process check ran, so the explanation can run the same one on its snapshot. */
+type LineageVariant = "codex" | "claude_conversation" | "claude_runtime" | "claude_exact_resume";
+
+/** Which part of the process check failed, for the message. The pane label only routes the check to the process
+ *  tree; it is never the reason the check failed. A conversation id is shown by its first eight characters.
+ *  The check is re-run on one snapshot of the process table: if it passes there, the process, pane or pid may have
+ *  changed during the check (the snapshot cannot show which). If it fails, `explainNativeRejection` (which mirrors the check's own tests)
+ *  says which test rejected. Anything it does not cover is "could not be verified", never a guessed cause.
+ *  Null when the tree gives no better answer than the label did. */
+async function describeLineageFailure(input: {
+  variant: LineageVariant;
+  runtime: "claude-code" | "codex";
+  sessionName: string;
+  target: string;
+  tmux: PaneIdentityTmux;
+  listProcesses?: NativeProcessLister;
+  expectedToken: string | null;
+  rotation: ClaudeResumeRotation | null;
+  /** The check required a resume (`requireExactResumeLineage`), not just a runtime. */
+  exact: boolean;
+}): Promise<string | null> {
+  const short = (token: string) => token.length > 8 ? `${token.slice(0, 8)}…` : token;
+  const records = input.expectedToken ? `the seat records ${short(input.expectedToken)}` : "the seat records no conversation";
+  const agree = input.expectedToken ? ". Clearing needs the two to agree" : "";
+  const runtimeName = input.runtime === "codex" ? "Codex" : "Claude";
+  try {
+    // One read serves every observation below, so the explanation costs one process-table read. A failed read
+    // looks like an empty table (and a missing pane pid like no process), so neither may be reported as an absence.
+    const pid = await input.tmux.getPanePid(input.target);
+    const rows = pid ? await Promise.resolve((input.listProcesses ?? listNativeProcesses)()).catch((): NativeProcessRow[] => []) : [];
+    if (!pid || !rows.some((row) => row.pid === pid)) return "The pane's process could not be found in the process listing (the listing may have failed), so the runtime could not be verified";
+    const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows };
+    const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact })
+      : input.variant === "claude_conversation" ? !!await observeClaudePaneProcess({ ...observation, expectedToken: input.expectedToken, rotation: input.rotation })
+      : input.variant === "claude_runtime" ? !!await observeClaudePaneRuntime(observation)
+      : !!(input.expectedToken && findExactNativeResumeProcess(rows, pid, "claude-code", input.expectedToken, input.rotation));
+    if (passes) {
+      // The check also needs the session to hold one pane, and the pane's pid to stay the same; the re-run sees neither.
+      const panes = await input.tmux.listPanes(input.sessionName).catch((): unknown[] => []);
+      if (panes.length > 1) return `The session now has ${panes.length} panes, so the runtime could not be verified for the seat's pane`;
+      return `A re-read now finds the ${runtimeName} process the check wanted, so the pane, pid or process may have changed during the check`;
+    }
+    // The exact-resume Claude check searches the pane's whole process subtree for a Claude executable anywhere in
+    // argv, and reads argv its own way, so the single-process rejection tests below do not mirror it. It is worded
+    // specifically only when that same recognizer finds no Claude row at all.
+    if (input.variant === "claude_exact_resume") {
+      if (subtreeNamesClaudeExecutable(rows, pid)) return "The running Claude could not be verified against the stored conversation";
+      return await verifyPaneIdleShell(observation)
+        ? "The pane's foreground is an idle shell, and no process in its tree names a Claude executable"
+        : "No process in the pane's process tree names a Claude executable";
+    }
+    const rejection = input.variant === "claude_runtime" ? { kind: "no_single_process" as const }
+      : explainNativeRejection(rows, pid, input.runtime, input.expectedToken, input.exact, input.rotation);
+    switch (rejection.kind) {
+      case "no_single_process": {
+        if (input.runtime === "claude-code") {
+          const delivery = await observeClaudeDelivery({ ...observation, expectedToken: input.expectedToken, rotation: input.rotation }, { unknownKeepsIdle: false });
+          if (delivery.state === "idle_shell") return "The pane's foreground is an idle shell";
+          if (delivery.state === "conflict") return delivery.detail;
+          return "The pane's foreground does not hold exactly one process the check recognises as Claude";
+        }
+        return await verifyPaneIdleShell(observation)
+          ? "The pane's foreground is an idle shell"
+          : "The pane's foreground does not hold a single process the check recognises as Codex";
+      }
+      case "no_recorded_conversation": return `The seat records no conversation, so the running ${runtimeName} cannot be matched to one`;
+      case "names_no_conversation": return input.runtime === "codex"
+        ? `The running Codex's resume names no conversation (${records})`
+        : `The check could not read a conversation from the running Claude's launch, so it cannot be matched to the stored one (${records})`;
+      case "not_a_resume": return `The check could not read a resume from the running Codex's launch, so it cannot be matched to a conversation (${records})`;
+      case "conflicting_conversations": return "The Codex launcher chain names different conversations";
+      case "other_conversation": return input.runtime === "codex"
+        ? `The check read conversation ${short(rejection.conversation)} from the running Codex's launch; ${records}${agree}`
+        : `The running Claude was launched with conversation ${short(rejection.conversation)}; ${records}${agree}`;
+      case "rotation_process_mismatch": return `The running Claude names conversation ${short(rejection.conversation)}, which the recorded rotation covers, but it is not the process that rotation recorded`;
+      case "passes": return `The ${runtimeName} process could not be verified against the stored conversation`;
+    }
+  } catch { /* the label text below stands */ }
+  return null;
+}
+
 /** Rebind one managed seat to the sole pane currently in its named tmux
  * session and positively identify its declared agent runtime. */
 export async function rebindAndVerifyPaneIdentity(input: {
@@ -45,6 +126,9 @@ export async function rebindAndVerifyPaneIdentity(input: {
    *  the same per-process check (`findExactNativeResumeProcess`). */
   resumeRotation?: ClaudeResumeRotation | null;
   listProcesses?: NativeProcessLister;
+  /** On a failed process check, read the process table again to say which part failed (default true).
+   *  A caller that re-runs the check in a polling loop passes false until the attempt whose text it shows. */
+  explainFailure?: boolean;
   now?: () => Date;
 }): Promise<PaneIdentityReconcileResult> {
   const observedAt = (input.now ?? (() => new Date()))().toISOString();
@@ -174,9 +258,26 @@ export async function rebindAndVerifyPaneIdentity(input: {
   }
   if (verdict.verdict === "mismatch") {
     if (runtimeAmbiguous) {
+      // A process check ran for Codex, a Claude launch wrapper or version label, and an exact-resume Claude: name the part that failed.
+      // A tokenless version-label Claude is unverifiable by design (nothing was compared), so it keeps the label text.
+      const unverifiableByDesign = claudeVersionLabel && !claudeWrapper && expectedResumeToken === null;
+      const exact = input.requireExactResumeLineage === true;
+      // The same variant, token and rotation the failed check used.
+      const variant: LineageVariant | null = input.runtime === "codex" ? "codex"
+        : claudeProcessProof ? (expectedResumeToken === null && !exact ? (claudeWrapper ? "claude_runtime" : null) : "claude_conversation")
+        : strictNativeLineage ? "claude_exact_resume" : null;
+      const rotation = !expectedResumeToken ? null
+        : claudeProcessProof && !exact ? storedRotation(input.db, input.nodeId, expectedResumeToken)
+        : input.resumeRotation ?? null;
+      const failedCheck = input.explainFailure !== false && !unverifiableByDesign && variant !== null && (input.runtime === "codex" || input.runtime === "claude-code")
+        ? await describeLineageFailure({ variant, runtime: input.runtime, sessionName: input.sessionName, target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses,
+          exact, expectedToken: expectedResumeToken, rotation })
+        : null;
       return {
         ok: false,
-        detail: `tmux pane '${pane.id}' foreground command '${command ?? "unknown"}' does not positively identify runtime '${input.runtime}'`,
+        detail: failedCheck
+          ? `tmux pane '${pane.id}' (foreground command '${command ?? "unknown"}') did not pass the process check for runtime '${input.runtime}': ${failedCheck}`
+          : `tmux pane '${pane.id}' foreground command '${command ?? "unknown"}' does not positively identify runtime '${input.runtime}'`,
       };
     }
     return {

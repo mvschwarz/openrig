@@ -1417,13 +1417,15 @@ describe("RestoreOrchestrator", () => {
         resumeToken: "tok",
       });
       const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => command) } as unknown as TmuxAdapter;
-      const result = await createOrchestrator({ tmux, claude: mockClaudeResume({ ok: true }) }).restore(snap.id);
+      // An empty process table: the fixture's pane pid is not in it, so the check cannot say what runs in the pane.
+      const result = await createOrchestrator({ tmux, claude: mockClaudeResume({ ok: true }), listProcesses: async () => [] }).restore(snap.id);
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.result.rigResult).toBe("partially_restored");
       expect(result.result.nodes[0]!.status).toBe("attention_required");
-      expect(result.result.nodes[0]!.error).toContain("does not positively identify runtime 'claude-code'");
+      expect(result.result.nodes[0]!.error).toContain("did not pass the process check for runtime 'claude-code'");
+      expect(result.result.nodes[0]!.error).toContain("could not be found in the process listing");
       expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
         .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
     },
