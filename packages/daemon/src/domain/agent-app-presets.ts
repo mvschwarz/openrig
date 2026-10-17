@@ -4,7 +4,7 @@
 // never confirms their identity, and reads their activity only from what the screen shows. Built-in runtime names are
 // reserved, so a preset can't replace one.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { BUILT_IN_RUNTIMES, isAgentAppRuntime } from "./built-in-runtimes.js";
@@ -60,9 +60,16 @@ export function loadAgentAppPreset(name: string, dir: string = agentAppsDir()): 
   if (BUILT_IN_RUNTIMES.has(name)) {
     return { ok: false, kind: "incompatible", path, message: `"${name}" is a built-in runtime; an agent app preset can't use that name` };
   }
-  if (!NAME.test(name) || !existsSync(path)) {
-    return { ok: false, kind: "missing", path,
-      message: `no agent app preset named "${name}" is installed (looked for ${path})` };
+  // The name check comes first: it keeps a runtime name from reaching outside the directory.
+  if (!NAME.test(name)) {
+    if (name === basename(name) && !name.startsWith(".") && existsSync(path)) {
+      return { ok: false, kind: "incompatible", path,
+        message: `agent app "${name}": the preset at ${path} can't be used: its name must be lowercase letters, digits and hyphens, starting with a letter or digit` };
+    }
+    return { ok: false, kind: "missing", path, message: `no agent app preset named "${name}" is installed (looked for ${path})` };
+  }
+  if (!existsSync(path)) {
+    return { ok: false, kind: "missing", path, message: `no agent app preset named "${name}" is installed (looked for ${path})` };
   }
   let text: string;
   try { text = readFileSync(path, "utf-8"); } catch {

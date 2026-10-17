@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -52,6 +52,18 @@ describe("agent app presets", () => {
     const found = loadAgentAppPreset("synth", presets(files as Record<string, string>));
     expect(found).toMatchObject({ ok: false, kind });
     expect(!found.ok && found.message).toContain(text);
+  });
+
+  it("calls a preset file with a name it can't take incompatible, and never looks outside the directory", () => {
+    const dir = presets({ "My_App.yaml": GOOD.replace("name: synth", "name: My_App") });
+    expect(loadAgentAppPreset("My_App", dir)).toMatchObject({ ok: false, kind: "incompatible",
+      message: expect.stringContaining("its name must be lowercase letters, digits and hyphens") });
+    expect(listAgentAppPresets(dir)).toEqual([expect.objectContaining({ ok: false, kind: "incompatible" })]);
+    // A file one level up, in a directory this test owns, is never reached by "../outside".
+    const parent = presets({ "outside.yaml": GOOD.replace("name: synth", "name: outside") });
+    const inner = join(parent, "agent-apps");
+    mkdirSync(inner);
+    expect(loadAgentAppPreset("../outside", inner)).toMatchObject({ ok: false, kind: "missing" });
   });
 
   it("reserves every built-in runtime name", () => {
