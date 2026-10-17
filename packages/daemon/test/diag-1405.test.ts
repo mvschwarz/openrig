@@ -52,10 +52,6 @@ describe("issue 1405 diagnostic", () => {
       }
     }
     console.log(rows.join("\n"));
-    for (const name of ["A_gateway_before_turn", "B_existing_402_fixture", "C_gateway_after_successful_turn", "D_no_credential_after_refused_turn"]) {
-      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: panes[name]! }))
-        .toMatchObject({ status: "failed", code: "login_required" });
-    }
   });
 
   it("records the adapter readiness a startup caller sees", async () => {

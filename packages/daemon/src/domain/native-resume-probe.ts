@@ -126,7 +126,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for project MCP server approval before the session can become interactive.",
       };
     }
-    if (looksLikeClaudeLoginPrompt(paneContent)) {
+    if (looksLikeClaudeLoginRefusal(paneContent)) {
       return {
         status: "failed",
         code: "login_required",
@@ -327,9 +327,12 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   return numberedOption;
 }
 
-function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
-  return paneContent.includes("Not logged in")
-    && paneContent.includes("Run /login");
+// Claude's documented request-time refusals when no usable login is available. The status footer
+// "Not logged in · Run /login" alone says only that Claude holds no credential of its own; a gateway
+// can still authenticate its requests, so the footer is not a refusal.
+function looksLikeClaudeLoginRefusal(paneContent: string): boolean {
+  return paneContent.includes("Not logged in · Please run /login")
+    || paneContent.includes("Login expired · Please run /login");
 }
 
 function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
