@@ -146,7 +146,7 @@ that gateway side too. For the pane side, read:
   `indeterminate:…` reads `claimed` (`presentedNudgeResult`). Unclaiming shows
   the stored result again.
 - `claimedAt`: when the destination claimed the row. Closing doesn't clear it.
-- `pickup`: the derived pickup receipt (`unclaimed`, `working`,
+- `pickup`: the derived pickup receipt (`unclaimed`, `working`, `needs-input`,
   `stalled-after-claim`, `parked`, `terminal`), computed at read time.
 
 A claim isn't proof that the body was read or that the terminal render was
@@ -158,6 +158,20 @@ result reads as stored. For such an unconfirmed, claimed item,
 has claimed the item (claimed)."; for any claimed item it adds "A claim shows
 the seat took the item; it does not prove the body was read."
 (`terminalDeliveryResult`, `packages/cli/src/commands/queue.ts`).
+
+Pickup receipts are derived by `queue-pickup.ts` for queue reads, the pickup
+view and the execution view. A claimed item in progress whose owner's activity
+oracle reports outstanding input reads `needs-input`, with the reason in
+`pickup.evidence`, regardless of working/idle activity or claim age. This does
+not change the stored queue state or count as task progress. The pickup stall
+check resumes when the oracle clears the input; unanswered prompts do not age
+out. The waiting view suspends the pickup backstop while retaining any explicit
+closure deadline, and attention surfaces still show the outstanding prompt.
+Unclaimed, blocked and terminal items retain their existing receipt semantics.
+The sweep retires an existing stall finding with a specific input-wait receipt;
+that automatic closure does not suppress a later genuine stall. Manual recovery
+dispositions remain authoritative. New findings use the retirement transition
+as part of their deterministic ID, without adding progress to the work item.
 
 The standing detector in `queue-stuck-sweep.ts` creates findings through the
 queue repository, with `evidenceRef: rig queue show <source-qitem-id>`

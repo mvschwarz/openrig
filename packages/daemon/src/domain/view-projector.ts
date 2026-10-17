@@ -179,7 +179,7 @@ export class ViewProjector {
 
     // S04 — the pickup lens post-processes through the ONE shared derivation rule
     // (derivePickup), never a second SQL copy of it: claimed live rows, oldest claim first,
-    // each carrying pickup_state and (when stalled) the named pickup_evidence.
+    // each carrying pickup_state and the evidence for a stall or input wait.
     if (name === "pickup") {
       const rows = this.db
         .prepare(
@@ -202,6 +202,7 @@ export class ViewProjector {
         const receipt = derivePickup({
           lastMeaningfulAt: lastMeaningfulTransition(this.db, String(r.qitem_id))?.at,
           activity: activity?.activity, needsInput: activity?.needsInput.count,
+          needsInputReason: activity?.needsInput.reason,
           state: String(r.state),
           claimedAt: (r.claimed_at as string | null) ?? null,
           lastHeartbeat: (r.last_heartbeat as string | null) ?? null,

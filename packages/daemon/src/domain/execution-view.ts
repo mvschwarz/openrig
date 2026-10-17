@@ -848,6 +848,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       state: r.state,
       lastMeaningfulAt: lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
       activity: arbitrated?.activity, needsInput: arbitrated?.needsInput.count,
+      needsInputReason: arbitrated?.needsInput.reason,
       claimedAt: r.claimed_at,
       lastHeartbeat: r.last_heartbeat,
       postClaimMotionCount: Number(r.post_claim_motion ?? 0),
@@ -1182,6 +1183,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       const pickup = derivePickup({
         lastMeaningfulAt: lastMeaningfulTransition(deps.db, r.qitem_id)?.at,
         activity: activity?.activity, needsInput: activity?.needsInput.count,
+        needsInputReason: activity?.needsInput.reason,
         state: r.state,
         claimedAt: r.claimed_at,
         lastHeartbeat: r.last_heartbeat,

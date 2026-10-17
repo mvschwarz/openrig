@@ -6,6 +6,7 @@
 // (S02 owns the standing sweep; this module exports the INPUT contract it consumes).
 //
 // Working activity is positive liveness evidence, not proof of task progress.
+// Outstanding input is an explicit wait, even when working/idle activity is unknown.
 // Otherwise the grace follows the latest meaningful queue change; an old note
 // cannot keep the row working forever. Stalled-after-claim names this evidence
 // without inferring idle/dead from age. Blocked remains parked; wake health is
@@ -23,8 +24,8 @@ export const PICKUP_STALL_THRESHOLD_KEY = "queue.pickup_stall_threshold_minutes"
 export const DEFAULT_PICKUP_STALL_THRESHOLD_MINUTES = 3;
 
 export interface PickupReceipt {
-  state: "unclaimed" | "working" | "stalled-after-claim" | "parked" | "terminal";
-  /** Present iff stalled or terminal: the named evidence replacing the manual cross-surface join. */
+  state: "unclaimed" | "working" | "needs-input" | "stalled-after-claim" | "parked" | "terminal";
+  /** Present when waiting for input, stalled or terminal: the evidence behind the receipt. */
   evidence?: string;
 }
 
@@ -55,6 +56,7 @@ export interface PickupFacts {
   lastMeaningfulAt?: string;
   activity?: string;
   needsInput?: number;
+  needsInputReason?: string | null;
   now?: Date;
   thresholdMinutes?: number;
 }
@@ -67,6 +69,9 @@ export function derivePickup(facts: PickupFacts): PickupReceipt {
     return { state: "terminal", evidence: `closed (${facts.state})` };
   }
   if (!facts.claimedAt) return { state: "unclaimed" };
+  if ((facts.needsInput ?? 0) > 0) {
+    return { state: "needs-input", evidence: facts.needsInputReason ? `owner needs input: ${facts.needsInputReason}` : "owner needs input" };
+  }
   const now = facts.now ?? new Date();
   const claimedMs = Date.parse(facts.claimedAt);
   // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;

@@ -1,4 +1,4 @@
-import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
+import { findQueueRecovery, inputWaitResolution, INPUT_WAIT_RESOLVED_NOTE, recoveryId, recoveryTag } from "./queue-recovery.js";
 import { queueWaitNotice } from "./queue-wait-backoff.js";
 import { lastMeaningfulTransition, pendingSince } from "./queue-waiting.js";
 import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
@@ -591,7 +591,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       if (existing && existingIsOpen) {
         // Age is derived at read time; an unchanged scan is not a transition.
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
-      } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
+      } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated) || inputWaitResolution(deps.db, existing.qitem_id) !== null) {
         const created = await deps.queueRepo.create({
           qitemId: recoveryId(deps.db, c.row.qitemId),
           // The detector is machinery, not a seat: the obligation's own creator is the
@@ -626,12 +626,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const dedupTag = tags.find((t) => t.startsWith("stuck-sweep:"));
       if (!dedupTag || liveDedupTags.has(dedupTag)) continue;
       const [, kind, stuckId] = dedupTag.match(/^stuck-sweep:([a-z-]+):(.+)$/) ?? [];
+      const waitingForInput = kind === "stalled-after-claim" && stuckId
+        && deps.queueRepo.getById(stuckId)?.pickup?.state === "needs-input";
       await deps.queueRepo.update({
         qitemId: f.qitem_id,
         actorSession: f.source_session,
         state: "done",
         closureReason: "no-follow-on",
-        transitionNote: `stuck-sweep resolved: ${kind ?? "finding"} on ${stuckId ?? "row"} no longer detected`,
+        transitionNote: waitingForInput ? INPUT_WAIT_RESOLVED_NOTE
+          : `stuck-sweep resolved: ${kind ?? "finding"} on ${stuckId ?? "row"} no longer detected`,
       });
       if (kind && stuckId) {
         findings.push({
