@@ -10,6 +10,11 @@ export interface AgentRow {
   runtime: string;
   /** effective served model; separate from runtime, null when not served */
   model?: string | null;
+  /** Configured launch effort: the seat's explicit choice, else the authored value.
+   *  null = no configured level (runtime default); never an observed guess. */
+  effort?: string | null;
+  /** Provenance for `effort`; `runtime_default` = no configured level is known. */
+  effortSource?: "seat_choice" | "authored" | "runtime_default" | null;
   spec: string;
   profile?: string | null;
   specVersion?: string | null;
@@ -349,8 +354,39 @@ export interface HealthSnapshot {
 
 export interface ProjectSelection { id: string; root: string }
 export interface ProjectEntry extends ProjectSelection { name: string; sourcePath: string | null; missionsRoot: string; error?: string }
+/** The served `rig seat effort` report, narrowed to the fields this renderer reads.
+ *  `ok: false` is a refusal (code/message), never a fabricated value. */
+export interface SeatEffortRead {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  runtime?: string;
+  saved?: { effective?: string | null; source?: string | null; authored?: string | null; choice?: string | null };
+  emitted?: {
+    state?: "observed" | "unknown";
+    value?: string | null;
+    pid?: number;
+    startedAt?: string | null;
+    matchesSaved?: boolean;
+    detail?: string;
+  };
+  observed?: {
+    state?: "observed" | "not_verified";
+    value?: string | null;
+    source?: string;
+    outcome?: string;
+    detail?: string;
+    at?: string;
+    matchesEmitted?: boolean;
+  };
+  summary?: string;
+}
+
 export interface FleetSnapshot {
   attentionRead?: import("@openrig/daemon/attention").AttentionRead | null;
+  /** Present only while an agent detail page is open; fetched from the existing
+   *  seat-effort route. Absent = not read, never a claim that no effort exists. */
+  seatEffort?: { seatRef: string; report: SeatEffortRead } | null;
   projects?: { catalogPath: string; projects: ProjectEntry[] } | null;
   projectRead?: ProjectSelection | null;
   projectSources?: Record<string, string>;

@@ -686,6 +686,11 @@ export interface NodeInventoryEntry {
   latestError: string | null;
   // Extended fields
   model: string | null;
+  /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
+   *  null = no configured value (the runtime's own default). Never a guess at what the model ran. */
+  effort: string | null;
+  /** Where `effort` came from. `runtime_default` means no configured level is known. */
+  effortSource: "seat_choice" | "authored" | "runtime_default";
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;

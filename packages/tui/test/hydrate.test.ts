@@ -416,6 +416,20 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expectIncompleteNeedsTruth(snap);
   });
 
+  it("carries configured effort and its provenance from the node inventory", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const nodes = [
+      { ...base, logicalId: "dev.choice", effort: "high", effortSource: "seat_choice" },
+      { ...base, logicalId: "dev.authored", effort: "medium", effortSource: "authored" },
+      { ...base, logicalId: "dev.default", effort: null, effortSource: "runtime_default" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const byName = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent]));
+    expect(byName["dev.choice"]).toMatchObject({ effort: "high", effortSource: "seat_choice" });
+    expect(byName["dev.authored"]).toMatchObject({ effort: "medium", effortSource: "authored" });
+    expect(byName["dev.default"]).toMatchObject({ effort: null, effortSource: "runtime_default" });
+  });
+
   it("gives failed, attention, and needs-input truth precedence over terminal active/idle", async () => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
 

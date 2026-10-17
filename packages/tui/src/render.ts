@@ -36,7 +36,7 @@ import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
-import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, ViewState } from "./types.js";
+import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, SeatEffortRead, ViewState } from "./types.js";
 
 interface ContentLine {
   text: string;
@@ -63,7 +63,7 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 }
 
 type Align = "left" | "right";
-type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "context" | "status" | "queue" | "work" | "now" | "actions";
+type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "effort" | "context" | "status" | "queue" | "work" | "now" | "actions";
 type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
 
 function columnsWidth(columns: AgentColumn[]): number {
@@ -73,14 +73,14 @@ function columnsWidth(columns: AgentColumn[]): number {
 function agentColumns(contentWidth: number): AgentColumn[] {
   if (contentWidth >= 110) return [
     ["pod", "POD", 8, "left"], ["seat", "SEAT", 15, "left"], ["runtime", "RT", 4, "left"],
-    ["model", "MODEL", 12, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
-    ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 27, "left"],
+    ["model", "MODEL", 12, "left"], ["effort", "EFFORT", 7, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
+    ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 19, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   if (contentWidth >= 88) return [
-    ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"], ["runtime", "RT", 3, "left"],
-    ["model", "MODEL", 8, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
-    ["queue", "Q", 2, "right"], ["work", "WORK", 8, "left"], ["now", "NOW", 11, "left"],
+    ["pod", "POD", 5, "left"], ["seat", "SEAT", 10, "left"], ["runtime", "RT", 3, "left"],
+    ["model", "MODEL", 8, "left"], ["effort", "EFF", 4, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", 6, "left"], ["now", "NOW", 11, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   // At 84x28 the L2 content pane is 58 cells. The three explicitly deferred
@@ -127,6 +127,36 @@ function runtimeShort(runtime: string): string {
 /** Tables optimize for glance width; details retain the canonical model id. */
 function tableModel(model: string | null | undefined): string {
   return model?.replace(/^claude-/i, "") || "—";
+}
+
+/** The configured launch effort only. "—" means no configured level is known.
+ *  The compact form keeps the medium table inside its width; detail renders the exact value. */
+const COMPACT_EFFORT: Record<string, string> = { medium: "med", xhigh: "xhi", minimal: "min" };
+
+function tableEffort(effort: string | null | undefined, compact: boolean): string {
+  const value = effort?.trim();
+  if (!value) return "—";
+  return compact ? (COMPACT_EFFORT[value] ?? value) : value;
+}
+
+function effortConfigured(agent: { effort?: string | null; effortSource?: "seat_choice" | "authored" | "runtime_default" | null }): string {
+  if (!agent.effort) return "— (runtime default; no configured level)";
+  const source = agent.effortSource === "seat_choice" ? "this seat's choice"
+    : agent.effortSource === "authored" ? "authored"
+    : "configured";
+  return `${agent.effort} (${source})`;
+}
+
+/** What the native session recorded, in the table-independent detail line. The full
+ *  four-way report stays on `rig seat effort`; here the value and outcome are the point. */
+function effortObserved(report: SeatEffortRead | null): string {
+  if (!report) return "not read";
+  if (!report.ok) return `not read · ${report.message ?? report.code ?? "report unavailable"}`;
+  const observed = report.observed;
+  if (observed?.state === "observed") {
+    return `${observed.value ?? "—"}${observed.outcome ? ` (${observed.outcome})` : ""}`;
+  }
+  return `not verified${observed?.detail ? ` · ${observed.detail}` : ""}`;
 }
 
 function contextCompact(value: number | null, narrow: boolean): string {
@@ -274,6 +304,10 @@ function agentDetailLines(
     ...runtimeMarkSegs(agent.runtime),
   ];
   const runtimeLine: ContentLine = { text: rtSegs.map((segment) => segment.text).join(""), segs: rtSegs };
+  const effortReport = snap.seatEffort && snap.seatEffort.seatRef === `${agent.name}@${rig.name}`
+    ? snap.seatEffort.report
+    : null;
+  const effortText = `${effortConfigured(agent)} · observed ${effortObserved(effortReport)}`;
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
   const needsRows = needs.length > 0
     ? needs.flatMap((item) => [
@@ -294,6 +328,7 @@ function agentDetailLines(
           fieldLine({ label: "meter", value: context == null ? "— (not yet known)" : `${context}% used  ${barCells(context / 100, meterWidth)}` }),
           fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
           runtimeLine,
+          ...wrapDetailValue("effort", effortText, contentWidth),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
           fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
         ],
@@ -878,10 +913,12 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     const agentCols = agentColumns(contentWidth);
     lines.push(...queueSampleLines(snap, contentWidth));
     const narrowFactory = !agentCols.some(([key]) => key === "model");
-    if (narrowFactory) lines.push({ text: "MODEL/NOW/ACTIONS on drill (enter)" });
+    const effortCol = agentCols.find(([key]) => key === "effort");
+    const compactEffort = !!effortCol && effortCol[2] <= 4;
+    if (narrowFactory) lines.push({ text: "MODEL/EFFORT/NOW/ACTIONS on drill (enter)" });
     lines.push({
       text: tableRow(agentCols, {
-        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", context: "CTX",
+        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: compactEffort ? "EFF" : "EFFORT", context: "CTX",
         status: "STATE", queue: "Q", work: "WORK", now: "NOW", actions: "ACTIONS",
       }),
     });
@@ -920,6 +957,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           seat: `${stateCell.mark} ${seatName(a.pod, a.name)}`,
           runtime: runtimeShort(a.runtime),
           model: tableModel(a.model),
+          effort: tableEffort(a.effort, compactEffort),
           context: contextCompact(a.context, narrowFactory),
           status: stateCell.word,
           queue: queueCount(snap, queue.count),

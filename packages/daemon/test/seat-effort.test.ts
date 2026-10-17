@@ -13,6 +13,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import {
   LATEST_WINS_EFFORT_PRECEDENCE, UNDECIDED_EFFORT_PRECEDENCE, effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort,
 } from "../src/domain/seat-effort.js";
@@ -48,6 +49,24 @@ describe("resolveSeatEffort: the one resolver for managed continuations", () => 
     expect(readSeatEffort(db, "missing")).toBeNull();
     db.exec("ALTER TABLE nodes DROP COLUMN effort_choice");
     expect(readSeatEffort(db, node.id)).toMatchObject({ effective: "low", source: "authored" });
+    db.close();
+  });
+});
+
+describe("node inventory: the configured effort and its provenance", () => {
+  it("serves the seat choice first, then the authored value, and runtime_default when neither exists", () => {
+    const db = createFullTestDb();
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("eff-inventory");
+    const chosen = repo.addNode(rig.id, "dev.choice", { runtime: "codex", effort: "low" });
+    repo.setNodeEffortChoice(chosen.id, "high");
+    repo.addNode(rig.id, "dev.authored", { runtime: "codex", effort: "medium" });
+    repo.addNode(rig.id, "dev.default", { runtime: "codex" });
+
+    const byId = Object.fromEntries(getNodeInventory(db, rig.id).map((entry) => [entry.logicalId, entry]));
+    expect(byId["dev.choice"]).toMatchObject({ effort: "high", effortSource: "seat_choice" });
+    expect(byId["dev.authored"]).toMatchObject({ effort: "medium", effortSource: "authored" });
+    expect(byId["dev.default"]).toMatchObject({ effort: null, effortSource: "runtime_default" });
     db.close();
   });
 });

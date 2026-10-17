@@ -285,6 +285,10 @@ export class DaemonClient {
   rigNodes(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
   }
+  /** The existing per-seat effort report: requested, saved, emitted and observed. */
+  seatEffort(seatRef: string) {
+    return this.get(`/api/seat/effort/${encodeURIComponent(seatRef)}`);
+  }
   reviewAgents(scope: "rig" | "fleet" = "rig") {
     return this.get(`/api/review/agents?scope=${scope}`);
   }
