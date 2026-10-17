@@ -554,25 +554,34 @@ export class CodexInPlaceRestart {
   }
 
   private async verifyReplacement(target: InPlaceRestartTarget, report: InPlaceRestartReport, oldExe: string | null): Promise<InPlaceRestartReport> {
-    const identity = await rebindAndVerifyPaneIdentity({
-      db: this.deps.db, sessionRegistry: this.deps.sessionRegistry, tmux: this.deps.tmux,
-      nodeId: target.seat.nodeId, sessionName: target.sessionName, runtime: "codex",
-      expectedResumeToken: report.conversationId, requireExactResumeLineage: true, listProcesses: this.listProcesses,
-    });
-    const now = await this.observeCodex(report.pane, report.conversationId);
-    if (!identity.ok || !now) {
-      return { ...report, outcome: "native_unknown", couldNotSee: [`the replacement Codex's identity: ${identity.ok ? "process not observed" : identity.detail}`],
-        message: "Codex reported a resumed conversation, but the process in the pane could not be proven to be that conversation." };
+    // Screen readiness can precede native-process visibility. Repeat only the joined
+    // observations, never the launch. The budget counts yields, not observation I/O.
+    const polls = Math.max(1, Math.ceil(this.timing.timeoutMs / this.timing.pollMs));
+    for (let attempt = 0; ; attempt++) {
+      const identity = await rebindAndVerifyPaneIdentity({
+        db: this.deps.db, sessionRegistry: this.deps.sessionRegistry, tmux: this.deps.tmux,
+        nodeId: target.seat.nodeId, sessionName: target.sessionName, runtime: "codex",
+        expectedResumeToken: report.conversationId, requireExactResumeLineage: true, listProcesses: this.listProcesses,
+      });
+      const now = await this.observeCodex(report.pane, report.conversationId);
+      if (!identity.ok || !now) {
+        if (attempt < polls) {
+          await this.timing.sleep(this.timing.pollMs);
+          continue;
+        }
+        return { ...report, outcome: "native_unknown", couldNotSee: [`the replacement Codex's identity: ${identity.ok ? "process not observed" : identity.detail}`],
+          message: "Codex reported a resumed conversation, but the process in the pane could not be proven to be that conversation." };
+      }
+      const after = await this.io.readProcess(now.process.pid);
+      const before = report.oldProcess;
+      const startedAt = now.process.startedAt ?? null;
+      return {
+        ...report, outcome: "restarted_account_unverified",
+        newProcess: { pid: now.process.pid, startedAt, sameExecutable: after?.exe && oldExe ? after.exe === oldExe : null },
+        account: this.accountEvidence(report.codexHome, before.startedAt, startedAt),
+        message: "Restarted in place on the same conversation and pane. The account is not verified: run --verify after a real tool-using turn.",
+      };
     }
-    const after = await this.io.readProcess(now.process.pid);
-    const before = report.oldProcess;
-    const startedAt = now.process.startedAt ?? null;
-    return {
-      ...report, outcome: "restarted_account_unverified",
-      newProcess: { pid: now.process.pid, startedAt, sameExecutable: after?.exe && oldExe ? after.exe === oldExe : null },
-      account: this.accountEvidence(report.codexHome, before.startedAt, startedAt),
-      message: "Restarted in place on the same conversation and pane. The account is not verified: run --verify after a real tool-using turn.",
-    };
   }
 
   /** A direct-native stop or respawn that failed: report what the pane and the original process are now,
