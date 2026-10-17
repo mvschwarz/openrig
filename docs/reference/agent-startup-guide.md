@@ -426,6 +426,66 @@ remain shared.
 
 **Terminal seats** (`builtin:terminal`) get no agent or profile layers and no startup proof.
 
+### Codex compaction and sizing
+
+OpenRig's managed compaction is for Claude Code seats only, by design. That covers `rig compact`, the
+`policies.claude_compaction.*` automatic policy, and the watchdog jobs that the `managed-compaction` and
+`apprentice-handover` strategies create. A Codex seat compacts with Codex's own automatic compaction, and OpenRig
+leaves that to Codex.
+
+- `rig compact <session>` refuses a Codex seat: "not a Claude (claude-code) seat".
+- `rig compact-plan` lists a Codex seat as skipped (`codex_not_managed_by_claude_compact_in_place`).
+- The automatic policy never acts on a Codex seat.
+- A Codex member with `compaction_strategy: managed-compaction` or `apprentice-handover` gets no watchdog jobs.
+
+**What Codex compacts at.** Codex describes `model_auto_compact_token_limit` as the "token threshold that triggers
+automatic history compaction (unset uses model defaults)". Its configuration reference does not say what those
+defaults are, and the model catalog's `auto_compact_token_limit` is null for the models we checked in Codex 0.162.1.
+Measure a seat's own compactions before relying on an unset limit.
+
+**What window the model has.** `codex debug models` prints the catalog. Each model carries `context_window`,
+`max_context_window` and `effective_context_window_percent`. In Codex 0.162.1, `gpt-5.6-sol` has a `context_window`
+of 272000 at 95%, which is 258400. That is the `model_context_window` its rollout `token_count` events report.
+A limit only matters when it is below that effective window. Leave `model_context_window` alone: don't raise it toward
+`max_context_window` to avoid compaction. Set the limit instead.
+
+**Setting the limit for seats only.** Put `model_auto_compact_token_limit` in a Codex profile file,
+`$CODEX_HOME/<name>.config.toml` (`~/.codex/<name>.config.toml` when `CODEX_HOME` is unset), and name it on each
+Codex member that should use it:
+
+```toml
+# ~/.codex/seat-compaction.config.toml
+model_auto_compact_token_limit = 150000   # choose your own value
+```
+
+```yaml
+codex_config_profile: seat-compaction
+```
+
+OpenRig passes `-p seat-compaction` on that seat's fresh, fork and resume launches. Codex layers the profile file on
+top of the base user config, so only seats that name the profile see the lower limit. A Codex session started without
+that profile keeps the base `config.toml` in the same Codex home (`$CODEX_HOME/config.toml`, or `~/.codex/config.toml`
+when `CODEX_HOME` is unset). The `150000` is an example, not a recommendation.
+
+With the normal launch mode, `codex_config_profile` replaces OpenRig's explicit workspace-write sandbox flag, so the
+profile must set the sandbox and approvals you want. See
+[permission precedence and limits](getting-started.md#custom-settings-and-precedence), which also gives Codex's order
+of precedence between a profile, project settings and CLI overrides.
+
+**The trade-off.** Every model call carries the whole context so far, so a smaller context makes each call cheaper. The
+cost is that Codex compacts sooner and more often, so more of the conversation is carried as a summary instead of
+verbatim. A higher limit keeps more detail and makes each call larger.
+
+**Related keys.** These also shape compaction. This guide doesn't recommend values for them. See Codex's
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference):
+
+| Key | What Codex says it does |
+|---|---|
+| `model_auto_compact_token_limit_scope` | `total` (the default) counts the full active context; `body_after_prefix` counts only growth after the carried compaction-window prefix. |
+| `compact_prompt` | Inline override for the history compaction prompt. |
+| `experimental_compact_prompt_file` | Loads the compaction prompt override from a file (experimental). |
+| `tool_output_token_limit` | Token budget for storing individual tool or function outputs in history. |
+
 When authoring startup content, note which instructions are runtime-specific. For example, an orchestrator that needs a monitoring loop should include instructions like: "If running Claude Code, use `/loop 3m` to periodically check rig health. If running Codex, check rig health at the start of each task cycle instead."
 
 ---

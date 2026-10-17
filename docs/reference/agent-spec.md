@@ -184,7 +184,7 @@ defaults:
 | Field | Type | Default | Allowed Values |
 |-------|------|---------|----------------|
 | `execution_mode` | string | `interactive_resident` | `interactive_resident` (only value in v1; `wake_on_demand` is explicitly rejected) |
-| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1) |
+| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1). `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing) |
 | `restore_policy` | string | `resume_if_possible` | `resume_if_possible`, `relaunch_fresh`, `checkpoint_only` |
 | `mechanic` | string | — | A canonical `seat@rig` session address; needed by `apprentice-handover` |
 
