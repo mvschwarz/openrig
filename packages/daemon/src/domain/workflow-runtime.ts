@@ -1750,9 +1750,10 @@ export class WorkflowRuntime {
    * mechanical advance is folded into project() for v1; continue() is
    * the audit/inspect entrypoint.
    */
-  continue(instanceId: string): {
+  continue(instanceId: string, options: { fullHistory?: boolean } = {}): {
     instance: WorkflowInstanceWithDeadline;
     trail: WorkflowStepTrailEntry[];
+    trailCompleteness: "complete" | "recent";
     guidance: ReturnType<WorkflowRuntime["guidance"]>;
     reconciliation: ReturnType<typeof inspectGraph>;
     frontier: ReturnType<WorkflowRuntime["inspect"]>["frontier"];
@@ -1761,11 +1762,14 @@ export class WorkflowRuntime {
     boundaryObligations: LifecycleObligation[];
   } {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
-    const trail = this.trailLog.listForInstance(instanceId);
+    const trail = options.fullHistory
+      ? this.trailLog.listForInstanceInAppendOrder(instanceId).reverse()
+      : this.trailLog.listForInstance(instanceId);
     const inspected = this.inspect(instanceId);
     return {
       instance: this.withDeadline(instance),
       trail,
+      trailCompleteness: options.fullHistory ? "complete" : "recent",
       guidance: this.guidance(instanceId),
       reconciliation: this.inspectGraph(instanceId),
       frontier: inspected.frontier,

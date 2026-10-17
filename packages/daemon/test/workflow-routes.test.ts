@@ -340,6 +340,31 @@ describe("workflow routes (PL-004 Phase D)", () => {
     expect(body.trail).toEqual([]);
   });
 
+  it("GET trace full=true returns every native trail entry while the default remains recent", async () => {
+    const created = await runtime.instantiate({ specPath, rootObjective: "full route history", createdBySession: "ops@rig" });
+    const instanceId = created.instance.instanceId;
+    for (let index = 0; index < 111; index++) {
+      runtime.trailLog.record({
+        instanceId, stepId: `proof-${index}`, stepRole: "producer", closedAt: "2026-10-13T00:00:00Z",
+        closureReason: "done", actorSession: "producer@rig", priorQitemId: created.entryQitemId,
+        closureEvidence: { index },
+      });
+    }
+    const completeResponse = await app.request(`/api/workflow/${instanceId}/trace?full=true`);
+    expect(completeResponse.status).toBe(200);
+    const complete = await completeResponse.json() as { trail: Array<{ closureEvidence: { index: number } }>; trailCompleteness: string };
+    expect(complete.trail).toHaveLength(111);
+    expect(complete.trailCompleteness).toBe("complete");
+    expect(complete.trail.map((entry) => entry.closureEvidence.index)).toEqual(Array.from({ length: 111 }, (_, index) => 110 - index));
+    for (const suffix of ["", "?full=false"]) {
+      const response = await app.request(`/api/workflow/${instanceId}/trace${suffix}`);
+      const recent = await response.json() as { trail: unknown[]; trailCompleteness: string };
+      expect(recent.trail).toHaveLength(50);
+      expect(recent.trailCompleteness).toBe("recent");
+      expect(recent.trail).toEqual(complete.trail.slice(0, 50));
+    }
+  });
+
   // Phase A R1 SSE route-order discipline tests.
   it("R1 SSE pattern: GET /api/workflow/sse returns 200 + content-type text/event-stream", async () => {
     const res = await app.request("/api/workflow/sse");
