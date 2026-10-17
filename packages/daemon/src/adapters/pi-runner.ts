@@ -796,6 +796,26 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   fs.mkdirSync(paths.agentDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
 
+  // Sync operator-level provider configs & credentials dynamically on every launch (live check)
+  try {
+    const homeDir = process.env.HOME || "";
+    const globalDir = runtime === "omp"
+      ? nodePath.join(homeDir, ".omp", "agent")
+      : nodePath.join(homeDir, ".pi", "agent");
+    const filesToSync = runtime === "omp"
+      ? ["models.json", "auth.json", "agent.db", "models.db"]
+      : ["settings.json", "auth.json", "models.json", "models-store.json"];
+    for (const f of filesToSync) {
+      const src = nodePath.join(globalDir, f);
+      const dest = nodePath.join(paths.agentDir, f);
+      if (fs.existsSync(src)) {
+        try {
+          fs.copyFileSync(src, dest);
+        } catch { /* best-effort sync */ }
+      }
+    }
+  } catch { /* best-effort sync */ }
+
   const { catchUpSince } = prepareRunnerSidecar(
     {
       readFile: (p) => fs.readFileSync(p, "utf8"),

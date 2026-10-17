@@ -114,6 +114,7 @@ export const PI_PROVIDER_ENV_VARS: Record<string, string> = {
   "zai": "ZAI_API_KEY",
   "kimi-coding": "KIMI_API_KEY",
   "minimax": "MINIMAX_API_KEY",
+  "deepseek": "DEEPSEEK_API_KEY",
 };
 
 /** Explicit OMP chat-provider credential names. Only the declared provider's
