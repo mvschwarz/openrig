@@ -49,6 +49,10 @@ interface WorldOptions {
   screenBefore?: string;
   throwAt?: "signalPid" | "sendResumeCommand" | "readProcessAfter" | "signalPaneProcess" | "respawnPane" | "verifyResumeInPane" | "restorePaneOption";
   daemonStartedAt?: Date;
+  /** Only post-relaunch process observations; preflight and stop retain the existing table. */
+  replacementRows?: (read: number, rows: NativeProcessRow[]) => NativeProcessRow[];
+  replacementTiming?: { pollMs: number; timeoutMs: number };
+  afterReplacementYield?: (ms: number) => void | Promise<void>;
   /** The pane hold fails: the remain-on-exit write errors, or it doesn't read back as on. */
   holdFails?: "write" | "readback";
   /** The pane disappears when its process is signalled, and tmux doesn't report it dead (review-r2's case). */
@@ -98,6 +102,8 @@ function world(options: WorldOptions = {}) {
   const calls: string[] = [];
   const paneLines: string[] = (options.screenBefore ?? "").split("\n").filter(Boolean);
   let relaunched = false;
+  let replacementReads = 0;
+  const replacementYields: number[] = [];
   let thrown = false;
   const maybeThrow = (at: WorldOptions["throwAt"]) => {
     if (options.throwAt === at && !thrown) { thrown = true; throw new Error(`injected failure at ${at}`); }
@@ -193,15 +199,27 @@ function world(options: WorldOptions = {}) {
   const service = new SeatLifecycleService({
     db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
     runtimeAdapters: { codex: codex as never },
-    listProcesses: () => (options.identityFails && rows.some((row) => row.pid === 300) ? [] : rows),
+    listProcesses: () => {
+      if (relaunched) {
+        replacementReads++;
+        if (options.replacementRows) return options.replacementRows(replacementReads, rows);
+      }
+      return options.identityFails && rows.some((row) => row.pid === 300) ? [] : rows;
+    },
     activityOracle: { declareOccupantSwap: () => {}, getSeatState: () => options.activity ?? null },
     inPlaceRestartIo: io,
-    inPlaceRestartTiming: { pollMs: 1, timeoutMs: 2, sleep: async () => {} },
+    inPlaceRestartTiming: { pollMs: 1, timeoutMs: 2, ...options.replacementTiming, sleep: async ms => {
+      if (relaunched) {
+        replacementYields.push(ms);
+        await options.afterReplacementYield?.(ms);
+      }
+    } },
     inPlaceRestartDaemonStartedAt: options.daemonStartedAt ?? new Date("2000-01-01T00:00:00Z"),
   });
   const events = () => (db.prepare("SELECT type, payload FROM events WHERE type LIKE 'seat.restart_in_place%' ORDER BY seq").all() as Array<{ type: string; payload: string }>)
     .map((row) => ({ type: row.type, ...JSON.parse(row.payload) }));
-  return { db, service, node, session, calls, launches, builds, events, sessionRegistry,
+  return { db, service, node, session, calls, launches, builds, events, sessionRegistry, tmux,
+    replacementYields, get replacementReads() { return replacementReads; }, get relaunched() { return relaunched; },
     setRows: (next: NativeProcessRow[]) => { rows = next; },
     print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); } };
 }
@@ -669,5 +687,167 @@ describe("#1196 round 2: account evidence only from lines produced after the res
     const finished = w.events().at(-1)!;
     expect(Object.values(finished.accountLinesAtRestart)).toEqual([1]);
     expect(JSON.stringify(finished)).not.toContain("example.com");
+  });
+});
+
+
+describe("post-relaunch identity observation window", () => {
+  // Synthetic process tables model the saved launcher-only observation, not native timing.
+  // Reuse the existing row builders and lifecycle fixture; only observation is staged.
+  const replacement = (shape: Shape, token = TOKEN): NativeProcessRow[] => {
+    const root = shape === "shell_backed" ? 100 : 300;
+    return [shellRow(root, 350),
+      { pid: 350, ppid: root, pgid: 350, tpgid: 350, executableName: "sh", startedAt: LATER,
+        command: "/bin/sh /tmp/openrig-tmux-send-fixture.txt" },
+      { pid: 351, ppid: 350, pgid: 350, tpgid: 350, executableName: "node", startedAt: LATER,
+        command: `/usr/bin/node /opt/codex/bin/codex.js resume ${token}` },
+      codexRow(400, 351, `-m gpt-5.5 -s workspace-write resume ${token}`, LATER, 350)];
+  };
+  const verdicts = (w: ReturnType<typeof world>) => w.db.prepare("SELECT verdict FROM observed_identity ORDER BY rowid")
+    .all() as Array<{ verdict: string }>;
+  const auditVerdicts = (w: ReturnType<typeof world>) => w.db.exec(`
+    CREATE TEMP TABLE observed_identity (verdict TEXT);
+    CREATE TEMP TRIGGER observe_identity_insert AFTER INSERT ON seat_identity_verdicts
+      BEGIN INSERT INTO observed_identity VALUES (NEW.verdict); END;
+    CREATE TEMP TRIGGER observe_identity_update AFTER UPDATE ON seat_identity_verdicts
+      BEGIN INSERT INTO observed_identity VALUES (NEW.verdict); END;
+  `);
+
+  it.each(["shell_backed", "direct_native"] as const)("%s: waits for the native child, keeps truthful verdicts and launches once", async (shape) => {
+    const rows = replacement(shape);
+    const w = world({ shape, replacementRows: read => read <= 4 ? rows.slice(0, -1) : rows,
+      afterReplacementYield: async () => {
+        expect(verdicts(w).at(-1)?.verdict).toBe("mismatch");
+        expect(w.events().map(event => event.type)).toEqual(["seat.restart_in_place_started"]);
+        expect(w.sessionRegistry.getBindingForNode(w.node.id)?.tmuxPane).toBe("%1");
+        if (shape === "direct_native") expect(await w.tmux.getPaneLocalOption("%1", "remain-on-exit")).toBe("on");
+      } });
+    auditVerdicts(w);
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "observe the replacement" });
+    expect(result).toMatchObject({ outcome: "restarted_account_unverified", newProcess: { pid: 400 }, account: { verdict: "unverified" } });
+    expect(w.replacementYields).toEqual([1, 1]);
+    // Two null attempts each use one strict OS read and one secondary snapshot.
+    // The successful attempt uses two fresh strict reads and ONE cached secondary snapshot.
+    expect(w.replacementReads).toBe(7);
+    expect(verdicts(w).map(row => row.verdict)).toEqual(["mismatch", "mismatch", "verified"]);
+    expect(w.events().map(event => [event.type, event.outcome])).toEqual([
+      ["seat.restart_in_place_started", undefined], ["seat.restart_in_place_finished", "restarted_account_unverified"]]);
+    expect(w.builds).toHaveLength(1);
+    expect(w.calls.filter(call => /signal.*TERM/.test(call))).toHaveLength(1);
+    if (shape === "shell_backed") expect(w.launches).toHaveLength(1);
+    else {
+      expect(w.calls.filter(call => call.startsWith("respawn "))).toHaveLength(1);
+      expect(w.calls.filter(call => call.startsWith("restore remain-on-exit"))).toEqual(["restore remain-on-exit null"]);
+    }
+  });
+
+  it("keeps immediate success immediate, with two fresh strict reads and one secondary snapshot", async () => {
+    const w = world({ replacementRows: () => replacement("shell_backed") });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "ready now" }))
+      .toMatchObject({ outcome: "restarted_account_unverified" });
+    expect(w.replacementYields).toEqual([]);
+    expect(w.replacementReads).toBe(3);
+  });
+
+  it.each(["shell_backed", "direct_native"] as const)("%s: exhausts the default 31 evaluations without another launch", async (shape) => {
+    const rows = replacement(shape).slice(0, -1);
+    const w = world({ shape, replacementRows: () => rows, replacementTiming: { pollMs: 100, timeoutMs: 3_000 } });
+    auditVerdicts(w);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "no native evidence" }))
+      .toMatchObject({ outcome: "native_unknown" });
+    expect(w.replacementYields).toEqual(Array(30).fill(100));
+    expect(w.replacementReads).toBe(62);
+    expect(verdicts(w).map(row => row.verdict)).toEqual(Array(31).fill("mismatch"));
+    expect(w.events()).toHaveLength(2);
+    expect(w.builds).toHaveLength(1);
+    if (shape === "shell_backed") expect(w.launches).toHaveLength(1);
+    else {
+      expect(w.calls.filter(call => call.startsWith("respawn "))).toHaveLength(1);
+      expect(w.calls.some(call => call.startsWith("restore remain-on-exit"))).toBe(false);
+      expect(await w.tmux.getPaneLocalOption("%1", "remain-on-exit")).toBe("on");
+    }
+  });
+
+  it.each(["wrong token", "missing token", "conflicting native", "wrong OS executable"])("never promotes stable invalid evidence: %s", async kind => {
+    const rows = replacement("shell_backed");
+    if (kind === "wrong token") rows[3] = { ...rows[3]!, command: "/usr/local/bin/codex resume other-thread" };
+    if (kind === "missing token") rows[3] = { ...rows[3]!, command: "/usr/local/bin/codex" };
+    if (kind === "conflicting native") rows.push(codexRow(401, 351, `resume ${TOKEN}`, LATER, 350));
+    if (kind === "wrong OS executable") rows[3] = { ...rows[3]!, executableName: "node" };
+    const w = world({ replacementRows: () => rows });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "invalid evidence" })).toMatchObject({ outcome: "native_unknown" });
+    expect(w.replacementYields).toEqual([1, 1]);
+    expect(w.replacementReads).toBe(6);
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it("allows an earlier token mismatch to resolve only into a later fully valid pair", async () => {
+    const good = replacement("shell_backed");
+    const bad = good.map(row => row.pid === 400 ? { ...row, command: "/usr/local/bin/codex resume other-thread" } : row);
+    const w = world({ replacementRows: read => read <= 2 ? bad : good });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "later valid proof" }))
+      .toMatchObject({ outcome: "restarted_account_unverified" });
+    expect(w.replacementYields).toEqual([1]);
+    expect(w.replacementReads).toBe(5);
+  });
+
+  it("does not join a drifting first/second fingerprint across attempts", async () => {
+    const good = replacement("shell_backed");
+    const drift = good.map(row => row.pid === 400 ? { ...row, startedAt: LSTART } : row);
+    const w = world({ replacementRows: read => read === 2 ? drift : good });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "stable second attempt" }))
+      .toMatchObject({ outcome: "restarted_account_unverified" });
+    expect(w.replacementYields).toEqual([1]);
+    expect(w.replacementReads).toBe(6);
+  });
+
+  it("keeps a failed secondary snapshot conjunct after each positive strict proof", async () => {
+    const w = world({ replacementRows: read => read % 3 === 0 ? [] : replacement("shell_backed") });
+    auditVerdicts(w);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "secondary absent" })).toMatchObject({ outcome: "native_unknown" });
+    expect(w.replacementYields).toEqual([1, 1]);
+    expect(w.replacementReads).toBe(9);
+    // These are truthful strict-identity verdicts, not a completed-restart claim.
+    expect(verdicts(w).map(row => row.verdict)).toEqual(["verified", "verified", "verified"]);
+    expect(w.events().at(-1)).toMatchObject({ outcome: "native_unknown" });
+  });
+
+  it.each(["lost", "changed", "ambiguous", "pid changed"])("keeps the pane join mandatory: %s", async kind => {
+    const w = world({ replacementRows: () => replacement("shell_backed") });
+    const list = w.tmux.listPanes.bind(w.tmux);
+    const pid = w.tmux.getPanePid.bind(w.tmux);
+    w.tmux.listPanes = async session => {
+      const panes = await list(session);
+      if (!w.relaunched) return panes;
+      if (kind === "lost") return [];
+      if (kind === "changed") return panes.map(pane => ({ ...pane, id: "%2" }));
+      if (kind === "ambiguous") return [...panes, { ...panes[0]!, id: "%2" }];
+      return panes;
+    };
+    w.tmux.getPanePid = async target => w.relaunched && kind === "pid changed" ? 101
+      : w.relaunched && kind === "changed" && target === "%1" ? null : pid(target);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "pane join fails" })).toMatchObject({ outcome: "native_unknown" });
+    expect(w.replacementYields).toEqual([1, 1]);
+    expect(w.launches).toHaveLength(1);
+  });
+
+  it.each([[5, "restarted_account_unverified", 7], [7, "native_unknown", 6]] as const)(
+    "native appears at OS read %i: respects the last allowed attempt", async (appearAt, outcome, reads) => {
+      const rows = replacement("shell_backed");
+      const w = world({ replacementRows: read => read < appearAt ? rows.slice(0, -1) : rows });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "budget boundary" })).toMatchObject({ outcome });
+      expect(w.replacementYields).toEqual([1, 1]);
+      expect(w.replacementReads).toBe(reads);
+    });
+
+  it("preserves thrown-error finalization instead of resampling an exception", async () => {
+    const w = world({ replacementRows: () => replacement("shell_backed").slice(0, -1),
+      afterReplacementYield: () => { throw new Error("observation sleep failed"); } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "throw during observation" }))
+      .toMatchObject({ outcome: "native_unknown", couldNotSee: [expect.stringContaining("observation sleep failed")] });
+    expect(w.replacementYields).toEqual([1]);
+    expect(w.replacementReads).toBe(2);
+    expect(w.events()).toHaveLength(2);
+    expect(w.launches).toHaveLength(1);
   });
 });
