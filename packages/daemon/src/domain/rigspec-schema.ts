@@ -19,6 +19,7 @@ import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agen
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { normalizeSeatEnv, validateSeatEnv } from "./seat-env.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
+import { deriveCanonicalSessionName } from "./session-name.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
 import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
 import * as path from "node:path";
@@ -202,6 +203,7 @@ export class RigSpecSchema {
         const pod = pods[pi]!;
         errors.push(...validatePod(pod, pi, podIds, advisories));
       }
+      errors.push(...validateDerivedSessionNames(pods, obj["name"]));
 
       // Cross-pod edge validation
       const allQualifiedIds = new Set<string>(opts?.externalQualifiedIds ?? []);
@@ -382,6 +384,27 @@ function normalizeWorkspaceBlock(raw: unknown): WorkspaceSpec | undefined {
 }
 
 // -- Pod validation --
+
+/** Members in different pods can derive one session name (pod "a-b" + member "c" and pod "a" + member "b-c"). */
+function validateDerivedSessionNames(pods: Record<string, unknown>[], rigName: unknown): string[] {
+  const errors: string[] = [];
+  const owners = new Map<string, string>();
+  const rig = typeof rigName === "string" ? rigName : "";
+  pods.forEach((pod, pi) => {
+    if (!isMapping(pod) || typeof pod["id"] !== "string" || !Array.isArray(pod["members"])) return;
+    (pod["members"] as unknown[]).forEach((member, mi) => {
+      if (!isMapping(member) || typeof member["id"] !== "string") return;
+      const sessionName = deriveCanonicalSessionName(pod["id"] as string, member["id"] as string, rig);
+      const owner = owners.get(sessionName);
+      const qualifiedId = `${pod["id"]}.${member["id"]}`;
+      if (owner === undefined) owners.set(sessionName, qualifiedId);
+      else if (owner !== qualifiedId) {
+        errors.push(`pods[${pi}].members[${mi}].id: session name "${sessionName}" is already used by member "${owner}"`);
+      }
+    });
+  });
+  return errors;
+}
 
 function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
