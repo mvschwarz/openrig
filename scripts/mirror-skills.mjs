@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -267,9 +268,9 @@ export async function stagePublicSkills({
 
       const targetPath = join(stagingRoot, skillRelative === "." ? skill : publicPath);
       mkdirSync(dirname(targetPath), { recursive: true });
-      writeFileSync(targetPath, bytes, {
-        mode: lstatSync(sourcePath).mode & 0o777,
-      });
+      writeFileSync(targetPath, bytes);
+      // A create mode is masked by the umask; set the source's mode exactly.
+      chmodSync(targetPath, lstatSync(sourcePath).mode & 0o777);
     }
   }
 }
@@ -766,6 +767,7 @@ function copyTree(sourceRoot, targetRoot) {
     const targetPath = join(targetRoot, relative(sourceRoot, sourcePath));
     mkdirSync(dirname(targetPath), { recursive: true });
     copyFileSync(sourcePath, targetPath);
+    chmodSync(targetPath, lstatSync(sourcePath).mode & 0o777);
   }
 }
 
