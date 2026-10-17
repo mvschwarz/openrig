@@ -4,6 +4,11 @@ import { startupRevision } from "../src/routes/startup.js";
 import { defaultProbeRuntimes } from "../src/domain/kernel-boot.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { existsSync, readFileSync } from "node:fs";
+import { verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
+vi.mock("../src/domain/native-process-lineage.js", async (original) => {
+  const actual = await original<typeof import("../src/domain/native-process-lineage.js")>();
+  return { ...actual, verifyPaneIdleShell: vi.fn(actual.verifyPaneIdleShell) };
+});
 vi.mock("../src/domain/kernel-boot.js", async (original) => ({ ...await original<typeof import("../src/domain/kernel-boot.js")>(), defaultProbeRuntimes: vi.fn(async () => ({ codex: "ok", claudeCode: "ok" })) }));
 
 describe("startup consent and effect boundary", () => {
@@ -65,6 +70,31 @@ describe("startup consent and effect boundary", () => {
     expect(setup.sessionRegistry.getSessionsForRig(rig.id).map((s) => s.id)).toEqual([session.id]);
     const readback = await setup.app.request(`/api/startup/${rig.id}`);
     expect((await readback.json()).seats[0]).toMatchObject({ freshAllowed: false, prerequisite: expect.stringContaining("unauthenticated") });
+  });
+  describe("a seat whose pane command reads as a shell", () => {
+    function shellPane(runtime: "claude-code" | "codex", proven: boolean) {
+      const { rig, node } = seat();
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, node.id);
+      vi.mocked(setup.tmuxAdapter.probeSession).mockResolvedValue({ state: "present" } as never);
+      setup.tmuxAdapter.listPanes = vi.fn(async () => [{ id: "%1", index: 0, cwd: "/p", width: 80, height: 24, active: true }]) as never;
+      setup.tmuxAdapter.getPaneCommand = vi.fn(async () => "sh");
+      setup.tmuxAdapter.capturePaneContent = vi.fn(async () => "booting wrapper...");
+      vi.mocked(verifyPaneIdleShell).mockResolvedValue(proven);
+      return rig;
+    }
+    async function observed(rigId: string) {
+      const response = await setup.app.request(`/api/startup/${rigId}`);
+      return (await response.json()).seats[0].observed as { state: string; detail: string };
+    }
+    it("does not call a Claude pane a returned shell when no idle shell is proven", async () => {
+      const seen = await observed(shellPane("claude-code", false).id);
+      expect(seen.state).toBe("attention_required");
+      expect(seen.detail).toBe("The pane shows a shell that is not a proven idle shell; a launch script may still be starting Claude.");
+    });
+    it("keeps the returned-to-shell wording when the idle shell is proven", async () => {
+      const seen = await observed(shellPane("claude-code", true).id);
+      expect(seen).toMatchObject({ state: "attention_required", detail: "The probe pane returned to a shell instead of staying inside the runtime." });
+    });
   });
   it("reports unavailable transport without authorizing fresh replacement", async () => {
     const { rig, node } = seat();

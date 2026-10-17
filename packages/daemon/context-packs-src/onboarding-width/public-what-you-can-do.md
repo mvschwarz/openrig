@@ -173,7 +173,7 @@ unseen — which makes messages the one delivery channel that never gets skipped
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
   sent with “Also send to #channel” reach the seat like any other thread reply. A person's reply
   inside a thread OpenRig opened is answered in that thread: answer with `rig queue create
-  --human-intent update --reply-to <the inbound reply's row>`; a top-level message is answered
+  --human-intent update --summary "<subject>" --reply-to <the inbound reply's row>`; a top-level message is answered
   top-level.
 
 ## Making work outlive you
@@ -181,7 +181,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
 **Your terminal buffer is not a record and your turn is not a container.** A durable row survives
 your context, your compaction and your replacement — and it is the only thing that does.
 
-- **`rig queue create`** — a row with an owner, a body and a transition history. Its reply, like
+- **`rig queue create`** — a row with an owner, a body and a transition history. Give it a `--summary` (its
+  subject wherever it is listed) and, for project work, `project:`/`mission:`/`slice:` tags. Its reply, like
   `handoff`'s, confirms the row was saved; the owner is woken after that. Before you say they were
   told, read the row's transitions, or use `--verify`. For a seat it reports the wake's terminal
   receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is

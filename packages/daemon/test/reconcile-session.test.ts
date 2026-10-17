@@ -14,6 +14,8 @@ import type { ExpansionRequest } from "../src/domain/types.js";
 import { convergeOp, SUPPORTED_OP_KINDS, isSupportedOpKind } from "../src/domain/topology-converge.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { ClaimService } from "../src/domain/claim-service.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 /** Fully-instrumented tmux adapter: records every call by method name. */
 function spyTmux(overrides?: Partial<Record<string, unknown>>) {
@@ -184,6 +186,32 @@ describe("ClaimService.reconcileSession (OPR.0.3.4.3)", () => {
     expect(result.result.projectionDrift.join(" ")).toContain("cwd unverified");
     // Continuity is NEVER asserted.
     expect(result.result.continuity).toBe("unverified");
+  });
+
+  describe("runtime drift for a pane whose command is its launcher", () => {
+    const started = "Sat Jan  1 12:00:00 2000";
+    const launchScript: NativeProcessRow = { pid: 900, ppid: 1, command: "/bin/sh /tmp/launch.sh", pgid: 900, tpgid: 901, executableName: "sh", startedAt: started };
+    const idleSh: NativeProcessRow = { pid: 900, ppid: 1, command: "/bin/sh", pgid: 900, tpgid: 900, executableName: "sh", startedAt: started };
+    async function drift(runtime: "claude-code" | "codex", rows: NativeProcessRow[]) {
+      const spy = spyTmux({ getPaneCommand: vi.fn(async () => "sh"), getPanePid: vi.fn(async () => 900) });
+      const rig = setup.rigRepo.createRig(`launcher-${runtime}`);
+      const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime, cwd: "/work/repo", podId: null });
+      const sess = setup.sessionRegistry.registerSession(node.id, `dev-impl@launcher-${runtime}`);
+      setup.sessionRegistry.markDetached(sess.id);
+      setup.sessionRegistry.updateBinding(node.id, { tmuxSession: `dev-impl@launcher-${runtime}` });
+      const service = new ClaimService({ db, rigRepo: setup.rigRepo, sessionRegistry: setup.sessionRegistry,
+        discoveryRepo: setup.discoveryRepo, eventBus: setup.eventBus, tmuxAdapter: spy.adapter, listProcesses: () => rows });
+      const result = await service.reconcileSession({ sessionName: `dev-impl@launcher-${runtime}` });
+      expect(result.ok).toBe(true);
+      return result.ok ? result.result.projectionDrift.filter((entry) => entry.startsWith("runtime unverified")) : [];
+    }
+    it.each(["claude-code", "codex"] as const)("reports no runtime drift when a %s process holds the pane's foreground under an sh launcher", async (runtime) => {
+      const exe = runtime === "claude-code" ? "claude" : "codex";
+      expect(await drift(runtime, [launchScript, { pid: 901, ppid: 900, command: exe, pgid: 901, tpgid: 901, executableName: exe, startedAt: started }])).toEqual([]);
+    });
+    it.each(["claude-code", "codex"] as const)("keeps the unverified note for a %s node whose pane is only an idle shell", async (runtime) => {
+      expect(await drift(runtime, [idleSh])).toEqual([`runtime unverified: pane command "sh" does not confirm runtime "${runtime}"`]);
+    });
   });
 
   it("session_not_found when no live tmux session has the canonical name (never adopts a ghost)", async () => {

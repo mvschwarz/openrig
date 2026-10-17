@@ -20,7 +20,7 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { observeClaudeDelivery, observeClaudeResumeLaunch, verifyClaudePaneProcess, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudeResumeLaunch, verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
 import type {
@@ -81,6 +81,7 @@ import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatR
 import { effectiveRestorePolicy, type RestoreSeatFacts } from "./restore-policy.js";
 import { agentAppOf } from "./built-in-runtimes.js";
 import { seatAdapter } from "../adapters/agent-app-runtime-adapter.js";
+import { pluginPathsOf } from "./claude-core-plugin-env.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -1019,7 +1020,13 @@ export class RestoreOrchestrator {
     }
 
     // Attempt launch — compensate ONLY if launch itself fails
-    const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, launchOpts);
+    // The snapshot's saved startup context says which plugins the seat selected; without one the launcher reads the
+    // node's own saved context.
+    const savedStartup = data.nodeStartupContext?.[nodeId];
+    const launchResult = await this.nodeLauncher.launchNode(rigId, node.logicalId, {
+      ...launchOpts,
+      ...(savedStartup ? { pluginPaths: pluginPathsOf(savedStartup.projectionEntries) } : {}),
+    });
     if (!launchResult.ok) {
       // Launch failed — restore prior state (compensating action)
       this.restoreNodeState(nodeId, priorState);
@@ -1962,6 +1969,11 @@ export class RestoreOrchestrator {
     // Precondition #4: pane is at a usable/idle state — explicitly NOT a
     // resume-selection prompt and not the "returned to shell" failure mode.
     if (probe.status !== "resumed") {
+      // The label reads as a shell, but the runtime's lineage was just proven in this pane: name a shell only for a proven idle one.
+      if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: identity.pane, tmux: this.tmuxAdapter,
+        ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })) {
+        return { ok: false, code: "pane_not_usable", detail: "Pane is not shown to be resumed: its command reads as a shell, but it is not a proven idle shell (the runtime may be starting or showing a dialog); reconciliation requires resumed." };
+      }
       return { ok: false, code: "pane_not_usable", detail: `Pane state is ${probe.status} (${probe.code}); reconciliation requires resumed.` };
     }
 

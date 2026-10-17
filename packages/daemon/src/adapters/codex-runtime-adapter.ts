@@ -34,7 +34,7 @@ import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorksp
 import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 
-import { listNativeProcesses, observeCodexPaneProcess, type NativeProcessRow } from "../domain/native-process-lineage.js";
+import { listNativeProcesses, observeCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -622,6 +622,21 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       paneCommand,
       paneContent,
     });
+
+    if (probe.code === "returned_to_shell") {
+      const isIdleShell = await verifyPaneIdleShell({
+        target: binding.tmuxSession,
+        tmux: this.tmux,
+        listProcesses: this.listProcesses,
+      });
+      if (!isIdleShell) {
+        return {
+          ready: false,
+          reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Codex.",
+          code: "awaiting_runtime",
+        };
+      }
+    }
 
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };

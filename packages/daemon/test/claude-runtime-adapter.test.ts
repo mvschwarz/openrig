@@ -20,6 +20,7 @@ function mockTmux(): TmuxAdapter {
     listSessions: vi.fn(async () => []),
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
+    getPanePid: vi.fn(async () => null),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
   } as unknown as TmuxAdapter;
 }
@@ -237,8 +238,15 @@ describe("Claude Code runtime adapter", () => {
   it("checkReady returns false when the pane has fallen back to a shell prompt", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
     (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("user@example.test rigged %");
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 900, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
 
     const result = await adapter.checkReady(makeBinding());
 
@@ -247,6 +255,46 @@ describe("Claude Code runtime adapter", () => {
       reason: "The probe pane returned to a shell instead of staying inside the runtime.",
       code: "returned_to_shell",
     });
+  });
+
+  it("checkReady returns awaiting_runtime when the shell label is a launch script still starting Claude", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("sh");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("booting wrapper...");
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/sh /tmp/launch.sh", pgid: 900, tpgid: 901, executableName: "sh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "claude", pgid: 901, tpgid: 901, executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result).toEqual({
+      ready: false,
+      reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Claude.",
+      code: "awaiting_runtime",
+    });
+  });
+
+  it("checkReady does not call the pane a shell when the process listing is unavailable", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("sh");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("");
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => { throw new Error("ps unavailable"); },
+    });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result.ready).toBe(false);
+    expect(result.code).toBe("awaiting_runtime");
   });
 
   it("checkReady returns false when Claude is blocked on the workspace trust prompt", async () => {
@@ -643,6 +691,44 @@ describe("Claude Code runtime adapter", () => {
       ok: false,
       error: "Claude resume failed: pane returned to shell instead of entering Claude",
       recovery: "retry_fresh",
+    });
+  });
+
+  describe("a resume still starting is not a return to the shell (pane command is sh for every OpenRig launch)", () => {
+    const startedAt = "Fri Oct 16 15:00:00 2026";
+    const pane = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: "-zsh", executableName: "zsh", startedAt };
+    const launchScript = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, command: "/bin/sh /tmp/openrig-tmux-send.txt", executableName: "sh", startedAt };
+    const claude = { pid: 12, ppid: 11, pgid: 11, tpgid: 11, executableName: "claude", startedAt,
+      command: "claude --permission-mode acceptEdits --resume abc-123 --name dev-impl@test-rig" };
+    const run = async (rows: Array<typeof pane>) => {
+      const tmux = mockTmux();
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("sh");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("");
+      (tmux as unknown as { getPanePid: unknown }).getPanePid = vi.fn(async () => 10);
+      const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => rows });
+      return adapter.launchHarness({ ...makeBinding(), tmuxPane: "%1" }, { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+    };
+
+    it("reports the timeout, not a return to the shell, while Claude runs under the pane", async () => {
+      expect(await run([{ ...pane, tpgid: 11 }, launchScript, claude])).toEqual({
+        ok: false,
+        error: "Claude resume failed: timed out waiting for Claude to become active",
+      });
+    });
+
+    it("reports the timeout while the launch script still holds the foreground before Claude starts", async () => {
+      expect(await run([{ ...pane, tpgid: 11 }, launchScript])).toEqual({
+        ok: false,
+        error: "Claude resume failed: timed out waiting for Claude to become active",
+      });
+    });
+
+    it("still reports a pane whose shell owns the terminal with nothing under it", async () => {
+      expect(await run([pane])).toEqual({
+        ok: false,
+        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        recovery: "retry_fresh",
+      });
     });
   });
 

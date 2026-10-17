@@ -534,6 +534,35 @@ export function matchesRecordedHandoffTarget(
   return foreign !== null && foreign[1] === deriveCrossHostSuccessorId(qitemId, handedOffTo, foreign[2]!);
 }
 
+/**
+ * Shared read-only lineage helper for handoff advisory and stuck sweep.
+ * Checks whether a local successor item exists matching target (by qitem_id or destination_session)
+ * linked to sourceQitemId (via handed_off_from or chain_of_record membership).
+ *
+ * Excludes source row itself (s.qitem_id != sourceQitemId). Guards chain_of_record with json_valid.
+ * Throws on database/query errors so callers can handle lookup failures with their own policies.
+ */
+export function hasLinkedSuccessor(
+  db: Database.Database,
+  sourceQitemId: string,
+  target: string,
+): boolean {
+  const successor = db
+    .prepare(
+      `SELECT 1 FROM queue_items s
+        WHERE (s.qitem_id = ? OR s.destination_session = ?) AND s.qitem_id != ?
+          AND (s.handed_off_from = ? OR (
+            s.chain_of_record IS NOT NULL
+            AND json_valid(s.chain_of_record)
+            AND EXISTS (
+              SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
+            )
+          )) LIMIT 1`,
+    )
+    .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
+  return Boolean(successor);
+}
+
 /** PL-007 — defensive column probe. Older test fixtures bypass the
  *  canonical migration list, so target_repo may be absent. Mirrors
  *  the `hasNodeColumn` pattern in rig-repository.ts. */
@@ -4157,16 +4186,7 @@ export class QueueRepository {
       || row.closure_reason !== "handed_off_to" || !row.closure_target) return undefined;
     const target = row.closure_target;
     try {
-      const successor = this.db.prepare(
-        `SELECT 1 FROM queue_items s
-          WHERE (s.qitem_id = ? OR s.destination_session = ?) AND s.qitem_id != ?
-            AND (s.handed_off_from = ? OR EXISTS (
-              SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
-            )) LIMIT 1`,
-      ).get(target, target, row.qitem_id, row.qitem_id, row.qitem_id);
-      // A linked row may have handed on to another owner. Its current state
-      // does not establish whether later hops still hold the work.
-      if (successor) return undefined;
+      if (hasLinkedSuccessor(this.db, row.qitem_id, target)) return undefined;
     } catch {
       // Optional reporting must not fail a close that has already committed,
       // or describe an unavailable lookup as proof of a missing local row.
@@ -4178,8 +4198,8 @@ export class QueueRepository {
       target,
       reason: "no-live-local-successor",
       message: foreignTarget
-        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup.`
-        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID.`,
+        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup. Use 'rig queue handoff' or 'handoff-and-complete': a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`
+        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID. Use 'rig queue handoff' or 'handoff-and-complete': a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`,
     };
   }
 

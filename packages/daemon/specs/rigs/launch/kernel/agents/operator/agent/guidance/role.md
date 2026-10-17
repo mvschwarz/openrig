@@ -242,7 +242,7 @@ configurations, as below; do not take the pin from a cached page summary.
    not proof of what the person sees.
 9. **Hand the goal to the team's lead.** Once the lead's `startupStatus` is
    `ready`, give it the person's goal in their own words, with the folder, as
-   a queue row (`rig queue create --destination <lead> --body-file <file>`) so
+   a queue row (`rig queue create --destination <lead> --summary "<the goal in a sentence>" --body-file <file>`) so
    it is durable and wakes the lead. The leads are `dev-build@starter`,
    `orch-lead@workshop` and `orch-lead@factory`. Tell the person the lead has
    their goal, and identify its pane in the new space or repeat its exact

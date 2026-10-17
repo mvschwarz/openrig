@@ -13,7 +13,7 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { observeClaudePaneProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
@@ -364,6 +364,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
     const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
 
+    // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone
+    // is not a return to a shell. Say so only for a proven idle shell (the rule Codex's checkReady uses).
+    if (probe.code === "returned_to_shell"
+      && !await verifyPaneIdleShell({ target: binding.tmuxSession, tmux: this.tmux, listProcesses: this.listProcesses })) {
+      return {
+        ready: false,
+        reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Claude.",
+        code: "awaiting_runtime",
+      };
+    }
+
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
   }
@@ -416,6 +427,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
       return verifiedProbe;
     } catch { return probe; }
+  }
+
+  /** tmux names a shell for every OpenRig launch (the launch script is `sh`), so its word alone can't say
+   *  Claude is gone. With a bound pane, the process tree must show the pane's shell holding the terminal with
+   *  nothing under it; Claude, or a launch script about to start it, is a slow resume. */
+  private async paneReturnedToShell(binding: NodeBinding, paneCommand: string | null): Promise<boolean> {
+    if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) return false;
+    if (!binding.tmuxPane) return true;
+    const observed = await observeClaudeDelivery({ target: binding.tmuxPane, tmux: this.tmux, listProcesses: this.listProcesses },
+      { unknownKeepsIdle: false });
+    return observed.state === "idle_shell";
   }
 
   private async verifyResumeLaunch(binding: NodeBinding): Promise<HarnessLaunchResult> {
@@ -493,7 +515,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+    if (await this.paneReturnedToShell(binding, finalCommand)) {
       return {
         ok: false,
         error: "Claude resume failed: pane returned to shell instead of entering Claude",

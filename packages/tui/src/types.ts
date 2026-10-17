@@ -264,6 +264,9 @@ export interface RecentTransitionSnap {
   change: string;
   /** Authored queue summary for display only; never used to derive change. */
   summary?: string | null;
+  /** Display text the daemon derives from the body (first non-blank line within its first 2,000
+   *  characters) for a row with no authored summary. Absent from older daemons. */
+  bodyPreview?: string | null;
   /** Owning local rig, explicit on instance-scoped reads. */
   rig?: string | null;
   targetKind: "qitem" | "slice" | "mission";

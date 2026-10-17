@@ -274,7 +274,9 @@ The AgentSpec and RigSpec allow declaring deterministic environment configuratio
 ### What the Spec Supports
 
 **Hooks** ship inside plugins: declare the plugin under `resources.plugins[]`. AgentSpec validation refuses
-`resources.hooks`.
+`resources.hooks`. OpenRig loads one plugin's hooks into a seat itself: the shipped `openrig-core` plugin, for a Claude seat
+that selects it (see [the refocus channel](refocus-channel.md#the-mechanism)). The folder a declared plugin is projected into
+is not one Claude Code or Codex loads, so a plugin of your own does not get its hooks run by that projection.
 
 **Runtime resources** (in `resources.runtime_resources`):
 ```yaml
@@ -308,7 +310,7 @@ run after the harness is ready: `after_files` (the default) after the post-launc
 | Guidance file projection (`guidance_merge`) | **Supported** | Reliable. Primary delivery mechanism. |
 | Skill projection (`skill_install`) | **Supported** | Reliable. Skills are copied to workspace. |
 | `send_text` delivery after ready | **Supported** | Reliable. Requires harness to be ready. |
-| Hooks | **Through plugins** | Declare a plugin under `resources.plugins[]`; `resources.hooks` is refused. |
+| Hooks | **Through plugins, limited** | `resources.hooks` is refused. OpenRig loads the shipped `openrig-core` plugin's hooks into a Claude seat that selects it (Claude Code v2.1.280 or later); a plugin you declare under `resources.plugins[]` is projected, but its hooks are not loaded. |
 | Runtime resource projection | **Supported for recognized fragments** | `claude_settings_fragment`, `claude_mcp_fragment`, and `codex_config_fragment` are applied to provider config. Unknown types are copied to runtime extension directories. |
 | Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them; a seat with no policy, selection or named Codex profile also gets the per-launch [team default](rig-spec.md#team-launch-defaults), and the `kernel` rig's seats get a wider operational default ([rig spec, "At launch"](rig-spec.md)). Neither is written to a settings file. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
 | MCP installation | **Supported for Claude fragments** | A selected `claude_mcp_fragment` is merged into the project's `.mcp.json`. Claude asks to approve new servers found there; that prompt stops startup as `mcp_gate` until someone answers it and runs `rig seat continue`. Otherwise use `/mcp` or `claude mcp add`, or describe the servers in startup files for the agent to configure. |

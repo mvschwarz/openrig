@@ -17,7 +17,8 @@ a queue identity.
 
 For the first meaningful code change, ask dev-check for an independent check
 of the exact diff and the behavior it promises. Subsequent checks should match
-the consequence of the work. Hand off through `rig queue handoff`, with the
+the consequence of the work. Hand off through `rig queue handoff` with a
+`--summary` and the project, mission and slice tags, giving the
 repository path, candidate commit or diff, checks run and any limits. Consult
 `--help` for current syntax. Do not use chat text as the work record.
 

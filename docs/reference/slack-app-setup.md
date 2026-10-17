@@ -166,7 +166,7 @@ rig slack channel-map remove pr@my-rig
   is left to the retry of retained posts.
 - **Replies and new messages.** A reply in an item's thread reaches that item's seat, in any
   channel. To answer it in the same thread, the seat sends `rig queue create --human-intent update
-  --reply-to <the inbound reply's row>`. A message the human starts (or a reply in a thread OpenRig does not know) goes to
+  --summary "<subject>" --reply-to <the inbound reply's row>`. A message the human starts (or a reply in a thread OpenRig does not know) goes to
   the connector's inbound destination, whichever channel it is in. Missed-message recovery
   (below) covers the default channel only.
 
