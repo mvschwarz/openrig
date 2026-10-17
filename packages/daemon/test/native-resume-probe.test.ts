@@ -47,11 +47,18 @@ describe("native resume probe", () => {
     it.each([
       ["Accessing workspace:\nYes, I trust this folder", "trust_gate"],
       ["new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm", "mcp_gate"],
-      ["Not logged in · Run /login", "login_required"],
+      ["● Not logged in · Please run /login\n❯\u00a0", "login_required"],
       ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "claude_resume_selection_prompt"],
       ["No conversation found", "no_conversation_found"],
     ])("does not let identity proof waive prerequisites: %s", (panel, code) => {
       expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent: `${screen}\n${panel}`, claudeAutoIdentityVerified: true }).code).toBe(code);
+    });
+    it("lets identity proof decide when only the not-logged-in footer shows", () => {
+      const paneContent = `${screen}                                   Not logged in · Run /login\n`;
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent }))
+        .toMatchObject({ status: "inconclusive", code: "claude_auto_identity_required" });
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent, claudeAutoIdentityVerified: true }))
+        .toMatchObject({ status: "resumed", code: "active_runtime" });
     });
   });
   describe("Claude's exact resume identity can validate the visible composer", () => {
@@ -71,7 +78,7 @@ describe("native resume probe", () => {
     it.each([
       ["Accessing workspace:\nYes, I trust this folder", "inconclusive", "trust_gate"],
       ["new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm", "inconclusive", "mcp_gate"],
-      ["Not logged in · Run /login", "failed", "login_required"],
+      ["● Not logged in · Please run /login\n❯\u00a0", "failed", "login_required"],
       ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "attention_required", "claude_resume_selection_prompt"],
       ["No conversation found", "failed", "no_conversation_found"],
     ])("keeps known blocking prompt authoritative despite resume identity proof: %s", (panel, status, code) => {
@@ -81,6 +88,14 @@ describe("native resume probe", () => {
         paneContent: `${screen}\n${panel}`,
         claudeResumeIdentityVerified: true,
       })).toMatchObject({ status, code });
+    });
+
+    it("lets resume identity decide when only the not-logged-in footer shows", () => {
+      const paneContent = `${screen}                                   Not logged in · Run /login\n`;
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.283", paneContent }))
+        .toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.283", paneContent, claudeResumeIdentityVerified: true }))
+        .toMatchObject({ status: "resumed", code: "verified_native_identity" });
     });
   });
   describe("issue116 headerless custom status lines", () => {
@@ -399,7 +414,7 @@ describe("native resume probe", () => {
     });
   });
 
-  it("classifies the Claude login-required screen as failed, not resumed", () => {
+  it("reads the persistent not-logged-in footer on a live Claude TUI as input readiness, not a login refusal", () => {
     expect(
       assessNativeResumeProbe({
         runtime: "claude-code",
@@ -416,10 +431,45 @@ describe("native resume probe", () => {
           "  ⏵⏵ accept edits on (shift+tab to cycle)                     ● high · /effort",
         ].join("\n"),
       })
-    ).toEqual({
-      status: "failed",
-      code: "login_required",
-      detail: "Claude is running but cannot continue until the user logs in.",
+    ).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  // #1405. The frame is a native Claude Code 2.1.296 capture: header, `❯` prompt row, `●` reply, input box, mode
+  // bar. The refusal strings are Claude's documented ones (code.claude.com/docs/en/errors); where Claude draws a
+  // refusal was not captured, so both a `●` reply row and a `⎿` result row are covered.
+  describe("a Claude login refusal counts only as the latest response", () => {
+    const native = fs.readFileSync(new URL("./fixtures/input-box/claude-code-2.1.296/after-enter-15s.J.txt", import.meta.url), "utf8").split("\n");
+    const head = native.slice(0, native.findIndex((line) => line.startsWith("❯ Reply with")));
+    const tail = native.slice(native.findIndex((line) => line.startsWith("✻ Cooked")) + 1);
+    const lastRule = tail.findLastIndex((line) => line.startsWith("────"));
+    const footerTail = [...tail.slice(0, lastRule + 1), "                                                    Not logged in · Run /login", ...tail.slice(lastRule + 1)];
+    const pane = (history: string[], footer = false) => [...head, ...history, ...(footer ? footerTail : tail)].join("\n");
+    const refusal = "Not logged in · Please run /login";
+
+    it.each([
+      ["the footer before any turn", pane([], true), "resumed"],
+      ["the footer after a completed turn", pane(["❯ Reply with OK.", "", "● OK", ""], true), "resumed"],
+      ["a current refusal as a reply row, with the footer", pane(["❯ hello", "", `● ${refusal}`, ""], true), "failed"],
+      ["a current refusal as a result row, without the footer", pane(["❯ hello", `  ⎿  ${refusal}`, ""]), "failed"],
+      ["a current expired-login refusal", pane(["❯ hello", "", "● Login expired · Please run /login", ""]), "failed"],
+      ["a refusal followed by a newer reply", pane(["❯ hello", "", `● ${refusal}`, "", "❯ again", "", "● OK", ""]), "resumed"],
+      ["a refusal followed by /login", pane(["❯ hello", "", `● ${refusal}`, "", "❯ /login", "  ⎿  Login successful", ""]), "resumed"],
+      ["a refusal quoted in a prompt", pane([`❯ What does "${refusal}" mean?`, "", "● It means Claude has no login of its own.", ""]), "resumed"],
+      ["a refusal on a prompt's own row while the turn runs", pane(["❯ Explain this message:", `  ${refusal}`, "", "✶ Thinking… (2s)", ""]), "resumed"],
+      ["a refusal quoted on its own row inside a reply", pane(["❯ hello", "", "● Claude shows this when it has no login:", "", `  ${refusal}`, "", "  Run /login to fix it.", ""]), "resumed"],
+      ["a refusal quoted inline in a reply", pane(["❯ hello", "", `● The message "${refusal}" means no login.`, ""]), "resumed"],
+    ])("%s", (_name, paneContent, status) => {
+      const result = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+      expect(result.status).toBe(status);
+      if (status === "failed") expect(result.code).toBe("login_required");
+    });
+
+    it("keeps the earlier native gates ahead of a current refusal", () => {
+      const refused = pane(["❯ hello", "", `● ${refusal}`, ""], true);
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: `${refused}\nAccessing workspace:\nYes, I trust this folder` }).code).toBe("trust_gate");
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: `No conversation found\n${refused}` }).code).toBe("no_conversation_found");
     });
   });
 
