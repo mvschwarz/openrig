@@ -5,6 +5,7 @@ import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
+import { verifyPaneIdleShell, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
@@ -32,6 +33,8 @@ interface CodexResumeOptions {
   readNetworkDefault?: CodexNetworkDefaultReader;
   /** Ensure the managed Codex config (hooks, trust) just before a resume, as a runtime-adapter launch does. */
   ensureManagedConfig?: () => Promise<void>;
+  /** Process rows for the idle-shell check; defaults to the OS listing. */
+  listProcesses?: NativeProcessLister;
 }
 
 export class CodexResumeAdapter {
@@ -213,10 +216,21 @@ export class CodexResumeAdapter {
     }
 
     if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+      // A shell label alone isn't a return to the shell: a launch script still starting Codex holds the pane the
+      // same way. Only a proven, stable idle shell ends the resume; anything else keeps the launch for attention.
+      if (await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+        ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) })) {
+        return {
+          ok: false,
+          code: "retry_fresh",
+          message: "Codex resume failed: pane returned to shell instead of entering Codex",
+        };
+      }
       return {
         ok: false,
-        code: "retry_fresh",
-        message: "Codex resume failed: pane returned to shell instead of entering Codex",
+        code: "attention_required",
+        message: "Codex resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Codex.",
+        evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }
 

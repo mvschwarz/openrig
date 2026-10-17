@@ -632,6 +632,38 @@ function launcherChain(candidates: NativeProcessObservation[], rows: NativeProce
   return [...candidates].sort((a, b) => depth.get(b)! - depth.get(a)!);
 }
 
+/** The pane's own shell when it owns the foreground with nothing else in its group, else null. A wrapper's label is
+ * not an idle shell: positive shell proof requires the pane shell itself to own the foreground, with no receiving
+ * child. A background child/helper in another group does not receive terminal input. Any runtime. */
+function idleShellRoot(rows: NativeProcessRow[], pid: number): NativeProcessRow | null {
+  const root = rows.find(row => row.pid === pid);
+  return new Set(rows.map(row => row.pid)).size === rows.length && root?.startedAt
+    && root.pgid === pid && root.tpgid === pid
+    && isShellForeground(executableName(root.executableName ?? ""))
+    && isShellForeground(executableName(tokens(root.command)[0]?.replace(/^-/, "") ?? ""))
+    && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid) ? root : null;
+}
+
+/** Whether the bound pane is a stable idle shell: in two samples the pane's own shell owns the foreground with
+ * nothing else in its group, and it is the same shell both times. A missing, failed or changing listing is not idle:
+ * a launch script still starting the runtime holds the foreground the same way a shell label would suggest. */
+export async function verifyPaneIdleShell(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+}): Promise<boolean> {
+  const sample = async (): Promise<string | null> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return null;
+      const root = idleShellRoot(await (input.listProcesses ?? listNativeProcesses)(), pid);
+      return root ? JSON.stringify(root) : null;
+    } catch { return null; }
+  };
+  const first = await sample();
+  return first !== null && await sample() === first;
+}
+
 export interface ClaudeDeliveryObservation {
   state: "verified" | "unknown" | "idle_shell" | "conflict";
   detail: string;
@@ -691,15 +723,8 @@ export async function observeClaudeDelivery(
       // A Codex launcher chain in a Claude seat keeps warn-and-send (#1088 review).
       const other = nativeProcessCandidates(rows, pid, "codex").length === 1 ? selectNativeProcess(rows, pid) : null;
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
-      const root = rows.find(row => row.pid === pid);
-      // A wrapper's label is not an idle shell. Positive shell proof requires
-      // the pane shell itself to own the foreground, with no receiving child.
-      // A background child/helper in another group does not receive terminal input.
-      if (new Set(rows.map(row => row.pid)).size === rows.length && root?.startedAt
-        && root.pgid === pid && root.tpgid === pid
-        && isShellForeground(executableName(root.executableName ?? ""))
-        && isShellForeground(executableName(tokens(root.command)[0]?.replace(/^-/, "") ?? ""))
-        && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid)) {
+      const root = idleShellRoot(rows, pid);
+      if (root) {
         return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
       }
       return unknown;
