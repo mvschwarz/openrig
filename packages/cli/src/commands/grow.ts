@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
+import { resolveRigHandle } from "../rig-handle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { resolveDefaultAgentRef } from "./topology-default-agent.js";
@@ -72,7 +73,21 @@ export function growCommand(depsOverride?: StatusDeps): Command {
       if (!daemonStatusGuard(status)) return;
       const client = deps.clientFactory(getDaemonUrl(status));
 
-      const rigRes = await client.get<RigNode[]>(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
+      const resolution = await resolveRigHandle(client, rigId);
+      if (resolution.kind === "ambiguous") {
+        const msg = `'${rigId}' matches ${resolution.ids.length} rigs. Nothing was grown. Re-run with the specific id, e.g. ${resolution.ids.map((id) => `rig grow ${id} ${members.join(" ")}`).join("  |  ")}`;
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, code: "rig_ambiguous", message: msg, candidates: resolution.ids }, null, 2));
+        } else {
+          console.error(msg);
+        }
+        process.exitCode = 1;
+        return;
+      }
+
+      const resolvedRigId = resolution.kind === "resolved" ? resolution.id : rigId;
+
+      const rigRes = await client.get<RigNode[]>(`/api/rigs/${encodeURIComponent(resolvedRigId)}/nodes`);
       if (rigRes.status >= 400) {
         console.error(`Rig ${rigId} was not found.`);
         process.exitCode = 1;
@@ -128,7 +143,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
 
       if (opts.newPod) {
         const res = await client.post<ExpandResult>(
-          `/api/rigs/${encodeURIComponent(rigId)}/expand`,
+          `/api/rigs/${encodeURIComponent(resolvedRigId)}/expand`,
           {
             pod: { id: pod, label: pod, members: memberSpecs, edges: [] },
             rigRoot: cwd,
@@ -158,7 +173,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
         const failures: string[] = [];
         for (const member of memberSpecs) {
           const res = await client.post<AddMemberResult>(
-            `/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(pod)}/members`,
+            `/api/rigs/${encodeURIComponent(resolvedRigId)}/pods/${encodeURIComponent(pod)}/members`,
             { member, rigRoot: cwd },
             { timeoutMs: 120_000 },
           );
@@ -184,7 +199,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
       if (opts.json) {
         console.log(JSON.stringify({
           ok,
-          rigId,
+          rigId: resolvedRigId,
           rigName,
           pod,
           seats: nodes.map((node) => node.logicalId),
@@ -196,7 +211,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
           retryTargets,
         }, null, 2));
       } else if (ok) {
-        console.log(`Grew rig ${rigName ?? rigId}`);
+        console.log(`Grew rig ${rigName ?? resolvedRigId}`);
         if (nodes.length === 1) {
           const node = nodes[0]!;
           console.log(`  Seat: ${node.logicalId}${node.sessionName ? ` (${node.sessionName})` : ""}`);
@@ -207,7 +222,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
           }
         }
       } else {
-        console.error(`Grow did not fully succeed for ${rigName ?? rigId}`);
+        console.error(`Grow did not fully succeed for ${rigName ?? resolvedRigId}`);
         for (const node of nodes) {
           const icon = node.status === "launched" ? "OK" : node.status === "attention_required" ? "ATTENTION" : "FAIL";
           const session = node.sessionName ? ` (${node.sessionName})` : "";
@@ -220,7 +235,7 @@ export function growCommand(depsOverride?: StatusDeps): Command {
         for (const warning of warnings) console.error(`  Warning: ${warning}`);
         if (retryTargets.length > 0) {
           console.error("  Failed nodes can be relaunched individually. Recover by:");
-          for (const target of retryTargets) console.error(`    rig launch ${rigId} ${target}`);
+          for (const target of retryTargets) console.error(`    rig launch ${resolvedRigId} ${target}`);
         }
       }
 
