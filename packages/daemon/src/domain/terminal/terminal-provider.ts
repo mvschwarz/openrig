@@ -95,6 +95,8 @@ export interface ProviderLiveness {
  */
 export interface OpenViewResult {
   provider: string;
+  /** Explicitly selected provider session, when the request names one. */
+  session?: string;
   ok: boolean;
   opened: string[];
   absent: AbsentSeat[];
