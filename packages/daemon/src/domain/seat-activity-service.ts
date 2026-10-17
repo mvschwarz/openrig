@@ -187,6 +187,11 @@ export class SeatActivityService {
       if (!updated) return;
       seat.permissionObservedAt = this.now().toISOString();
       const count = [...seat.permissions.values()].filter(request => request.confirmed).length;
+      if (claude && count === 0) {
+        for (const source of seat.sources.values()) {
+          if (source.latest.permissionRequest) source.latest = { ...source.latest, needsInput: undefined };
+        }
+      }
       const sourceId = `${runtime}:permission-prompt`;
       this.reportEvidence({
         seatNodeId: seatNodeId!, sessionName, rung: "needs-input-chrome", sourceId,
@@ -371,8 +376,9 @@ export class SeatActivityService {
       if (claude || !seat.permissions.has(request.id)) {
         seat.permissions.set(request.id, { sinceMs: this.now().getTime(), confirmed: claude, seen: false, nextCheckMs: 0 });
       }
-    } else if (evidence.rung === "lifecycle-hooks" && (evidence.activity === "idle-at-prompt" || evidence.permissionResolved
-        || (claude && evidence.needsInput?.count && evidence.needsInput.reason !== "permission_prompt"))) {
+    } else if ((evidence.rung === "lifecycle-hooks" && (evidence.activity === "idle-at-prompt" || evidence.permissionResolved
+        || (claude && evidence.needsInput?.count && evidence.needsInput.reason !== "permission_prompt")))
+        || (claude && seat.permissions.size === 0 && evidence.needsInput?.count && evidence.needsInput.reason !== "permission_prompt")) {
       seat.permissions.clear();
       seat.permissionObservedAt = null;
       seat.sources.delete(`${runtime}:permission-prompt`);

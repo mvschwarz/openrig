@@ -170,6 +170,39 @@ describe("Claude permission episodes share the permission poller", () => {
     expect(subject.service.getSeatState("seat")!.needsInput.reason).toBe("elicitation_dialog");
   });
 
+  it("does not mask later self-report attention with a retired permission episode", async () => {
+    const subject = fixture();
+    subject.hook("PreToolUse");
+    subject.hook();
+    await subject.tick(0);
+    subject.visible(false);
+    await subject.tick();
+    expect(subject.count()).toBe(0);
+    subject.service.reportEvidence({ seatNodeId: "seat", sessionName: "session", rung: "self-report", sourceId: "claude:pid-json",
+      seq: 1, observedAt: new Date(1_001).toISOString(), needsInput: { count: 1, reason: "dialog owns input" } });
+    expect(subject.count()).toBe(1);
+    await subject.tick();
+    expect(subject.count()).toBe(1);
+    subject.service.reportEvidence({ seatNodeId: "seat", sessionName: "session", rung: "self-report", sourceId: "claude:pid-json",
+      seq: 2, observedAt: new Date(2_001).toISOString(), activity: "working" });
+    expect(subject.count()).toBe(0);
+    expect(subject.service.getSeatState("seat")!.activity).toBe("working");
+  });
+
+  it("keeps probing an open episode when generic self-report waiting may describe the same permission", async () => {
+    const subject = fixture();
+    subject.hook();
+    await subject.tick(0);
+    subject.service.reportEvidence({ seatNodeId: "seat", sessionName: "session", rung: "self-report", sourceId: "claude:pid-json",
+      seq: 1, observedAt: new Date(0).toISOString(), needsInput: { count: 1, reason: "dialog owns input" } });
+    subject.visible(null);
+    await subject.tick();
+    expect(subject.count()).toBe(1);
+    subject.visible(false);
+    await subject.tick();
+    expect(subject.count()).toBe(0);
+  });
+
   it("wires pane-only Claude confirmation and clearing through the daemon, excluding non-tmux bindings", async () => {
     const originalNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
