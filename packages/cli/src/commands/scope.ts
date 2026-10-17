@@ -340,7 +340,7 @@ function buildSliceCreateCommand(): Command {
             action: "Pick a slug containing letters or digits.",
           });
         }
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace, strictOverride: true });
         const mission = findMission(missionsRoot, missionName);
         let nn = nextSliceNN(mission.absPath);
         const title = opts.title ?? titleFromSlug(slug);
@@ -809,7 +809,13 @@ function buildMissionCreateCommand(): Command {
             action: "Pick a name with no whitespace or path separators.",
           });
         }
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        // #70: a named workspace is where the mission goes, even its first one;
+        // never the configured root as a silent fallback.
+        const missionsRoot = resolveMissionsRoot({
+          override: getOpts(command).workspace,
+          strictOverride: true,
+          createMissing: true,
+        });
         const absPath = path.join(missionsRoot, name);
         if (fs.existsSync(absPath)) {
           throw new ScopeCliError({
