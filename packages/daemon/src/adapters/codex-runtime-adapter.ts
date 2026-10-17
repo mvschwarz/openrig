@@ -576,7 +576,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
     const networkArg = await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
-    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg, queueStateDirArg, daemonOptOut, daemonArg, networkArg };
+    // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
+    const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, daemonOptOut, daemonArg, networkArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {

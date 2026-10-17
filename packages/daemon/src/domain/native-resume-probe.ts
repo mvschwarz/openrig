@@ -34,6 +34,8 @@ export function buildNativeResumeCommand(
   resumeToken: string | null,
   sessionName?: string | null,
   codexConfigProfile?: string | null,
+  /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
+  codexDaemonOptOut?: boolean,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -41,7 +43,7 @@ export function buildNativeResumeCommand(
     return `claude --resume ${shellQuote(resumeToken)}${nameSuffix}`;
   }
   if (runtime === "codex") {
-    return buildCodexResumeCore(resumeToken, codexConfigProfile);
+    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);
   }
   return null;
 }

@@ -128,7 +128,8 @@ export class CodexResumeAdapter {
     }
 
     const result = await this.verifyResume(tmuxSessionName);
-    return result.ok ? { ...result, appliedLaunch } : result;
+    const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut: daemonSupport.kind === "supported" } : appliedLaunch;
+    return result.ok ? { ...result, appliedLaunch: launchFacts } : result;
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native
