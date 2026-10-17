@@ -7,7 +7,7 @@ import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
-import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
+import { derivePickup, resolvePickupThresholdMinutes, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
@@ -1076,10 +1076,82 @@ export class QueueRepository {
 
   private deliverWakeIntentAfterCommit(outboxId: string): void {
     queueMicrotask(() => {
-      void this.deliverWakeIntent(outboxId).catch((err) => {
+      void (async () => {
+        const intent = this.outbox?.getById(outboxId);
+        if (intent?.deliveryState === "pending") {
+          // Issue #1210 — FIFO pump for the destination seat: the just-staged
+          // intent is delivered at its ts_dispatched turn, so older intents held
+          // by the seat-busy gate go first when the seat is free, and the staged
+          // intent itself holds with them when the seat is busy. Claim+finalize
+          // semantics are unchanged (deliverWakeIntent does both).
+          await this.pumpWakeIntentsForSeat(intent.destinationSession);
+          return;
+        }
+        // Not `pending` (typing-guard custody retained/retired it at stage time,
+        // or it already resolved): keep the historical single-intent delivery for
+        // its retained:typing_guard audit.
+        await this.deliverWakeIntent(outboxId);
+      })().catch((err) => {
         console.error(`Queue wake delivery failed for ${outboxId}:`, err);
       });
     });
+  }
+
+  /**
+   * Issue #1210 — seat serialization: is another qitem already holding this
+   * seat's one delivery slot? A seat is OCCUPIED while any OTHER qitem on it is
+   * (a) `in-progress` — the seat is working — or (b) still `pending` but already
+   * handed a wake whose delivery is unexpired: `sending` (claimed, ambiguous) or
+   * `delivered` within the pickup-stall grace (`queue.pickup_stall_threshold_minutes`,
+   * the same knob the stalled-after-claim sweep reads). (b) closes the claim race —
+   * a wake that landed but the seat has not picked up yet — and it EXPIRES so a
+   * dropped, never-claimed wake degrades to today's visible-pending behavior
+   * instead of holding the seat forever (no standing sweep covers unclaimed rows).
+   *
+   * Called inside deliverWakeIntent's claim transaction: better-sqlite3 txns are
+   * synchronous, so concurrent pumps serialize at the DB — the first intent
+   * claims the seat, the rest see it occupied and hold.
+   */
+  private seatOccupiedByOtherWake(destinationSession: string, exceptQitemId: string): boolean {
+    const cutoff = new Date(Date.now() - resolvePickupThresholdMinutes() * 60_000).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM queue_items occ
+          WHERE occ.destination_session = ? AND occ.qitem_id != ?
+            AND (occ.state = 'in-progress'
+                 OR (occ.state = 'pending' AND EXISTS (
+                      SELECT 1 FROM outbox_entries w
+                      WHERE substr(w.outbox_id, 1, ?) = ?
+                        AND w.audit_pointer = occ.qitem_id
+                        AND w.delivery_state IN ('sending', 'delivered')
+                        AND (w.delivered_at IS NULL OR w.delivered_at >= ?))))
+          LIMIT 1`)
+      .get(destinationSession, exceptQitemId, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, cutoff);
+    return row !== undefined;
+  }
+
+  /**
+   * Issue #1210 release path: FIFO re-drive of every pending wake intent for ONE
+   * seat. Called after a seat-occupying qitem leaves `in-progress` (terminal
+   * closure, handoff, park) or its claim is released — each candidate re-runs the
+   * seat-busy gate inside its own claim transaction, so at most the OLDEST
+   * deliverable intent actually sends and the rest keep holding. Sequential awaits
+   * (not fire-and-forget) keep the FIFO claim order deterministic; the gate, not
+   * the pump, decides what delivers. Bounded like the drain's page (200): a seat
+   * with more pending intents than that waits for the next trigger.
+   */
+  private async pumpWakeIntentsForSeat(destinationSession: string): Promise<void> {
+    if (!this.outbox || !this.transport) return;
+    const pending = this.outbox
+      .listPending(WAKE_INTENT_PREFIX, 200)
+      .filter((entry) => entry.destinationSession === destinationSession);
+    for (const entry of pending) {
+      try {
+        await this.deliverWakeIntent(entry.outboxId);
+      } catch (err) {
+        console.error(`Queue wake pump failed for ${entry.outboxId}:`, err);
+      }
+    }
   }
 
   /**
@@ -1153,6 +1225,10 @@ export class QueueRepository {
     // Claim the exact return's arrival + dependent resumes atomically. Each
     // original frozen intent and audit pointer survives; only transport coalesces.
     let superseded = false;
+    // Issue #1210: the destination seat still holds another runnable qitem — the
+    // intent stays `pending` and this delivery reports `retained` (releasing is
+    // the pump's job, not a supersession, so the row is never failed here).
+    let seatBusyHeld = false;
     const actionable = (entry: import("./outbox-handler.js").OutboxEntry): boolean => {
       const row = entry.auditPointer ? this.db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(entry.auditPointer) as { state: string } | undefined : undefined;
       let current = row?.state === "pending";
@@ -1179,6 +1255,17 @@ export class QueueRepository {
     const group = this.db.transaction(() => {
       const candidate = this.outbox!.getById(outboxId);
       if (!candidate || candidate.deliveryState !== "pending" || !actionable(candidate)) return [];
+      // Issue #1210 — at most one runnable qitem delivered per seat, FIFO: hold
+      // the whole group while another qitem occupies the destination seat. The
+      // row stays `pending`; the next post-commit pump for this seat (the
+      // occupying item's terminal/blocked/handoff/unclaim commit), the startup
+      // drain, or daemon restart re-runs the gate. Not a supersession: no
+      // failed-marking, the frozen envelope survives for its turn.
+      if (this.seatOccupiedByOtherWake(candidate.destinationSession, candidate.auditPointer ?? candidate.outboxId)) {
+        if (candidate.auditPointer) this.recordNudgeAttempt(candidate.auditPointer, "held:seat-busy");
+        seatBusyHeld = true;
+        return [];
+      }
       if (!this.outbox!.claimForDelivery(outboxId)) return [];
       const first = this.outbox!.getById(outboxId)!;
       const intents = [first];
@@ -1193,7 +1280,7 @@ export class QueueRepository {
       return intents;
     })();
     const intent = group[0];
-    if (!intent) return superseded ? "failed" : "skipped";
+    if (!intent) return seatBusyHeld ? "retained" : superseded ? "failed" : "skipped";
     // Only deliver a wake for a qitem that actually exists. A wake intent whose
     // target qitem is missing — a caller-recorded id under this prefix (the route
     // no longer refuses those), or a successor already swept — is finalized
@@ -1290,6 +1377,14 @@ export class QueueRepository {
       await this.maybeNudge(successorQitemId, destinationSession, nudge, sourceSession);
       return;
     }
+    // Issue #1210: FIFO pump for the destination seat — the successor's
+    // just-committed intent is delivered at its ts_dispatched turn: older intents
+    // held by the seat-busy gate go first when the seat is free, and the
+    // successor's own intent holds with them when the seat is busy (its next
+    // pump — the occupying item's closure — releases it). The direct pass below
+    // is then a no-op skip; it still records the retained:typing_guard audit
+    // when typing-guard custody retained the intent at stage time.
+    await this.pumpWakeIntentsForSeat(destinationSession);
     await this.deliverWakeIntent(`${WAKE_INTENT_PREFIX}${successorQitemId}`);
   }
 
@@ -1336,7 +1431,14 @@ export class QueueRepository {
         if (outcome === "delivered") { tally.delivered++; progressed++; }
         else if (outcome === "indeterminate") { tally.indeterminate++; progressed++; }
         else if (outcome === "failed") { tally.failed++; progressed++; }
-        else if (outcome === "retained") { tally.retained++; progressed++; }
+        else if (outcome === "retained") {
+          tally.retained++;
+          // A seat-busy hold (issue #1210) leaves the row `pending` — it is
+          // re-pumped on a later trigger, so it is NOT drain progress. Only a row
+          // that actually LEFT pending (e.g. the transport's typing guard claimed
+          // custody) counts, otherwise an all-held page would spin.
+          if (this.outbox.getById(intent.outboxId)?.deliveryState !== "pending") progressed++;
+        }
       }
       // Nothing left pending changed state this round (e.g. transport gone
       // mid-sweep) — stop rather than spin; the next daemon start retries.
@@ -1922,6 +2024,13 @@ export class QueueRepository {
 
     // Closure and successor are persisted. Delivery is separate and recoverable
     // from the committed intent; a slow terminal must not hold the receipt.
+    // Issue #1210: the source seat just left in-progress (handed-off) — release
+    // its held wake intents FIFO. Called before the successor's post-commit
+    // deliver so the pump's synchronous claim prefix keeps oldest-first order on
+    // a self-handoff (toSession === fromSession).
+    void this.pumpWakeIntentsForSeat(input.fromSession).catch((err) => {
+      console.error(`Queue wake pump failed for ${input.fromSession}:`, err);
+    });
     if (input.nudge !== false) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${newId}`);
 
     return {
@@ -2093,6 +2202,12 @@ export class QueueRepository {
     }
 
     // Return the persisted closure and successor without awaiting terminal delivery.
+    // Issue #1210: the source seat just left in-progress (done) — release its held
+    // wake intents FIFO, before the successor's post-commit deliver (self-handoff
+    // ordering, same as handoff()).
+    void this.pumpWakeIntentsForSeat(input.fromSession).catch((err) => {
+      console.error(`Queue wake pump failed for ${input.fromSession}:`, err);
+    });
     if (input.nudge !== false) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${newId}`);
 
     return {
@@ -2425,6 +2540,11 @@ export class QueueRepository {
 
     const persistedEvent = txn();
     this.eventBus.notifySubscribers(persistedEvent);
+    // Issue #1210: releasing the claim frees the seat (the released row's own
+    // wake is long past its grace window) — release held wake intents FIFO.
+    void this.pumpWakeIntentsForSeat(destinationSession).catch((err) => {
+      console.error(`Queue wake pump failed for ${destinationSession}:`, err);
+    });
     return this.getByIdOrThrow(qitemId);
   }
 
@@ -2445,6 +2565,23 @@ export class QueueRepository {
     const txn = this.db.transaction(() => this.updateInTransactionalContext(input));
     const result = txn();
     for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    // Issue #1210: a row that was holding the seat's delivery slot — in-progress,
+    // or pending with an unexpired delivered wake — releasing it to a terminal or
+    // parked state frees the seat: release that seat's held wake intents FIFO
+    // (fire-and-forget; each candidate re-runs the seat-busy gate in its own
+    // claim transaction).
+    const committed = result.persistedEvent;
+    if (committed.type === "queue.updated") {
+      const wasOccupying = committed.fromState === "in-progress" || committed.fromState === "pending";
+      const releasedSeat = committed.toState === "blocked" ||
+        !["pending", "in-progress", "blocked"].includes(committed.toState);
+      if (wasOccupying && releasedSeat) {
+        const seat = this.getByIdOrThrow(input.qitemId).destinationSession;
+        void this.pumpWakeIntentsForSeat(seat).catch((err) => {
+          console.error(`Queue wake pump failed for ${seat}:`, err);
+        });
+      }
+    }
     return this.getByIdOrThrow(input.qitemId);
   }
 
@@ -4112,8 +4249,8 @@ export class QueueRepository {
   releaseClaimsByGeneration(retiringGeneration: string): number {
     if (!this.hasClaimedGenColumn || !retiringGeneration) return 0;
     const rows = this.db
-      .prepare(`SELECT qitem_id FROM queue_items WHERE state = 'in-progress' AND claimed_by_generation_uuid = ?`)
-      .all(retiringGeneration) as Array<{ qitem_id: string }>;
+      .prepare(`SELECT qitem_id, destination_session FROM queue_items WHERE state = 'in-progress' AND claimed_by_generation_uuid = ?`)
+      .all(retiringGeneration) as Array<{ qitem_id: string; destination_session: string }>;
     if (rows.length === 0) return 0;
     const ts = new Date().toISOString();
     const txn = this.db.transaction(() => {
@@ -4135,6 +4272,13 @@ export class QueueRepository {
       }
     });
     txn();
+    // Issue #1210: the retiring generation's claims were the seats' occupancy —
+    // release each freed seat's held wake intents FIFO.
+    for (const seat of new Set(rows.map((r) => r.destination_session))) {
+      void this.pumpWakeIntentsForSeat(seat).catch((err) => {
+        console.error(`Queue wake pump failed for ${seat}:`, err);
+      });
+    }
     return rows.length;
   }
 

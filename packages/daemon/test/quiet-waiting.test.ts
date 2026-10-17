@@ -163,6 +163,17 @@ describe("quiet waits and bounded recovery on existing domain seams", () => {
   it("different approvals with identical bytes remain two obligations and two deliveries", async () => {
     for (let i = 0; i < 2; i++) await queue.create({ sourceSession: "owner@rig", destinationSession: "worker@rig", body: "Approved", nudge: true });
     expect(queue.list({ destinationSession: "worker@rig", limit: 100 })).toHaveLength(2);
+    // Issue #1210 seat serialization: the first wake delivers; the identical-bytes
+    // second item stays pending (held:seat-busy) until the first closes, then
+    // delivers in turn. Two obligations, two deliveries — never coalesced to one.
+    expect(sends).toHaveLength(1);
+    let first: ReturnType<QueueRepository["list"]>[number] | undefined;
+    await vi.waitFor(() => {
+      first = queue.list({ destinationSession: "worker@rig", limit: 100 })
+        .find((item) => item.lastNudgeResult === "verified");
+      expect(first).toBeDefined();
+    });
+    await queue.update({ qitemId: first!.qitemId, actorSession: "owner@rig", state: "done", closureReason: "no-follow-on" });
     expect(sends).toHaveLength(2);
   });
 
