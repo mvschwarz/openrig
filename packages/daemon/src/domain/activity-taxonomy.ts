@@ -18,7 +18,7 @@
 // display from the count+reason fields via `deriveDisplayActivity` — the one bridge —
 // so no store or transition ever holds "needs-input" as a state. That reconciliation
 // is documented in the reference doc's addendum-mapping section.
-import { isAgentAppRuntime } from "./built-in-runtimes.js";
+import { agentAppOf } from "./built-in-runtimes.js";
 
 /** Activity axis — what a present agent is doing. */
 export type ActivityValue = "working" | "idle-at-prompt" | "unknown";
@@ -204,10 +204,11 @@ export const AGENT_APP_RUNG_INVENTORY: AdapterRungInventory = {
 };
 
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
- *  Built-in runtimes without their own inventory get the generic floor; community agent apps get theirs. */
-export function runtimeRungInventory(runtime: string | null): AdapterRungInventory {
+ *  Unknown runtimes get the generic floor — partial-coverage honesty by default. A seat launched for a community
+ *  agent app (its session's recorded selection, still the node's runtime) gets that app's inventory. */
+export function runtimeRungInventory(runtime: string | null, agentApp?: string | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
-  if (isAgentAppRuntime(runtime)) return AGENT_APP_RUNG_INVENTORY;
+  if (agentAppOf(agentApp, runtime)) return AGENT_APP_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }

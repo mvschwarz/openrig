@@ -2531,6 +2531,7 @@ describe("RestoreOrchestrator", () => {
     sessionRegistry.updateStatus(session.id, "running");
     // A token left by a former runtime: nothing resumes an agent app with it.
     sessionRegistry.updateResumeToken(session.id, "codex_id", "former-runtime-token");
+    sessionRegistry.recordAgentAppSelection(session.id, "synth-app");
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-app");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
     sessionRegistry.updateStatus(session.id, "exited");
@@ -2555,6 +2556,30 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.status).toBe("awaiting-decision");
       expect(nodeResult!.error).toBe(`Resume is unsupported for agent app "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
       expect(launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a free-text runtime seat that wasn't launched for an agent app keeps the existing restore result", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-free-text", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-app", podId: "pod-free-text" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "some-token");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-app");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: {} });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
+      expect(nodeResult!.error).not.toContain("Resume is unsupported for agent app");
     }
   });
 

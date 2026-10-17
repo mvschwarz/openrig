@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { listAgentAppPresets, loadAgentAppPreset } from "../src/domain/agent-app-presets.js";
-import { AgentAppRuntimeAdapter, withAgentApps } from "../src/adapters/agent-app-runtime-adapter.js";
+import { AgentAppRuntimeAdapter, seatAdapter, withAgentAppResolver, withAgentApps } from "../src/adapters/agent-app-runtime-adapter.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import {
   AGENT_APP_RUNG_INVENTORY,
   CLAUDE_ACTIVITY_RUNG_INVENTORY,
@@ -16,6 +17,7 @@ import { SeatActivityService } from "../src/domain/seat-activity-service.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { agentAppPaneActivity, classifyPaneActivity } from "../src/domain/session-transport.js";
 import type { RuntimeAdapter, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -121,6 +123,48 @@ describe("the agent app adapter", () => {
   });
 });
 
+describe("relaunching a seat", () => {
+  const builtIn = (runtime: string) => ({ runtime }) as RuntimeAdapter;
+  const tmux = {} as Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand">;
+  function map(dir: string) {
+    return withAgentAppResolver({ codex: builtIn("codex"), terminal: builtIn("terminal") } as Record<string, RuntimeAdapter>, { tmux, presetsDir: () => dir });
+  }
+
+  it("keeps the map's keys the built-ins, and returns them as they are", () => {
+    const m = map(presets({ "synth.yaml": GOOD }));
+    expect(Object.keys(m)).toEqual(["codex", "terminal"]);
+    expect(seatAdapter(m, "codex", null)).toBe(m["codex"]);
+    expect(m["synth"]).toBeUndefined();
+  });
+
+  it("resolves an agent app only for a seat launched for it", () => {
+    const m = map(presets({ "synth.yaml": GOOD }));
+    expect(seatAdapter(m, "synth", "synth")).toBeInstanceOf(AgentAppRuntimeAdapter);
+    // A free-text runtime that only matches a preset's name gets no adapter, as before the preset existed.
+    expect(seatAdapter(m, "synth", null)).toBeUndefined();
+    expect(seatAdapter(m, "synth", "other-app")).toBeUndefined();
+  });
+
+  it("gives an agent app's seat no adapter once its preset is gone", () => {
+    expect(seatAdapter(map(presets({})), "synth", "synth")).toBeUndefined();
+  });
+});
+
+describe("the agent app selection recorded on a session", () => {
+  it("is read back only for the session it was recorded on", () => {
+    const db = createFullTestDb(); dbs.push(db);
+    const registry = new SessionRegistry(db);
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('n1', 'rig-1', 'work.worker', 'synth', '/tmp')").run();
+    const launched = registry.registerSession("n1", "work-worker@r");
+    registry.recordAgentAppSelection(launched.id, "synth");
+    const claimed = registry.registerClaimedSession("n1", "work-worker@r");
+    const sessions = registry.getSessionsForRig("rig-1");
+    expect(sessions.find(s => s.id === launched.id)?.agentApp).toBe("synth");
+    expect(sessions.find(s => s.id === claimed.id)).not.toHaveProperty("agentApp");
+  });
+});
+
 describe("the runtime adapter map with agent apps", () => {
   const builtIn = (runtime: string) => ({ runtime }) as RuntimeAdapter;
   const builtIns = () => ({ "claude-code": builtIn("claude-code"), codex: builtIn("codex"), pi: builtIn("pi"), omp: builtIn("omp"), stub: builtIn("stub"), terminal: builtIn("terminal") });
@@ -150,7 +194,10 @@ describe("activity for an agent app", () => {
     expect(runtimeRungInventory("claude-code")).toBe(CLAUDE_ACTIVITY_RUNG_INVENTORY);
     expect(runtimeRungInventory("codex")).toBe(CODEX_ACTIVITY_RUNG_INVENTORY);
     for (const runtime of ["pi", "omp", "terminal", "stub", null]) expect(runtimeRungInventory(runtime)).toBe(TMUX_GENERIC_RUNG_INVENTORY);
-    expect(runtimeRungInventory("synth")).toBe(AGENT_APP_RUNG_INVENTORY);
+    // Only a seat launched for the app gets its inventory; a free-text runtime keeps the generic floor, as before.
+    expect(runtimeRungInventory("synth", "synth")).toBe(AGENT_APP_RUNG_INVENTORY);
+    expect(runtimeRungInventory("synth")).toBe(TMUX_GENERIC_RUNG_INVENTORY);
+    expect(runtimeRungInventory("synth", "other-app")).toBe(TMUX_GENERIC_RUNG_INVENTORY);
   });
 
   function seat(inventory: typeof AGENT_APP_RUNG_INVENTORY) {
@@ -180,24 +227,38 @@ describe("activity for an agent app", () => {
   });
 });
 
+describe("the pane reader for an agent app", () => {
+  it("turns an idle-looking screen into unknown for an agent app, and keeps work, attention and built-ins as they were", () => {
+    const idle = classifyPaneActivity("some output\n❯ ");
+    expect(idle.state).toBe("agent_idle");
+    expect(agentAppPaneActivity(idle, "synth")).toEqual({ state: "unknown", reason: "agent_app_no_idle_signal", evidence: idle.evidence });
+    for (const agentApp of [null, undefined, ""]) expect(agentAppPaneActivity(idle, agentApp)).toBe(idle);
+    const prompt = classifyPaneActivity("Do you want to proceed? (y/n)");
+    expect(prompt.state).toBe("attention");
+    expect(agentAppPaneActivity(prompt, "synth")).toBe(prompt);
+    const busy = classifyPaneActivity("⠋ Working (esc to interrupt)");
+    expect(agentAppPaneActivity(busy, "synth")).toBe(busy);
+  });
+});
+
 describe("identity for an agent app", () => {
-  function reconcile(runtime: string, command: string) {
+  function reconcile(runtime: string, command: string, agentApp: string | null = null) {
     const db = createFullTestDb(); dbs.push(db);
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r')").run();
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('n1', 'rig-1', 'work.worker', ?, '/tmp')").run(runtime);
-    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES ('s1', 'n1', 'w@r', 'running', 'ready')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, agent_app) VALUES ('s1', 'n1', 'w@r', 'running', 'ready', ?)").run(agentApp);
     db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b1', 'n1', 'tmux', 'w@r', '%1')").run();
     const tmux = { listSessions: vi.fn(async () => [{ name: "w@r" }] as never), getPanePid: vi.fn(async () => 10), getPaneCommand: vi.fn(async () => command) };
     return { rec: new SeatIdentityReconciler({ db, tmux, now: () => new Date("2026-10-17T12:00:00Z") }), verdict: () => new SeatIdentityStore(db).getForNode("n1") };
   }
 
   it.each(["node", "bash"])("is unconfirmed, not verified, with %s in the pane", async (command) => {
-    const r = reconcile("synth", command);
+    const r = reconcile("synth", command, "synth");
     await r.rec.reconcileAll();
     expect(r.verdict()).toMatchObject({ verdict: "unconfirmed", reason: "process_identity_unconfirmed", evidence: { matchedLayer: null } });
   });
 
-  it.each([["pi", "node"], ["omp", "node"], ["terminal", "bash"]])("stays verified for %s, as before", async (runtime, command) => {
+  it.each([["pi", "node"], ["omp", "node"], ["terminal", "bash"], ["synth", "node"]])("stays verified for %s without a recorded app selection, as before", async (runtime, command) => {
     const r = reconcile(runtime, command);
     await r.rec.reconcileAll();
     expect(r.verdict()).toMatchObject({ verdict: "verified", reason: null });

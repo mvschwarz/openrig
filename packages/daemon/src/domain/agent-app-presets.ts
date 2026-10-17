@@ -94,7 +94,7 @@ export interface AgentAppLabel {
   maintainer: string | null;
   limits: string[];
   identity: "not confirmed";
-  needsInput: "not detected: no prompt pattern";
+  needsInput: "from the screen only: no app prompt pattern";
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
@@ -105,7 +105,7 @@ export function agentAppLabel(runtime: string, dir: string = agentAppsDir()): Ag
     app: runtime, community: true, testedByOpenRig: false,
     maintainer: found.ok ? found.preset.maintainer : null,
     limits: found.ok ? found.preset.limits : [],
-    identity: "not confirmed", needsInput: "not detected: no prompt pattern",
+    identity: "not confirmed", needsInput: "from the screen only: no app prompt pattern",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

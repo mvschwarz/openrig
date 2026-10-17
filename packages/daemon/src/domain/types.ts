@@ -105,6 +105,8 @@ export interface Session {
   origin: "launched" | "claimed";
   startupStatus: "pending" | "ready" | "attention_required" | "failed";
   startupCompletedAt: string | null;
+  /** The community agent app this session was launched for (selected through its preset); absent otherwise. */
+  agentApp?: string;
 }
 
 // -- Event types --

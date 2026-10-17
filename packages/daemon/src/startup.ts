@@ -176,7 +176,7 @@ import type { NotificationAdapter } from "./domain/mission-control/notification-
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { homeIsolationAdvisory } from "./domain/home-isolation.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
-import { withAgentApps } from "./adapters/agent-app-runtime-adapter.js";
+import { withAgentAppResolver, withAgentApps } from "./adapters/agent-app-runtime-adapter.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
 import {
   getCompatibleOpenRigPath,
@@ -1236,7 +1236,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Capture compatibility before the spec-library initializer creates the primary directory.
   const userSpecLibraryRoot = getDefaultOpenRigPath("specs");
   const compatibleSpecLibraryRoot = getCompatibleOpenRigPath("specs");
-  const runtimeAdaptersMap = withAgentApps({
+  const runtimeAdaptersMap = withAgentAppResolver({
     "claude-code": claudeAdapter,
     "codex": codexAdapter,
     "pi": piAdapter,

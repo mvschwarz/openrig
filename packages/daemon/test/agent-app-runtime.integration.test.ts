@@ -61,7 +61,7 @@ describe("a community agent app from a data preset", () => {
   }, 120_000);
 
   afterAll(async () => {
-    try { if (daemon) await rig(["down", "agent-app-rig", "--json", "--force"]); }
+    try { if (daemon) for (const r of ["agent-app-rig", "free-rig"]) await rig(["down", r, "--json", "--force"]); }
     finally { await daemon?.stop(); }
   }, 60_000);
 
@@ -80,7 +80,7 @@ describe("a community agent app from a data preset", () => {
     expect(await until(async () => capture(), text => text.includes("synth-app 1.0 started"))).toContain("app> ");
     const seat = await node();
     expect(seat).toMatchObject({ runtime: "synth-app", sessionStatus: "running",
-      agentApp: { app: "synth-app", maintainer: "Example Maintainer", identity: "not confirmed", needsInput: "not detected: no prompt pattern" } });
+      agentApp: { app: "synth-app", maintainer: "Example Maintainer", identity: "not confirmed", needsInput: "from the screen only: no app prompt pattern" } });
     const human = await rig(["ps", "--nodes", "--rig", "agent-app-rig"]);
     expect(human.stdout).toContain(`Community app (${session}): synth-app, maintained by Example Maintainer, not tested by OpenRig. Identity not confirmed`);
     const verdict = await until(() => json(["ps", "--nodes", "--rig", "agent-app-rig", "--full", "--json"]).then(n => n[0]?.identityVerdict),
@@ -114,6 +114,11 @@ describe("a community agent app from a data preset", () => {
     expect(refused.code).not.toBe(0);
     expect(refused.stdout + refused.stderr).toContain("target_needs_input");
     expect(capture()).not.toContain("should-not-arrive");
+    // rig ps keeps the prompt the screen shows: the app's default-zero needs-input isn't a clearance.
+    // The ACTIVITY cell is clipped to its width, as for a built-in's "needs-input x1".
+    const row = (out: string) => out.split("\n").find(line => line.includes(session)) ?? "";
+    const shown = await until(() => rig(["ps", "--nodes", "--rig", "agent-app-rig"]).then(r => row(r.stdout)), line => line.includes("needs-input"), 20_000);
+    expect(shown).toContain("needs-input");
     // The person answers it at the pane.
     execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "send-keys", "-t", `=${session}:`, "y", "Enter"], { env: scaffold.env as NodeJS.ProcessEnv });
     expect(await until(async () => capture(), text => text.includes("answered: y"))).not.toContain("Do you want to proceed?");
@@ -129,6 +134,16 @@ describe("a community agent app from a data preset", () => {
     const refused = await rig(["send", session, "after-exit", "--json"]);
     expect(refused.code).not.toBe(0);
     expect(refused.stdout + refused.stderr).toContain("target_runtime_unverified");
+    // A subset launch calls the app not running, names the recovery, keeps the pane and starts nothing.
+    await rig(["snapshot", rigId]);
+    const launched = await rig(["launch", rigId, "work.worker", "--json"], 60_000);
+    const seat = JSON.parse(launched.stdout).launched?.find((n: { logicalId: string }) => n.logicalId === "work.worker");
+    expect(seat, launched.stdout).toMatchObject({ status: "attention_required" });
+    expect(seat.error).toContain(`Session alive, agent not running for 'work.worker'`);
+    expect(seat.error).toContain(`rig seat launch ${session} --fresh --stop`);
+    expect(capture()).toContain("bye");
+    const foreground = execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "display-message", "-p", "-t", `=${session}:`, "#{pane_current_command}"], { env: scaffold.env as NodeJS.ProcessEnv }).toString().trim();
+    expect(["bash", "sh", "zsh", "dash"]).toContain(foreground);
   }, 60_000);
 
   it("reports resume as unsupported and starts nothing", async () => {
@@ -160,19 +175,87 @@ describe("a community agent app from a data preset", () => {
     expect(all.map((n: { rigName: string }) => n.rigName)).not.toContain("missing-app-rig");
   }, 90_000);
 
-  it("keeps an existing rig, launching nothing else, when its preset is removed", async () => {
+  it("keeps an app's seat an agent app after its preset is removed, across a daemon restart and a snapshot", async () => {
+    // A fresh start while the preset is installed: this occupant was launched for the app.
+    const fresh = await rig(["up", "agent-app-rig", "--existing", "--fresh", "work.worker", "--json"], 120_000);
+    expect(JSON.parse(fresh.stdout).nodes, fresh.stdout).toEqual([expect.objectContaining({ logicalId: "work.worker", status: "fresh-primed" })]);
+    await until(async () => capture(), text => text.includes("synth-app 1.0 started"));
     rmSync(join(presetDir(), "synth-app.yaml"));
+    await daemon.restart();
+    const seat = await until(node, n => n.identityVerdict?.verdict === "unconfirmed", 30_000);
+    expect(seat).toMatchObject({ runtime: "synth-app", identityVerdict: { verdict: "unconfirmed", reason: "process_identity_unconfirmed" } });
+    expect(seat.agentApp.presetError).toContain(`no agent app preset named "synth-app" is installed`);
+    await sleep(8_000);
+    expect((await node()).activityState).toMatchObject({ activity: "unknown", decidedBy: null });
+    // Stopped, then a snapshot: still launch-only, so nothing resumes and nothing starts in its place.
+    await rig(["send", session, "quit", "--json"]);
+    await until(async () => capture(), text => text.includes("bye"));
+    execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "kill-session", "-t", `=${session}`], { env: scaffold.env as NodeJS.ProcessEnv });
+    await until(node, n => n.sessionStatus !== "running", 20_000);
+    expect((await rig(["snapshot", rigId])).code).toBe(0);
     const launched = await rig(["launch", rigId, "work.worker", "--json"], 60_000);
     expect(launched.code).not.toBe(0);
-    expect(JSON.parse(launched.stdout)).toMatchObject({ status: "awaiting-decision" });
+    expect(JSON.parse(launched.stdout)).toMatchObject({ status: "awaiting-decision",
+      error: expect.stringContaining(`Resume is unsupported for agent app "synth-app"`) });
     expect(() => capture()).toThrow();
-    // Even a deliberate fresh start launches nothing in the app's place: no adapter, no harness.
-    const fresh = await rig(["up", "agent-app-rig", "--existing", "--fresh", "work.worker", "--json"], 120_000);
-    expect(fresh.stdout + fresh.stderr).toContain("Harness not started: no synth-app runtime adapter for work.worker.");
+    const again = await rig(["up", "agent-app-rig", "--existing", "--fresh", "work.worker", "--json"], 120_000);
+    expect(again.stdout + again.stderr).toContain("Harness not started: no synth-app runtime adapter for work.worker.");
     expect(capture()).not.toContain("synth-app 1.0 started");
-    const seat = await node();
-    expect(seat.runtime).toBe("synth-app");
-    expect(seat.agentApp.presetError).toContain(`no agent app preset named "synth-app" is installed`);
+    expect((await node()).agentApp.presetError).toContain(`no agent app preset named "synth-app" is installed`);
     expect(readFileSync(join(rigRoot, "agent-app-rig.yaml"), "utf-8")).toContain("runtime: synth-app");
-  }, 180_000);
+  }, 300_000);
+
+  /** Self-attach from a new pane on the private tmux server, the way a person runs `rig attach --self`. */
+  async function attachSelf(tmuxSession: string, args: string[]) {
+    const script = join(scaffold.root, `${tmuxSession}.sh`);
+    const out = join(scaffold.root, `${tmuxSession}.json`);
+    const exports = Object.entries(daemon.readEnv).filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `export ${k}=${JSON.stringify(v)}`).join("\n");
+    writeFileSync(script, `${exports}\nnode ${JSON.stringify(rigBin)} attach --self ${args.map(a => JSON.stringify(a)).join(" ")} --json > ${JSON.stringify(out)} 2>&1\nexec sh\n`);
+    execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "new-session", "-d", "-s", tmuxSession, "sh", script], { env: scaffold.env as NodeJS.ProcessEnv });
+    const text = await until(async () => { try { return readFileSync(out, "utf-8"); } catch { return ""; } }, t => t.trim().endsWith("}"), 30_000);
+    return JSON.parse(text);
+  }
+
+  it("leaves a free-text self-attached seat as it was, before and after a same-named preset appears", async () => {
+    const up = await rig(["up", specFor("free-rig", "stub"), "--cwd", rigRoot, "--json", "--yes"], 120_000);
+    expect(up.code, JSON.stringify(up)).toBe(0);
+    const freeRigId = JSON.parse(up.stdout).rigId;
+    const attached = await attachSelf("free-seat", ["--rig", freeRigId, "--pod", "work", "--member", "free", "--runtime", "free-app", "--cwd", rigRoot]);
+    expect(attached, JSON.stringify(attached)).toMatchObject({ ok: true });
+    const freeSeat = async () => (await json(["ps", "--nodes", "--rig", "free-rig", "--full", "--json"])).find((n: { logicalId: string }) => n.logicalId === "work.free");
+    const check = async () => {
+      const seat = await until(freeSeat, n => n?.identityVerdict?.verdict === "verified" && n?.activityState?.activity === "idle-at-prompt", 30_000);
+      expect(seat).toMatchObject({ runtime: "free-app", identityVerdict: { verdict: "verified", reason: null },
+        activityState: { activity: "idle-at-prompt", decidedBy: "window-sampling" } });
+      expect(seat).not.toHaveProperty("agentApp");
+    };
+    await check();
+    writePreset("free-app.yaml", ["format: 1", "name: free-app", `command: node ${appScript}`, "maintainer: Example Maintainer", ""].join("\n"));
+    await sleep(4_000);
+    await check();
+    // A relaunch doesn't start the same-named app in its place.
+    expect((await rig(["down", "free-rig", "--json", "--force"])).code).toBe(0);
+    // A deliberate fresh launch of the seat gets main's refusal (a self-attached seat has no startup context, checked
+    // before any adapter lookup) and starts nothing.
+    const seatLaunch = await rig(["seat", "launch", "work.free@free-rig", "--fresh", "--reason", "relaunch a free-text seat", "--json"], 60_000);
+    expect(seatLaunch.code, JSON.stringify(seatLaunch)).not.toBe(0);
+    expect(JSON.parse(seatLaunch.stdout)).toMatchObject({ ok: false, code: "startup_context_missing" });
+    const relaunch = await rig(["up", "free-rig", "--existing", "--fresh", "work.free", "--json"], 120_000);
+    const freeResult = (JSON.parse(relaunch.stdout).nodes ?? []).find((n: { logicalId: string }) => n.logicalId === "work.free");
+    // Restore doesn't relaunch a self-attached seat, as on main; with the preset installed it still starts nothing.
+    expect(freeResult, relaunch.stdout).toBeUndefined();
+    const panes = execFileSync("tmux", ["-S", scaffold.tmuxSocketPath, "list-panes", "-a", "-F", "#{session_name} #{pane_current_command}"], { env: scaffold.env as NodeJS.ProcessEnv }).toString();
+    expect(panes).not.toMatch(/free\S* node/);
+    await rig(["down", "free-rig", "--json", "--force"]);
+  }, 300_000);
+
+  it("doesn't pass the agent-app classification to a different occupant of the same seat", async () => {
+    expect((await rig(["down", "agent-app-rig", "--json", "--force"])).code).toBe(0);
+    const attached = await attachSelf("other-occupant", ["--rig", rigId, "--node", "work.worker"]);
+    expect(attached, JSON.stringify(attached)).toMatchObject({ ok: true });
+    const seat = await until(node, n => n.identityVerdict?.verdict === "verified", 30_000);
+    expect(seat.identityVerdict).toMatchObject({ verdict: "verified", reason: null });
+    expect(seat).not.toHaveProperty("agentApp");
+  }, 120_000);
 });

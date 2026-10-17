@@ -1296,12 +1296,15 @@ async function handleNodes(
   }
 }
 
-function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState">): string {
+function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState" | "agentApp">): string {
   // S19 — render from the served taxonomy state when present: needs-input as
   // count(+reason), otherwise the bridge's display value. No local arbitration.
   const tax = n.activityState;
   if (tax) {
     if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
+    // A community agent app has no needs-input source in that state, so its zero isn't a clearance: a prompt the
+    // screen shows is kept.
+    if (n.agentApp && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
     return tax.display;
   }
   // Legacy fallback (a daemon without the S19 enrichment) — retires with the

@@ -14,6 +14,7 @@ import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { isShellForeground } from "../domain/shell-classifier.js";
 import { isAgentAppRuntime, loadAgentAppPreset, agentAppsDir } from "../domain/agent-app-presets.js";
+import { agentAppOf } from "../domain/built-in-runtimes.js";
 
 interface AgentAppAdapterDeps {
   tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand">;
@@ -93,4 +94,31 @@ export function withAgentApps<T extends Record<string, RuntimeAdapter>>(builtIns
     get: (target, key, receiver) => installed(key) ? new AgentAppRuntimeAdapter(key, deps) : Reflect.get(target, key, receiver),
     has: (target, key) => Reflect.has(target, key) || installed(key),
   });
+}
+
+/** The hidden key of a relaunch map's agent-app resolver; a symbol, so the map's own keys stay the built-ins. */
+const AGENT_APP_RESOLVER = Symbol("agent-app-resolver");
+
+/**
+ * The runtime adapter map for relaunches (restore, seat lifecycle): exactly the built-ins, plus a hidden resolver for a
+ * community agent app. Only `seatAdapter`, given a seat's recorded selection, reaches that resolver, so a seat whose
+ * runtime merely matches an installed preset's name (a free-text self-attach) gets no adapter, as before.
+ */
+export function withAgentAppResolver<T extends Record<string, RuntimeAdapter>>(builtIns: T, deps: AgentAppAdapterDeps): T {
+  Object.defineProperty(builtIns, AGENT_APP_RESOLVER, {
+    enumerable: false,
+    value: (runtime: string) => isAgentAppRuntime(runtime) && loadAgentAppPreset(runtime, deps.presetsDir?.() ?? agentAppsDir()).ok
+      ? new AgentAppRuntimeAdapter(runtime, deps) : undefined,
+  });
+  return builtIns;
+}
+
+/** The adapter to relaunch a seat with: its runtime's built-in adapter, or, for a seat launched for a community agent
+ *  app (`agentAppOf`), that app's adapter while its preset is installed. */
+export function seatAdapter(map: Record<string, RuntimeAdapter> | undefined, runtime: string | null | undefined,
+  agentApp: string | null | undefined): RuntimeAdapter | undefined {
+  if (!map || !runtime) return undefined;
+  if (Object.hasOwn(map, runtime)) return map[runtime];
+  const resolve = (map as Record<symbol, ((runtime: string) => RuntimeAdapter | undefined) | undefined>)[AGENT_APP_RESOLVER];
+  return agentAppOf(agentApp, runtime) && resolve ? resolve(runtime) : undefined;
 }
