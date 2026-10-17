@@ -630,8 +630,26 @@ The harness readiness window defaults to 30 seconds. On a loaded machine, set
 `rig config set runtime.readiness_timeout_seconds 60` to give new seats and
 handover successors longer to become interactive. The setting accepts 1–600
 seconds, applies to the next launch without a daemon restart, and can also be
-set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It does not change the
-time spent by the runtime adapter before readiness polling starts.
+set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It also bounds how long a
+restore keeps watching a Claude seat whose resume is still starting, so raising
+it for slow fresh launches lengthens that wait too. The wait is about the
+setting in total per seat, counting the usual 3.2-second check: the adapter polls
+for the rest of it (nominally: it counts polls, and each poll's tmux and process
+reads add a little). A restore
+starts seats one after another, so each seat that never starts Claude adds up to
+about this much, minus the 3.2 seconds, to the restore; the time adds up seat by
+seat, and a longer setting means a longer wait before a stuck seat is reported.
+A seat that is still not interactive then ends `attention_required` with its
+launch and resume token kept, and the later readiness wait is skipped for it.
+That holds at every setting: at 1–3 seconds there are no extra polls, but an
+unresolved boot is still kept rather than failed. A pane that shows another
+runtime or another conversation's Claude is not waited for. `rig up` and
+`rig launch` wait 120 seconds for the daemon, so a restore of several stuck
+seats can pass that (in one measurement, about 31 seconds a seat at the
+default, 95 for three). A client timeout and exit code 1 do not mean the
+restore was rolled back or that it should be run again; check the real state
+first with `rig ps`. Apart from this, the setting does not change the time
+spent by the runtime adapter before readiness polling starts.
 
 ---
 
