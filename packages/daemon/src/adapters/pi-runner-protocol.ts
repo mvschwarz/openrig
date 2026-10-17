@@ -174,7 +174,9 @@ export const OMP_PROVIDER_EXTRA_ENV_VARS: Record<string, readonly string[]> = {
 };
 
 // Baseline process needs. No host credential families or shell customization.
-export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
+// SSH_AUTH_SOCK is the local agent socket path, not a credential value: Pi's
+// shell tools inherit this child env, so dropping it breaks git over SSH (#1159).
+export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "SSH_AUTH_SOCK", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
 
 // NodeLauncher supplies identity and instance routing on both fresh and resumed
 // seats. Pi's shell tools inherit this child env: dropping these values makes
