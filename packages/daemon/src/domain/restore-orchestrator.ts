@@ -79,6 +79,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError } from "./active-occupant.js";
 import { effectiveRestorePolicy, type RestoreSeatFacts } from "./restore-policy.js";
+import { isAgentAppRuntime } from "./built-in-runtimes.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -137,7 +138,9 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: stri
   }
   const policy = effectiveRestorePolicy(seatFacts(data, nodeId, savedRuntime, runtime), session.restorePolicy);
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
-  if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
+  if (!session.resumeToken) {
+    return { kind: "decision", why: isAgentAppRuntime(runtime) ? `is an agent app whose preset is launch-only (resume unsupported)` : "has no resume token for this seat" };
+  }
   if (!session.resumeType || session.resumeType === "none") return { kind: "fresh", why: "records no resume source for this seat" };
   return { kind: "resume" };
 }
@@ -917,6 +920,14 @@ export class RestoreOrchestrator {
       const policy = effectiveRestorePolicy(seatFacts(data, nodeId, node.runtime, liveNode ? liveNode.runtime : node.runtime), snapSession?.restorePolicy);
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
       if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {
+        if (isAgentAppRuntime(node.runtime)) {
+          return {
+            nodeId,
+            logicalId: node.logicalId,
+            status: "awaiting-decision",
+            error: `Resume is unsupported for agent app "${node.runtime}": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh ${node.logicalId} only if you want a new conversation.`,
+          };
+        }
         const sourceNote = resumeSourceRecorded
           ? `resume source '${snapSession?.resumeType}' recorded but no token available`
           : `no resume token was captured for this seat`;

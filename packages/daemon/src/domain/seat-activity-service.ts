@@ -554,9 +554,12 @@ export class SeatActivityService {
     const nowMs = this.now().getTime();
     for (const rung of EVIDENCE_RUNG_RANK) {
       if (rung === opts.excludeRung) continue;
-      if (this.rungTrust(seat, rung) !== "authoritative") continue;
+      const trust = this.rungTrust(seat, rung);
+      if (trust !== "authoritative" && trust !== "positive-only") continue;
       const evd = this.latestByRung(seat, rung, "activity");
       if (!evd || evd.activity === undefined) continue;
+      // A positive-only rung answers only "working"; its silence leaves the state to the rungs below, or unknown.
+      if (trust === "positive-only" && evd.activity !== "working") continue;
       if (rung === "lifecycle-hooks" && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
       return evd;
     }

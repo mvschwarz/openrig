@@ -21,6 +21,7 @@ import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { agentAppLabel, isAgentAppRuntime } from "./agent-app-presets.js";
 
 // -- Row types for SQL results --
 
@@ -692,6 +693,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
+    ...(isAgentAppRuntime(row.runtime) ? { agentApp: agentAppLabel(row.runtime) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     intentionallyStopped: row.intentionally_stopped === 1

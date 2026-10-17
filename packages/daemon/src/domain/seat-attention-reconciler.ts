@@ -11,6 +11,7 @@ import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
+import { isAgentAppRuntime } from "./built-in-runtimes.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = NativeProcessRow;
@@ -135,13 +136,15 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const runtimeAmbiguous = input.runtime === "codex" || claudeProcessProof ? lineageMatch === null : runtimeMatch === "match" && (strictNativeLineage
     ? lineageMatch === null
     : input.runtime === "claude-code" && !normalizedCommand.includes("claude"));
+  // A community agent app's live pane is never proof of which session it runs.
+  const unconfirmed = pid !== null && runtimeMatch !== "mismatch" && !runtimeAmbiguous && isAgentAppRuntime(input.runtime);
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
     verdict: pid === null
       ? "pane_missing"
       : runtimeMatch === "mismatch" || runtimeAmbiguous
         ? "mismatch"
-        : "verified",
+        : unconfirmed ? "unconfirmed" : "verified",
     evidenceSource: "pane_process",
     reason: pid === null
       ? "pane_pid_gone"
@@ -149,12 +152,12 @@ export async function rebindAndVerifyPaneIdentity(input: {
         ? "process_identity_mismatch"
         : runtimeAmbiguous
           ? "process_identity_ambiguous"
-        : null,
+        : unconfirmed ? "process_identity_unconfirmed" : null,
     evidence: {
       registeredPane: pane.id,
       observedPid: lineageMatch?.pid ?? pid,
       observedCommand: lineageMatch?.command ?? command,
-      matchedLayer: pid === null || runtimeAmbiguous ? null : 1,
+      matchedLayer: pid === null || runtimeAmbiguous || unconfirmed ? null : 1,
     },
     sessionName: input.sessionName,
     observedAt,

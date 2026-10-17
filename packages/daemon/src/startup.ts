@@ -176,6 +176,7 @@ import type { NotificationAdapter } from "./domain/mission-control/notification-
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { homeIsolationAdvisory } from "./domain/home-isolation.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
+import { withAgentApps } from "./adapters/agent-app-runtime-adapter.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
 import {
   getCompatibleOpenRigPath,
@@ -1018,7 +1019,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
+    adapters: withAgentApps({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment }),
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1235,14 +1236,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Capture compatibility before the spec-library initializer creates the primary directory.
   const userSpecLibraryRoot = getDefaultOpenRigPath("specs");
   const compatibleSpecLibraryRoot = getCompatibleOpenRigPath("specs");
-  const runtimeAdaptersMap = {
+  const runtimeAdaptersMap = withAgentApps({
     "claude-code": claudeAdapter,
     "codex": codexAdapter,
     "pi": piAdapter,
     "omp": ompAdapter,
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
-  };
+  }, { tmux: tmuxAdapter, seatLaunchEnvironment });
 
   const deps: AppDeps = {
     rigRepo,

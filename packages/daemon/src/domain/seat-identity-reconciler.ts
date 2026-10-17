@@ -7,6 +7,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
 import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
+import { isAgentAppRuntime } from "./built-in-runtimes.js";
 
 /** Default identity-reconcile cadence: 5s. Process identity changes rarely
  *  (a seat's pane/process is stable for its whole life), and the check is
@@ -348,6 +349,17 @@ export class SeatIdentityReconciler {
         evidenceSource: "pane_process",
         reason: "process_identity_mismatch",
         evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: 1 },
+      };
+    }
+
+    // A community agent app's process doesn't prove which session it is: the pane is live, its identity unconfirmed.
+    if (isAgentAppRuntime(seat.runtime)) {
+      return {
+        ...base,
+        verdict: "unconfirmed",
+        evidenceSource: "pane_process",
+        reason: "process_identity_unconfirmed",
+        evidence: { registeredPane: seat.tmux_pane, observedPid: pid, observedCommand: command, matchedLayer: null },
       };
     }
 

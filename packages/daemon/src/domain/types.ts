@@ -587,7 +587,8 @@ export type NodeLifecycleState = "running" | "detached" | "recoverable" | "atten
  * projection; `verified`, `binding_absent`, and `tmux_unavailable` (and an
  * absent verdict) leave it unchanged.
  */
-export type SeatIdentityVerdictKind = "verified" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
+/** `unconfirmed`: the seat's pane is live, but nothing proves which session it runs (a community agent app). */
+export type SeatIdentityVerdictKind = "verified" | "unconfirmed" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
 
 export interface SeatIdentityVerdict {
   nodeId: string;
@@ -598,6 +599,7 @@ export interface SeatIdentityVerdict {
   reason:
     | "process_identity_mismatch"
     | "process_identity_ambiguous"
+    | "process_identity_unconfirmed"
     | "pane_ambiguous"
     | "pane_pid_gone"
     | "binding_pane_missing"
@@ -658,6 +660,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Present only on a community agent app's seat: its label, maintainer and declared limits. */
+  agentApp?: import("./agent-app-presets.js").AgentAppLabel;
   /** Effective current status; confirmed session absence projects as detached. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
