@@ -1,5 +1,6 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ChildProcess } from "node:child_process";
 import { connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
 import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
@@ -188,6 +189,7 @@ export interface StartOptions {
 }
 
 export interface LifecycleDeps {
+  requestStop?: (state: DaemonState) => Promise<void>;
   /** Required by startDaemon; read-only lifecycle consumers need no launch capability. */
   acquireStartLock?: () => DaemonStartLock;
   spawn: (cmd: string, args: string[], opts: {
@@ -908,7 +910,8 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   let notBefore = Date.parse(state.startedAt);
   if (pidState !== "dead") {
     notBefore = Date.now();
-    deps.kill(state.pid, "SIGTERM");
+    if (deps.requestStop) await deps.requestStop(state);
+    else deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
     while (deps.isProcessAlive(state.pid) && Date.now() < deadline) {
@@ -1088,13 +1091,12 @@ export function tailLogs(deps: LifecycleDeps, opts: { follow: boolean }): void {
   const logFile = resolveLifecycleFile(deps, "daemon.log");
   if (!deps.exists(logFile)) return;
 
-  const args = opts.follow ? ["-f", logFile] : [logFile];
-  const child = deps.spawn("tail", args, {
+  const args = [fileURLToPath(new URL("./log-tail.js", import.meta.url)), logFile, ...(opts.follow ? ["--follow"] : [])];
+  deps.spawn(process.execPath, args, {
     env: process.env as Record<string, string>,
     stdio: "inherit" as unknown,
     detached: false,
   });
-  child.unref();
 }
 
 /**

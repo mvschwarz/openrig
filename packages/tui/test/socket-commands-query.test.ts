@@ -28,7 +28,7 @@ describe("socket commands query (I4)", () => {
     const sockPath = path.join(os.tmpdir(), `t-i4-${process.pid}.sock`);
     const sock = await createControlSocket({ socketPath: sockPath, view });
     try {
-      const res = (await query(sockPath, "commands")) as { ok: boolean; commands: Array<{ name: string; available: boolean; context: string }> };
+      const res = (await query(sock.path, "commands")) as { ok: boolean; commands: Array<{ name: string; available: boolean; context: string }> };
       expect(res.ok).toBe(true);
       expect(res.commands.length).toBe(COMMAND_REGISTRY.length); // every entry, none hidden
       expect(res.commands.every((c) => typeof c.available === "boolean" && c.context.length > 0)).toBe(true);

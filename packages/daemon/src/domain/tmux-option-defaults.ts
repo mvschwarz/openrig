@@ -114,6 +114,10 @@ export class TmuxOptionDefaultsApplier {
     // Set first so concurrent applies don't double-assert; either way the
     // sets are idempotent.
     this.serverDefaultsAsserted = true;
+    if (this.platform === "win32") {
+      warnings.push("Native clipboard server options are unavailable on psmux 3.3.8; session mouse/status defaults still apply.");
+      return;
+    }
 
     const clip = await this.tmuxAdapter.setServerOption("set-clipboard", "on");
     if (!clip.ok) {

@@ -8,12 +8,12 @@ beforeEach(() => { vi.resetAllMocks(); });
 it("batches only unresolved version-named Claude candidates; healthy seats need no extra subprocess", async () => {
   const healthy = [line(10, "zsh", "-zsh"), line(11, "claude", "claude"), line(12, "codex", "codex"), line(13, "2.1.289", "/x/.local/share/claude/versions/2.1.289"), line(14, "2.1.289", "unrelated")];
   execute.mockResolvedValue({ stdout: "HEADER\n" + healthy.join("\n") });
-  expect(await listNativeProcesses()).toHaveLength(5);
+  expect(await listNativeProcesses("linux")).toHaveLength(5);
   expect(paths).not.toHaveBeenCalled();
   const unresolved = [line(15, "2.1.289", "claude --resume token"), line(16, "2.1.288", "/bin/claude")];
   execute.mockResolvedValue({ stdout: "HEADER\n" + [...healthy, ...unresolved].join("\n") });
   paths.mockResolvedValue(new Map([[15, "/x/.local/share/claude/versions/2.1.289"]]));
-  const rows = await listNativeProcesses();
+  const rows = await listNativeProcesses("linux");
   expect(paths).toHaveBeenCalledExactlyOnceWith([15, 16]);
   expect(rows.find(r => r.pid === 15)?.executablePath).toBe("/x/.local/share/claude/versions/2.1.289");
   expect(rows.find(r => r.pid === 16)?.executablePath).toBeUndefined();

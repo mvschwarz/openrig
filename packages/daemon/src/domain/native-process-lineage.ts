@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import path from "node:path";
 import { isShellForeground } from "./shell-classifier.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
+import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 
 const execFileAsync = promisify(execFile);
 
 export interface NativeProcessRow {
+  platform?: "win32";
   pid: number;
   ppid: number;
   command: string;
@@ -53,7 +56,11 @@ function tokens(command: string): string[] {
 }
 
 function executableName(token: string): string {
-  return (token.split("/").pop() ?? token).toLowerCase().replace(/\.exe$/, "");
+  return (token.split(/[\\/]/).pop() ?? token).toLowerCase().replace(/\.exe$/, "");
+}
+
+function rowArgv(row: NativeProcessRow): string[] {
+  return row.platform === "win32" ? parseWindowsCommandLine(row.command) : tokens(row.command);
 }
 
 // The native installer resolves `claude` to this versioned path. A bare version
@@ -395,8 +402,14 @@ function mayBeClaudeRuntime(row: NativeProcessRow): boolean {
 
 /** The same OS observation serves menu input, restore proof and periodic identity.
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
-export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
+export async function listNativeProcesses(platform: NodeJS.Platform = process.platform): Promise<NativeProcessRow[]> {
   try {
+    if (platform === "win32") {
+      const { stdout } = await execFileAsync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        ["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='StartedAt';e={$_.CreationDate.ToUniversalTime().ToString('o')}}) | ConvertTo-Json -Compress"],
+        { encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
+      return parseWindowsProcesses(stdout);
+    }
     const output = await runAsyncSite("codex.runtime.list_processes", async () => {
       // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
       const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
@@ -437,9 +450,49 @@ function rotationProcess(row: NativeProcessRow, rotation: ClaudeResumeRotation |
 export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
 export type CodexProcessObservation = NativeProcessObservation;
 
+/** CIM supplies executable identity and process birth times, never synthetic POSIX groups. */
+export function parseWindowsProcesses(output: string): NativeProcessRow[] {
+  const values: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
+  if (!Array.isArray(values)) return [];
+  return values.flatMap((value): NativeProcessRow[] => {
+    const row = value as Record<string, unknown>;
+    if (!row || !Number.isSafeInteger(row.ProcessId) || Number(row.ProcessId) <= 0
+      || !Number.isSafeInteger(row.ParentProcessId) || Number(row.ParentProcessId) < 0
+      || typeof row.Name !== "string" || typeof row.ExecutablePath !== "string"
+      || typeof row.CommandLine !== "string" || typeof row.StartedAt !== "string"
+      || !Number.isFinite(Date.parse(row.StartedAt))) return [];
+    return [{ platform: "win32", pid: Number(row.ProcessId), ppid: Number(row.ParentProcessId),
+      executableName: row.Name, executablePath: row.ExecutablePath, command: row.CommandLine, startedAt: row.StartedAt }];
+  });
+}
+
 function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string): NativeProcessObservation[] {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const root = byPid.get(panePid);
+  if (root?.platform === "win32") {
+    if (byPid.size !== rows.length || !root.startedAt) return [];
+    // A unique native child rooted in this pane is the Windows occupancy proof.
+    // Creation ordering rejects a recycled parent PID; no foreground PGID is invented.
+    const matches: NativeProcessObservation[] = [];
+    const expectedName = runtime === "claude-code" ? "claude" : "codex";
+    for (const row of rows) {
+      if (row.platform !== "win32" || executableName(row.executableName ?? "") !== expectedName
+        || !row.executablePath || executableName(row.executablePath) !== expectedName
+        || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
+        || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
+      const chain: NativeProcessRow[] = [];
+      const visited = new Set<number>();
+      let current: NativeProcessRow | undefined = row;
+      while (current?.platform === "win32" && current.startedAt && !visited.has(current.pid)) {
+        visited.add(current.pid); chain.push(current);
+        if (current.pid === panePid) { matches.push({ panePid, process: row, fingerprint: JSON.stringify(chain) }); break; }
+        const parent = byPid.get(current.ppid);
+        if (!parent?.startedAt || Date.parse(parent.startedAt) > Date.parse(current.startedAt)) break;
+        current = parent;
+      }
+    }
+    return matches;
+  }
   if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return [];
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
   const executable = runtime === "claude-code" ? "claude" : "codex";
@@ -469,16 +522,17 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return null;
   const observation = chain[0]!;
   const { process } = observation;
+  const argv = rowArgv(process);
   if (runtime === "claude-code") {
     if (!expectedToken) return null;
-    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    const launched = claudeSessionToken(argv.slice(1));
     if (launched !== expectedToken && !(launched === rotation?.token && rotationProcess(process, rotation))) return null;
   } else {
     // Every link that names a conversation must name the expected one, and
     // links naming different conversations stay refused. Exact resume proof
     // needs the deepest process's own argv: a launcher's token is never
     // inherited by a child that names nothing, which stays deliverable but unproved.
-    const identities = chain.map((link) => codexResumeToken(tokens(link.process.command).slice(1)));
+    const identities = chain.map((link) => codexResumeToken(rowArgv(link.process).slice(1)));
     if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return null;
     if (requireResume && (!expectedToken || identities[0] !== expectedToken)) return null;
     if (expectedToken !== undefined && identities.some((value) => value !== undefined
@@ -489,7 +543,7 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
 
 async function observeNativePaneProcess(input: {
   target: string;
-  tmux: { getPanePid(target: string): Promise<number | null> };
+  tmux: { getPanePid(target: string): Promise<number | null>; getPaneCommand?(target: string): Promise<string | null> };
   listProcesses?: NativeProcessLister;
   expectedToken?: string | null;
   requireResume?: boolean;
@@ -503,6 +557,10 @@ async function observeNativePaneProcess(input: {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? listNativeProcesses)();
+    if (rows.find(row => row.pid === pid)?.platform === "win32") {
+      const foreground = executableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
+      if (!(runtime === "claude-code" ? ["claude"] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
+    }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined);
   } catch { return null; }
@@ -690,14 +748,14 @@ export async function observeClaudeDelivery(
       const native = chain[0];
       if (native) {
         const fingerprint = native.fingerprint;
-        const identities = chain.map((link) => claudeSessionIdentity(tokens(link.process.command).slice(1)));
+        const identities = chain.map((link) => claudeSessionIdentity(rowArgv(link.process).slice(1)));
         const named = new Set(identities.filter((value): value is string => typeof value === "string"));
         if (named.size > 1) {
           // A Claude can start a fork of its own conversation, and ancestry in one foreground group doesn't show which
           // of them receives input. When only a --fork-session link names the second conversation, keep the warn-and-send
           // that held before forks were read, without verifying either.
           const unforked = new Set(identities.filter((value, index): value is string =>
-            typeof value === "string" && !tokens(chain[index]!.process.command).includes("--fork-session")));
+            typeof value === "string" && !rowArgv(chain[index]!.process).includes("--fork-session")));
           if (unforked.size <= 1) return { state: "unknown", detail: "A Claude process and a fork of a conversation share the bound foreground; current conversation is unverified", fingerprint };
           return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
         }
