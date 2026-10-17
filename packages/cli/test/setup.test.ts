@@ -218,6 +218,17 @@ describe("rig setup", () => {
     expect(verify?.status).toBe("pass");
   });
 
+  it("managed tmux block keeps history above the transcript window and small enough for a long-lived fleet", async () => {
+    const writeSpy = vi.fn();
+    await runSetup(makeDeps({ writeFile: writeSpy }), {});
+    const [, conf] = writeSpy.mock.calls.find(([p]) => String(p).endsWith("/.tmux.conf"))!;
+    const limit = Number(/^set -g history-limit (\d+)$/m.exec(String(conf))?.[1]);
+    // Rotation captures the last 1000 rows (transcripts.lines default): history must hold them with margin.
+    expect(limit).toBeGreaterThanOrEqual(2000);
+    // tmux 3.4 at 90 panes x 50000 rows: 12.8 GB server heap and 250 ms/s of server CPU under the daemon's captures.
+    expect(limit).toBeLessThanOrEqual(10000);
+  });
+
   // OPR.0.3.3.04.2 (AC-1): the ONE canonical ordered golden path over EXISTING
   // verbs (no mega-command), in sequence, with the durable doc reference.
   it("AC-1: goldenPathNextSteps is the ordered sequence over existing verbs, with the durable doc", () => {

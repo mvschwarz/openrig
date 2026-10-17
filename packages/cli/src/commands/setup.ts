@@ -467,7 +467,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   const MANAGED_BLOCK = [
     MANAGED_MARKER,
     "set -g mouse on",
-    "set -g history-limit 50000",
+    "set -g history-limit 5000",
     `# End ${MANAGED_MARKER}`,
   ].join("\n");
 
