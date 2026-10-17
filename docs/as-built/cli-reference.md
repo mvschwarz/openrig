@@ -770,6 +770,19 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig grow <rig-id> <members...>` | — | `--pod <pod>`<br>`--new-pod <pod>`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--json` |
 
+### edge
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig edge` | — | — |
+| `rig edge add <rig> [from] [to]` | — | `--kind <kind>`<br>`--file <path>`<br>`--plan`<br>`--json` |
+| `rig edge remove <rig> <edge-id>` | — | `--plan`<br>`--json` |
+
+`add` requires either `from`, `to` and `--kind`, or `--file` alone. Single and batch
+additions are idempotent; a batch validates and writes atomically. See
+[changing edges on an existing rig](../reference/rig-spec.md#changing-edges-on-an-existing-rig)
+for input and receipt examples, rollback, and snapshot behavior.
+
 ### reconcile-session
 
 | Invocation | Aliases | Declared options |

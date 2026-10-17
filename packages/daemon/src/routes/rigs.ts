@@ -36,7 +36,8 @@ import type { TranscriptStore } from "../domain/transcript-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
-import { convergeOp } from "../domain/topology-converge.js";
+import { convergeOp, type TopologyOp } from "../domain/topology-converge.js";
+import type { EdgeInput, EdgeOpOutcome, EdgeBatchOutcome } from "../domain/rig-edge-ops.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 import type { SelfAttachService } from "../domain/self-attach-service.js";
 
@@ -846,6 +847,66 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
   // 201 created. The node may still be failed/attention_required at launch; that
   // is carried in outcome.result.node.status (mirrors expand's per-node status).
   return c.json(outcome, 201);
+});
+
+function edgeOpStatus(outcome: EdgeOpOutcome | EdgeBatchOutcome): 200 | 201 | 400 | 404 | 500 {
+  if (outcome.ok) {
+    const results = "results" in outcome ? outcome.results : [outcome];
+    return results.some((result) => result.outcome === "added") ? 201 : 200;
+  }
+  if (outcome.code === "rig_not_found" || outcome.code === "edge_not_found") return 404;
+  return outcome.code === "unavailable" ? 500 : 400;
+}
+
+// Single {from,to,kind} or atomic {edges:[{from,to,kind},...]}. All endpoints are
+// rig-scoped logical IDs, including same-pod edges. `plan: true` writes nothing.
+rigsRoutes.post("/:rigId/edges", async (c) => {
+  const rigId = c.req.param("rigId")!;
+  const raw: unknown = await c.req.json().catch(() => null);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return c.json({ ok: false, code: "validation_failed", message: "body must be an edge object or { edges: [...] }" }, 400);
+  }
+  const body = raw as Record<string, unknown>;
+  const { from, to, kind, edges, plan } = body;
+  if (plan !== undefined && typeof plan !== "boolean") {
+    return c.json({ ok: false, code: "validation_failed", message: "plan must be a boolean" }, 400);
+  }
+  let op: TopologyOp;
+  if ("edges" in body) {
+    if (!Array.isArray(edges) || ["from", "to", "kind"].some((key) => key in body)) {
+      return c.json({ ok: false, code: "validation_failed", message: "use either { from, to, kind } or { edges: [...] }" }, 400);
+    }
+    op = { kind: "add_edges", edges: edges as EdgeInput[], plan };
+  } else {
+    if (typeof from !== "string" || typeof to !== "string" || typeof kind !== "string") {
+      return c.json({ ok: false, code: "validation_failed", message: "from, to and kind are required strings" }, 400);
+    }
+    op = { kind: "add_edge", from, to, edgeKind: kind, plan };
+  }
+  const converged = await convergeOp(
+    { instantiator: c.get("podInstantiator" as never) as PodRigInstantiator, rigRepo: getRepo(c) },
+    rigId, op, ".",
+  );
+  if (!converged.supported || (converged.kind !== "add_edge" && converged.kind !== "add_edges")) {
+    return c.json({ error: "Unexpected converge result for edge addition" }, 500);
+  }
+  return c.json(converged.outcome, edgeOpStatus(converged.outcome));
+});
+
+// DELETE /api/rigs/:rigId/edges/:edgeId — remove exactly that edge. `?plan=1` writes nothing.
+rigsRoutes.delete("/:rigId/edges/:edgeId", async (c) => {
+  const plan = c.req.query("plan");
+  if (plan !== undefined && plan !== "0" && plan !== "1") {
+    return c.json({ ok: false, code: "validation_failed", message: "plan must be 0 or 1" }, 400);
+  }
+  const converged = await convergeOp(
+    { instantiator: c.get("podInstantiator" as never) as PodRigInstantiator, rigRepo: getRepo(c) },
+    c.req.param("rigId")!,
+    { kind: "remove_edge", edgeId: c.req.param("edgeId")!, plan: plan === "1" },
+    ".",
+  );
+  if (converged.kind !== "remove_edge" || !converged.supported) return c.json({ error: "Unexpected converge result for remove_edge" }, 500);
+  return c.json(converged.outcome, edgeOpStatus(converged.outcome));
 });
 
 // DELETE /api/rigs/:rigId/pods/:podRef

@@ -61,6 +61,7 @@ import { expandCommand } from "./commands/expand.js";
 import { addMemberCommand } from "./commands/add.js";
 import { createCommand } from "./commands/create.js";
 import { growCommand } from "./commands/grow.js";
+import { edgeCommand } from "./commands/edge.js";
 import { reconcileSessionCommand } from "./commands/reconcile-session.js";
 import { envCommand } from "./commands/env.js";
 import { askCommand } from "./commands/ask.js";
@@ -145,6 +146,7 @@ export interface ProgramDeps {
   addDeps?: StatusDeps;
   createDeps?: StatusDeps;
   growDeps?: StatusDeps;
+  edgeDeps?: StatusDeps;
   reconcileSessionDeps?: StatusDeps;
   envDeps?: StatusDeps;
   unclaimDeps?: StatusDeps;
@@ -238,6 +240,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(addMemberCommand(depsOverride?.addDeps));
   program.addCommand(createCommand(depsOverride?.createDeps));
   program.addCommand(growCommand(depsOverride?.growDeps));
+  program.addCommand(edgeCommand(depsOverride?.edgeDeps));
   program.addCommand(reconcileSessionCommand(depsOverride?.reconcileSessionDeps));
   program.addCommand(envCommand(depsOverride?.envDeps));
   program.addCommand(unclaimCommand(depsOverride?.unclaimDeps));

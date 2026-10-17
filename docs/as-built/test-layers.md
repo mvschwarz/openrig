@@ -316,6 +316,19 @@ above remain pending: pane rendering does not prove input consumption, durable
 stream replay does not prove live subscription, and this test does not exercise
 native providers, restore or policy changes.
 
+`packages/daemon/test/rig-edge-cli.integration.test.ts` uses the same private
+scenario daemon and tmux helpers for edge repair. It removes a stub seat, re-adds
+its logical ID with the terminal runtime, then restores its cross-pod edges through
+`rig edge add --file`. It checks repeat IDs and edge counts, rejection without
+partial writes, unchanged sibling node/binding identities and pane PIDs, export,
+snapshot capture and exact rollback. It models the cross-runtime replacement
+workaround without invoking Claude Code or Codex. The YAML runner has no bound
+edge/remove/add verbs, so this journey drives the real CLI directly:
+
+```sh
+npm test -w @openrig/daemon -- test/rig-edge-cli.integration.test.ts
+```
+
 ## If your change touches an artery, add or extend a scenario (or say why not)
 
 [arteries.md](arteries.md) lists the behaviours that everything else depends on. If your
