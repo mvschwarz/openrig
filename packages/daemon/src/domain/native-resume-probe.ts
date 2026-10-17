@@ -126,7 +126,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for project MCP server approval before the session can become interactive.",
       };
     }
-    if (looksLikeClaudeLoginPrompt(paneContent)) {
+    if (hasCurrentClaudeLoginRefusal(paneContent)) {
       return {
         status: "failed",
         code: "login_required",
@@ -327,9 +327,30 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   return numberedOption;
 }
 
-function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
-  return paneContent.includes("Not logged in")
-    && paneContent.includes("Run /login");
+// Claude's request-time refusals when it has no usable login (code.claude.com/docs/en/errors).
+const CLAUDE_LOGIN_REFUSALS = new Set(["Not logged in · Please run /login", "Login expired · Please run /login"]);
+const CLAUDE_RESPONSE_MARKER = /^\s*(?:[●⏺⎿]\s*)+/;
+
+// A refusal blocks only as Claude's latest response: the last marked response row (● or ⏺ reply, ⎿ result) after
+// the last submitted prompt (❯) and above the input box, reading exactly as a refusal. The persistent
+// "Not logged in · Run /login" footer says only that Claude holds no credential of its own, and a gateway can still
+// authenticate its requests. Older scrollback, a refusal quoted in a prompt or reply, and one followed by a newer
+// reply or prompt are not current.
+function hasCurrentClaudeLoginRefusal(paneContent: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  const isPromptRow = (line: string) => /^\s*❯/.test(line);
+  let inputBox = lines.length;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (isPromptRow(lines[index]!)) { inputBox = index; break; }
+  }
+  let latest: "refusal" | "reply" | null = null;
+  for (const line of lines.slice(0, inputBox)) {
+    if (isPromptRow(line)) latest = null;
+    else if (CLAUDE_RESPONSE_MARKER.test(line)) {
+      latest = CLAUDE_LOGIN_REFUSALS.has(line.replace(CLAUDE_RESPONSE_MARKER, "").trim()) ? "refusal" : "reply";
+    }
+  }
+  return latest === "refusal";
 }
 
 function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
