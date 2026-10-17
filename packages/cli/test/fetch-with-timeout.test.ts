@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { describe, it, expect, vi } from "vitest";
 import { fetchWithTimeout, FetchTimeoutError } from "../src/fetch-with-timeout.js";
 
@@ -47,5 +48,22 @@ describe("fetchWithTimeout", () => {
         timeoutMessage: "probe timed out",
       }),
     ).rejects.toThrow(FetchTimeoutError);
+  });
+
+  it("removes the caller's abort listener after each request settles", async () => {
+    const parent = new AbortController();
+    const fetchImpl: typeof fetch = async () => new Response("ok");
+
+    for (let i = 0; i < 12; i++) {
+      await fetchWithTimeout(fetchImpl, "https://example.test/", { signal: parent.signal }, {
+        timeoutMs: 1_000,
+        timeoutMessage: "timed out",
+        consumeResponse: async (response) => {
+          await response.text();
+        },
+      });
+    }
+
+    expect(getEventListeners(parent.signal, "abort")).toHaveLength(0);
   });
 });
