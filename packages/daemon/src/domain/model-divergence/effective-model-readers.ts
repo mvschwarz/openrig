@@ -7,6 +7,8 @@
 //     provider transcript — the API response names the model that produced it. Absent until the
 //     seat's first such record.
 //   - codex: the latest `world_state` event's `collaboration_mode.model` in the rollout.
+//   - pi: the newest determinate assistant record's `provider/model` in the session file, when that
+//     record is the current occupant's own (not inherited from a fork parent, not a prior runner's).
 //
 // BOUNDED READS by contract: provider records on live seats reach hundreds of MB (a whole-file
 // readFileSync throws ERR_STRING_TOO_LONG past ~0.5GB and stalls the loop long before that — the
@@ -17,6 +19,7 @@
 // UNKNOWN — the detector reports it as observable pending), never a guess.
 
 import { openSync, readSync, closeSync, fstatSync } from "node:fs";
+import { parsePiSessionHeader, piAssistantFields, piEntryOrigin, type PiSessionBoundary } from "../pi-usage-facts.js";
 
 const TAIL_BYTES = 512 * 1024;
 const MAX_SCAN_BYTES = 8 * 1024 * 1024;
@@ -110,9 +113,16 @@ function newestCodexModel(lines: string[]): string | null {
  *  census put records 0.4-0.8MB from EOF on the big rollouts), so one tail window is not always
  *  enough, but 8MB bounds the read far under the loop-stall class. */
 export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_SCAN_BYTES): string | null {
+  return scanBackward(rolloutPath, newestCodexModel, maxScanBytes);
+}
+
+/** The ONE bounded backward scan: tail-sized windows from EOF down to `maxScanBytes`, each handed
+ *  to `pick` as whole lines (oldest first). The first non-null pick ends the scan; null = keep
+ *  scanning older windows. Missing/unreadable file, or nothing picked within the cap → null. */
+function scanBackward<T>(path: string, pick: (lines: string[]) => T | null, maxScanBytes: number): T | null {
   let fd: number;
   try {
-    fd = openSync(rolloutPath, "r");
+    fd = openSync(path, "r");
   } catch {
     return null;
   }
@@ -136,8 +146,8 @@ export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_
         droppedBytes = Buffer.byteLength(lines[0]!, "utf-8");
         lines.shift();
       }
-      const model = newestCodexModel(lines);
-      if (model !== null) return model;
+      const picked = pick(lines);
+      if (picked !== null) return picked;
       if (start === scanFloor) break;
       // Fragment-sized step-back — UNLESS the fragment fills the whole window (a single line wider
       // than 512KB: real, r1 measured 44 such lines on this box, longest 8.2MB). In that case
@@ -150,6 +160,88 @@ export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_
       end = next < end ? next : start;
     }
     return null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The occupant whose Pi session-file records may answer: records stamped at or before
+ *  `notBeforeMs` belong to an earlier runner or occupant of the same file (a resume keeps it). */
+export interface PiOccupantScope {
+  notBeforeMs: number;
+}
+
+/** The Pi runtime's effective model, `provider/model`, from the NEWEST determinate assistant
+ *  record in the session file — provided that record is this occupant's own. Pi's `model` is the
+ *  runtime's own record of what answered; `responseModel` (a routed/dated API variant) is not
+ *  compared, since modelsMatch canonicalizes only the pin.
+ *
+ *  The newest determinate record DECIDES: when it is inherited from a fork parent, of unknown
+ *  origin, stamped no later than `scope.notBeforeMs`, or carries no provider, the answer is a
+ *  named no-answer (pending) and the scan does NOT reach for an older record — an older one is
+ *  at least as stale. Error and aborted turns are skipped (they name the requested model, not one
+ *  that answered). The session header decides origin; an unreadable header is a no-answer. */
+export function readPiEffectiveModel(
+  sessionFile: string,
+  scope: PiOccupantScope,
+  maxScanBytes = MAX_SCAN_BYTES,
+): { ok: true; model: string } | { ok: false; reason: string } {
+  const header = readFirstLine(sessionFile);
+  if (header === null) return { ok: false, reason: `Pi session file ${sessionFile} is unreadable` };
+  const boundary = parsePiSessionHeader(header);
+  if (!boundary) return { ok: false, reason: `Pi session file ${sessionFile} has no readable session header` };
+  const picked = scanBackward(sessionFile, (lines) => newestPiModel(lines, boundary, scope), maxScanBytes);
+  return picked ?? { ok: false, reason: `no determinate assistant record from the current occupant in the bounded read of ${sessionFile}` };
+}
+
+function newestPiModel(
+  lines: string[],
+  boundary: PiSessionBoundary,
+  scope: PiOccupantScope,
+): { ok: true; model: string } | { ok: false; reason: string } | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes('"assistant"')) continue;
+    let entry: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      entry = parsed as Record<string, unknown>;
+    } catch {
+      continue; // corrupt line — keep scanning
+    }
+    const fields = piAssistantFields(entry);
+    if (!fields) continue;
+    if (fields.stopReason === "error" || fields.stopReason === "aborted") continue;
+    const id = typeof entry["id"] === "string" ? entry["id"] : "";
+    const timestamp = typeof entry["timestamp"] === "string" ? entry["timestamp"] : "";
+    const at = Date.parse(timestamp);
+    if (!id || !Number.isFinite(at)) return { ok: false, reason: `newest Pi assistant record carries no entry id or timestamp` };
+    const origin = piEntryOrigin(id, timestamp, boundary);
+    if (origin !== "own") return { ok: false, reason: `newest Pi assistant record ${id} is ${origin === "inherited" ? "inherited from the fork parent" : "of undecidable fork origin"}` };
+    if (at <= scope.notBeforeMs) return { ok: false, reason: `newest Pi assistant record ${id} predates the current runner` };
+    if (!fields.provider || !fields.model) return { ok: false, reason: `newest Pi assistant record ${id} names no provider and model` };
+    return { ok: true, model: `${fields.provider}/${fields.model}` };
+  }
+  return null;
+}
+
+/** The first line of a file, read bounded (a Pi session header is small). null when unreadable. */
+function readFirstLine(path: string, maxBytes = 64 * 1024): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    const read = readSync(fd, buf, 0, maxBytes, 0);
+    const text = buf.subarray(0, read).toString("utf-8");
+    const newline = text.indexOf("\n");
+    return newline >= 0 ? text.slice(0, newline) : text;
   } catch {
     return null;
   } finally {

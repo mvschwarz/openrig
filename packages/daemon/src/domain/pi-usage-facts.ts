@@ -69,7 +69,7 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? 
  *     session's entry ids decide it when they have been read, and otherwise the entry stays unknown.
  * When the parent's ids are known they are the evidence for every entry; a contradiction is unknown.
  */
-function originOf(entryId: string, timestamp: string, boundary: PiSessionBoundary | null): PiUsageOrigin {
+export function piEntryOrigin(entryId: string, timestamp: string, boundary: PiSessionBoundary | null): PiUsageOrigin {
   if (!boundary) return "unknown";
   if (!boundary.parentSession) return "own";
   const at = Date.parse(timestamp);
@@ -80,6 +80,29 @@ function originOf(entryId: string, timestamp: string, boundary: PiSessionBoundar
     return at >= created ? "own" : "unknown";
   }
   return at < created ? "inherited" : at > created ? "own" : "unknown";
+}
+
+/** The fields of a Pi assistant `message` entry, decoded as Pi persists them; null for any other entry. Each
+ *  consumer keeps its own precedence: usage facts price `responseModel ?? model`, the model-divergence reader
+ *  compares `model` only. */
+export function piAssistantFields(entry: Record<string, unknown>): {
+  provider: string | null;
+  model: string | null;
+  responseModel: string | null;
+  stopReason: string | null;
+  api: string | null;
+  responseId: string | null;
+} | null {
+  const message = entry["message"] && typeof entry["message"] === "object" ? entry["message"] as Record<string, unknown> : null;
+  if (entry["type"] !== "message" || message?.["role"] !== "assistant") return null;
+  return {
+    provider: str(message["provider"]),
+    model: str(message["model"]),
+    responseModel: str(message["responseModel"]),
+    stopReason: str(message["stopReason"]),
+    api: str(message["api"]),
+    responseId: str(message["responseId"]),
+  };
 }
 
 /** Whether an entry is stamped in the same millisecond as the fork header (the case only the parent's ids decide). */
@@ -108,14 +131,15 @@ export function extractPiUsageFacts(entries: unknown[], boundary: PiSessionBound
     let stopReason: string | null = null;
     let api: string | null = null;
     let responseId: string | null = null;
-    if (entry["type"] === "message" && message?.["role"] === "assistant") {
+    const assistant = piAssistantFields(entry);
+    if (assistant) {
       kind = "assistant";
-      usage = message["usage"];
-      provider = str(message["provider"]);
-      model = str(message["responseModel"]) ?? str(message["model"]);
-      stopReason = str(message["stopReason"]);
-      api = str(message["api"]);
-      responseId = str(message["responseId"]);
+      usage = message?.["usage"];
+      provider = assistant.provider;
+      model = assistant.responseModel ?? assistant.model;
+      stopReason = assistant.stopReason;
+      api = assistant.api;
+      responseId = assistant.responseId;
     } else if (entry["type"] === "usage") {
       kind = "usage";
       usage = entry["usage"];
@@ -156,7 +180,7 @@ export function extractPiUsageFacts(entries: unknown[], boundary: PiSessionBound
       stopReason,
       api,
       responseId,
-      origin: originOf(id, timestamp, boundary),
+      origin: piEntryOrigin(id, timestamp, boundary),
     });
   }
   return { facts, malformed };
