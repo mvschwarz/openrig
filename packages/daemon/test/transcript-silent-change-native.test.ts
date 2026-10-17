@@ -188,7 +188,7 @@ const CASES: Array<{ label: string; history: number; screen: string; op: Op; cha
 const seats: Seat[] = [];
 afterAll(async () => { for (const s of seats) await s.done(); });
 
-describe.concurrent.skipIf(!nativeAvailable)("silent text changes on an idle seat", () => {
+describe.skipIf(!nativeAvailable).concurrent("silent text changes on an idle seat", () => {
   CASES.forEach((c, i) => {
     it(c.label, async () => {
       const s = await seat(`c${i}-s@r`, { history: c.history, screen: c.screen });

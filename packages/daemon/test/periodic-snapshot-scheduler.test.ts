@@ -279,8 +279,29 @@ describe("PeriodicSnapshotScheduler", () => {
 
   it("captures when the earlier restore-source lookup fails", async () => {
     const rigId = seedRunningRig("r-restore-lookup-fails");
+    const node = rigRepo.addNode(rigId, "sibling", { role: "worker" });
+    const sibling = sessionRegistry.registerSession(node.id, "sibling@r-restore-lookup-fails");
+    sessionRegistry.updateStatus(sibling.id, "running");
+    snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
     const lookup = vi.spyOn(snapshotRepo, "findLatestRestoreUsable")
       .mockImplementation(() => { throw new Error("lookup failed"); });
+    // A seat stops during refresh, so the tick reaches the lookup; the first seat keeps the rig running.
+    const periodic = new PeriodicSnapshotScheduler({
+      db, snapshotCapture, snapshotRepo, sessionRegistry,
+      resumeMetadataRefresher: { refresh: vi.fn(async () => { sessionRegistry.updateStatus(sibling.id, "exited"); }) } as unknown as Refresher,
+    });
+
+    await periodic.tick();
+
+    expect(lookup).toHaveBeenCalledWith(rigId);
+    expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(1);
+    lookup.mockRestore();
+  });
+
+  it("does not read the restore source on a tick where no seat changed", async () => {
+    const rigId = seedRunningRig("r-stable-tick");
+    snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
+    const lookup = vi.spyOn(snapshotRepo, "findLatestRestoreUsable");
     const periodic = new PeriodicSnapshotScheduler({
       db, snapshotCapture, snapshotRepo, sessionRegistry,
       resumeMetadataRefresher: { refresh: vi.fn(async () => {}) } as unknown as Refresher,
@@ -288,7 +309,7 @@ describe("PeriodicSnapshotScheduler", () => {
 
     await periodic.tick();
 
-    expect(lookup).toHaveBeenCalledWith(rigId);
+    expect(lookup).not.toHaveBeenCalled();
     expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" })).toHaveLength(1);
     lookup.mockRestore();
   });

@@ -107,12 +107,15 @@ export class PeriodicSnapshotScheduler {
             // occupant set if any refreshed running seat stopped or was replaced.
             // Read after refresh: teardown may have written the pre-down source
             // while refresh was awaiting. A lookup failure is best-effort and
-            // must not suppress the periodic capture.
-            let hasEarlierUsableSnapshot = false;
-            try {
-              hasEarlierUsableSnapshot = this.deps.snapshotRepo.findLatestRestoreUsable(rigId) !== null;
-            } catch { /* treat an unavailable lookup as no earlier snapshot */ }
-            if (hasEarlierUsableSnapshot && sessions.some((session) => session.status === "running" && !runningIds.has(session.sessionId))) continue;
+            // must not suppress the periodic capture. The lookup reads every
+            // snapshot of the rig, so it runs only when a seat did change.
+            if (sessions.some((session) => session.status === "running" && !runningIds.has(session.sessionId))) {
+              let hasEarlierUsableSnapshot = false;
+              try {
+                hasEarlierUsableSnapshot = this.deps.snapshotRepo.findLatestRestoreUsable(rigId) !== null;
+              } catch { /* treat an unavailable lookup as no earlier snapshot */ }
+              if (hasEarlierUsableSnapshot) continue;
+            }
           }
           // Refresh yields to teardown/archive. Recheck immediately before the
           // synchronous capture so a stopped rig cannot replace its pre-down

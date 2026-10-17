@@ -139,6 +139,36 @@ describe("rig create", () => {
     expect(logs.join("\n")).toContain("shipped default agent is unavailable");
     expect(client.postText).not.toHaveBeenCalled();
   });
+
+  async function createWith(response: { status: number; data: Record<string, unknown> }, json: boolean) {
+    const client = { get: vi.fn(async () => ({ status: 200, data: library })), postText: vi.fn(async () => response) };
+    const program = createProgram({ createDeps: deps(client) });
+    program.exitOverride();
+    return captureLogs(() => program.parseAsync(["node", "rig", "create", "alpha", "--cwd", "/work", ...(json ? ["--json"] : [])]));
+  }
+
+  it.each([
+    ["the daemon's errors", { status: 400, data: { errors: ["first problem", "second problem"] } }, "first problem; second problem"],
+    ["the daemon's message", { status: 409, data: { message: "rig alpha is running" } }, "rig alpha is running"],
+    ["a seat that needs attention", {
+      status: 201,
+      data: { rigId: "rig-1", nodes: [{ logicalId: "main.lead", status: "attention_required", error: "Startup requires attention: log in" }] },
+    }, "Startup requires attention: log in"],
+    ["no detail at all", { status: 500, data: {} }, "Create failed (HTTP 500)"],
+  ])("a failed create's --json carries the reason the text output prints: %s", async (_label, response, reason) => {
+    const json = await createWith(response, true);
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.logs.join("\n"))).toMatchObject({ ok: false, detail: reason });
+
+    const text = await createWith(response, false);
+    expect(text.exitCode).toBe(1);
+    expect(text.logs).toEqual([reason]);
+  });
+
+  it("a successful create's --json has no detail", async () => {
+    const { logs } = await createWith({ status: 201, data: { rigId: "rig-1", nodes: [{ logicalId: "main.lead", status: "launched" }] } }, true);
+    expect(JSON.parse(logs.join("\n"))).not.toHaveProperty("detail");
+  });
 });
 
 describe("rig grow", () => {
