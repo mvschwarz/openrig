@@ -154,8 +154,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is the active foreground process in the probe pane.",
       };
     }
-    if (/(^|\n)\s*❯/.test(paneContent)
-      && /^[ \t]*⏵⏵ auto mode on \(shift\+tab to cycle\)(?:[ \t]+·[^\r\n]*)?[ \t]*$/m.test(paneContent)) {
+    if (/(^|\n)\s*❯/.test(paneContent) && paneContent.split(/\r?\n/).some(isClaudeAutoModeFooter)) {
       return input.claudeAutoIdentityVerified
         ? { status: "resumed", code: "active_runtime", detail: "Claude auto-mode TUI and the exact managed native identity were verified." }
         : { status: "inconclusive", code: "claude_auto_identity_required", detail: "Auto-mode screen text requires proof of the launched Claude identity." };
@@ -258,6 +257,31 @@ export function isProbeShellReady(input: ProbeShellReadyInput): boolean {
   const paneContent = input.paneContent?.trim() ?? "";
   return SHELL_COMMANDS.has(paneCommand) && paneContent.length > 0;
 }
+
+const AUTO_MODE_HINT = "(shift+tab to cycle)";
+const AUTO_MODE_HEAD = "⏵⏵ auto mode on";
+// Shorter than this could still be the accept-edits bar (`⏵⏵ a…`).
+const AUTO_MODE_MIN = "⏵⏵ auto";
+
+/** Claude's auto-mode footer line. A narrow pane squeezes it: the hint is cut short (`…(shift+tab to cy`) or
+ * dropped (`⏵⏵ auto mode on      · …`), and the mode name itself can be cut (`⏵⏵ auto mode`). Vim mode puts
+ * a mode marker such as `-- INSERT --` or `-- NORMAL --` ahead of it (`VIM_MARKER`, the same set as `CLAUDE_MODE_FOOTER`
+ * in session-transport.ts).
+ * Only that mode bar is accepted: this is screen text, never identity proof. */
+function isClaudeAutoModeFooter(line: string): boolean {
+  const bar = line.trim().replace(VIM_MARKER, "").replace(/…$/, "").trimEnd();
+  if (bar.length < AUTO_MODE_MIN.length) return false;
+  if (!bar.startsWith(AUTO_MODE_HEAD)) return `${AUTO_MODE_HEAD} ${AUTO_MODE_HINT}`.startsWith(bar);
+  const rest = bar.slice(AUTO_MODE_HEAD.length);
+  // The hint is dropped (and other segments may follow after a `·`), or it is there whole or cut short.
+  if (/^(?:\s+·.*)?$/.test(rest)) return true;
+  if (!rest.startsWith(" ")) return false;
+  const tail = rest.slice(1);
+  return AUTO_MODE_HINT.startsWith(tail)
+    || (tail.startsWith(AUTO_MODE_HINT) && /^(?:\s+·.*)?$/.test(tail.slice(AUTO_MODE_HINT.length)));
+}
+
+const VIM_MARKER = /^-- [A-Z]+ --\s+/;
 
 function looksLikeClaudeTui(paneContent: string): boolean {
   const hasPrompt = hasClaudeComposerPrompt(paneContent);

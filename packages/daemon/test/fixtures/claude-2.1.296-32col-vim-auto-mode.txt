@@ -1,0 +1,10 @@
+
+❯ /config
+  ⎿  Set editor mode to vim
+
+─────────────────── p-a@lcsolo ─
+❯ 
+────────────────────────────────
+  -- INSERT -- ⏵⏵ auto mode on
+  Update available! Run: mise…
+

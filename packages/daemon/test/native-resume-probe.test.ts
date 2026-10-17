@@ -40,7 +40,8 @@ describe("native resume probe", () => {
     it.each([
       "  ⏵⏵ auto mode on (shift+tab to cycle)",
       "❯\nThe manual says auto mode on (shift+tab to cycle)",
-      "❯\n  ⏵⏵ auto mode on",
+      "❯\n  ⏵⏵ au",
+      "❯\n  auto mode on",
     ])("still needs the actual prompt/footer shape: %s", (paneContent) => {
       expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent, claudeAutoIdentityVerified: true }).status).not.toBe("resumed");
     });
@@ -898,5 +899,124 @@ describe("native resume probe", () => {
       expect(result.status).toBe("resumed");
       expect(result.code).toBe("active_runtime");
     });
+  });
+});
+
+// A narrow pane cuts Claude's footer short, and vim mode puts a marker (`-- INSERT --`, `-- NORMAL --`) ahead of it. Screen text alone
+// still never proves the launched identity for an auto-mode seat, so those screens stay "inconclusive" without it.
+describe("Claude footers in a narrow or vim-mode pane", () => {
+  const screen = (footer: string) => `Conversation\n──────────\n❯ \n──────────\n  ${footer}\n`;
+  const probe = (footer: string, verified = false) => assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.296",
+    paneContent: screen(footer), ...(verified ? { claudeAutoIdentityVerified: true } : {}) });
+
+  it.each([
+    "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+    "-- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    "-- NORMAL -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    "⏵⏵ auto mode on (shift+tab to cy",
+    "⏵⏵ auto mode on (shift+tab to cycle…",
+    "⏵⏵ auto mode on (",
+    "⏵⏵ auto mode on",
+    "⏵⏵ auto mode on      · …",
+    "⏵⏵ auto mode",
+    "⏵⏵ auto",
+    "-- INSERT -- ⏵⏵ auto mode on",
+    "-- INSERT -- ⏵⏵ auto mode",
+    "-- NORMAL -- ⏵⏵ auto",
+  ])("an auto-mode footer reads as awaiting identity proof: %s", footer => {
+    expect(probe(footer)).toMatchObject({ status: "inconclusive", code: "claude_auto_identity_required" });
+    expect(probe(footer, true)).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it.each([
+    "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+    "-- INSERT -- ⏵⏵ accept edits on (shift+tab to cycle)",
+    "⏵⏵ accept edits on (shift+t",
+    "-- NORMAL -- ⏵⏵ accept edits on (shift+tab to cycle)",
+  ])("an accept-edits footer reads as a running TUI: %s", footer => {
+    expect(probe(footer)).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  // Known limitation, the same as on upstream main: an accept-edits bar cut before `accept edits on` is not
+  // recognized. Screen text cannot tell a current cut-short accept bar from a stale one, and an accept bar
+  // that read as ready would skip the identity proof an auto-mode bar needs.
+  it.each([
+    "⏵⏵ accept edi",
+    "-- INSERT -- ⏵⏵ accept",
+  ])("an accept-edits bar cut before `accept edits on` is not recognized: %s", footer => {
+    expect(probe(footer)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it.each([
+    "⏵⏵ auto mode on (shift+tab to cycle) extra words",
+    "⏵⏵ auto mode off",
+    "⏵⏵ auto mode only (shift+tab to cycle)",
+    "⏵⏵ au",
+    "-- INSERT -- ⏵⏵",
+    "auto mode on (shift+tab to cycle)",
+    "I think ⏵⏵ auto mode on (shift+tab to cycle)",
+    "-- normal -- ⏵⏵ auto mode on (shift+tab to cycle)",
+    "⏵⏵ bypass permissions on (shift+tab to cycle)",
+    "? for shortcuts",
+  ])("a non-ready or unrelated line is still not a ready footer: %s", footer => {
+    expect(probe(footer, true)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+    expect(probe(footer)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  // Real panes of a healthy Claude 2.1.296 seat, captured with `tmux capture-pane -p` while a narrow client was
+  // attached (the window was as wide as the file name says, 10 rows). Claude squeezes the footer to fit.
+  const realFrame = (name: string) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+  const footerOf = (frame: string) => frame.split("\n").filter((line) => line.includes("⏵⏵")).at(-1);
+  const probeFrame = (paneContent: string, verified: boolean) => assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.296",
+    paneContent, ...(verified ? { claudeAutoIdentityVerified: true } : {}) });
+
+  it.each([
+    ["claude-2.1.296-30col-auto-mode.txt", "  ⏵⏵ auto mode on (shift+tab"],
+    ["claude-2.1.296-28col-auto-mode-no-hint.txt", "  ⏵⏵ auto mode on      · …"],
+    ["claude-2.1.296-32col-vim-auto-mode.txt", "  -- INSERT -- ⏵⏵ auto mode on"],
+    ["claude-2.1.296-30col-vim-auto-mode.txt", "  -- INSERT -- ⏵⏵ auto mode"],
+  ])("reads the footer of a real auto-mode seat in a narrow pane: %s", (name, footer) => {
+    const paneContent = realFrame(name);
+    expect(footerOf(paneContent)).toBe(footer);
+    expect(probeFrame(paneContent, false)).toMatchObject({ status: "inconclusive", code: "claude_auto_identity_required" });
+    expect(probeFrame(paneContent, true)).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it("reads the footer of a real accept-edits seat in a 30-column pane, as before", () => {
+    const paneContent = realFrame("claude-2.1.296-30col-accept-edits.txt");
+    expect(footerOf(paneContent)).toBe("  ⏵⏵ accept edits on   · ← …");
+    expect(probeFrame(paneContent, false)).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  // Known limitation (as on upstream main): vim mode at 30 columns cuts the accept-edits bar before `accept edits on`.
+  it("does not recognize a real vim-mode accept-edits seat in a 30-column pane", () => {
+    const paneContent = realFrame("claude-2.1.296-30col-vim-accept-edits.txt");
+    expect(footerOf(paneContent)).toBe("  -- INSERT -- ⏵⏵ accept");
+    expect(probeFrame(paneContent, false)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  // A truncated auto-mode bar is always identity-gated, wherever it sits, so a stale or copied accept or auto line
+  // in the pane can at worst make an auto-mode seat need its identity proof; no pane here reads resumed without it.
+  const withBars = (...bars: string[]) => `Conversation\n❯\n${bars.map((bar) => `  ${bar}`).join("\n")}\n`;
+
+  it.each([
+    ["accept line above the current auto bar", ["-- INSERT -- ⏵⏵ accept", "-- INSERT -- ⏵⏵ auto mode"]],
+    ["accept line below the current auto bar", ["-- INSERT -- ⏵⏵ auto mode", "-- INSERT -- ⏵⏵ accept"]],
+    ["auto line above a cut-short accept bar", ["-- INSERT -- ⏵⏵ auto mode", "-- INSERT -- ⏵⏵ accept"]],
+    ["full auto line above a cut-short accept bar", ["⏵⏵ auto mode on (shift+tab to cycle)", "-- INSERT -- ⏵⏵ accept"]],
+  ])("a pane with a stale or ambiguous bar still needs the identity proof: %s", (_name, bars) => {
+    const pane = withBars(...bars);
+    expect(probeFrame(pane, false)).toMatchObject({ status: "inconclusive", code: "claude_auto_identity_required" });
+    expect(probeFrame(pane, true)).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it.each(["⏵⏵ a", "-- INSERT -- ⏵⏵ a", "⏵⏵", "⏵⏵ ac"])("%s is too short to say which mode it is", (bar) => {
+    expect(probeFrame(withBars(bar), false)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+    expect(probeFrame(withBars(bar), true)).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("needs the composer prompt as well", () => {
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "2.1.296",
+      paneContent: "Conversation\n  ⏵⏵ auto mode on (shift+tab to cy\n" })).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
   });
 });
