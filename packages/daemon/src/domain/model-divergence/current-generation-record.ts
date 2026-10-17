@@ -3,8 +3,10 @@
 // A registry token is continuity metadata, not live identity, and transcript recency is never an
 // identity tie-breaker: a deliberately retained predecessor may keep writing forever.
 
-import { dirname, join } from "node:path";
+import { dirname, join, relative, isAbsolute, sep } from "node:path";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
+import { readPiEffectiveModel } from "./effective-model-readers.js";
+import { canonicalModelPin } from "./model-divergence-monitor.js";
 
 export interface ProcessRow {
   pid: number;
@@ -232,4 +234,114 @@ export async function resolveLiveCodexThreadId(
   if (ids.size === 1) return { ok: true, id: [...ids][0]! };
   if (ids.size > 1) return { ok: false, reason: `multiple codex threads under the live pane of ${sessionTarget}` };
   return { ok: false, reason: `live codex process under ${sessionTarget} yielded no thread id from its logs` };
+}
+
+export interface PiOccupantRecordInput {
+  sessionName: string;
+  generation: string | null;
+  occupantBootAt: string | null;
+  binding: { tmuxSession: string | null; tmuxPane: string | null } | null;
+  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder. */
+  runner: {
+    state: { ready?: boolean; launchId?: string; sessionFile?: string; exited?: unknown } | null;
+    sessionsDir: string;
+  };
+}
+
+export type PiRecordSelection =
+  | { ok: true; path: string; launchId: string; notBeforeMs: number }
+  | { ok: false; reason: string };
+
+/** The value after `flag` in a whitespace-tokenized process command line, or null. */
+function flagValue(tokens: string[], flag: string): string | null {
+  const at = tokens.indexOf(flag);
+  const value = at >= 0 ? tokens[at + 1] : undefined;
+  return value ? value.replace(/^['"]|['"]$/g, "") : null;
+}
+
+/**
+ * Resolve a Pi seat's session file only when the runner the registered pane is running right now is
+ * the one that wrote the sidecar: the pane's managed runner process carries `--launch-id` (the
+ * adapter mints it per launch attempt and the runner stamps it into every sidecar write), so a
+ * sidecar left by an earlier runner — or a runner in another pane under the same name — never
+ * answers. The sidecar must say ready and not exited, and its session file must sit under the
+ * seat's own sessions folder. `notBeforeMs` scopes the records to this runner's tenure: the later
+ * of the occupant's boot and the runner process start, both second-resolution stamps, so the whole
+ * starting second is excluded (a record in it could be the predecessor's). A resume keeps the same
+ * session file, so this is what separates the previous occupant's records from this one's.
+ */
+export async function resolveIdentityVerifiedPiRecord(
+  input: PiOccupantRecordInput,
+  deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
+  realpath: (path: string) => string | null,
+): Promise<PiRecordSelection> {
+  if (!input.generation) {
+    return { ok: false, reason: `current occupant generation is unknown for ${input.sessionName}` };
+  }
+  const bootAtMs = input.occupantBootAt ? parseSqliteUtcMs(input.occupantBootAt) : NaN;
+  if (!Number.isFinite(bootAtMs)) {
+    return { ok: false, reason: `current occupant boot time is unknown for ${input.sessionName}` };
+  }
+  const binding = input.binding;
+  if (!binding?.tmuxPane || binding.tmuxSession !== input.sessionName) {
+    return { ok: false, reason: `no canonical tmux pane binding for ${input.sessionName}` };
+  }
+  const state = input.runner.state;
+  if (!state) return { ok: false, reason: `no readable Pi runner sidecar for ${input.sessionName}` };
+  if (state.exited) return { ok: false, reason: `Pi runner sidecar for ${input.sessionName} says the runner exited` };
+  if (state.ready !== true) return { ok: false, reason: `Pi runner sidecar for ${input.sessionName} is not ready` };
+  const launchId = cleanString(state.launchId);
+  if (!launchId) return { ok: false, reason: `Pi runner sidecar for ${input.sessionName} carries no launch id` };
+
+  const panePid = await deps.getPanePid(binding.tmuxPane);
+  if (!panePid) return { ok: false, reason: `registered pane ${binding.tmuxPane} has no live pid` };
+  const processes = await deps.listProcesses();
+  // The runner command (and any launch wrapper that carries it whole) names this seat and its
+  // launch id; the Pi child it spawns carries neither.
+  const runners = findDescendants(processes, panePid, (command) => {
+    const tokens = command.trim().split(/\s+/);
+    return flagValue(tokens, "--session-name") === input.sessionName && flagValue(tokens, "--launch-id") !== null;
+  }).map((pid) => processes.find((process) => process.pid === pid)!);
+  if (runners.length === 0) {
+    return { ok: false, reason: `no managed Pi runner under registered pane ${binding.tmuxPane}` };
+  }
+  const paneLaunchIds = new Set(runners.map((runner) => flagValue(runner.command.trim().split(/\s+/), "--launch-id")!));
+  if (paneLaunchIds.size > 1) {
+    return { ok: false, reason: `multiple Pi runner launch ids under registered pane ${binding.tmuxPane}: ${[...paneLaunchIds].join(", ")}` };
+  }
+  const paneLaunchId = [...paneLaunchIds][0]!;
+  if (paneLaunchId !== launchId) {
+    return { ok: false, reason: `Pi runner sidecar launch ${launchId} is not the pane's live runner launch ${paneLaunchId}` };
+  }
+  const startedMs = runners.map((runner) => Date.parse(runner.startedAt ?? ""));
+  if (startedMs.some((ms) => !Number.isFinite(ms))) {
+    return { ok: false, reason: `the live Pi runner under ${binding.tmuxPane} has no readable start time` };
+  }
+
+  const sessionFile = cleanString(state.sessionFile);
+  if (!sessionFile) return { ok: false, reason: `Pi runner sidecar for ${input.sessionName} reports no session file` };
+  const file = realpath(sessionFile);
+  const folder = realpath(input.runner.sessionsDir);
+  const inside = file !== null && folder !== null ? relative(folder, file) : null;
+  if (inside === null || inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+    return { ok: false, reason: `Pi session file ${sessionFile} is not under the seat's sessions folder` };
+  }
+  return { ok: true, path: file!, launchId, notBeforeMs: Math.max(bootAtMs, ...startedMs) + 999 };
+}
+
+/** A Pi seat's effective-model read as the monitor wires it: the pin must resolve to a
+ *  `provider/model` id (a Pi record names both, so any other pin could never match and would only
+ *  proclaim falsely), then the live runner's own session file, then this occupant's newest record.
+ *  Every gap is a named no-answer — pending, never a refusal. */
+export async function readCurrentPiOccupantModel(
+  input: PiOccupantRecordInput & { pinnedModel: string },
+  deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
+  realpath: (path: string) => string | null,
+): Promise<{ ok: true; model: string } | { ok: false; reason: string }> {
+  if (!/^[^/\s]+\/\S+$/.test(canonicalModelPin(input.pinnedModel))) {
+    return { ok: false, reason: `pin ${input.pinnedModel} does not resolve to a provider/model id a Pi record can match` };
+  }
+  const selection = await resolveIdentityVerifiedPiRecord(input, deps, realpath);
+  if (!selection.ok) return selection;
+  return readPiEffectiveModel(selection.path, { notBeforeMs: selection.notBeforeMs });
 }

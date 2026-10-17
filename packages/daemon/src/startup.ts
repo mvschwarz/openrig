@@ -2272,7 +2272,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const { readClaudeEffectiveModel, readCodexEffectiveModel } = await import("./domain/model-divergence/effective-model-readers.js");
-      const { resolveIdentityVerifiedClaudeRecord, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
+      const { readCurrentPiOccupantModel, resolveIdentityVerifiedClaudeRecord, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
       const { defaultListProcesses } = await import("./domain/resume-metadata-refresher.js");
       const { readCodexThreadIdFromCandidateHomes, defaultResolveHomeDirByPid } = await import("./domain/codex-thread-id.js");
       const nodeOs = await import("node:os");
@@ -2344,6 +2344,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             return model
               ? { ok: true as const, model }
               : { ok: false as const, reason: `no assistant turn yet in the current occupant record ${selection.path} (selected from ${selection.source})` };
+          }
+          if (seat.runtime === "pi") {
+            const binding = sessionRegistry.getBindingForNode(seat.nodeId);
+            return readCurrentPiOccupantModel({
+              sessionName: seat.sessionName,
+              pinnedModel: seat.pinnedModel,
+              generation: seat.generation,
+              occupantBootAt: sessionRegistry.currentOccupantTenure(seat.nodeId)?.bootAt ?? null,
+              binding: binding ? { tmuxSession: binding.tmuxSession, tmuxPane: binding.tmuxPane } : null,
+              runner: piAdapter.readRunnerSidecar(seat.sessionName),
+            }, genDeps, (path) => {
+              try { return nodeFs.realpathSync(path); } catch { return null; }
+            });
           }
           return { ok: false as const, reason: `runtime ${seat.runtime ?? "unknown"} has no effective-model reader yet` };
         },

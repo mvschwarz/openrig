@@ -272,10 +272,13 @@ export class ModelDivergenceMonitor {
  *  unknown alias or a fallback model canonicalizes to itself and still diverges. Raw
  *  pinned/effective strings travel untouched in any proclamation. */
 export function modelsMatch(pinned: string, effective: string): boolean {
+  return canonicalModelPin(pinned) === effective.trim().toLowerCase();
+}
+
+/** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
+export function canonicalModelPin(pinned: string): string {
   const pin = pinned.trim().toLowerCase();
-  const eff = effective.trim().toLowerCase();
-  const canonicalPin = (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
-  return canonicalPin === eff;
+  return (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
 }
 // (The self-expiring CLAUDE_ALIAS_MIGRATION_BRIDGE and its SPEC_VALIDATION_CAPABILITIES sentinel
 // gate completed their arc and are DELETED per the bridge's own deletion contract: the 5.3
