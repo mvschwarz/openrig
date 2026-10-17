@@ -81,6 +81,77 @@ it("uses real human obligations, source summaries and dependents; excludes agent
   } finally { f.db.close(); }
 });
 
+it("shows open human FYIs before delivery without creating a decision or changing the queue", async () => {
+  const f = fixture();
+  try {
+    f.row("decision");
+    f.row("queued-update");
+    f.row("failed-update", "human-reader@external", "in-progress");
+    f.row("blocked-update", "human@kernel", "blocked", "human-reader@external");
+    f.row("closed-update", "human@kernel", "done");
+    f.row("agent-update", "worker@fixture");
+    f.row("malformed-update", "human-@kernel");
+    f.db.prepare("UPDATE queue_items SET human_intent = 'update' WHERE qitem_id <> 'decision'").run();
+    f.db.prepare("UPDATE queue_items SET summary = ?, body = ?, human_detail = ?, evidence_ref = ? WHERE qitem_id = ?")
+      .run("Weekly usage is near its limit", "The usage alert has not reached Slack.", "No human registry was configured when this update was created.", join(f.root, "a/SPEC.md"), "queued-update");
+    f.queue.transitionLog.append({ qitemId: "failed-update", state: "in-progress", actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-transport-failed notification_key=fixture class=transport error=synthetic" });
+    expect(f.queue.listDeliveredHumanUpdates()).toEqual([]);
+    const before = f.db.serialize();
+
+    const read = await f.read("queue:queued-update");
+    expect(read.items.filter(i => i.kind === "action").map(i => i.id)).toEqual(["queue:decision"]);
+    expect(read.items.filter(i => i.kind === "update" && i.id.startsWith("queue:")).map(i => i.id).sort())
+      .toEqual(["queue:blocked-update", "queue:failed-update", "queue:queued-update"]);
+    expect(read.detail?.item).toMatchObject({ kind: "update", urgency: "urgent", recipient: "human@kernel", unblocks: null, project: { id: "a" } });
+    expect(read.detail?.lines.join("\n")).toContain("The usage alert has not reached Slack.");
+    expect(read.detail?.lines.join("\n")).toContain("No human registry was configured");
+    expect(read.detail?.lines).toContain("State: pending");
+    expect(read.detail?.lines.join("\n")).not.toContain("Decision route:");
+    expect(read.detail?.files[0]?.path).toBe(realpathSync(join(f.root, "a/SPEC.md")));
+    expect(read.sources.find(s => s.source === "queue")?.detail).toContain("FYI updates");
+    expect(f.db.serialize()).toEqual(before);
+  } finally { f.db.close(); }
+});
+
+it("bounds human requests and open FYIs independently and selects urgent updates before newer routine rows", async () => {
+  const f = fixture();
+  try {
+    f.row("decision");
+    f.row("old-critical"); f.row("old-urgent");
+    f.db.prepare("UPDATE queue_items SET human_intent = 'update', priority = ?, ts_created = ?, ts_updated = ? WHERE qitem_id = ?")
+      .run("critical", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "old-critical");
+    f.db.prepare("UPDATE queue_items SET human_intent = 'update', ts_created = ?, ts_updated = ? WHERE qitem_id = ?")
+      .run("2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", "old-urgent");
+    const insert = f.db.prepare("INSERT INTO queue_items(qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body, human_intent) VALUES(?, ?, ?, 'author@fixture', 'human@kernel', 'pending', 'routine', 'Routine update', 'update')");
+    f.db.transaction(() => {
+      for (let i = 0; i < 1001; i++) insert.run(`routine-${i}`, "2026-01-03T00:00:00Z", "2026-01-03T00:00:00Z");
+    })();
+
+    const read = await f.read();
+    const updates = read.items.filter(i => i.kind === "update" && i.id.startsWith("queue:"));
+    expect(read.items.filter(i => i.kind === "action").map(i => i.id)).toEqual(["queue:decision"]);
+    expect(updates).toHaveLength(1000);
+    expect(updates.slice(0, 2).map(i => i.id)).toEqual(["queue:old-critical", "queue:old-urgent"]);
+    expect(read.sources.find(s => s.source === "queue")?.state).toBe("partial");
+    expect(f.queue.listAttention().map(q => q.qitemId)).toEqual(["decision"]);
+  } finally { f.db.close(); }
+});
+
+it("keeps an opened FYI inspectable after it closes without listing it as current work", async () => {
+  const f = fixture();
+  try {
+    f.row("update");
+    f.db.prepare("UPDATE queue_items SET human_intent = 'update' WHERE qitem_id = 'update'").run();
+    expect((await f.read()).items.find(i => i.id === "queue:update")?.kind).toBe("update");
+    f.db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'update'").run();
+    const read = await f.read("queue:update");
+    expect(read.items.some(i => i.id === "queue:update")).toBe(false);
+    expect(read.detail?.item.kind).toBe("update");
+    expect(read.detail?.lines).toContain("State: done");
+    expect(read.detail?.lines.join("\n")).not.toContain("Decision route:");
+  } finally { f.db.close(); }
+});
+
 it("keeps current proof corrections and exact project sources, retained health clears and unavailable states", async () => {
   const f = fixture();
   try {

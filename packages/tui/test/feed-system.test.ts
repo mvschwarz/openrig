@@ -2,7 +2,9 @@ import { expect, it } from "vitest";
 import { createViewState, computeExplorerRows, emptySnapshot } from "../src/state.js";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
-import { attentionLines } from "../src/attention/attention-model.js";
+import { attentionLines, composeHumanUpdates } from "../src/attention/attention-model.js";
+import { retainAttentionSources } from "../src/attention/source-continuity.js";
+import type { AttentionRead } from "@openrig/daemon/attention";
 import { renderScreen } from "../src/render.js";
 import { parseCommand } from "../src/grammar.js";
 import { pageReadKey } from "../src/page-read.js";
@@ -62,6 +64,54 @@ it.each([80, 140])("joins delivered FYIs without making a decision and retains p
   expect(live.load().stale).toBe(true);
   expect(requests.every(r => r.startsWith("GET "))).toBe(true);
   live.close();
+});
+
+it.each([80, 140])("renders undelivered FYIs as searchable updates with no action needed at %i columns", width => {
+  const view = createViewState({ instanceId: "fixture" }); view.dispatch(parseCommand("feed"));
+  const item = { id: "queue:pending", kind: "update" as const, summary: "Weekly usage alert", urgency: "urgent", recipient: "human@kernel", unblocks: null, at: "2026-01-01T00:00:00Z", scope: "instance", project: null, source: "/api/queue/pending" };
+  const read: AttentionRead = { scope: "instance", readAt: item.at, items: [item], sources: [{ source: "queue", state: "available", detail: "Open human requests and FYI updates" }], detail: null, detailError: null };
+  const composed = composeHumanUpdates(read, { items: [], limit: 20, truncated: false });
+  const text = attentionLines({ ...view.get(), filter: "weekly" }, { ...emptySnapshot(), attentionRead: composed }, width).map(l => l.text).join("\n");
+  expect(text.slice(text.indexOf("Human requests"), text.indexOf("Updates"))).not.toContain("Weekly usage alert");
+  expect(text.slice(text.indexOf("Updates"))).toContain("[urgent] Weekly usage alert");
+  expect(text).toContain("No action needed");
+  expect(text).toContain("human@kernel");
+  view.dispatch({ type: "attention-open", id: item.id });
+  const detail: AttentionRead = { ...read, detail: { item, lines: ["State: pending", "The alert has not reached Slack."], files: [] } };
+  const detailText = attentionLines(view.get(), { ...emptySnapshot(), attentionRead: detail }, width).map(l => l.text).join("\n");
+  expect(detailText).toContain("No action needed");
+  expect(detailText).toContain("State: pending");
+});
+
+it("reports unknown updates when the queue source is unavailable", () => {
+  const view = createViewState({ instanceId: "fixture" }); view.dispatch(parseCommand("feed"));
+  const read: AttentionRead = { scope: "instance", readAt: "2026-01-01T00:00:00Z", items: [],
+    sources: [{ source: "queue", state: "unavailable", detail: "Queue read failed" },
+      { source: "project catalog", state: "available", detail: "No projects" },
+      { source: "mission outcomes", state: "available", detail: "No outcomes" },
+      { source: "health", state: "available", detail: "No health updates" }],
+    detail: null, detailError: null };
+  const composed = composeHumanUpdates(read, { items: [], limit: 20, truncated: false });
+  const text = attentionLines(view.get(), { ...emptySnapshot(), attentionRead: composed }, 80).map(l => l.text).join("\n");
+  const updates = text.slice(text.indexOf("\nUpdates\n"), text.indexOf("\nRead at "));
+  expect(updates).toContain("Unknown: a required source is unavailable or partial.");
+  expect(updates).not.toContain("No current items");
+});
+
+it("keeps priority when joining delivered FYIs and shows a queue item only once across both sources", () => {
+  const item = (id: string, urgency: string, at: string) => ({ id: `queue:${id}`, kind: "update" as const, summary: id, urgency, unblocks: null, at, scope: "instance", project: null, source: `/api/queue/${id}` });
+  const read: AttentionRead = { scope: "instance", readAt: "fixture", items: [item("critical", "critical", "2026-01-01"), item("pending", "urgent", "2026-01-02"), item("routine", "routine", "2026-01-05")], sources: [], detail: null, detailError: null };
+  const delivered = (qitemId: string, priority: string) => ({ qitemId, priority, summary: qitemId, body: "Delivered FYI", humanDetail: null, destinationSession: "human@kernel", sourceSession: "author@fixture", tags: null, evidenceRef: null, deliveredAt: "2026-01-04", deliveryReceipt: "posted" });
+  const result = composeHumanUpdates(read, { items: [delivered("pending", "urgent"), delivered("delivered", "urgent")], limit: 20, truncated: false })!;
+  expect(result.items.filter(i => i.source === "/api/queue/pending")).toHaveLength(1);
+  expect(result.items.map(i => i.id)).toEqual(["queue:critical", "human-update:delivered", "queue:pending", "queue:routine"]);
+  expect(result.items.find(i => i.id === "human-update:delivered")?.urgency).toBe("urgent");
+  expect(read.items).toHaveLength(3);
+  const unavailable = { ...read, items: [], sources: [{ source: "queue", state: "unavailable" as const, detail: "Queue read failed" }] };
+  const freshHistory = composeHumanUpdates(unavailable, { items: [delivered("pending", "urgent")], limit: 20, truncated: false })!;
+  const retained = retainAttentionSources(freshHistory, read).read;
+  expect(retained.items.filter(i => i.source === "/api/queue/pending")).toHaveLength(1);
+  expect(retained.items.map(i => i.id)).toEqual(["queue:critical", "human-update:pending", "queue:routine"]);
 });
 
 it("reads instance Health directly and renders its explicit scope", async () => {
