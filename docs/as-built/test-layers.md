@@ -264,8 +264,11 @@ The most useful next pieces of harness work, roughly in dependency order:
 2. A model-free test entry point shaped like a provider, that goes through the real native
    adapter and managed launch. Package tests such as `claude-interactive-launch.test.ts` and
    the `*-native.test.ts` files already drive the real adapters through tmux against an
-   offline recorder; they prove command resolution and arguments, not readiness, history or
-   answers.
+   offline recorder; they prove command resolution and arguments.
+   `claude-executable-foreground.test.ts` holds that recorder open in private Bash/zsh panes
+   to check parent PID, process-group ownership, tmux's pane command and parent-shell
+   restoration for unmanaged fresh, fork and resume launches. These fixtures do not prove
+   native readiness, history or answers.
 3. Lifecycle and identity steps (tmux reset, archive/remove).
 4. Then pickup, wake and restore scenarios.
 
