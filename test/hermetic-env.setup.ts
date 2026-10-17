@@ -106,6 +106,10 @@ if (createdHome) {
 }
 process.env["OPENRIG_HOME"] = fixtureHome;
 delete process.env["RIGGED_HOME"];
+// Compaction packets default to the shared /tmp/claude-compaction-restore that real seats use. Give every test a
+// folder under the fixture home instead (removed with it), so a test that forgets its own root can't write there
+// and a seat's value can't reach the suite. Tests that set their own root still do.
+process.env["OPENRIG_COMPACTION_OUT_ROOT"] = path.join(fixtureHome, "compaction-packets");
 // Legacy ~/.rigged discovery and ordinary home-based config must also stay local
 // to this fixture. Merely changing HOME would not override OPENRIG_HOME or DB.
 // Keep ordinary user files outside the state root, as in a real installation.
