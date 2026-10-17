@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { projectSliceScope, type ScopeFsDeps, type SliceScopeDetail } from "../domain/scope/scope-view-projection.js";
+import { isPathInsideRoot } from "../domain/cwd-resolution.js";
 
 const realFs: ScopeFsDeps = {
   readBytes: p => { try { return fs.readFileSync(p); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; } },
@@ -70,6 +71,13 @@ export function scopesRoutes(): Hono {
       return { mission: name, slices: wantDetail ? slices : slices.map(({ intent, miniRequirements, proofContract, progressPath, specShaShort, prdExists, narrative, ...summary }) => summary), readiness: readMissionReadiness(dir, readPolicy, bound) };
     };
     if (mission) {
+      // Content-surfaces discipline (parity with scope-audit.ts / scope-approve.ts): the
+      // joined mission target must stay INSIDE the slices root. Lexical, separator-safe:
+      // a name that leaves the root (`..`, `../outside`) is reported as not found, never
+      // read. A leading-slash or dot-prefixed name keeps today's meaning (`path.join`
+      // keeps it under the root), and a root that is itself `/` or a drive root is not
+      // over-refused.
+      if (!isPathInsideRoot(path.join(r.root, mission), r.root)) return c.json({ error: "mission_not_found", mission }, 404);
       if (!realFs.isDirectory(path.join(r.root, mission))) return c.json({ error: "mission_not_found", mission }, 404);
       return c.json(missionFor(mission));
     }
@@ -95,6 +103,9 @@ export function scopesRoutes(): Hono {
     const slice = c.req.query("slice");
     if (selected && slice && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(slice)) return c.json({ error: "invalid_slice" }, 400);
     if (!mission || !slice) return c.json({ error: "missing_params", hint: "?mission=&slice=" }, 400);
+    // Content-surfaces discipline: the joined slice target must stay INSIDE the slices
+    // root (same lexical, separator-safe rule as the mission check above).
+    if (!isPathInsideRoot(path.join(r.root, mission, "slices", slice), r.root)) return c.json({ error: "slice_not_found", mission, slice }, 404);
     if (selected && slice) workSource(selected.root, path.join(r.root, mission!, "slices", slice));
     const detail = projectSliceScope(realFs, path.join(r.root, mission, "slices", slice), undefined, selected?.root);
     return detail ? c.json(detail) : c.json({ error: "slice_not_found", mission, slice }, 404);
@@ -110,6 +121,9 @@ export function scopesRoutes(): Hono {
     if (selected && slice && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(slice)) return c.json({ error: "invalid_slice" }, 400);
     if (!mission || !slice) return c.json({ error: "missing_params", hint: "?mission=&slice=" }, 400);
     const p = path.join(r.root, mission, "slices", slice, "PROGRESS.md");
+    // Content-surfaces discipline: the joined narrative target must stay INSIDE the
+    // slices root (same lexical, separator-safe rule as the mission check above).
+    if (!isPathInsideRoot(p, r.root)) return c.json({ error: "narrative_not_found" }, 404);
     if (selected) insideProject(selected.root, p);
     const content = realFs.readFile(p);
     // The narrative DISPLAY (plan atom 3): raw artifact bytes; explicitly not a data source.
