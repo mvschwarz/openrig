@@ -2523,6 +2523,66 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("an agent app's seat stops at resume-unsupported even with a saved token, launching nothing", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-agent-app", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-app", podId: "pod-agent-app" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    // A token left by a former runtime: nothing resumes an agent app with it.
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "former-runtime-token");
+    sessionRegistry.recordAgentAppSelection(session.id, "synth-app");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-app");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const launchHarness = vi.fn(async () => ({ ok: true as const }));
+    const mockAdapter = {
+      runtime: "synth-app",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: { "synth-app": mockAdapter } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toBe(`Resume is unsupported for agent app "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
+      expect(launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a free-text runtime seat that wasn't launched for an agent app keeps the existing restore result", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-free-text", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-app", podId: "pod-free-text" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", "some-token");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-app");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const orch = createOrchestrator();
+    const result = await orch.restore(snap.id, { adapters: {} });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      expect(nodeResult!.status).toBe("awaiting-decision");
+      expect(nodeResult!.error).toContain("Original session unresumable");
+      expect(nodeResult!.error).not.toContain("Resume is unsupported for agent app");
+    }
+  });
+
   it("pod-aware Codex restore returns awaiting-decision for requested resume even when a checkpoint exists", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-codex-restore-"));
     try {

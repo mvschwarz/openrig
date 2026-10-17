@@ -138,6 +138,8 @@ import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
 import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
+import { loadAgentAppPreset } from "./agent-app-presets.js";
+import { BUILT_IN_RUNTIMES } from "./built-in-runtimes.js";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import {
   resolvePermissionPolicyAttachment,
@@ -147,7 +149,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = BUILT_IN_RUNTIMES;
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -382,9 +384,12 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
         }
       }
 
-      // Check runtime
+      // Check runtime: a built-in, or a community agent app whose preset is installed and usable.
       if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
-        errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}"`);
+        const app = loadAgentAppPreset(member.runtime);
+        if (!app.ok) {
+          errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
+        }
       }
 
       // Check cwd (required, already validated by RigSpec schema, but double-check)
