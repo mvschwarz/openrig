@@ -6,7 +6,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelDivergenceMonitor, type PinnedSeat } from "../src/domain/model-divergence/model-divergence-monitor.js";
+import { ModelDivergenceMonitor, piPinModel, type PinnedSeat } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { readCurrentPiOccupantModel, type ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
 
 const SESSION = "dev-impl@r";
@@ -110,8 +110,8 @@ function read(f: Fixture) {
   });
 }
 
-function monitorFor(f: Fixture) {
-  const seat: PinnedSeat = { nodeId: "n1", sessionName: SESSION, rigId: "rig-1", rigName: "r", runtime: "pi", pinnedModel: f.pin, generation: "gen-1" };
+function monitorFor(f: Fixture, runtime = "pi") {
+  const seat: PinnedSeat = { nodeId: "n1", sessionName: SESSION, rigId: "rig-1", rigName: "r", runtime, pinnedModel: f.pin, generation: "gen-1" };
   const sent: string[] = [];
   const monitor = new ModelDivergenceMonitor({
     listPinnedSeats: () => [seat],
@@ -265,5 +265,42 @@ describe("Pi pin and record spellings", () => {
     const r = await pass(monitorFor(f));
     expect(r.fired).toEqual([]);
     expect(r.pending).toEqual([]);
+  });
+});
+
+describe("Pi pin with a :<thinking level> suffix", () => {
+  it("sets aside only a trailing level Pi accepts, keeping any other suffix", () => {
+    expect(piPinModel("anthropic/claude-fable-5:high")).toBe("anthropic/claude-fable-5");
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      expect(piPinModel(` openrouter/x-ai/grok-4:${level} `)).toBe("openrouter/x-ai/grok-4");
+    }
+    expect(piPinModel("openrouter/meta/llama-4:free")).toBe("openrouter/meta/llama-4:free");
+    expect(piPinModel("anthropic/claude-fable-5:HIGH")).toBe("anthropic/claude-fable-5:HIGH"); // Pi's levels are case-sensitive
+    expect(piPinModel("anthropic/claude-fable-5:free:low")).toBe("anthropic/claude-fable-5:free");
+  });
+
+  it("a suffixed pin settles on a record of its model and proclaims a different model with the raw pin", async () => {
+    const same = fixture([header(T0), assistant(RUNNER_START + 5_000, "claude-fable-5")], { pin: `${PIN}:low` });
+    const settled = await pass(monitorFor(same));
+    expect(settled.fired).toEqual([]);
+    expect(settled.pending).toEqual([]);
+
+    const other = fixture([header(T0), assistant(RUNNER_START + 5_000, OTHER)], { pin: `${PIN}:low` });
+    const r = await pass(monitorFor(other));
+    expect(r.fired).toHaveLength(1);
+    expect(r.fired[0]!.pinnedModel).toBe(`${PIN}:low`);
+    expect(r.fired[0]!.effectiveModel).toBe(`anthropic/${OTHER}`);
+  });
+
+  it("a bare model with a level suffix still does not resolve to provider/model", async () => {
+    const f = fixture([header(T0), assistant(RUNNER_START + 5_000, "claude-fable-5")], { pin: "claude-fable-5:high" });
+    const r = await pass(monitorFor(f));
+    expect(r.fired).toEqual([]);
+    expect(r.pending[0]?.reason).toMatch(/does not resolve to a provider\/model id/);
+  });
+
+  it("the suffix is set aside for Pi seats only", async () => {
+    const f = fixture([header(T0), assistant(RUNNER_START + 5_000, "claude-fable-5")], { pin: `${PIN}:low` });
+    expect((await pass(monitorFor(f, "omp"))).fired).toHaveLength(1);
   });
 });
