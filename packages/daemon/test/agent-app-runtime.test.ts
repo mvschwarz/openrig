@@ -74,6 +74,9 @@ describe("agent app presets", () => {
     [";", "cd /srv/app; node app.mjs"],
     ["a redirection (< or >)", "node app.mjs > app.log"],
     ["$(…) (command substitution)", "node $(which app).mjs"],
+    // The shell reads \" as a literal quote, so the && here would run.
+    ["a backslash escape", 'echo \\" && echo injected \\"'],
+    ["a backslash escape", 'node app.mjs --label "say \\"hi\\""'],
   ])("refuses shell syntax (%s) in the command, since it's started without a shell", (shown, command) => {
     const found = loadAgentAppPreset("synth", presets({ "synth.yaml": GOOD.replace("command: synth-app --serve", `command: ${command}`) }));
     expect(found).toMatchObject({ ok: false, kind: "incompatible" });
@@ -81,7 +84,7 @@ describe("agent app presets", () => {
   });
 
   it("accepts a program whose arguments are quoted, operators inside single quotes included", () => {
-    const command = `node "/srv/my apps/app.mjs" --label 'a|b && c' --name "two words"`;
+    const command = `node "/srv/my apps/app.mjs" --label 'a|b && c' --name "two words" --path 'C:\\apps\\x'`;
     const found = loadAgentAppPreset("synth", presets({ "synth.yaml": GOOD.replace("command: synth-app --serve", `command: ${command}`) }));
     expect(found).toMatchObject({ ok: true, preset: { command } });
   });
