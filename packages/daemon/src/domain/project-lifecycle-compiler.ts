@@ -6,6 +6,7 @@ import { parse as parseYaml, stringify } from "yaml";
 import type { WorkflowSpec, WorkflowStepSpec } from "./workflow-types.js";
 import { WorkflowSpecError, parseWorkflowSpec } from "./workflow-spec-cache.js";
 import { WorkflowValidator } from "./workflow-validator.js";
+import { isNodeId, lifecycleScopeAdvisories } from "./workflow-scope.js";
 import {
   LifecycleManifestValidationError,
   validateMissionComposition,
@@ -38,6 +39,10 @@ export interface LifecycleCompilation {
   compiledInputDigest: string;
   sources: LifecycleSourceDigest[];
   dependencies: Array<{ stepId: string; dependsOn: string[] }>;
+  /** Step id -> the slice directory its packets are tagged with (the Queue tab keys on the directory, which a step id need
+   *  not equal). A compiled step maps to its own slice. An authored step maps by name: a slice directory, else a
+   *  metadata.id exactly one active slice claims; a step matching neither is absent and carries no slice tag. */
+  sliceDirs: Record<string, string>;
   graphSource: LifecycleGraphSource;
   workflowSpec: WorkflowSpec | null;
   advisories: string[];
@@ -82,6 +87,10 @@ export function compileProjectLifecycle(input: {
 
   const sources: LifecycleSourceDigest[] = [digestSource("project", projectPath), digestSource("mission", missionPath)];
   const steps: WorkflowStepSpec[] = [];
+  // Null-prototype: a step named `constructor` or `__proto__` is an ordinary key here.
+  const sliceDirs: Record<string, string> = Object.create(null);
+  const activeSliceDirs: string[] = [];
+  const idClaims = new Map<string, string[]>();
   const roles: WorkflowSpec["roles"] = {};
   const unknowns: string[] = [];
   const advisories: string[] = [];
@@ -170,14 +179,24 @@ export function compileProjectLifecycle(input: {
       throw manifestError("lifecycle_slice_mission_mismatch", `${slicePath}: composition.mission does not resolve to ${missionPath}`, { slicePath, missionRef, missionPath });
     }
 
-    // A mission boundary is explicitly authored; slice SDLC never manufactures its steps.
-    if (authoredBoundary || !member.active) return;
+    const sliceDir = basename(dirname(slicePath));
+    // A mission boundary is explicitly authored; slice SDLC never manufactures its steps. Its steps may name a slice, so
+    // an active slice's id is read here, leniently: a malformed one costs that slice its alias (advisory), never the compile.
+    if (authoredBoundary) {
+      if (member.active) {
+        activeSliceDirs.push(sliceDir);
+        const claimed = readSliceIdLeniently(slice, slicePath, advisories);
+        if (claimed) idClaims.set(claimed, [...(idClaims.get(claimed) ?? []), sliceDir]);
+      }
+      return;
+    }
+    if (!member.active) return;
     const execution = asMapping(slice.execution, `${slicePath}: execution`, true);
     if (!execution) {
       unknowns.push(`${normalizedRef}: execution contract missing`);
       return;
     }
-    const stepId = optionalString(asMapping(slice.metadata, `${slicePath}: metadata`, true)?.id, `${slicePath}: metadata.id`) ?? basename(dirname(slicePath));
+    const stepId = optionalString(asMapping(slice.metadata, `${slicePath}: metadata`, true)?.id, `${slicePath}: metadata.id`) ?? sliceDir;
     const actorRole = requiredString(execution.actor_role, `${slicePath}: execution.actor_role`);
     const preferredTargets = stringList(execution.preferred_targets, `${slicePath}: execution.preferred_targets`, true);
     roles[actorRole] ??= preferredTargets.length > 0 ? { preferred_targets: preferredTargets } : {};
@@ -195,7 +214,24 @@ export function compileProjectLifecycle(input: {
       ...(execution.acceptance ? { acceptance: asMapping(execution.acceptance, `${slicePath}: execution.acceptance`) as unknown as WorkflowStepSpec["acceptance"] } : {}),
     };
     steps.push(step);
+    // A compiled step keeps its own slice, whatever another slice is named.
+    if (isNodeId(sliceDir)) sliceDirs[stepId] = sliceDir;
+    else advisories.push(`slice directory "${sliceDir}" cannot be a packet tag; step "${stepId}" is tagged with no slice`);
   });
+
+  // An authored step is named for a slice's directory or its metadata.id. The directory wins; an id maps only when
+  // exactly one active slice claims it and no directory has that name, otherwise the step gets no slice tag.
+  if (authoredBoundary) {
+    const usable = activeSliceDirs.filter(isNodeId);
+    for (const dir of activeSliceDirs) if (!usable.includes(dir)) advisories.push(`slice directory "${dir}" cannot be a packet tag; a step named "${dir}" is tagged with no slice`);
+    for (const [id, dirs] of idClaims) {
+      if (activeSliceDirs.includes(id)) continue; // the directory of that name wins
+      if (dirs.length === 1 && isNodeId(dirs[0]!)) sliceDirs[id] = dirs[0]!;
+      else if (dirs.length > 1) advisories.push(`slice metadata.id "${id}" is claimed by ${dirs.length} active slices (${dirs.join(", ")}); a step named "${id}" is tagged with no slice`);
+    }
+    for (const dir of usable) sliceDirs[dir] = dir;
+  }
+  advisories.push(...lifecycleScopeAdvisories({ project: projectId, mission: missionName }));
 
   if (!input.operationKey) unknowns.push("opaque lifecycle operation key not supplied");
   if (!lifecycleProfile) unknowns.push("project lifecycle profile missing");
@@ -242,10 +278,29 @@ export function compileProjectLifecycle(input: {
     sources,
     graphSource,
     dependencies: steps.map((step) => ({ stepId: step.id, dependsOn: step.depends_on ?? [] })),
+    sliceDirs,
     workflowSpec,
     advisories,
     unknowns,
   };
+}
+
+/** A slice's metadata.id for the authored-step alias map. Unlike the compiled-step read it never throws: the slice may be
+ *  one the lifecycle does not run, and main compiled those without looking at its metadata. */
+function readSliceIdLeniently(slice: Mapping, slicePath: string, advisories: string[]): string | null {
+  const metadata = slice.metadata;
+  if (metadata === undefined || metadata === null) return null;
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    advisories.push(`${slicePath}: metadata is not a mapping; no step can name this slice by its id`);
+    return null;
+  }
+  const id = (metadata as Mapping).id;
+  if (id === undefined || id === null) return null;
+  if (typeof id !== "string" || id.trim() === "") {
+    advisories.push(`${slicePath}: metadata.id is not a non-empty string; no step can name this slice by its id`);
+    return null;
+  }
+  return id;
 }
 
 function address(root: string, ref: string): string {

@@ -18,6 +18,15 @@ function deps(client: DaemonClient): StatusDeps {
   };
 }
 
+/** The launch resolves the rig handle with one summary read first; answer it at once with no rigs, so the handle
+ *  goes on as an id and only the launch request itself is slow. */
+function answerRigLookup(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  if (req.method !== "GET" || !req.url?.startsWith("/api/rigs/summary")) return false;
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end("[]");
+  return true;
+}
+
 let server: http.Server | undefined;
 beforeEach(() => {
   vi.stubEnv("OPENRIG_HOST_SELECTED", "local");
@@ -42,6 +51,7 @@ describe("local launch request deadlines", () => {
     let requests = 0;
     let requestBody = "";
     server = http.createServer(async (req, res) => {
+      if (answerRigLookup(req, res)) return;
       for await (const chunk of req) requestBody += chunk.toString();
       requests++;
       res.writeHead(201, { "Content-Type": "application/json" });
@@ -61,6 +71,7 @@ describe("local launch request deadlines", () => {
   it("waits for a single-node launch response beyond the default five seconds without retrying", async () => {
     let requests = 0;
     server = http.createServer(async (req, res) => {
+      if (answerRigLookup(req, res)) return;
       for await (const _chunk of req) { /* drain */ }
       requests++;
       res.writeHead(201, { "Content-Type": "application/json" });

@@ -638,12 +638,7 @@ export class TmuxAdapter {
    * environment can't be read: the caller can't tell whether the seat inherits
    * an identity, so it reports a warning (the launch still goes ahead). */
   private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
-    const global = await this.run(["tmux", "show-environment", "-g"], "tmux show-environment -g");
-    const inherited: Record<string, string> = {};
-    for (const line of global.split(/\r?\n/)) {
-      const eq = line.indexOf("=");
-      if (eq > 0) inherited[line.slice(0, eq)] = line.slice(eq + 1);
-    }
+    const inherited = await this.globalEnvironment();
     const keys = parentSessionEnvKeys(inherited).filter((key) => !keep.includes(key));
     for (const key of keys) {
       const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
@@ -1099,6 +1094,38 @@ export class TmuxAdapter {
     }
   }
 
+  /** Set one variable in a session's environment: what its next spawned process inherits, not a
+   *  running one. Callers that pass a value are putting it on a tmux command line. */
+  async setSessionEnv(session: string, key: string, value: string): Promise<void> {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    const target = exactTarget(session, "session");
+    await this.run(["tmux", "set-environment", "-t", target, key, value],
+      `tmux set-environment -t ${shellQuote(target)} ${shellQuote(key)} ${shellQuote(value)}`);
+  }
+
+  /** Remove one variable from a session's environment, so a process spawned there afterwards
+   *  inherits the server's value for it, or none. A name that is the launching session's own
+   *  identity in the server's environment (see parent-session-env) is marked removed instead, as a
+   *  launch does, so the server's value does not come back. */
+  async unsetSessionEnv(session: string, key: string): Promise<void> {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    const target = exactTarget(session, "session");
+    const parentIdentity = parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
+    const flag = parentIdentity ? "-r" : "-u";
+    await this.run(["tmux", "set-environment", "-t", target, flag, key],
+      `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
+  }
+
+  private async globalEnvironment(): Promise<Record<string, string>> {
+    const global = await this.run(["tmux", "show-environment", "-g"], "tmux show-environment -g");
+    const inherited: Record<string, string> = {};
+    for (const line of global.split(/\r?\n/)) {
+      const eq = line.indexOf("=");
+      if (eq > 0) inherited[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return inherited;
+  }
+
   /** OPR.0.4.3.28 Part C — usable-presence check for a session-env variable.
    *  Returns whether the var has a nonblank value, NEVER that value, and null
    *  when the session environment cannot be inspected. Listing the environment
@@ -1394,6 +1421,27 @@ export class TmuxAdapter {
    *   - `null` when the target is missing OR the value is unparseable
    *     (consumers treat null as "no signal", distinct from "idle").
    */
+  /** readAllSessionWindowActivity with a key of each current window's active pane from the same call. tmux changes
+   *  what a capture returns without counting activity on a resize, a reset, a respawn, a pane switch or a
+   *  clear-history; each moves the pane's id, pid, size, history size or bytes, or its cursor. The session name stays last. */
+  async readAllSessionWindows(): Promise<Map<string, { activity: number; size: string }> | null> {
+    try {
+      const format = ["#{window_active}", "#{window_activity}", "#{window_width}x#{window_height}:#{pane_id}:#{pane_pid}:#{pane_width}x#{pane_height}:#{history_size}:#{history_bytes}:#{cursor_x},#{cursor_y}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
+      const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
+      const out = new Map<string, { activity: number; size: string }>();
+      for (const line of output.split("\n")) {
+        const f1 = line.indexOf(TMUX_FIELD_SEPARATOR), f2 = line.indexOf(TMUX_FIELD_SEPARATOR, f1 + 1), f3 = line.indexOf(TMUX_FIELD_SEPARATOR, f2 + 1);
+        if (f1 < 0 || f2 < 0 || f3 < 0) continue;
+        const activity = line.slice(f1 + 1, f2).trim(), session = line.slice(f3 + 1);
+        if (!session || line.slice(0, f1) !== "1" || !/^\d+$/.test(activity) || Number(activity) <= 0) continue;
+        out.set(session, { activity: Number(activity), size: line.slice(f2 + 1, f3) });
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
   /** Every session's current-window `#{window_activity}` in ONE tmux call, keyed by session name: the same value
    *  `readPaneLastActivity(<session name>)` reads (display-message -t <session> resolves to the session's current
    *  window). Only well-formed timestamps are included, so a missing key means "read it the per-target way". Null when

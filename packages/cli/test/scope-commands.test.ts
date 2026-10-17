@@ -14,6 +14,7 @@ import YAML from "yaml";
 
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
+import { readMissionReadiness, readProjectReadiness, readSliceReadiness, recordJudgment } from "../../daemon/src/domain/proof/judgments.js";
 
 function mktemp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "rig-scope-cmd-"));
@@ -779,6 +780,105 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     ], env.missionsRoot);
     expect(r.exitCode).toBe(1);
     expect(JSON.parse(r.stdout).ok).toBe(false);
+  });
+
+  it("seeds metadata.status: planned so a new mission stays outside the project rollup", async () => {
+    const r = await run(["mission", "create", "experiments-foo", "--json"], env.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const manifest = YAML.parse(
+      fs.readFileSync(path.join(JSON.parse(r.stdout).mission.path, "mission.yaml"), "utf8"),
+    ) as { metadata?: { status?: string }; composition: { slices: unknown[] } };
+    expect(manifest.metadata?.status).toBe("planned");
+    expect(manifest.composition.slices).toEqual([]);
+  });
+
+  it("seeds planned for the release template too", async () => {
+    const r = await run(["mission", "create", "release-0.6.0", "--json"], env.missionsRoot);
+    expect(JSON.parse(r.stdout).mission.template).toBe("release");
+    const manifest = YAML.parse(
+      fs.readFileSync(path.join(JSON.parse(r.stdout).mission.path, "mission.yaml"), "utf8"),
+    ) as { metadata?: { status?: string } };
+    expect(manifest.metadata?.status).toBe("planned");
+  });
+
+  it("keeps metadata.status when a slice is later added to the mission", async () => {
+    await run(["mission", "create", "experiments-foo", "--json"], env.missionsRoot);
+    const slice = await run(["slice", "create", "experiments-foo", "first", "--json"], env.missionsRoot);
+    expect(slice.exitCode).toBe(0);
+    const manifest = YAML.parse(
+      fs.readFileSync(path.join(env.missionsRoot, "experiments-foo", "mission.yaml"), "utf8"),
+    ) as { metadata?: { status?: string }; composition: { slices: unknown[] } };
+    expect(manifest.composition.slices).toHaveLength(1);
+    expect(manifest.metadata?.status).toBe("planned");
+  });
+
+  describe("project readiness", () => {
+    let project: string;
+    let missions: string;
+    beforeEach(() => {
+      project = mktemp();
+      missions = path.join(project, "missions");
+      writeFile(path.join(project, "project.yaml"), YAML.stringify({
+        kind: "project",
+        metadata: { id: "trial" },
+        proofPolicy: { judges: ["judge@trial"] },
+        missions: { root: "missions" },
+      }));
+      fs.mkdirSync(missions, { recursive: true });
+    });
+    afterEach(() => { fs.rmSync(project, { recursive: true, force: true }); });
+
+    /** Create a mission with one slice whose only item is accepted; returns the mission dir. */
+    async function missionWithAcceptedSlice(name: string): Promise<string> {
+      expect((await run(["mission", "create", name, "--json"], missions)).exitCode).toBe(0);
+      const sliceRun = await run(["slice", "create", name, "only", "--json"], missions);
+      expect(sliceRun.exitCode).toBe(0);
+      const sliceDir = JSON.parse(sliceRun.stdout).slice.path as string;
+      writeFile(
+        path.join(sliceDir, "SPEC.md"),
+        `---\nid: only\nstatus: done\n---\n# only\n\n## Proof contract\n- [x] Prove it.\n`,
+      );
+      writeFile(path.join(sliceDir, "proof", "evidence.md"), "Observed outcome.\n");
+      const item = readSliceReadiness(sliceDir).items[0]!;
+      recordJudgment(missions, {
+        scope: `${name}/slices/${path.basename(sliceDir)}`,
+        item: item.id,
+        verdict: "accept",
+        reason: "Independent accept judgment",
+        evidence: ["proof/evidence.md"],
+        expectedRevision: item.revision,
+        expectedPrevious: null,
+      }, "judge@trial", "transport:v1");
+      return path.join(missions, name);
+    }
+
+    function setStatus(missionDir: string, status: string): void {
+      const manifestPath = path.join(missionDir, "mission.yaml");
+      const doc = YAML.parseDocument(fs.readFileSync(manifestPath, "utf8"));
+      doc.setIn(["metadata", "status"], status);
+      fs.writeFileSync(manifestPath, String(doc), "utf8");
+    }
+
+    it("a ready project stays ready after creating an empty ordinary mission and an empty release mission", async () => {
+      const existing = await missionWithAcceptedSlice("existing");
+      setStatus(existing, "active");
+      expect(readProjectReadiness(missions).state).toBe("ready");
+
+      expect((await run(["mission", "create", "experiments-foo", "--json"], missions)).exitCode).toBe(0);
+      expect(readProjectReadiness(missions).state).toBe("ready");
+      expect((await run(["mission", "create", "release-0.6.0", "--json"], missions)).exitCode).toBe(0);
+      expect(readProjectReadiness(missions).state).toBe("ready");
+    });
+
+    it("a planned mission is not counted after its slices are accepted, and is once set to active", async () => {
+      const created = await missionWithAcceptedSlice("trial");
+      expect(readMissionReadiness(created).state).toBe("ready");
+      expect(readMissionReadiness(created).historicalStatus).toBe("planned");
+      // Not counted: no active mission, so the project is not ready.
+      expect(readProjectReadiness(missions).state).toBe("not-ready");
+      setStatus(created, "active");
+      expect(readProjectReadiness(missions).state).toBe("ready");
+    });
   });
 
   it("mission create auto-scaffolds NOTES.md with placeholders substituted", async () => {

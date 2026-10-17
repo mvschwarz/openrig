@@ -222,6 +222,19 @@ describe("frontmatterIntent — folded and literal intents", () => {
     expect(frontmatterIntent("---\nintent: plain words\n---\n")).toBe("plain words");
     expect(frontmatterIntent("# no frontmatter\nintent: nope\n")).toBeNull();
   });
+
+  it("reads the same intent from a CRLF SPEC.md as from its LF twin", () => {
+    for (const lf of [
+      "---\nid: x\nintent: >-\n  Ship the\n  alpha thing\nstage: wip\n---\n# A\n",
+      "---\nintent: |\n  one\n  two\n---\n",
+      "---\nintent: \"quoted: yes\"\n---\n",
+      "---\nintent: plain words\n---\n",
+    ]) {
+      const expected = frontmatterIntent(lf);
+      expect(expected).not.toBeNull();
+      expect(frontmatterIntent(lf.replace(/\n/g, "\r\n"))).toBe(expected);
+    }
+  });
 });
 
 describe("trace-to-root --packet — the work packet as text", () => {

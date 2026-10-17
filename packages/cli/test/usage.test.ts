@@ -64,6 +64,11 @@ const TOP_PAYLOAD = {
   totalRankedSeats: 1,
 };
 const SERIES_PAYLOAD = { rows: [{ id: 1, lane: "context", seatSession: "a@r", capturedAt: "t1", totalInputTokens: 5 }] };
+// What the route serves for since=garbage: main's (empty) rows plus the advisory.
+const ADVISED_PAYLOAD = {
+  rows: [],
+  advisories: ['since "garbage" was not recognised as a date or time; the existing text comparison against captured_at was used'],
+};
 
 describe("rig usage CLI grammar (daemon-backed)", () => {
   let server: http.Server;
@@ -83,6 +88,7 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
         return;
       }
       if ((req.url ?? "").includes("/usage/top")) res.end(JSON.stringify(TOP_PAYLOAD));
+      else if ((req.url ?? "").includes("since=garbage")) res.end(JSON.stringify(ADVISED_PAYLOAD));
       else res.end(JSON.stringify(SERIES_PAYLOAD));
     });
     await new Promise<void>((resolve) => server.listen(0, () => resolve()));
@@ -115,6 +121,29 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
     expect(seen[0]!.url).toContain("/api/telemetry/usage/series");
     expect(seen[0]!.url).toContain("seat=a%40r");
     expect(JSON.parse(logs.join("\n"))).toEqual(SERIES_PAYLOAD);
+  });
+
+  it("usage series --since garbage prints the advisory on stderr and keeps the empty series on stdout", async () => {
+    const { logs, errors, exitCode } = await run(["series", "--since", "garbage"], runningDeps(port));
+    expect(errors).toEqual([`note: ${ADVISED_PAYLOAD.advisories[0]}`]);
+    expect(logs).toEqual(["no samples match — the series is empty for this filter"]);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("usage series --since garbage --json stays one payload carrying the advisory, nothing on stderr", async () => {
+    const { logs, errors, exitCode } = await run(["series", "--since", "garbage", "--json"], runningDeps(port));
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!)).toEqual(ADVISED_PAYLOAD);
+    expect(errors).toEqual([]);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("usage series with no advisory prints rows and nothing on stderr", async () => {
+    const { logs, errors, exitCode } = await run(["series", "--since", "2026-08-07T11"], runningDeps(port));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("a@r");
+    expect(errors).toEqual([]);
+    expect(exitCode).toBeUndefined();
   });
 
   it("an unparseable --window is a teaching error, exit 1, no request fired", async () => {

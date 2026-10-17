@@ -80,6 +80,10 @@ function usableProject(p: ProjectRead): ProjectRead {
   if (!fs.existsSync(p.missionsRoot)) throw new ProjectReadError("missions_unavailable", `${p.id}: missions root is unavailable: ${p.missionsRoot}`);
   return p;
 }
+/** One catalog project by id, resolved as `?project=` selection resolves it, without requiring its sources to be readable. */
+export function declaredProject(c: Pick<ReadContext, "get">, id: string): ProjectRead {
+  return lookupProject(c, id);
+}
 /** One catalog project by id, with the same resolution and checks as `?project=` selection. */
 export function projectById(c: Pick<ReadContext, "get">, id: string): ProjectRead {
   return usableProject(lookupProject(c, id));

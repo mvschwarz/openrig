@@ -238,7 +238,7 @@ outcomes recorded while it was on stay visible.`)
       if (opts.until) params.set("until", opts.until);
       if (opts.limit) params.set("limit", opts.limit);
       const qs = params.toString();
-      const res = await client.get<{ rows: Array<Record<string, unknown>> }>(
+      const res = await client.get<{ rows: Array<Record<string, unknown>>; advisories?: string[] }>(
         `/api/telemetry/usage/series${qs ? `?${qs}` : ""}`,
       );
       if (handleHttpError(res, "usage series", opts.json)) return;
@@ -246,6 +246,8 @@ outcomes recorded while it was on stay visible.`)
         console.log(JSON.stringify(res.data, null, 2));
         return;
       }
+      // An advisory (e.g. a bound that isn't a date or time) goes to stderr, so stdout stays the series.
+      for (const advisory of res.data.advisories ?? []) console.error(`note: ${advisory}`);
       const rows = res.data.rows;
       if (rows.length === 0) {
         console.log("no samples match — the series is empty for this filter");

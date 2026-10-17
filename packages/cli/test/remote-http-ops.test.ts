@@ -489,8 +489,9 @@ describe("rig launch --host HTTP", () => {
     const { stdout, exitCode } = await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "launch", "rig-1", "--seats", "dev.impl", "--plan", "--host", "host-b", "--json"]);
     });
-    expect(client._calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${HEALTH}`, `POST ${SUBSET}`]);
-    expect(client._calls[1]!.body).toMatchObject({ seats: ["dev.impl"], plan: true });
+    // The rig lookup runs after the plan-support check; this host has no rig list, so the handle goes on as an id.
+    expect(client._calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET ${HEALTH}`, "GET /api/ps?includeArchived=true", `POST ${SUBSET}`]);
+    expect(client._calls[2]!.body).toMatchObject({ seats: ["dev.impl"], plan: true });
     expect(exitCode).toBeUndefined();
     expect(JSON.parse(stdout.join(""))).toMatchObject({ ok: true, data: { planOnly: true } });
   });

@@ -8,9 +8,18 @@ import {
 
 const normalize = (text: string): string => text.replace(/\s+/g, "");
 // Claude 2.1.289 briefly replaces its mode bar after a bracketed paste.
-// Only the bare hint and medium-effort suffix are established by retained captures.
-const isComposerFooter = (line: string): boolean => /(?:shift\+tab to cycle|\? for shortcuts)/i.test(line)
-  || /^paste again to expand(?:\s{2,}◐ medium · \/effort)?$/.test(line);
+// The hint is the bare line or carries an effort suffix, which depends on the seat's effort setting.
+// Vim mode puts `-- INSERT --` ahead of either footer, and a narrow pane truncates the mode bar's hint,
+// so a mode-bar line is also known by its leading marker.
+const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
+const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
+// The suffix is a circle glyph and an effort level, e.g. `◐ medium` or `● high`; arbitrary text is not one.
+const PASTE_HINT = /^paste again to expand(?:\s{2,}[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort)?$/;
+const isComposerFooter = (line: string): boolean => {
+  const bar = line.replace(VIM_MODE_PREFIX, "");
+  return (bar === "" && line !== "") || /(?:shift\+tab to cycle|\? for shortcuts)/i.test(bar) || MODE_BAR_START.test(bar)
+    || PASTE_HINT.test(bar);
+};
 // This placeholder occupies an empty composer while submitted text is queued.
 export const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
@@ -21,13 +30,14 @@ export function composerRegion(pane: string | null, runtime: string | null = nul
   const inputAt = findComposerInputLineIndex(lines, promptClass);
   let end = -1;
   if (inputAt >= 0) {
-    // Prompt text can itself contain rules (the startup challenge does).
+    // Prompt text can itself contain rules (the startup challenge does), and a rule in the prompt can be followed by a
+    // line that looks like a mode bar. The composer's closing rule is the last rule on the screen: only the footer
+    // lines come after it. An unrecognized footer under it leaves the region unverified rather than falling back to
+    // a rule inside the prompt.
     for (let i = lines.length - 1; i > inputAt; i--) {
-      if (/^[─═-]{10,}$/.test(lines[i]!.trim())
-        && isComposerFooter((lines.slice(i + 1).find((next) => next.trim()) ?? "").trim())) {
-        end = i;
-        break;
-      }
+      if (!/^[─═-]{10,}$/.test(lines[i]!.trim())) continue;
+      if (isComposerFooter((lines.slice(i + 1).find((next) => next.trim()) ?? "").trim())) end = i;
+      break;
     }
   }
   const body = inputAt < 0 || end < 0 || composerPromptIsAmbiguous(lines, inputAt, promptClass)

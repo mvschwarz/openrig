@@ -923,7 +923,17 @@ and managed restrictions still matter; this flag is not a promise about sandbox
 or account access. See [Claude permissions](https://code.claude.com/docs/en/permissions).
 
 **Already running:** changing a file or running `rig policy apply` does not revoke
-a live agent's permissions, nor rewrite a stored rig's policy on restore. Pause
+a live agent's permissions, and a spec edit does not rewrite a stored rig's policy
+on restore: restore and resume read each seat's stored policy. To change that
+for an existing seat, run `rig policy apply <name> --seat <seat> --reason <text>`,
+adding `--operator <address>` outside a managed seat. Restore, resume and launches
+that read the seat's stored state then use it, unless an explicit native selection
+(`rig seat set-permissions`) takes precedence; the running process and the spec
+file are unchanged. `rig up <rig name>` uses it, while launching from a spec that
+declares a policy replaces it with the spec's policy, which later restores then
+use. `--seat none` is an explicit floor for that seat, not "no policy", and it does
+not inherit the rig's policy. After `--seat`, a `rig launch --retry-startup-from`
+file has to carry the new policy. Pause
 work and use the native permission controls for that conversation (current
 Codex and Claude CLIs expose `/permissions`); inspect the effective mode again.
 Keep the launch spec/profile consistent for subsequent launches. If the native

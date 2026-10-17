@@ -355,11 +355,15 @@ restore) into one call.
 
 ```bash
 rig start                    # interactive: daemon + kernel + pick-and-restore
-rig start --last             # headless: restore all rigs that were last running
+rig start --last             # headless: restore rigs that were last running; a rig stopped on purpose stays down
 rig start --all              # headless: restore all rigs with restore-usable snapshots
 rig start --rigs <name> [<name>...]   # headless: restore only the named rigs
 rig start --json             # JSON output for agents
 ```
+
+`rig start --last` keeps down a rig that was stopped on purpose (`rig down` or `rig seat stop`).
+Bring it back with `rig start --rigs <rig>`. A rig whose seat statuses can't be read is still
+attempted, with a warning (`seat_status_unreadable`).
 
 Framing: `rig start` is the RECOVERY entry point, not the getting-started
 hero. The fresh-user boot hero remains `rig up <team>` (typically
@@ -520,7 +524,7 @@ rig queue list --mine                # just the caller's items
 rig queue list --destination <s>     # destined to <s>
 rig queue list --source <s>          # sourced by <s>
 rig queue show <qitemId>             # bounded single-item body preview
-rig queue show <qitemId> --full      # complete body and chain fields
+rig queue show <qitemId> --full      # complete body and chain fields; a closed row adds closingTransition (the close's state, reason, target, actor, time and note)
 ```
 
 Four orthogonal axes (scope × history × field-breadth × encoding), all composable. **STOP using bare `rig queue list` as the cross-rig firehose.** Default is now active + compact + current-rig. Cross-rig history with full bodies is opt-in via `-A -a --full`; request only the breadth and fields needed for the question.
@@ -1281,8 +1285,8 @@ This lets ordinary agents ask the manager for OpenRig help instead of every agen
 ```bash
 rig grow <rig-id> <member...> [--pod <pod> | --new-pod <pod>] [--runtime <runtime>] [--cwd <path>] [--json]
 rig expand <rig-id> <pod-fragment-path> [--rig-root <path>] [--json]
-rig launch <rigId> <nodeRef> [--json]
-rig launch <rigId> --seats <a,b,c> [--hold-reason <text>] [--json]
+rig launch <rig> <nodeRef> [--json]
+rig launch <rig> --seats <a,b,c> [--hold-reason <text>] [--json]
 rig remove <rigId> <nodeRef> [--json]
 rig shrink <rigId> <podRef> [--json]
 rig unclaim <sessionRef> [--json]
@@ -1295,8 +1299,9 @@ or `rig add` (one member) when a seat needs an explicit model, a permission poli
 different agent spec or role profile, per-seat runtime or cwd, or startup files.
 
 Node-granular managed partial restore (v0.3.4+):
-- `rig launch <rigId> <nodeRef>` relaunches a single seat by logical id or node id through orchestration.
-- `rig launch <rigId> --seats <a,b,c>` relaunches a comma-separated subset of seats.
+- `rig launch <rig> <nodeRef>` relaunches a single seat by logical id or node id through orchestration. `<rig>` is the
+  rig's name or ID; a name shared by more than one active rig stops with the candidate IDs.
+- `rig launch <rig> --seats <a,b,c>` relaunches a comma-separated subset of seats.
 - `--hold-reason <text>` records a reason for holding non-target seats during the partial launch.
 - This is a SUPPORTED managed path. The prior `pod_aware_launch_unsupported` dead-end is retired; pod-aware narrow launch now goes through this surface rather than ad-hoc rebuilds.
 

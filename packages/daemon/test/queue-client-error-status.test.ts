@@ -1,4 +1,4 @@
-// Refusals the caller can fix (wake options on a non-park update, a ghost blocker, closure
+// Refusals the caller can fix (wake options on a non-park update, closure
 // fields on a transition that cannot store them) were answered 500 because the route's
 // error map did not know their codes. They are client errors: 400 with the named code.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";

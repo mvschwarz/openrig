@@ -277,20 +277,23 @@ describe("RestoreOrchestrator", () => {
   // whose earlier occupant left a resume token is not silently fresh-primed.
   describe("a seat with no occupant at capture", () => {
     /** Capture an absent seat while retaining configurable resume-token history and policy. */
-    function absentSeat(opts: { resumeToken?: string | null; restorePolicy?: string } = {}) {
+    function absentSeat(opts: { resumeToken?: string | null; restorePolicy?: string; runtime?: string; currentRuntime?: string } = {}) {
       const snap = seedRigAndSnapshot({
-        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        nodes: [{ logicalId: "worker", role: "worker", runtime: opts.runtime ?? "claude-code" }],
         edges: [],
         resumeType: opts.resumeToken === null ? undefined : "claude_id",
         resumeToken: opts.resumeToken === null ? undefined : (opts.resumeToken ?? "earlier-thread"),
       });
       const node = snap.data.nodes[0]!;
-      return updateSnapshotData(snap, (data) => {
+      const absent = updateSnapshotData(snap, (data) => {
         data.sessions = data.sessions.map((session) => ({
           ...session, status: "exited", ...(opts.restorePolicy ? { restorePolicy: opts.restorePolicy } : {}),
         }));
         data.activeOccupantsByNode = { [node.id]: { kind: "absent" } };
       });
+      // The seat's current label, when it differs from the one the snapshot saved (a same-name seat re-created).
+      if (opts.currentRuntime) db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(opts.currentRuntime, node.id);
+      return absent;
     }
 
     it("stops for a decision when an earlier occupant left a resume token", async () => {
@@ -334,6 +337,25 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
       expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
       expect(db.prepare("SELECT * FROM continuity_state").all()).toEqual(continuityBefore);
+    });
+
+    // A recorded token is history whatever the node's label says, so these keep main's stop: a seat re-created as a
+    // terminal under the same name (saved as claude-code), and a claude_id token on a node saved as a terminal.
+    it.each([
+      ["a same-name seat re-created as a terminal", { currentRuntime: "terminal" }],
+      ["a resume token on a node saved as a terminal", { runtime: "terminal" }],
+    ] as const)("still stops for a decision, in the preview and in restore, for %s", async (_label, opts) => {
+      const snap = absentSeat(opts);
+      const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions);
+      expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+      const sessionsBefore = db.prepare("SELECT id FROM sessions").all();
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(snap.id);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).toBe("awaiting-decision");
+      expect(db.prepare("SELECT id FROM sessions").all()).toEqual(sessionsBefore);
+      expect(tmux.createSession).not.toHaveBeenCalled();
     });
 
     it("--fresh still starts it fresh", async () => {
@@ -2783,6 +2805,96 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.status).toBe("fresh-primed");
       expect(tmux.sendText).toHaveBeenCalledWith("infra-ui@test-rig", "npm run dev");
     }
+  });
+
+  describe("a terminal seat has no conversation to resume", () => {
+    /** A saved seat whose session row carries `policy` and, unless `token` is given, no resume token, as every
+     *  session a relaunch creates does. `currentRuntime` re-labels the live node after the snapshot is taken. */
+    function seatSnapshot(runtime: string, policy: string, opts: { token?: string; currentRuntime?: string; startupContext?: boolean } = {}) {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-t", rig.id, "Infra");
+      const node = rigRepo.addNode(rig.id, "infra.ui", { runtime, podId: "pod-t", cwd: "." });
+      const session = sessionRegistry.registerSession(node.id, "infra-ui@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?").run(policy, session.id);
+      if (opts.token) db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = ? WHERE id = ?").run(opts.token, session.id);
+      if (opts.startupContext !== false) {
+        db.prepare(
+          "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
+        ).run(node.id, "[]", "[]", JSON.stringify([
+          { type: "send_text", value: "rig tui", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: false },
+        ]), runtime);
+      }
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      if (opts.currentRuntime) db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(opts.currentRuntime, node.id);
+      return { snap, node };
+    }
+
+    function adapterFor(runtime: string) {
+      return {
+        runtime,
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true as const })),
+      };
+    }
+
+    async function restoreSeat(runtime: string, policy: string, opts: { token?: string; currentRuntime?: string; startupContext?: boolean } = {}) {
+      const { snap, node } = seatSnapshot(runtime, policy, opts);
+      const tmux = mockTmux();
+      const sessionsBefore = db.prepare("SELECT id FROM sessions").all().length;
+      const result = await createOrchestrator({ tmux }).restore(snap.id, {
+        adapters: { [runtime]: adapterFor(runtime), [opts.currentRuntime ?? runtime]: adapterFor(opts.currentRuntime ?? runtime) },
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("restore failed");
+      const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions);
+      const newSessions = db.prepare("SELECT id FROM sessions").all().length - sessionsBefore;
+      return { status: result.result.nodes.find((n) => n.nodeId === node.id)!.status, tmux, forecast, newSessions };
+    }
+
+    it.each(["resume_if_possible", "relaunch_fresh", "checkpoint_only"])(
+      "relaunches a terminal seat saved with policy %s fresh and runs its startup actions",
+      async (policy) => {
+        const { status, tmux, forecast } = await restoreSeat("terminal", policy);
+        expect(status).toBe("fresh-primed");
+        expect(tmux.sendText).toHaveBeenCalledWith("infra-ui@test-rig", "rig tui");
+        expect(forecast.nodes[0]!.intendedAction).toBe("fresh-primed");
+        expect(forecast.nodes[0]!.freshRequired).toBe(false);
+      },
+    );
+
+    it("still stops an agent seat saved with resume_if_possible and no token", async () => {
+      const { status, tmux, forecast } = await restoreSeat("claude-code", "resume_if_possible");
+      expect(status).toBe("awaiting-decision");
+      expect(tmux.sendText).not.toHaveBeenCalledWith("infra-ui@test-rig", "rig tui");
+      expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+    });
+
+    // A terminal label is not proof the seat has no conversation: a recorded resume token is, whichever route wrote
+    // it. Where the sessions carry one, main's result stands.
+    it("resumes a terminal-labelled seat whose resolved occupant carries a resume token, without replaying startup", async () => {
+      const { status, tmux } = await restoreSeat("terminal", "resume_if_possible", { token: "claude-thread" });
+      expect(status).toBe("resumed");
+      expect(tmux.sendText).not.toHaveBeenCalledWith("infra-ui@test-rig", "rig tui");
+    });
+
+    // Saved and current runtime must agree before the label counts. With no saved startup context nothing else stops
+    // a mismatch, so these two wait exactly as main does, in the preview and in restore.
+    it.each([
+      ["saved terminal, current claude-code", "terminal", "claude-code"],
+      ["saved claude-code, current terminal", "claude-code", "terminal"],
+    ])("waits for a decision when the runtime changed (%s) and no startup context was saved", async (_label, saved, current) => {
+      const { status, tmux, forecast, newSessions } = await restoreSeat(saved, "resume_if_possible", { currentRuntime: current, startupContext: false });
+      expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+      expect(status).toBe("awaiting-decision");
+      expect(newSessions).toBe(0);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
   });
 
   it("restore propagates launch warnings and writes transcript boundary marker with snapshot ID", async () => {

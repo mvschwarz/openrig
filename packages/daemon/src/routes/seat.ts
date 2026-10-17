@@ -246,7 +246,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
-    || code === "missing_effort" || code === "invalid_effort") return 400;
+    || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
@@ -264,6 +264,18 @@ seatRoutes.post("/set-permissions/:seatRef", async (c) => {
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
   const result = await seatLifecycleService(c).setPermissions({
     seatRef: c.req.param("seatRef"), mode: body.mode, reason: body.reason, actor,
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
+
+// `rig policy apply <name> --seat`: re-point an existing seat's stored permission_policy; the running process is unchanged.
+seatRoutes.post("/set-policy/:seatRef", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
+  if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
+  if (!body || Array.isArray(body) || typeof body.ref !== "string") return c.json({ error: "ref is required" }, 400);
+  const result = await seatLifecycleService(c).setPolicy({
+    seatRef: c.req.param("seatRef"), ref: body.ref, reason: typeof body.reason === "string" ? body.reason : "", actor,
   });
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
 });

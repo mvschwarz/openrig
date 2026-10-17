@@ -345,7 +345,8 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
   const profiles: Record<string, ProfileSpec> = {};
   if (raw["profiles"] && typeof raw["profiles"] === "object" && !Array.isArray(raw["profiles"])) {
     for (const [name, profileRaw] of Object.entries(raw["profiles"] as Record<string, unknown>)) {
-      profiles[name] = normalizeProfile(profileRaw as Record<string, unknown>);
+      // A bare `default:` parses to null; treat it as an empty profile, same as `default: {}`.
+      profiles[name] = normalizeProfile((profileRaw ?? {}) as Record<string, unknown>);
     }
   }
 

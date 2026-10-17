@@ -394,6 +394,10 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         process.exitCode = 2;
         return;
       }
+      // An advisory (e.g. a since that isn't a date or time) goes to stderr, so stdout stays the listing.
+      for (const advisory of Array.isArray(res.data["advisories"]) ? res.data["advisories"] : []) {
+        console.error(`Note: ${advisory}`);
+      }
       const records = Array.isArray(res.data["records"]) ? res.data["records"] as Array<Record<string, unknown>> : [];
       if (records.length === 0) {
         console.log("No bundle install audit records found.");

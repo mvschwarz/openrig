@@ -367,8 +367,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
   human mode it first prints one line with each agent's last known activity, or “unknown”: a
   best-effort snapshot, not a record of what was interrupted. With `--host`, a remote teardown
   that reports errors exits 2.
-- **`rig launch <rigId> [seat]`** — one seat is down; start just that one, without disturbing the
-  rest. It takes the rig ID from `rig ps --json`; a rig name gives `rig_not_found`. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
+- **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
+  rest. It takes the rig's name or ID; a name shared by more than one active rig stops and lists their IDs. Add `--plan` to preview it first, locally or with `--host`; a plan is never sent to a
   daemon older than 0.5.9, which would ignore it and launch. A seat whose agent exited to a shell in
   its kept pane reads `attention_required` (exit 1), not already running: resume it, or
   `rig seat launch <session> --fresh --stop`.

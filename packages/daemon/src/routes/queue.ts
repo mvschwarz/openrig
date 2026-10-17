@@ -354,6 +354,8 @@ export function queueRoutes(): Hono {
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
+      /** How the sender's identity was established, recorded on the source close as a local handoff records it. */
+      identityProvenance?: string | null;
     },
     createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
       (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
@@ -427,6 +429,7 @@ export function queueRoutes(): Hono {
         closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
+        identityProvenance: body.identityProvenance ?? null,
       });
     } catch (err) {
       return errorResponse(c, err);
@@ -626,6 +629,7 @@ export function queueRoutes(): Hono {
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
+      resolution?: unknown;
       blockedOn?: string;
       wakeWatchdogId?: string;
       wakeAfterSeconds?: number;
@@ -649,6 +653,8 @@ export function queueRoutes(): Hono {
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,
+        // Only text can be an outcome; any other value is treated as absent.
+        resolution: typeof body.resolution === "string" ? body.resolution : undefined,
         // OPR.0.4.4.19 FR-6 — the leg-1 park surface: blockedOn plus the
         // park-time summary/evidence_ref persist inputs.
         blockedOn: body.blockedOn,
@@ -712,6 +718,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody);
@@ -791,6 +799,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody);
@@ -1118,8 +1128,19 @@ export function queueRoutes(): Hono {
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
     // The owner notification level is what the Slack selector keys on: a registered person who
     // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
+    const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
+      ...(closing ? { closingTransition: {
+        transitionId: closing.transitionId,
+        ts: closing.ts,
+        state: closing.state,
+        closureReason: closing.closureReason,
+        closureTarget: closing.closureTarget,
+        actorSession: closing.actorSession,
+        transitionNote: closing.transitionNote,
+      } } : {}),
       destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
       ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
     });

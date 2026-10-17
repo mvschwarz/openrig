@@ -21,6 +21,7 @@ import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
+import { resolvePermissionPolicyAttachment, validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
 import {
@@ -113,7 +114,8 @@ export interface SeatRefusal {
     | "missing_effort"
     | "invalid_effort"
     | "effort_unsupported_runtime"
-    | "effort_unavailable";
+    | "effort_unavailable"
+    | "invalid_policy";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
@@ -131,6 +133,10 @@ export interface SeatDescriptor {
 
 export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
+  | SeatRefusal;
+
+export type SetPolicyResult =
+  | { ok: true; seat: SeatDescriptor; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; changed: boolean; effect: string }
   | SeatRefusal;
 
 /** OPR.0.7.0.7 — the four effort values for one seat, kept apart. */
@@ -517,6 +523,66 @@ export class SeatLifecycleService {
     } catch (error) {
       return { ok: false, code: "permission_selection_refused", message: (error as Error).message };
     }
+  }
+
+  /** `rig policy apply <name> --seat`: re-point an existing seat's own permission_policy. This writes
+   *  the raw ref and the provenance the instantiator would persist for the same member ref; restore,
+   *  resume and launches that read the seat's stored state use that provenance, while a launch from a
+   *  spec that declares a policy re-applies the spec's. The ref is validated exactly as a spec
+   *  member's is; the running process is untouched. */
+  async setPolicy(input: { seatRef: string; ref: string; reason: string; actor: string }): Promise<SetPolicyResult> {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    const invalid = validatePermissionPolicyRef(input.ref, "permission_policy");
+    if (invalid) return { ok: false, code: "invalid_policy", message: invalid };
+    const ref = input.ref;
+    // Built-ins and `none` resolve from the ref alone; only a custom file reads its declaring directory.
+    const attachment = resolvePermissionPolicyAttachment(ref, "", { readFile: () => { throw new Error("no declaring spec"); } });
+    if (attachment.origin === "custom") {
+      return {
+        ok: false, code: "invalid_policy",
+        message: `permission_policy: '${ref}' is a custom policy file, which resolves relative to the rig spec that declares it; a seat has no spec directory of its own.`,
+        guidance: "Use builtin:<name> or none here, or declare the custom ref in the rig spec.",
+      };
+    }
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    if (resolved.entry.runtime === "terminal") {
+      return { ok: false, code: "invalid_policy", message: "permission_policy: not valid on terminal members (a terminal node is not an agent seat)" };
+    }
+
+    const row = this.db.prepare("SELECT permission_policy FROM nodes WHERE id = ?").get(seat.nodeId) as { permission_policy: string | null } | undefined;
+    const from = row?.permission_policy ?? null;
+    const provenance = {
+      origin: attachment.origin,
+      resolvedTarget: attachment.resolvedTarget ?? null,
+      declaringDir: attachment.declaringDir ?? null,
+      launchPosture: attachment.launchPosture,
+    };
+    const before = this.rigRepo.getNodePolicyProvenance(seat.nodeId);
+    const changed = from !== ref || !before || before.origin !== provenance.origin || before.resolvedTarget !== provenance.resolvedTarget
+      || before.declaringDir !== provenance.declaringDir || before.launchPosture !== provenance.launchPosture;
+    if (changed) {
+      let persisted: PersistedEvent | null = null;
+      this.db.transaction(() => {
+        this.rigRepo.setNodePermissionPolicy(seat.nodeId, ref);
+        this.rigRepo.setNodePolicyProvenance(seat.nodeId, provenance);
+        persisted = this.eventBus.persistWithinTransaction({
+          type: "node.policy_changed", rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId,
+          from, to: ref, launchPosture: attachment.launchPosture, reason: input.reason.trim(), operator: input.actor.trim(),
+        });
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+    }
+    let selection = false;
+    // An unreadable selection refuses the launch by itself (NativePermissionStore.read); nothing to add here.
+    try { selection = new NativePermissionStore(this.db).read(seat.nodeId) !== null; } catch { /* see above */ }
+    const effect = "Restore, resume and launches that read this seat's stored state use this policy, unless an explicit native selection (rig seat set-permissions) takes precedence. "
+      + "`rig up <rig name>` uses it; a launch from a spec that declares a policy replaces it with the spec's policy, which later restores then use. "
+      + "The running process and the rig spec file are unchanged; nothing was restarted."
+      + (selection ? " This seat has an explicit native permission selection, so that selection takes precedence at launch." : "");
+    return { ok: true, seat, from, to: ref, launchPosture: attachment.launchPosture, changed, effect };
   }
 
   async stopSeat(input: { seatRef: string; reason: string; operator?: string | null }): Promise<StopSeatResult> {

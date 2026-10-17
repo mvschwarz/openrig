@@ -43,6 +43,19 @@ function isFilesystemRoot(cwd: string): boolean {
   return resolved === nodePath.parse(resolved).root;
 }
 
+/** The mistakes the daemon would refuse in an env: block, caught before anything is sent. */
+function checkEnvAssignment(assignment: string): string | null {
+  const eq = assignment.indexOf("=");
+  if (eq <= 0) return `expects KEY=VALUE, got "${assignment}"`;
+  const name = assignment.slice(0, eq);
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) return `"${name}" is not a valid name; names match ^[A-Z_][A-Z0-9_]*$`;
+  if (name.startsWith("OPENRIG_")) return `"${name}" is reserved; OPENRIG_* names belong to OpenRig`;
+  const value = assignment.slice(eq + 1);
+  if (value === "") return `${name}: value must not be empty`;
+  if (value.includes("\0")) return `${name}: value must not contain a NUL byte`;
+  return null;
+}
+
 // OPR.0.4.4.11 (arch return R11-2) — pre-dispatch detection of a topology
 // source for the --host rejection. Mirrors the daemon's FR-1 detection
 // contract without importing the daemon package: `.rigtopology` extension,
@@ -98,6 +111,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
+    .option("--env <KEY=VALUE>", "Set a launch environment variable on every seat for this run only; repeatable. Not saved: a later restore uses the spec's env: block. Values are visible to local processes, so never pass secrets", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--target <root>", "Install target for a .rigbundle (default: current directory). A v2 bundle is materialized there and relative member cwds resolve against it; --cwd still overrides launch cwd")
     .option("--preset <name>", "For a GitHub bundle link, choose a declared configuration")
     .option("--seat <member=runtime>", "For a GitHub bundle link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
@@ -105,7 +119,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
     .option("--fresh <seats...>", "Deliberately fresh-prime the named seats (logical ids) instead of resuming their original sessions (operation B; reported as fresh-primed)")
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (source: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
+    .action(async (source: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; cwd?: string; env?: string[]; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. Topology
@@ -114,6 +128,23 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
       // topology up into the rejected --host form.
       if (!sourceLooksLikeTopology(source)) opts.host = resolveEffectiveHost(opts.host);
       const deps = getDepsF();
+      const envOverride: Record<string, string> = {};
+      for (const assignment of opts.env ?? []) {
+        const problem = checkEnvAssignment(assignment);
+        if (problem) {
+          console.error(`--env ${problem}`);
+          process.exitCode = 1;
+          return;
+        }
+        const eq = assignment.indexOf("=");
+        envOverride[assignment.slice(0, eq)] = assignment.slice(eq + 1);
+      }
+      const envOverrideBody = Object.keys(envOverride).length > 0 ? envOverride : undefined;
+      if (envOverrideBody && sourceLooksLikeTopology(source)) {
+        console.error("--env applies to a new launch from one rig spec or bundle. A topology launches several rigs from their own specs; put env: in each rig's spec instead.");
+        process.exitCode = 1;
+        return;
+      }
 
       // Link preparation verifies the effective endpoint before fetch or local auto-start.
       // Existing path/name dispatch below is unchanged.
@@ -133,6 +164,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
               bundlePath: imported.bundlePath, plan: opts.plan ?? false, autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
               targetRoot: opts.target ? nodePath.resolve(opts.target) : process.cwd(),
               cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
+              envOverride: envOverrideBody,
               cliVersion: getCliVersion(),
             }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
           } catch {
@@ -169,12 +201,19 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           process.exitCode = 1;
           return;
         }
+        // The remote daemon restores a bare rig name from its own spec, so there is no launch for --env.
+        if (envOverrideBody && !source.includes("/") && !/\.(ya?ml|rigbundle|rigtopology)$/i.test(source)) {
+          console.error("--env applies to a new launch from a rig spec or bundle. A restore keeps the rig's own env: block; to change it, edit env: in the spec and launch again.");
+          process.exitCode = 1;
+          return;
+        }
         const { runRemoteHttpOp } = await import("../remote-host-ops.js");
         const body = {
           sourceRef: source,
           plan: opts.plan,
           autoApprove: opts.yes, nonInterruptive: opts.nonInterruptive,
           cwdOverride: opts.cwd,
+          envOverride: envOverrideBody,
           targetRoot: opts.target,
           existing: opts.existing,
           freshLogicalIds: opts.fresh,
@@ -308,6 +347,13 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
         }
         return false;
       };
+      // A restore brings the rig back from its own spec, so there is no launch to apply --env to.
+      const refuseEnvOnRestore = (): boolean => {
+        if (!envOverrideBody) return false;
+        console.error("--env applies to a new launch from a rig spec or bundle. A restore keeps the rig's own env: block; to change it, edit env: in the spec and launch again.");
+        process.exitCode = 1;
+        return true;
+      };
       if (isRigName && await refuseArchivedName(source)) return;
       if (isRigName && !opts.existing) {
         try {
@@ -348,6 +394,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
         // "Turning on ..." per the rig's derived lifecycleState. Help text honesty:
         // "Recover" describes what `rig up` does; it does not promise success before
         // tester L4 VM proof completes.
+        if (sourceRef === source && refuseEnvOnRestore()) return;
         if (sourceRef === source && !opts.json) {
           const summaries = await fetchRigSummaries();
           const match = summaries.find((r) => r.name === source);
@@ -357,6 +404,8 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
             console.log(`Turning on rig "${source}"...`);
           }
         }
+      } else if (isRigName && opts.existing && refuseEnvOnRestore()) {
+        return;
       } else if (isRigName && opts.existing && !opts.json) {
         const summaries = await fetchRigSummaries();
         const match = summaries.find((r) => r.name === source);
@@ -440,6 +489,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
           plan: opts.plan ?? false,
           autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
           cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
+          envOverride: envOverrideBody,
           targetRoot,
           // OPR.0.3.4.2 — operation B opt-in seats (deliberate fresh-prime).
           freshLogicalIds: opts.fresh,
@@ -622,6 +672,7 @@ team back with its conversations, run rig up <rig-name> --existing, not the spec
                   plan: false,
                   autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
                   cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
+                  envOverride: envOverrideBody,
                   targetRoot,
                   freshLogicalIds: accepted,
                 }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });

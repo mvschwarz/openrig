@@ -403,9 +403,9 @@ const BLOCK_SCALAR = new Set(["|", ">", "|-", ">-", "|+", ">+"]);
  * quotes are removed. parseFrontmatter is line-by-line and would return the indicator itself.
  */
 export function frontmatterIntent(raw: string): string | null {
-  const match = /^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/.exec(raw);
+  const match = /^---\s*\n([\s\S]*?)\r?\n---(?:\s*\n|$)/.exec(raw);
   if (!match) return null;
-  const lines = match[1]!.split("\n");
+  const lines = match[1]!.split(/\r?\n/);
   for (let index = 0; index < lines.length; index++) {
     const found = /^intent:\s*(.*)$/.exec(lines[index]!);
     if (!found) continue;
