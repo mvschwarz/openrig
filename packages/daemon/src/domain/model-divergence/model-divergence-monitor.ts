@@ -191,7 +191,7 @@ export class ModelDivergenceMonitor {
     }
     this.pendingPolls.delete(key);
     this.pendingReasons.delete(key);
-    if (modelsMatch(seat.pinnedModel, read.model)) {
+    if (modelsMatch(seat.runtime === "pi" ? piPinModel(seat.pinnedModel) : seat.pinnedModel, read.model)) {
       this.settled.add(key);
       return;
     }
@@ -272,10 +272,26 @@ export class ModelDivergenceMonitor {
  *  unknown alias or a fallback model canonicalizes to itself and still diverges. Raw
  *  pinned/effective strings travel untouched in any proclamation. */
 export function modelsMatch(pinned: string, effective: string): boolean {
+  return canonicalModelPin(pinned) === effective.trim().toLowerCase();
+}
+
+/** Pi's thinking levels, as `pi --help` lists them for `--thinking` and the `--model` suffix. */
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** The model part of a Pi pin. Pi reads a trailing `:<thinking level>` on `--model` (for example
+ *  `openrouter/x-ai/grok-4:high`) as the seat's thinking level and records the model without it.
+ *  Any other `:` suffix, such as OpenRouter's `:free`, is part of the id and is kept. Raw pins
+ *  still travel untouched in any proclamation. */
+export function piPinModel(pinned: string): string {
+  const pin = pinned.trim();
+  const colon = pin.lastIndexOf(":");
+  return colon !== -1 && PI_THINKING_LEVELS.has(pin.slice(colon + 1)) ? pin.slice(0, colon) : pin;
+}
+
+/** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
+export function canonicalModelPin(pinned: string): string {
   const pin = pinned.trim().toLowerCase();
-  const eff = effective.trim().toLowerCase();
-  const canonicalPin = (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
-  return canonicalPin === eff;
+  return (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
 }
 // (The self-expiring CLAUDE_ALIAS_MIGRATION_BRIDGE and its SPEC_VALIDATION_CAPABILITIES sentinel
 // gate completed their arc and are DELETED per the bridge's own deletion contract: the 5.3
