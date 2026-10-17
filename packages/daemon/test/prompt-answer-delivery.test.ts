@@ -357,7 +357,7 @@ describe("explicit prompt answer delivery", () => {
     expect(await f.transport.send(f.name, "3")).toMatchObject({ ok: false, reason: "target_needs_input" });
     expect(await f.transport.send(f.name, "3", { dangerouslyInteract: true, reason: "harmless choice" }))
       .toMatchObject({ ok: false, reason: "prompt_override_audit_unavailable" });
-    expect(f.state.commands).toEqual([]);
+    expect(f.state.commands.filter(a => a[1] === "paste-buffer" || a[1] === "send-keys")).toEqual([]);
   });
 
 });

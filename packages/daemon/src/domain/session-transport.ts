@@ -1499,8 +1499,8 @@ interface SessionTransportDeps {
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
   agentActivityStore?: AgentActivityStore;
-  // OPR.0.4.1.10 — required only for the --dangerously-interact audit path. When absent, a dangerous
-  // override fails closed (refuses) rather than sending unaudited. Non-danger sends never need it.
+  // A positive-picker override requires a working audit sink. Other explicit interaction attempts
+  // audit too, but an unavailable sink stays advisory so an already accepted send is not refused.
   eventBus?: EventBus;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
@@ -2465,7 +2465,7 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
-    let promptOverride = false;
+    const promptOverride = waitForIdleMs === undefined && Boolean(opts?.dangerouslyInteract);
     if (waitForIdleMs === undefined) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -2474,41 +2474,36 @@ export class SessionTransport {
         binding: observed?.binding,
       });
 
-      // Single state dispatch (B1 code-review fix): flattened so `unknown` ALWAYS attaches the advisory
-      // regardless of whether --dangerously-interact was passed — the deliberate-override branch no
-      // longer bypasses unknown handling.
-      if (readiness.state === "needs_input") {
-        // The POSITIVE picker/approval footgun. --dangerously-interact is the deliberate audited
-        // override (reason required + an auditable record persisted BEFORE the send; fail closed if it
-        // cannot be audited so an unauditable override never sends). Otherwise refuse with the
-        // proceed-path. This is the ONLY state --dangerously-interact bypasses.
-        if (opts?.dangerouslyInteract) {
-          if (!opts.reason || opts.reason.trim().length === 0) {
-            return {
-              ok: false,
-              sessionName,
-              reason: "dangerously_interact_requires_reason",
-              error: "--dangerously-interact requires --reason explaining why the prompt is being driven. No text was sent.",
-            };
-          }
-          const audit = this.recordPromptOverride({
+      // Explicit interaction selects key input even when readiness cannot recognize the prompt.
+      // Only bypassing a positive picker requires a successful audit; other states already sent.
+      if (opts?.dangerouslyInteract) {
+        if (readiness.state === "needs_input" && (!opts.reason || opts.reason.trim().length === 0)) {
+          return {
+            ok: false,
             sessionName,
-            readiness,
-            actorSession: opts.actorSession ?? null,
-            overrideReason: opts.reason,
-          });
-          if (!audit.ok) {
-            return {
-              ok: false,
-              sessionName,
-              reason: "prompt_override_audit_unavailable",
-              activity: readiness,
-              error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
-            };
-          }
-          // Audited answers use unbracketed input; a choice may submit itself.
-          promptOverride = true;
-        } else {
+            reason: "dangerously_interact_requires_reason",
+            error: "--dangerously-interact requires --reason explaining why the prompt is being driven. No text was sent.",
+          };
+        }
+        const audit = this.recordPromptOverride({
+          sessionName,
+          readiness,
+          actorSession: opts.actorSession ?? null,
+          overrideReason: opts.reason ?? null,
+        });
+        if (!audit.ok && readiness.state === "needs_input") {
+          return {
+            ok: false,
+            sessionName,
+            reason: "prompt_override_audit_unavailable",
+            activity: readiness,
+            error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
+          };
+        }
+        if (!audit.ok) sendAdvisory = "prompt-override: audit unavailable (" + audit.reason + "); input sent anyway.";
+      }
+      if (readiness.state === "needs_input") {
+        if (!promptOverride) {
           return {
             ok: false,
             sessionName,
@@ -2525,7 +2520,7 @@ export class SessionTransport {
         // surfaced without ever blocking communication. Hooks are advisory telemetry, not authority
         // over whether agents can talk.
         const linkDiagnosis = await this.diagnoseProducerLink(sessionName);
-        sendAdvisory = `producer-link: ${linkDiagnosis} — activity could not be determined (${readiness.reason}); sent anyway (telemetry is advisory).`;
+        sendAdvisory = [sendAdvisory, `producer-link: ${linkDiagnosis} — activity could not be determined (${readiness.reason}); sent anyway (telemetry is advisory).`].filter(Boolean).join(" ");
         // fall through to the send below.
       } else if (readiness.state === "running") {
         // OPR.0.4.3.28 fast-follow (advisor audit-catch, pm-ruled a founder-principle residual):
@@ -2533,7 +2528,7 @@ export class SessionTransport {
         // attach it on the success result + PROCEED (mirrors the unknown inversion). --force is now a
         // no-op here (the option is kept for back-compat). needs_input (positive picker) remains the
         // ONLY hard refuse; unknown/stale/missing already proceed-with-advisory above.
-        sendAdvisory = `target pane appears mid-task; sent anyway (busy is advisory, not a block).`;
+        sendAdvisory = [sendAdvisory, "target pane appears mid-task; sent anyway (busy is advisory, not a block)."].filter(Boolean).join(" ");
         // fall through to the send below.
       }
       // idle (or running/unknown — now advisory-and-proceed) → proceed to send.
@@ -2620,9 +2615,9 @@ export class SessionTransport {
       if (!promptAnswerStaged(pane, text, runtime)) {
         return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
           ...(inputBoxRuntime ? { inputBox: INPUT_BOX_UNCHECKED } : {}),
-          warning: "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)." });
+          warning: [sendAdvisory, "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)."].filter(Boolean).join(" ") });
       }
-      sendAdvisory = "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer.";
+      sendAdvisory = [sendAdvisory, "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer."].filter(Boolean).join(" ");
     }
 
     // 5. Submit (Enter)
@@ -3129,10 +3124,9 @@ export class SessionTransport {
     return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
   }
 
-  // OPR.0.4.1.10 — persist the audit record for a --dangerously-interact prompt override. Audit-all-
-  // or-nothing: if there is no eventBus, the target rig/node can't be resolved, or the event cannot be
-  // persisted, return !ok so the caller fails closed and does NOT send. Payload keeps the caller's
-  // overrideReason distinct from the classifier's detectedReason/evidenceSource (not overloaded).
+  // Record actor/reason with the actual readiness, never a fabricated prompt classification.
+  // Report an unavailable sink to the caller: a positive-picker override still fails closed,
+  // while other readiness states keep their existing accepted-send behavior with an advisory.
   private recordPromptOverride(input: {
     sessionName: string;
     readiness: AgentActivity;

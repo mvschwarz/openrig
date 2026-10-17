@@ -154,9 +154,9 @@ function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boole
   console.error(`  ${action}`);
 }
 
-/** Reject content that cannot communicate anything, before a transport call. */
-export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", json = false): boolean {
-  if (body.trim().length > 0) return false;
+/** Ordinary messages require content; explicit key input only requires nonzero bytes. */
+export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", json = false, explicitInteraction = false): boolean {
+  if (explicitInteraction ? body.length > 0 : body.trim().length > 0) return false;
   const fact = `rig ${verb}: message is empty or whitespace-only.`;
   const consequence = "The message transport did not run and nothing was delivered.";
   const action = "Check whether shell backtick or $() substitution collapsed the argument, or whether a --body-file/stdin source resolved to 0 bytes; provide non-empty content.";
@@ -390,7 +390,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           process.exitCode = 1;
           return;
         }
-        if (refuseEmptyMessage(message, "send", Boolean(opts.json))) return;
+        if (refuseEmptyMessage(message, "send", Boolean(opts.json), Boolean(opts.dangerouslyInteract))) return;
         if (opts.host) {
           console.error("--host (cross-host) supports single-seat sends only; --to/--pod/--rig are local.");
           process.exitCode = 1;
@@ -412,7 +412,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         process.exitCode = 1;
         return;
       }
-      if (!opts.context && refuseEmptyMessage(text!, "send", Boolean(opts.json))) return;
+      if (!opts.context && refuseEmptyMessage(text!, "send", Boolean(opts.json), Boolean(opts.dangerouslyInteract))) return;
 
       // The endpoint selects delivery; the local durable store identifies the origin.
       const localDaemonUrl = await resolveLocalDaemonUrl(deps);
@@ -489,7 +489,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         const warn = walkSizedWarning(resolved, session);
         if (warn && !opts.json) console.log(`Advisory: ${warn}`);
       }
-      if (refuseEmptyMessage(payload, "send", Boolean(opts.json))) return;
+      if (refuseEmptyMessage(payload, "send", Boolean(opts.json), Boolean(opts.dangerouslyInteract))) return;
       // Send/broadcast header (ruling 03c35295): a directed `rig send` is a DM — stamp it at send-time
       // (Sent: MM-DD HH:MMZ) so transcripts are timestamped; the To line stays the single recipient.
       const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, { stampISO: new Date().toISOString() });
