@@ -117,6 +117,7 @@ describe("Claude permission episodes share the permission poller", () => {
     subject.visible(null);
     await subject.tick();
     expect(subject.count()).toBe(1);
+    expect(subject.service.getSeatState("seat")!.needsInput.reason).toBe("permission_prompt");
     expect(subject.changed).toHaveBeenCalledTimes(calls);
     subject.visible(false);
     await subject.tick();

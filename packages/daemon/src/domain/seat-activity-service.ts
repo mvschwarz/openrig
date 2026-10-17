@@ -197,7 +197,7 @@ export class SeatActivityService {
         seatNodeId: seatNodeId!, sessionName, rung: "needs-input-chrome", sourceId,
         seq: (seat.sources.get(sourceId)?.latest.seq ?? 0) + 1,
         observedAt: seat.permissionObservedAt,
-        needsInput: { count, reason: count ? (visible === null ? "permission_request_unverified" : "permission_prompt") : null },
+        needsInput: { count, reason: count ? (!claude && visible === null ? "permission_request_unverified" : "permission_prompt") : null },
       });
     } finally {
       seat.permissionPolling = false;
