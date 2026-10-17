@@ -327,14 +327,14 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   return numberedOption;
 }
 
-// Claude's interactive refusals of a request for a missing, expired or revoked login, and its 401 rejection, whose
-// tail varies (code.claude.com/docs/en/errors).
+// Claude's interactive refusals of a request for a missing, expired or revoked login (code.claude.com/docs/en/errors).
+// Only these exact messages count. A 401 reads "Please run /login · API Error: 401 …" with a varying tail, and a
+// reply or tool output can start with the same words, so this input can't tell a real one apart.
 const CLAUDE_LOGIN_REFUSALS = new Set([
   "Not logged in · Please run /login",
   "Login expired · Please run /login",
   "OAuth token revoked · Please run /login",
 ]);
-const CLAUDE_LOGIN_REFUSAL_PREFIX = "Please run /login · API Error: 401";
 
 // A refusal blocks only as Claude's latest response. The persistent "Not logged in · Run /login" footer says only
 // that Claude holds no credential of its own, and a gateway can still authenticate its requests. Claude starts a
@@ -362,8 +362,7 @@ function hasCurrentClaudeLoginRefusal(paneContent: string): boolean {
   const inputBox = responses.some(({ at }) => at > lastPrompt) ? lines.length : lastPrompt;
   const turnStart = prompts.filter((at) => at < inputBox).at(-1) ?? -1;
   const latest = responses.filter(({ at }) => at > turnStart && at < inputBox).at(-1)?.text;
-  return latest !== undefined
-    && (CLAUDE_LOGIN_REFUSALS.has(latest) || latest.startsWith(CLAUDE_LOGIN_REFUSAL_PREFIX));
+  return latest !== undefined && CLAUDE_LOGIN_REFUSALS.has(latest);
 }
 
 function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
