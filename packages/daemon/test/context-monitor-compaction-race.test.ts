@@ -178,14 +178,80 @@ describe("context observations retain their compaction target", () => {
     expect(enforcer.getPreparationState(name)).toBeNull();
   });
 
-  it("allows its own readiness normalization and the next current observation", async () => {
+  it.each([
+    { readiness: { ready: true }, expected: "ready" },
+    { readiness: { ready: false, code: "trust_gate", reason: "fixture trust prompt" }, expected: "attention_required" },
+  ])("allows its own $expected readiness normalization and the next current observation", async ({ readiness, expected }) => {
     const { session, name } = seed();
-    const poller = monitor(async () => ({ ready: true }));
+    const poller = monitor(async () => readiness);
     await poller.pollOnce();
-    expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id)).toEqual({ startup_status: "ready" });
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id)).toEqual({ startup_status: expected });
     expect(send).toHaveBeenCalledTimes(1);
     expect(enforcer.getPreparationState(name)).toMatchObject({ status: "waiting" });
   });
+
+  it.each([
+    { path: "sampled", field: "startup_status" },
+    { path: "sampled", field: "startup_completed_at" },
+    { path: "pending", field: "startup_status" },
+    { path: "pending", field: "startup_completed_at" },
+  ] as const)("rejects an independent $field change during readiness on the $path path", async ({ path, field }) => {
+    const { session, name } = seed("writer@fixture", "ready");
+    const entered = deferred<void>();
+    const probe = deferred<ReadinessResult>();
+    const poller = monitor(() => { entered.resolve(); return probe.promise; });
+    if (path === "pending") {
+      await poller.pollOnce();
+      const prep = enforcer.getPreparationState(name)!;
+      writeFileSync(`${prep.mapPath}.tmp`, `# Fixture restore map\n${prep.marker}\n`);
+      await poller.pollOnce();
+      expect(enforcer.hasPendingPostCompactStage(name)).toBe(true);
+      rmSync(join(home, "state", "context-usage", `${name}.json`));
+    }
+    registry.updateStartupStatus(session.id, "failed");
+    const sendsBefore = send.mock.calls.length;
+    const poll = poller.pollOnce();
+    await entered.promise;
+    if (field === "startup_status") registry.updateStartupStatus(session.id, "attention_required");
+    else registry.updateStartupStatus(session.id, "failed", "2026-01-01T00:00:00.000Z");
+    probe.resolve({ ready: true });
+    await poll;
+    expect(send).toHaveBeenCalledTimes(sendsBefore);
+    if (path === "sampled") expect(enforcer.getPreparationState(name)).toBeNull();
+    else expect(enforcer.hasPendingPostCompactStage(name)).toBe(true);
+
+    await poller.pollOnce();
+    expect(send).toHaveBeenCalledTimes(sendsBefore + 1);
+  });
+
+  it.each(["startup_status", "startup_completed_at"] as const)(
+    "rejects a later %s change after its own normalization while waiting for the lease", async field => {
+      const { node, session, name } = seed();
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const queued = deferred<void>();
+      const compact = enforcer.maybeAutoCompact.bind(enforcer);
+      vi.spyOn(enforcer, "maybeAutoCompact").mockImplementation(input => { queued.resolve(); return compact(input); });
+      const lifecycle = guard.lifecycle([node.id], async () => {
+        entered.resolve();
+        await release.promise;
+        if (field === "startup_status") registry.updateStartupStatus(session.id, "attention_required");
+        else registry.updateStartupStatus(session.id, "ready", "2026-01-01T00:00:00.000Z");
+      });
+      await entered.promise;
+      const poller = monitor(async () => ({ ready: true }));
+      const poll = poller.pollOnce();
+      await queued.promise;
+      expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id)).toEqual({ startup_status: "ready" });
+      release.resolve();
+      await lifecycle;
+      await poll;
+      expect(send).not.toHaveBeenCalled();
+      expect(enforcer.getPreparationState(name)).toBeNull();
+      await poller.pollOnce();
+      expect(send).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("does not advance an unsampled pending stage after a queued stop, then drains a current poll", async () => {
     const { node, session, name } = seed("writer@fixture", "ready");

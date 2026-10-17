@@ -199,12 +199,11 @@ export class ContextMonitor {
     }
   }
 
-  /** Readiness normalization changes these two fields itself; all other snapshot
-   * fields, including the launch event sequence, must still describe this seat. */
+  /** Every field must match the observation, including this poll's own readiness writes. */
   private isCurrentSession(session: EligibleSession): boolean {
     const current = this.getEligibleSessions(session.node_id)[0];
     return current !== undefined && Object.entries(session).every(([key, value]) =>
-      key === "startup_status" || key === "startup_completed_at" || current[key as keyof EligibleSession] === value);
+      current[key as keyof EligibleSession] === value);
   }
 
   /** Start polling at the given interval. Idempotent. */
@@ -300,7 +299,7 @@ export class ContextMonitor {
 
     // A poll snapshot is not a lease: lifecycle work can run before or during
     // the probe. The event sequence also distinguishes same-status retries.
-    const isCurrent = () => JSON.stringify(this.getEligibleSessions(session.node_id)[0]) === JSON.stringify(session);
+    const isCurrent = () => this.isCurrentSession(session);
     try {
       if (!isCurrent()) return;
       const readiness = await checker.checkReady({
@@ -324,21 +323,28 @@ export class ContextMonitor {
           // A live prompt does not deliver saved context. Check after the await:
           // startup may have reached an attention gate while we were observing.
           if (hasPendingFreshStartup(this.db, session.node_id, session.session_id)) return;
-          this.db.prepare(`
+          const completedAt = new Date().toISOString();
+          const updated = this.db.prepare(`
             UPDATE sessions
             SET startup_status = 'ready',
                 startup_completed_at = ?
             WHERE id = ? AND startup_status IN ('failed', 'attention_required')
-          `).run(new Date().toISOString(), session.session_id);
+          `).run(completedAt, session.session_id);
+          if (updated.changes > 0) {
+            // Accept only the readiness changes written by this poll, not a later re-read.
+            session.startup_status = "ready";
+            session.startup_completed_at = completedAt;
+          }
           return;
         }
 
         if (isAttentionRequiredReadinessCode(readiness.code)) {
-          this.db.prepare(`
+          const updated = this.db.prepare(`
             UPDATE sessions
             SET startup_status = 'attention_required'
             WHERE id = ?
           `).run(session.session_id);
+          if (updated.changes > 0) session.startup_status = "attention_required";
         }
       }).immediate();
     } catch {
