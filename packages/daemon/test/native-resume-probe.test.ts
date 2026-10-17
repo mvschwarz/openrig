@@ -464,30 +464,37 @@ describe("native resume probe", () => {
       if (status === "failed") expect(result.code).toBe("login_required");
     });
 
+    // Only the three exact strings count. A real 401 reads ready for input, with or without the footer: no rule on
+    // this input tells it from a reply or tool output that starts with the same words.
     it.each([
-      ["OAuth token revoked · Please run /login", "failed"],
-      ["Please run /login · API Error: 401 OAuth token has expired", "failed"],
-      ["Please run /login · API Error: 401 Invalid authentication credentials", "failed"],
-      ["The error Please run /login · API Error: 401 means the token was rejected.", "resumed"],
-    ])("reads Claude's documented revoked and 401 refusals as current: %s", (reply, status) => {
+      ["OAuth token revoked · Please run /login", false, "failed"],
+      ["OAuth token revoked · Please run /login", true, "failed"],
+      ["Please run /login · API Error: 401 OAuth token has expired", false, "resumed"],
+      ["Please run /login · API Error: 401 OAuth token has expired", true, "resumed"],
+      ["Please run /login · API Error: 401 Invalid authentication credentials", false, "resumed"],
+      ["The error Please run /login · API Error: 401 means the token was rejected.", false, "resumed"],
+    ])("reads the revoked refusal as current and a 401 as ready for input: %s (footer %s)", (reply, footer, status) => {
       expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
-        paneContent: pane(["❯ hello", "", `● ${reply}`, ""]) }).status).toBe(status);
+        paneContent: pane(["❯ hello", "", `● ${reply}`, ""], footer) }).status).toBe(status);
     });
 
     it.each([
       ["a refusal Claude wraps in a narrow pane", ["● Not logged in · Please run", "  /login"], "failed"],
-      ["a 401 refusal whose tail wraps", ["● Please run /login · API Error: 401 OAuth token has", "  expired. Please obtain a new token or refresh your", "  existing token."], "failed"],
+      ["a revoked refusal Claude wraps", ["● OAuth token revoked · Please", "  run /login"], "failed"],
       ["a refusal with the right-aligned footer right below it", [`● ${refusal}`, "                    Not logged in · Run /login"], "failed"],
     ])("joins Claude's own wrapped rows: %s", (_name, rows, status) => {
       expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
         paneContent: pane(["❯ hello", "", ...rows, ""]) }).status).toBe(status);
     });
 
-    // Review inputs (#1417): a submitted prompt with no input box drawn below it, and quoted marker rows.
+    // Review inputs (#1417): a submitted prompt with no input box drawn below it, quoted marker rows, and replies or
+    // tool output that start like a 401.
     it.each([
       ["F1-current-no-box", `Claude Code v2.1.296\n❯ hello\n● ${refusal}\nNot logged in · Run /login`, "failed"],
       ["F1-recovered-no-box", `Claude Code v2.1.296\n❯ hello\n● ${refusal}\n❯ /login\n  ⎿ Login successful`, "resumed"],
       ["F2-quoted-reply-marker", `Claude Code v2.1.296\n❯ Explain this log.\n● Here is the quoted log line:\n\n  ● ${refusal}\n\n  That is an example, not this turn failing.\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
+      ["R2-prefix-explanation", `Claude Code v2.1.296\n❯ Explain this output.\n● Please run /login · API Error: 401 is an example from the manual, not this request failing.\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
+      ["R2-prefix-multiline-tool", `Claude Code v2.1.296\n❯ Explain this output.\n● Bash(print recorded fixture)\n  ⎿  Please run /login · API Error: 401 Invalid authentication credentials\n     This is recorded fixture output; the request succeeded.\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
       ["F2-quoted-prompt-marker", `Claude Code v2.1.296\n❯ Explain this log:\n  ● ${refusal}\n\n✶ Thinking… (2s)\n\n${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ⏵⏵ accept edits on (shift+tab to cycle)`, "resumed"],
     ])("%s", (_name, paneContent, status) => {
       const result = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
