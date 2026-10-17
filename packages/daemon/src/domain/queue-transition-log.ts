@@ -410,14 +410,20 @@ export class QueueTransitionLog {
 
   private ownerNotificationsStatement?: Database.Statement;
 
-  /** Every owner-notification transition of these qitems, newest first, by qitem: the first is
-   *  latestOwnerNotificationForQitem's. One read for a whole listing. */
+  /** The owner notifications a delivery ledger reads, by qitem, newest first: a qitem's latest (the first,
+   *  latestOwnerNotificationForQitem's), and its latest outbound one (a kind other than human-decision-resolved) when
+   *  that is older. One read for a whole listing. */
   ownerNotificationsForQitems(qitemIds: readonly string[]): Map<string, QueueTransition[]> {
     const byQitem = new Map<string, QueueTransition[]>();
     if (!this.hasOwnerNotificationColumns || qitemIds.length === 0) return byQitem;
     this.ownerNotificationsStatement ??= this.db.prepare(
-      `SELECT * FROM ${this.historySource}
-        WHERE qitem_id IN (SELECT value FROM json_each(?)) AND owner_notification_level IS NOT NULL
+      `SELECT * FROM (
+         SELECT history.*, ROW_NUMBER() OVER (
+           PARTITION BY qitem_id, (owner_notification_kind IS NOT NULL AND owner_notification_kind != 'human-decision-resolved')
+           ORDER BY transition_id DESC) AS newest
+           FROM ${this.historySource} history
+          WHERE qitem_id IN (SELECT value FROM json_each(?)) AND owner_notification_level IS NOT NULL)
+        WHERE newest = 1
         ORDER BY transition_id DESC`,
     );
     for (const row of this.ownerNotificationsStatement.all(JSON.stringify(qitemIds)) as QueueTransitionRow[]) {

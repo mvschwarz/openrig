@@ -1,11 +1,15 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getDefaultOpenRigPath } from "./openrig-compat.js";
 import { VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 import type { FailedStep } from "./cross-host-types.js";
 
 export type { FailedStep };
+
+// Only reading and writing hosts.yaml need yaml (~70 modules): it is required on that first use, so a
+// caller that only validates an entry (a seat's origin check, on each of its commands) never loads it.
+const yaml = (): typeof import("yaml") => createRequire(import.meta.url)("yaml") as typeof import("yaml");
 
 export interface RemoteBearerResolution {
   ok: true;
@@ -151,7 +155,7 @@ export function loadHostRegistry(path: string = defaultHostRegistryPath()): Host
   }
   let parsed: unknown;
   try {
-    parsed = parseYaml(raw);
+    parsed = yaml().parse(raw);
   } catch (err) {
     return { ok: false, error: `failed to parse host registry YAML at ${path}: ${(err as Error).message}` };
   }
@@ -361,7 +365,7 @@ export function addHostEntry(rawEntry: Record<string, unknown>, path: string = d
   try {
     mkdirSync(dirname(path), { recursive: true });
     const tmp = join(dirname(path), `.hosts.yaml.tmp-${process.pid}`);
-    writeFileSync(tmp, stringifyYaml({ hosts: validated.registry.hosts }), { mode: 0o600 });
+    writeFileSync(tmp, yaml().stringify({ hosts: validated.registry.hosts }), { mode: 0o600 });
     renameSync(tmp, path);
   } catch (err) {
     return { ok: false, error: `failed to write host registry at ${path}: ${(err as Error).message}` };
