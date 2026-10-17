@@ -47,11 +47,40 @@ function parsePreset(name: string, path: string, text: string): AgentAppPresetLo
   for (const key of ["command", "maintainer"] as const) {
     if (typeof raw[key] !== "string" || !(raw[key] as string).trim()) return bad(`${key} must be a non-empty string`);
   }
+  const shell = shellSyntaxIn(raw.command as string);
+  if (shell) {
+    return bad(`command must be a single program and its arguments; shell syntax such as ${shell} isn't supported: put it in a script and name the script`);
+  }
   const limits = raw.limits ?? [];
   if (!Array.isArray(limits) || limits.some(limit => typeof limit !== "string" || !limit.trim())) {
     return bad("limits must be a list of non-empty strings");
   }
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[], path } };
+}
+
+/** The first shell construct in a preset command, or null when it's one program with its arguments. The command is
+ *  started through `/usr/bin/env`, so operators, redirections, substitutions and newlines wouldn't apply to the program
+ *  (and an alias isn't a program). Single and double quotes may group an argument. */
+function shellSyntaxIn(command: string): string | null {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    const next = command[i + 1];
+    if (quote === "'") { if (c === "'") quote = null; continue; }
+    if (c === "\n" || c === "\r") return "a newline";
+    if (c === "`") return "`…` (command substitution)";
+    if (c === "$" && next === "(") return "$(…) (command substitution)";
+    if (quote === '"') { if (c === '"') quote = null; continue; }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    if (c === "&" && next === "&") return "&&";
+    if (c === "|" && next === "|") return "||";
+    if (c === "|") return "|";
+    if (c === "&") return "&";
+    if (c === ";") return ";";
+    if (c === "<" || c === ">") return "a redirection (< or >)";
+    if (c === "(" || c === ")") return "a subshell ( … )";
+  }
+  return quote ? "an unclosed quote" : null;
 }
 
 /** The installed preset for a community agent app, or why there isn't a usable one. */

@@ -68,6 +68,24 @@ describe("agent app presets", () => {
     expect(loadAgentAppPreset("../outside", inner)).toMatchObject({ ok: false, kind: "missing" });
   });
 
+  it.each([
+    ["&&", "node app.mjs && echo started"],
+    ["|", "node app.mjs | tee app.log"],
+    [";", "cd /srv/app; node app.mjs"],
+    ["a redirection (< or >)", "node app.mjs > app.log"],
+    ["$(…) (command substitution)", "node $(which app).mjs"],
+  ])("refuses shell syntax (%s) in the command, since it's started without a shell", (shown, command) => {
+    const found = loadAgentAppPreset("synth", presets({ "synth.yaml": GOOD.replace("command: synth-app --serve", `command: ${command}`) }));
+    expect(found).toMatchObject({ ok: false, kind: "incompatible" });
+    expect(!found.ok && found.message).toContain(`command must be a single program and its arguments; shell syntax such as ${shown} isn't supported: put it in a script and name the script`);
+  });
+
+  it("accepts a program whose arguments are quoted, operators inside single quotes included", () => {
+    const command = `node "/srv/my apps/app.mjs" --label 'a|b && c' --name "two words"`;
+    const found = loadAgentAppPreset("synth", presets({ "synth.yaml": GOOD.replace("command: synth-app --serve", `command: ${command}`) }));
+    expect(found).toMatchObject({ ok: true, preset: { command } });
+  });
+
   it("reserves every built-in runtime name", () => {
     for (const name of ["claude-code", "codex", "pi", "omp", "terminal", "stub"]) {
       const dir = presets({ [`${name}.yaml`]: GOOD.replace("name: synth", `name: ${name}`) });
@@ -97,6 +115,15 @@ describe("the agent app adapter", () => {
     const { tmux, app } = adapter(presets({ "synth.yaml": GOOD }));
     expect(await app.launchHarness(binding, { name: "w@r" })).toEqual({ ok: true });
     expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "synth-app --serve", undefined, { stageIfLong: true, execInScript: true });
+  });
+
+  it("types the command through the seat's launch environment, as a real daemon does", async () => {
+    const { tmux } = adapter(presets({ "synth.yaml": GOOD }));
+    const command = vi.fn(async (_session: string, cmd: string, target?: { runtime?: string }) => `/usr/bin/env OPENRIG_RUNTIME=${target?.runtime} ${cmd}`);
+    const app = new AgentAppRuntimeAdapter("synth", { tmux, seatLaunchEnvironment: { command }, presetsDir: () => presets({ "synth.yaml": GOOD }) });
+    expect(await app.launchHarness(binding, { name: "w@r" })).toEqual({ ok: true });
+    expect(command).toHaveBeenCalledWith("w@r", "synth-app --serve", { runtime: "synth" });
+    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "/usr/bin/env OPENRIG_RUNTIME=synth synth-app --serve", undefined, { stageIfLong: true, execInScript: true });
   });
 
   it("refuses resume and fork without starting anything", async () => {
