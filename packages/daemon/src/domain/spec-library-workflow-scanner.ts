@@ -378,10 +378,12 @@ function isUnderDir(childPath: string, parentDir: string): boolean {
 // (OQ-4 decision; deletion + audit log).
 //
 // OQ-3 mtime check: a file is skipped when its mtime is <= the cache row's
-// cached_at (no parse work needed). Otherwise it's re-parsed via the cache
-// (which itself hashes the content and returns the prior row when the
-// hash matches — second layer of skip for content-stable files whose
-// mtime nonetheless advanced, e.g., touch).
+// cached_at and its content hash still matches. A file can be restored or
+// copied with an older mtime, so the timestamp alone cannot prove that the
+// cached content is current. Otherwise it's re-parsed via the cache (which
+// itself hashes the content and returns the prior row when the hash matches —
+// second layer of skip for content-stable files whose mtime advanced, e.g.,
+// touch).
 
 export interface ScanWorkflowSpecFolderOpts {
   /** SQLite handle (used for direct lookups). */
@@ -454,8 +456,9 @@ export function scanWorkflowSpecFolder(
     result.scanned += 1;
 
     // mtime check (OQ-3): if the cache has a row at this source_path
-    // whose cached_at is at or after the file's mtime, the file is
-    // unchanged since last scan — skip the re-parse work entirely.
+    // whose cached_at is at or after the file's mtime, compare the
+    // content hash before skipping the re-parse. A restored or copied
+    // file can have an older mtime even though its content changed.
     //
     // Compare at second-resolution because some filesystems (HFS+, FAT)
     // round mtime down to whole seconds while cached_at carries ms
@@ -472,17 +475,16 @@ export function scanWorkflowSpecFolder(
       const cachedAtSec = Math.floor(cachedAtMs / 1000);
       const mtimeSec = Math.floor(mtimeMs / 1000);
       if (Number.isFinite(cachedAtMs) && cachedAtSec >= mtimeSec) {
-        let unchanged = cachedAtSec > mtimeSec;
-        if (!unchanged) {
-          // A same-second edit shares the timestamp bucket. Consult the
-          // cache's existing content hash before treating it as unchanged.
-          try {
-            // Hash the UTF-8 text exactly the way the cache hashes it on
-            // write (not the raw bytes): for files that are not clean UTF-8
-            // the two digests differ and every scan would re-parse.
-            unchanged = createHash("sha256").update(readFileSync(filePath, "utf-8")).digest("hex") === cachedAt.source_hash;
-          } catch { /* The existing readThrough path records the diagnostic. */ }
-        }
+        // Consult the cache's existing content hash before treating the file
+        // as unchanged. This covers both same-second edits and edits whose
+        // mtime moved backwards. Hash the UTF-8 text exactly the way the
+        // cache hashes it on write (not the raw bytes): for files that are
+        // not clean UTF-8 the two digests differ and every scan would
+        // re-parse.
+        let unchanged = false;
+        try {
+          unchanged = createHash("sha256").update(readFileSync(filePath, "utf-8")).digest("hex") === cachedAt.source_hash;
+        } catch { /* The existing readThrough path records the diagnostic. */ }
         if (unchanged) {
           result.skipped += 1;
           continue;

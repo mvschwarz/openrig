@@ -154,6 +154,23 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.skipped).toBe(0);
   });
 
+  it("re-reads a valid edit when file mtime moves backward", () => {
+    const file = join(folder, "wf.yaml");
+    writeFileSync(file, VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const before = db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as {cached_at: string};
+
+    writeFileSync(file, VALID_YAML.replace("A folder-scan fixture", "Updated objective"));
+    const older = new Date(Date.parse(before.cached_at) - 60_000);
+    utimesSync(file, older, older);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+
+    expect(result.valid).toBe(1);
+    expect(result.skipped).toBe(0);
+    const row = db.prepare("SELECT purpose FROM workflow_specs WHERE source_path = ? ORDER BY cached_at DESC, rowid DESC LIMIT 1").get(file) as {purpose: string};
+    expect(row.purpose).toBe("Updated objective");
+  });
+
   it.each(["valid-edit", "invalid-edit"])("re-reads a %s within the cached timestamp's second", (edit) => {
     const file = join(folder, "wf.yaml");
     writeFileSync(file, VALID_YAML);
