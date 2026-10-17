@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import YAML from "yaml";
+import { findFrontmatterBlock } from "../frontmatter.js";
 import type Database from "better-sqlite3";
 import { sessionMemberLabel } from "../session-name.js";
 import type { SliceIndexer, SliceRecord } from "../slices/slice-indexer.js";
@@ -323,10 +324,10 @@ export class ReviewGatherer {
 
   private parseFrontmatter(content: string | null): Record<string, unknown> {
     if (!content) return {};
-    const m = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!m) return {};
+    const block = findFrontmatterBlock(content);
+    if (!block) return {};
     try {
-      return (YAML.parse(m[1]!) ?? {}) as Record<string, unknown>;
+      return (YAML.parse(block.yaml) ?? {}) as Record<string, unknown>;
     } catch {
       return {};
     }
