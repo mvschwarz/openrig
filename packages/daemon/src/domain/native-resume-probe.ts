@@ -327,30 +327,43 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   return numberedOption;
 }
 
-// Claude's request-time refusals when it has no usable login (code.claude.com/docs/en/errors).
-const CLAUDE_LOGIN_REFUSALS = new Set(["Not logged in · Please run /login", "Login expired · Please run /login"]);
-const CLAUDE_RESPONSE_MARKER = /^\s*(?:[●⏺⎿]\s*)+/;
+// Claude's interactive refusals of a request for a missing, expired or revoked login, and its 401 rejection, whose
+// tail varies (code.claude.com/docs/en/errors).
+const CLAUDE_LOGIN_REFUSALS = new Set([
+  "Not logged in · Please run /login",
+  "Login expired · Please run /login",
+  "OAuth token revoked · Please run /login",
+]);
+const CLAUDE_LOGIN_REFUSAL_PREFIX = "Please run /login · API Error: 401";
 
-// A refusal blocks only as Claude's latest response: the last marked response row (● or ⏺ reply, ⎿ result) after
-// the last submitted prompt (❯) and above the input box, reading exactly as a refusal. The persistent
-// "Not logged in · Run /login" footer says only that Claude holds no credential of its own, and a gateway can still
-// authenticate its requests. Older scrollback, a refusal quoted in a prompt or reply, and one followed by a newer
-// reply or prompt are not current.
+// A refusal blocks only as Claude's latest response. The persistent "Not logged in · Run /login" footer says only
+// that Claude holds no credential of its own, and a gateway can still authenticate its requests. Claude starts a
+// reply with ● or ⏺ at column 0 and a result with ⎿ two cells in, continuing either on indented rows up to a blank
+// row; an indented marker is quoted text. The last ❯ row is the input box only when no response follows it;
+// otherwise it is a submitted prompt and no box is drawn. A refusal counts when it is the last response after the
+// last submitted prompt, so older scrollback, quoted text and a refusal followed by a newer reply or prompt do not.
 function hasCurrentClaudeLoginRefusal(paneContent: string): boolean {
   const lines = paneContent.split(/\r?\n/);
-  const isPromptRow = (line: string) => /^\s*❯/.test(line);
-  let inputBox = lines.length;
-  for (let index = lines.length - 1; index >= 0; index--) {
-    if (isPromptRow(lines[index]!)) { inputBox = index; break; }
+  const isPrompt = (line: string) => /^\s*❯/.test(line);
+  const isResponse = (line: string) => /^[●⏺]/.test(line) || /^ {2}⎿/.test(line);
+  const prompts: number[] = [];
+  const responses: Array<{ at: number; text: string }> = [];
+  for (let at = 0; at < lines.length; at++) {
+    const line = lines[at]!;
+    if (isPrompt(line)) prompts.push(at);
+    if (!isResponse(line)) continue;
+    let text = line.replace(/^\s*[●⏺⎿]/, "");
+    // Claude wraps its own rows with a short hanging indent; a right-aligned footer is not a continuation.
+    for (let next = at + 1; next < lines.length && /^ {1,6}\S/.test(lines[next]!) && !isPrompt(lines[next]!)
+      && !isResponse(lines[next]!); next++) text += ` ${lines[next]}`;
+    responses.push({ at, text: text.replace(/\s+/g, " ").trim() });
   }
-  let latest: "refusal" | "reply" | null = null;
-  for (const line of lines.slice(0, inputBox)) {
-    if (isPromptRow(line)) latest = null;
-    else if (CLAUDE_RESPONSE_MARKER.test(line)) {
-      latest = CLAUDE_LOGIN_REFUSALS.has(line.replace(CLAUDE_RESPONSE_MARKER, "").trim()) ? "refusal" : "reply";
-    }
-  }
-  return latest === "refusal";
+  const lastPrompt = prompts.at(-1) ?? -1;
+  const inputBox = responses.some(({ at }) => at > lastPrompt) ? lines.length : lastPrompt;
+  const turnStart = prompts.filter((at) => at < inputBox).at(-1) ?? -1;
+  const latest = responses.filter(({ at }) => at > turnStart && at < inputBox).at(-1)?.text;
+  return latest !== undefined
+    && (CLAUDE_LOGIN_REFUSALS.has(latest) || latest.startsWith(CLAUDE_LOGIN_REFUSAL_PREFIX));
 }
 
 function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
