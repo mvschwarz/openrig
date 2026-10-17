@@ -70,6 +70,29 @@ describe("OMP runner command and child isolation", () => {
     expect(env).not.toHaveProperty("OPENRIG_RUNTIME");
     expect(env.HOME).toBe("/operator");
   });
+  it("forwards DEEPSEEK_API_KEY to Pi child processes when declaring deepseek models", () => {
+    const source = {
+      PATH: "/usr/bin",
+      HOME: "/operator",
+      DEEPSEEK_API_KEY: "secret-deepseek-key",
+      OPENAI_API_KEY: "other-provider-key",
+      OPENRIG_ACTIVITY_HOOK_TOKEN: "private-token",
+    };
+    const env = buildPiChildEnv(source, {
+      runtime: "pi",
+      agentDir: "/s/agent",
+      sessionsDir: "/s/sessions",
+      sessionName: "pi-worker@rig",
+      model: "deepseek/deepseek-chat",
+    });
+    expect(env).toMatchObject({
+      DEEPSEEK_API_KEY: "secret-deepseek-key",
+      PI_CODING_AGENT_DIR: "/s/agent",
+      PI_CODING_AGENT_SESSION_DIR: "/s/sessions",
+    });
+    expect(env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(env).not.toHaveProperty("OPENRIG_ACTIVITY_HOOK_TOKEN");
+  });
 
   it("admits every OMP provider key into OMP seats only", () => {
     const names = Object.values(OMP_PROVIDER_ENV_VARS);
