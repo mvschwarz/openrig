@@ -227,8 +227,11 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // same deltas, so appending it repeated the growing text. Thinking and
       // tool-call argument deltas stay out of the pane; tool calls get their
       // own one-line summaries from tool_execution_*.
+      // OMP and Pi both provide text_delta frames. The enclosing message is a
+      // cumulative snapshot, not another delta: appending it duplicates replies.
       const update = event.assistantMessageEvent as Record<string, unknown> | undefined;
-      const delta = update?.type === "text_delta" && typeof update.delta === "string" ? update.delta : "";
+      const hasDelta = update?.type === "text_delta" && typeof update.delta === "string";
+      const delta = hasDelta ? update.delta as string : "";
       return delta ? { mirrorLines: [], mirrorAppend: delta } : { mirrorLines: [] };
     }
     case "message_end":
@@ -577,6 +580,7 @@ export class RunnerCore {
       const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
       this.sessionFile = sessionFile ?? this.sessionFile;
       this.sessionId = sessionId ?? this.sessionId;
+      const wasReady = this.ready;
       this.ready = this.runtime === "pi" || !!this.sessionFile;
       if (!this.ready) {
         this.io.mirrorLine("[omp-runner] ERROR rpc get_state returned no session file; cannot provide a resume token");
@@ -584,7 +588,12 @@ export class RunnerCore {
         return;
       }
       this.writeSidecar({});
-      this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile ?? "unknown"}`);
+      if (!wasReady) {
+        // Only the FIRST get_state->ready transition announces READY.
+        // The 5s heartbeat re-confirms liveness silently —
+        // re-printing READY on every poll spammed the pane (regression fold).
+        this.io.mirrorLine(`${this.runtime === "omp" ? "[omp-runner] READY" : PI_RUNNER_READY_MARKER} session=${this.sessionFile ?? "unknown"}`);
+      }
       this.postSessionIdentity();
       return;
     }
