@@ -344,6 +344,28 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.qitem_id)).toContain("qitem-lane-31");
   });
 
+  describe("a slice: tag names the slice by its frontmatter id or its directory name", () => {
+    const working = { activity: "working" as const, needsInput: { count: 0, reason: null }, decidedBy: "window-sampling", changedAt: "2026-08-29T21:59:30.000Z" };
+    const retag = (qitemId: string, tags: string[]) =>
+      db.prepare(`UPDATE queue_items SET tags = ? WHERE qitem_id = ?`).run(JSON.stringify(tags), qitemId);
+    const lane32 = async () => ((await show()).q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-lane-32")!;
+    const seq32 = async () => ((await show()).q2_sequencing as Record<string, unknown>[]).find((s) => s.slice_id === "OPR.9.9.32")!;
+
+    for (const [form, tag] of [["frontmatter id", "OPR.9.9.32"], ["directory name", "32-beta"], ["both forms", "OPR.9.9.32"]] as const) {
+      it(`gives a row tagged by ${form} an owner lane with working activity and a claimed slice`, async () => {
+        retag("qitem-lane-32", form === "both forms" ? [`mission:${MISSION}`, `slice:${tag}`, "slice:32-beta"] : [`mission:${MISSION}`, `slice:${tag}`]);
+        arbitratedBySession.set(SEAT_B, working);
+        const lane = await lane32();
+        expect(lane.seat).toBe(SEAT_B);
+        expect((lane.activity as Record<string, unknown>).activity).toBe("working");
+        const seq = await seq32();
+        expect((seq.work_rows as Record<string, unknown>[]).map((w) => w.qitem_id)).toEqual(["qitem-lane-32"]);
+        expect(seq.next_up).toBe(false);
+        expect(seq.next_up_basis).toBe("already claimed in-progress");
+      });
+    }
+  });
+
   describe("a row binds to a mission by its mission: tag first and by a body mention only when it has none", () => {
     const later = "2026-08-29T21:30:00.000Z";
     const addRow = (id: string, tags: string[], body: string, state = "in-progress", seat = SEAT_B) =>
@@ -699,6 +721,96 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     git(repoDir, "update-ref", "refs/heads/main", unfolded);
     const after = ((await show()).q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
     expect(after).toMatchObject({ folded: { value: true }, adopted: { value: false } });
+  });
+
+  describe("a row parked on an external gate is a waiting lane", () => {
+    const lanesOf = async (slice: string) =>
+      ((await show()).q1_lanes as Record<string, unknown>[]).filter((l) => l.slice === slice);
+    const park = (id: string, slice: string, seat: string, blockedOn: string) => {
+      const t = "2026-08-29T21:30:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES (?, ?, ?, 'lead@exec-fixture', ?, 'blocked', 'normal', 'light', ?, 'In review upstream.', ?, ?)`,
+      ).run(id, t, t, seat, JSON.stringify([`mission:${MISSION}`, `slice:${slice}`]), t, blockedOn);
+    };
+
+    it("lists the parked row's seat as the slice's lane, marked waiting and on what, with pickup parked", async () => {
+      park("qitem-pr-32", "OPR.9.9.32", SEAT_B, "external:pr-1293");
+      // lane-32 was in-progress; close it so the slice has only the parked row.
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      const lanes = await lanesOf("OPR.9.9.32");
+      expect(lanes).toHaveLength(1);
+      expect(lanes[0]).toMatchObject({
+        qitem_id: "qitem-pr-32",
+        seat: SEAT_B,
+        waiting: { on: "external:pr-1293" },
+        pickup: { state: "parked" },
+      });
+      // A waiting lane is not live work: parallelism health ignores it, so q1_lanes is longer than lanes_live.
+      const q6 = (await show()).q6_parallelism as Record<string, unknown>;
+      expect(q6.lanes_live).toBe(1);
+      expect(((await show()).q1_lanes as unknown[]).length).toBe(2);
+    });
+
+    it("shows a coordination wait with no worktree_path= line as a waiting row, not a builder", async () => {
+      park("qitem-decision-33", "OPR.9.9.33", SEAT_B, "external:capacity-decision");
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-parked-33'").run();
+      expect((db.prepare("SELECT body FROM queue_items WHERE qitem_id = 'qitem-decision-33'").get() as { body: string }).body).not.toContain("worktree_path=");
+      const lanes = await lanesOf("OPR.9.9.33");
+      expect(lanes).toHaveLength(1);
+      expect(lanes[0]).toMatchObject({
+        qitem_id: "qitem-decision-33",
+        seat: SEAT_B,
+        waiting: { on: "external:capacity-decision" },
+        worktree_path: "INDETERMINATE",
+        fragile_join: true,
+      });
+    });
+
+    it("leaves active lanes unmarked and shows only the in-progress lane when the slice also has a parked external row", async () => {
+      park("qitem-pr-31", "OPR.9.9.31", SEAT_B, "external:pr-7");
+      const lanes = await lanesOf("OPR.9.9.31");
+      expect(lanes.map((l) => l.qitem_id)).toEqual(["qitem-lane-31"]);
+      expect(lanes[0]!.waiting).toBeNull();
+    });
+
+    it("does not make a lane of a row parked on a qitem, a human seat, or a fold:/auth: gate", async () => {
+      for (const [i, on] of ["qitem-blocker-x", "human@kernel", "fold:main", "auth:claude", "external:"].entries()) {
+        park(`qitem-other-${i}`, "OPR.9.9.33", SEAT_B, on);
+      }
+      expect(await lanesOf("OPR.9.9.33")).toEqual([]);
+    });
+
+    it("keeps the park honest: the parked lane is in Q5 with its wake still armed, and is not a stall", async () => {
+      park("qitem-pr-32", "OPR.9.9.32", SEAT_B, "external:pr-1293");
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      db.prepare(
+        `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, transition_note, actor_session)
+         VALUES (32001, 'qitem-pr-32', '2026-08-29T21:30:00.000Z', 'blocked', 'parked', ?)`,
+      ).run(SEAT_B);
+      db.prepare(
+        `INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref)
+         VALUES (32001, 'qitem-pr-32', 'armed', 'timer', 'wake-timer-pr-32')`,
+      ).run();
+      const doc = await show();
+      const q5 = (doc.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-pr-32")!;
+      expect(q5.pickup_state).toBe("parked");
+      expect(q5.park_kind).toBe("deliberate-with-wake");
+      expect(String(q5.park_kind_basis)).toContain("wake-timer-pr-32");
+    });
+
+    it("lets an in-progress lane win whichever of the slice's id or dir each row names", async () => {
+      // Both forms name slice 31: lane-31 is tagged by id, the parked row by dir, and the reverse.
+      park("qitem-pr-31-dir", "31-alpha", SEAT_B, "external:pr-7");
+      expect((await lanesOf("OPR.9.9.31")).map((l) => l.qitem_id)).toEqual(["qitem-lane-31"]);
+      expect((await lanesOf("31-alpha"))).toEqual([]);
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = 'qitem-lane-31'")
+        .run(JSON.stringify([`mission:${MISSION}`, "slice:31-alpha", `candidate:${candidateSha.slice(0, 9)}`]));
+      db.prepare("DELETE FROM queue_items WHERE qitem_id = 'qitem-pr-31-dir'").run();
+      park("qitem-pr-31-id", "OPR.9.9.31", SEAT_B, "external:pr-7");
+      expect((await lanesOf("31-alpha")).map((l) => l.qitem_id)).toEqual(["qitem-lane-31"]);
+      expect(await lanesOf("OPR.9.9.31")).toEqual([]);
+    });
   });
 
   describe("reported merge (squash merges leave the candidate off the integration ref)", () => {

@@ -555,6 +555,10 @@ function requireNonEmptyResolvedBody(body: string, source: string): string {
   throw err;
 }
 
+/** The states that close a row; `rig queue update --resolution` needs one of them. */
+const CLOSING_STATES = ["done", "canceled", "denied", "failed", "handed-off"];
+const CLOSING_STATES_PHRASE = "done, canceled, denied, failed or handed-off";
+
 function emitBodyResolveError(err: Error & { fact?: string; consequence?: string; action?: string }, json: boolean): void {
   if (json) {
     console.log(JSON.stringify({ ok: false, error: { fact: err.fact ?? err.message, consequence: err.consequence ?? "", action: err.action ?? "" } }, null, 2));
@@ -935,6 +939,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done; also 'superseded' on state=canceled (with --closure-target = the successor) records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, blocked_on, escalation, and superseded")
+    .option("--resolution <text>", "The outcome, stored on the row and shown by rig queue show. Needs --state done, canceled, denied, failed or handed-off, and non-blank text. Stored when the update closes an open row, after anything the row already has (a fallback line, an earlier outcome); a row that is already closed keeps what it has")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
     .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
     .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
@@ -949,6 +954,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       reopen?: boolean;
       closureReason?: string;
       closureTarget?: string;
+      resolution?: string;
       blockedOn?: string;
       wakeWatchdog?: string;
       wakeAfter?: number;
@@ -958,6 +964,21 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       json?: boolean;
       full?: boolean;
     }) => {
+      // --resolution is checked here, before anything is sent: it names the outcome of a close, so it
+      // needs a closing --state and some text. The daemon ignores it anywhere else.
+      if (opts.resolution !== undefined) {
+        const problem = opts.state === undefined || !CLOSING_STATES.includes(opts.state)
+          ? { code: "resolution_needs_closing_state", message: `--resolution records the outcome of a close, so it needs --state ${CLOSING_STATES_PHRASE}${opts.state === undefined ? "" : ` (got '${opts.state}')`}. Nothing was sent.` }
+          : opts.resolution.trim().length === 0
+            ? { code: "resolution_needs_text", message: "--resolution needs text; it is blank. Nothing was sent." }
+            : null;
+        if (problem) {
+          if (opts.json) console.error(JSON.stringify({ error: problem.code, message: problem.message }));
+          else console.error(problem.message);
+          process.exitCode = 1;
+          return;
+        }
+      }
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
       // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
@@ -969,6 +990,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           reopen: opts.reopen,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
+          resolution: opts.resolution,
           blockedOn: opts.blockedOn,
           wakeWatchdogId: opts.wakeWatchdog,
           wakeAfterSeconds: opts.wakeAfter,
@@ -1335,12 +1357,19 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           await printQueueItemResult(client, qitemId, json, item, res.status);
           return;
         }
+        // The closing transition is for --full; the bounded preview prints the record as it did before.
+        const { closingTransition, ...record } = item as typeof item & { closingTransition?: unknown };
         const { preview, bodyBytes, bodyTruncated } = previewBody(item.body);
         // Append-only additions: keep `body` in place (now the preview) and add
         // the honest size + truncation flag. Object otherwise unchanged.
         const fullCommand = `rig queue show ${shellQuote(qitemId)} --full --json`;
-        const view = readView(item, fullCommand, bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []);
-        const transformed = { ...item, body: preview, bodyBytes, bodyTruncated, readView: view };
+        // Everything held back from this preview is declared, so a reader that trusts readView runs --full.
+        const omitted = [
+          ...(bodyTruncated ? [omittedReadField("body (after preview)", item.body.slice(preview.length))] : []),
+          ...(closingTransition === undefined ? [] : [omittedReadField("closingTransition", closingTransition)]),
+        ];
+        const view = readView(item, fullCommand, omitted);
+        const transformed = { ...record, body: preview, bodyBytes, bodyTruncated, readView: view };
         // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);

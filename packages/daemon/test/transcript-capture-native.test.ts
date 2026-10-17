@@ -111,8 +111,15 @@ it.skipIf(!nativeAvailable)("keeps real idle transcript health fresh across a va
     }
     expect(first, "the first capture landed within 10 s").toMatchObject({ state: "live", reason: "capture_fresh" });
     const until = Date.now() + 25_000;
+    let lastWrite = 0;
     while (Date.now() < until) {
-      expect(store.getIngestHealth("rig", "seat")).toMatchObject({ state: "live", reason: "capture_fresh" });
+      // Once the ticks stop, skipped ticks keep ingest live while the capture time stays the last capture.
+      expect(store.getIngestHealth("rig", "seat").state).toBe("live");
+      // A line every 3s keeps the seat capturing, so the slow fifth capture happens.
+      if (!slowCompleted && Date.now() - lastWrite > 3000) {
+        lastWrite = Date.now();
+        await run("send-keys", "-t", "seat", "-l", "tick"); await run("send-keys", "-t", "seat", "Enter");
+      }
       await wait(100);
     }
     expect(slowCompleted).toBe(true);

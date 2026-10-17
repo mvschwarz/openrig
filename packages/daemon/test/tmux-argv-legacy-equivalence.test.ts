@@ -120,6 +120,8 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.getDefaultShell();
   await a.getPaneCommand(SESSION);
   await a.getSessionEnv(SESSION, "OPENRIG_NODE_ID");
+  await a.setSessionEnv(SESSION, "SEAT_FLAG", "it's a value");
+  await a.unsetSessionEnv(SESSION, "SEAT_FLAG");
   await a.hasSessionEnv(SESSION, "OPENRIG_NODE_ID");
   await a.startPipePane(SESSION, "/tmp/out dir/it's.log");
   await a.stopPipePane(SESSION);
@@ -133,6 +135,7 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.showServerOption("copy-command");
   await a.getSessionOption(SESSION, "@openrig-x");
   await a.readAllSessionWindowActivity();
+  await a.readAllSessionWindows();
   await a.readAllPaneProcesses();
   await a.readPaneLastActivity(SESSION);
   await a.listClients();

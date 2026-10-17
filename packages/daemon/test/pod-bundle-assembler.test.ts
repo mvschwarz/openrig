@@ -395,7 +395,7 @@ describe("PodBundleAssembler", () => {
   });
 
   it.each([false, true])("keeps in-root symlinks with a symlinked rig root: %s", (aliasRoot) => {
-    const root = nodeFs.mkdtempSync(nodePath.join(tmpdir(), "pod-containment-"));
+    const root = nodeFs.realpathSync(nodeFs.mkdtempSync(nodePath.join(tmpdir(), "pod-containment-")));
     try {
       const actualRoot = nodePath.join(root, "rig");
       nodeFs.mkdirSync(actualRoot);

@@ -1,3 +1,4 @@
+import { packetScopeTags, readInstanceScope } from "./workflow-scope.js";
 import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
 // OPR.0.4.6.WF5 FR-2 class (b): detection-time exception items for
 // STUCK/OVERDUE instances.
@@ -132,6 +133,7 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
       `reason: ${exception.reason}\n` +
       `evidence: ${evidenceRef}\n` +
       `resolve: inspect the current owner and deadline; packet age alone does not establish idle. This item clears when the instance leaves the exception state.`;
+    const scopeTags = packetScopeTags(readInstanceScope(deps.db, e.instanceId), e.stepId);
     const createItem = (destination: string, tier: string) =>
       deps.queueRepo.create({
         qitemId: recoveryId(deps.db, e.packetId),
@@ -140,7 +142,7 @@ export function makeEnsureStuckExceptionItem(deps: StuckExceptionDeps): EnsureSt
         body,
         priority: "urgent",
         tier,
-        tags: [...workflowExceptionTags(exception.identity), recoveryTag(e.packetId)],
+        tags: [...workflowExceptionTags(exception.identity), recoveryTag(e.packetId), ...scopeTags],
         summary: exception.reason,
         evidenceRef,
       });

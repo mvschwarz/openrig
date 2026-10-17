@@ -100,6 +100,11 @@ function makeStdout(): Stdout {
 
 const MISSION_MANIFEST = `schema: openrig.mission/v0alpha1
 kind: mission
+# The project proof rollup counts only missions whose status is active or
+# release-candidate. A new mission is planned, so it stays outside the rollup
+# until you change this to active (or release-candidate).
+metadata:
+  status: planned
 composition:
   mission_markdown:
     spec: SPEC.md

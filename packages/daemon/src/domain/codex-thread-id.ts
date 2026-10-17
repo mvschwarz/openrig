@@ -8,6 +8,12 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 
 const execFileAsync = promisify(execFile);
 
+export type CodexCaptureDiagnostic = {
+  reason: "no_log_row" | "no_cli_thread" | "ambiguous_threads" | "sqlite_unreadable";
+  count?: number;
+};
+export type CodexCaptureReporter = (diagnostic: CodexCaptureDiagnostic) => void;
+
 /** F1 (B12's completion): may return a plain value (test stubs stay sync) or a Promise — every
  *  caller awaits it, and the DEFAULT is async so the per-PID `ps eww` spawn no longer blocks the
  *  event loop (measured live: 28.9s/15min of burst blocking inside the 8-attempt capture loops). */
@@ -98,7 +104,7 @@ export class CodexThreadIdResolver {
       /** Explicit provider root; never search another home's logs on a miss. */
       codexHome?: string;
       resolveHomeDirByPid?: ResolveHomeDirByPid;
-      readFromLogs?: (pid: number, homeDir: string) => string | undefined;
+      readFromLogs?: (pid: number, homeDir: string, report?: CodexCaptureReporter) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
       /** Freshness bound for UNSETTLED cache entries — identity-less
@@ -122,8 +128,8 @@ export class CodexThreadIdResolver {
    * call-graph discipline — is reachable ONLY via resolveUngatedLegacy, so a NEW identity-less
    * call site is a COMPILE error (the review-visible pin; see the codex-thread-id test).
    */
-  async resolve(pid: number, identity: string): Promise<string | undefined> {
-    return this.resolveInternal(pid, identity);
+  async resolve(pid: number, identity: string, report?: CodexCaptureReporter): Promise<string | undefined> {
+    return this.resolveWithDiagnostics(pid, identity, report);
   }
 
   /**
@@ -135,23 +141,35 @@ export class CodexThreadIdResolver {
    * false, and every entry it writes stays bounded by homeTtlMs (60s) — see the settled-permanence
    * rule (e91d7a94) on the cache above.
    */
-  async resolveUngatedLegacy(pid: number): Promise<string | undefined> {
-    return this.resolveInternal(pid, undefined);
+  async resolveUngatedLegacy(pid: number, report?: CodexCaptureReporter): Promise<string | undefined> {
+    return this.resolveWithDiagnostics(pid, undefined, report);
   }
 
-  private async resolveInternal(pid: number, identity: string | undefined): Promise<string | undefined> {
+  private async resolveWithDiagnostics(pid: number, identity: string | undefined, report?: CodexCaptureReporter): Promise<string | undefined> {
+    const diagnostics: CodexCaptureDiagnostic[] = [];
+    const token = await this.resolveInternal(pid, identity, diagnostic => diagnostics.push(diagnostic));
+    if (!token) {
+      // A default-home miss followed by a successful alternate-home read is not a failure.
+      const priority = { no_log_row: 0, no_cli_thread: 1, ambiguous_threads: 2, sqlite_unreadable: 3 };
+      const diagnostic = diagnostics.sort((a, b) => priority[b.reason] - priority[a.reason])[0];
+      report?.(diagnostic ?? { reason: "no_log_row" });
+    }
+    return token;
+  }
+
+  private async resolveInternal(pid: number, identity: string | undefined, report: CodexCaptureReporter): Promise<string | undefined> {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
-    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome);
+    if (this.opts.codexHome) return readCodexThreadIdFromLogs(pid, "", undefined, minTs, this.opts.codexHome, report);
     const readFromLogs = this.opts.readFromLogs
-      ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home, undefined, minTs));
+      ?? ((p: number, home: string, report?: CodexCaptureReporter) => readCodexThreadIdFromLogs(p, home, undefined, minTs, undefined, report));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
     const now = this.opts.now ?? Date.now;
     const ttl = this.opts.homeTtlMs ?? 60_000;
 
     // 1. Default home: no subprocess.
-    const fromDefault = readFromLogs(pid, defaultHome);
+    const fromDefault = readFromLogs(pid, defaultHome, report);
     if (fromDefault) return fromDefault;
 
     // 2. FRESH cached home for this (pid, identity): no subprocess. A reused
@@ -163,7 +181,7 @@ export class CodexThreadIdResolver {
     const cached = this.homeByKey.get(key);
     if (cached) {
       if (cached.settled || now() - cached.at <= ttl) {
-        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home);
+        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home, report);
       }
       this.homeByKey.delete(key);
     }
@@ -201,7 +219,7 @@ export class CodexThreadIdResolver {
     })();
     const home = await homePromise;
     if (!home || home === defaultHome) return undefined;
-    return readFromLogs(pid, home);
+    return readFromLogs(pid, home, report);
   }
 
   private cacheHome(key: string, home: string, settled: boolean): void {
@@ -222,7 +240,7 @@ export class CodexThreadIdResolver {
 // `true` is no longer assignable, and `tsc --noEmit` on packages/daemon FAILS. resolveUngatedLegacy is
 // the ONLY identity-less read path. Acceptance (r1): re-open resolve() to optional identity -> tsc fails.
 type ResolveRequiresIdentity =
-  Parameters<CodexThreadIdResolver["resolve"]> extends [pid: number, identity: string] ? true : never;
+  Parameters<CodexThreadIdResolver["resolve"]> extends [pid: number, identity: string, report?: CodexCaptureReporter] ? true : never;
 const _resolveRequiresIdentityPin: ResolveRequiresIdentity = true;
 void _resolveRequiresIdentityPin;
 
@@ -247,7 +265,9 @@ function readCodexThreadIdFromLogs(
   exists?: (path: string) => boolean,
   minTs?: number,
   codexHome?: string,
+  report?: CodexCaptureReporter,
 ): string | undefined {
+  let unreadable = false;
   const loggedIds = new Set<string>();
   for (const dbPath of resolveCodexDbPaths(homeDir, "logs", exists, codexHome)) {
     try {
@@ -261,9 +281,12 @@ function readCodexThreadIdFromLogs(
       } finally {
         db.close();
       }
-    } catch { /* Missing logs provide no process identity. */ }
+    } catch { unreadable = true; }
   }
-  if (!loggedIds.size) return undefined;
+  if (!loggedIds.size) {
+    report?.({ reason: unreadable ? "sqlite_unreadable" : "no_log_row" });
+    return undefined;
+  }
   // Native title generation logs another thread in the same process. Join only
   // PID-owned IDs to retained CLI conversations; recency cannot identify the TUI.
   const conversations = new Set<string>();
@@ -276,10 +299,14 @@ function readCodexThreadIdFromLogs(
       } finally {
         db.close();
       }
-    } catch { /* Missing native state is not evidence of a conversation. */ }
+    } catch { unreadable = true; }
   }
   // Multiple retained conversations in one process need a stronger native signal.
-  return conversations.size === 1 ? [...conversations][0] : undefined;
+  if (conversations.size === 1) return [...conversations][0];
+  report?.(unreadable ? { reason: "sqlite_unreadable" }
+    : conversations.size > 1 ? { reason: "ambiguous_threads", count: conversations.size }
+    : { reason: "no_cli_thread" });
+  return undefined;
 }
 
 /** Parse `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch

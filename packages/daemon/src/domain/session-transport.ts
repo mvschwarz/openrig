@@ -32,6 +32,8 @@ import { isShellForeground } from "./shell-classifier.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
+import { isAttentionRequiredReadinessCode, type NodeBinding, type ReadinessResult } from "./runtime-adapter.js";
+import { getLatestStartupFailedEvent, hasClaudeResumeIdentityWork, isRecoverableStartupFailure } from "./startup-orchestrator.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -1487,6 +1489,10 @@ export interface BroadcastResult {
   results: SendResult[];
 }
 
+export interface TransportReadinessChecker {
+  checkReady?(binding: NodeBinding): Promise<ReadinessResult>;
+}
+
 interface SessionTransportDeps {
   db: Database.Database;
   rigRepo: RigRepository;
@@ -1506,6 +1512,7 @@ interface SessionTransportDeps {
   /** S01/S02 P2: optional read-only capture observer. Absent by default (no activation). */
   captureObserver?: CaptureObserverSink;
   listProcesses?: NativeProcessLister;
+  runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
 }
@@ -1516,6 +1523,26 @@ interface SessionMetaRow { runtime: string | null; attachment_type: string | nul
   resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
+interface SessionReconciliationSnapshot {
+  node_id: string;
+  rig_id: string;
+  session_id: string;
+  session_name: string;
+  runtime: string;
+  cwd: string | null;
+  startup_status: string;
+  session_status: string;
+  startup_completed_at: string | null;
+  resume_type: string | null;
+  resume_token: string | null;
+  binding_session: string | null;
+  binding_window: string | null;
+  binding_pane: string | null;
+  binding_updated_at: string | null;
+  occupant_generation: string | null;
+  latest_session_id: string;
+  startup_event_seq: number | null;
+}
 
 export class SessionTransport {
   readonly db: Database.Database;
@@ -1532,6 +1559,8 @@ export class SessionTransport {
   private activityEndpointFile: () => { baseUrl: string; token: string } | null;
   private captureObserver?: CaptureObserverSink;
   private listProcesses?: NativeProcessLister;
+  private runtimeAdapters: Record<string, TransportReadinessChecker>;
+  private inFlightReconciliations = new Map<string, Promise<boolean>>();
   private verifyInputBox?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
@@ -1549,7 +1578,12 @@ export class SessionTransport {
     this.activityEndpointFile = deps.activityEndpointFile ?? (() => null);
     this.captureObserver = deps.captureObserver;
     this.listProcesses = deps.listProcesses;
+    this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+  }
+
+  attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
+    this.runtimeAdapters = { ...this.runtimeAdapters, ...adapters };
   }
 
   /** Freeze the registration and binding before asking tmux about this name. */
@@ -1856,7 +1890,13 @@ export class SessionTransport {
    * agent input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
-    if (!guard) return this.sendUnguarded(sessionName, text, opts);
+    if (!guard) {
+      const result = await this.sendUnguarded(sessionName, text, opts);
+      if (result.ok && result.sent !== false) {
+        await this.reconcileStartupReadiness(sessionName).catch(() => {});
+      }
+      return result;
+    }
     const outbox = new OutboxHandler(this.db);
     const ids = opts?.committedOutboxIds ?? [opts?.deliveryId ?? `guard-send-${randomUUID()}`];
     const retainedResult = (): SendResult => ({ ok: true, sessionName, outcome: "retained", sent: false, verified: false,
@@ -1918,7 +1958,7 @@ export class SessionTransport {
           sendOpts = { ...opts, preWaitedIdle: pre.evidence, preWaitBound: pre.bound };
         }
       }
-      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, sendOpts), async target => {
+      const result = await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, sendOpts), async target => {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         this.db.transaction(() => {
           for (const id of ids) {
@@ -1946,6 +1986,10 @@ export class SessionTransport {
         }
         return retainedResult();
       });
+      if (result.ok && result.sent !== false) {
+        await this.reconcileStartupReadiness(sessionName).catch(() => {});
+      }
+      return result;
     } catch (error) {
       return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
     }
@@ -3170,6 +3214,8 @@ export class SessionTransport {
       };
     }
 
+    await this.reconcileStartupReadiness(sessionName).catch(() => {});
+
     return { ok: true, sessionName, content, lines };
   }
 
@@ -3226,5 +3272,158 @@ export class SessionTransport {
       failed: results.filter((r) => !r.ok).length,
       results,
     };
+  }
+
+  private getReconciliationSnapshot(sessionName: string): SessionReconciliationSnapshot | undefined {
+    return this.db.prepare(`
+      SELECT n.id as node_id, r.id as rig_id, s.id as session_id, s.session_name, n.runtime, n.cwd,
+             s.startup_status, s.status as session_status, s.startup_completed_at,
+             s.resume_type, s.resume_token,
+             b.tmux_session as binding_session, b.tmux_window as binding_window, b.tmux_pane as binding_pane,
+             b.updated_at as binding_updated_at,
+             (SELECT generation_uuid FROM occupant_tenures WHERE node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) as occupant_generation,
+             (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1) as latest_session_id,
+             (SELECT MAX(seq) FROM events e WHERE e.node_id = n.id AND e.type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed')) as startup_event_seq
+      FROM sessions s
+      JOIN nodes n ON n.id = s.node_id
+      JOIN rigs r ON r.id = n.rig_id
+      LEFT JOIN bindings b ON b.node_id = n.id
+      WHERE s.session_name = ?
+      ORDER BY s.id DESC LIMIT 1
+    `).get(sessionName) as SessionReconciliationSnapshot | undefined;
+  }
+
+  /**
+   * Reconcile non-ready startup state after successful session interaction (Refs #7).
+   *
+   * If an active session is in a non-ready startup state (`failed` or `attention_required`),
+   * re-check readiness via the runtime adapter with currentness verification and atomic commit.
+   */
+  async reconcileStartupReadiness(sessionName: string): Promise<boolean> {
+    const existing = this.inFlightReconciliations.get(sessionName);
+    if (existing) return existing;
+
+    const promise = this.doReconcileStartupReadiness(sessionName);
+    this.inFlightReconciliations.set(sessionName, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlightReconciliations.delete(sessionName);
+    }
+  }
+
+  private async doReconcileStartupReadiness(sessionName: string): Promise<boolean> {
+    const snapshot = this.getReconciliationSnapshot(sessionName);
+    if (!snapshot) return false;
+    if (snapshot.startup_status !== "failed" && snapshot.startup_status !== "attention_required") return false;
+    if (snapshot.session_status !== "running") return false;
+    if (snapshot.session_id !== snapshot.latest_session_id) return false;
+    if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return false;
+
+    const checker = this.runtimeAdapters[snapshot.runtime];
+    if (!checker?.checkReady) return false;
+
+    const hasClaudeIdentityWork = (
+      nodeId: string,
+      sessionId: string,
+      runtime: string,
+    ): boolean => {
+      if (runtime !== "claude-code") return false;
+      const failedEvent = getLatestStartupFailedEvent(this.db, nodeId, sessionId);
+      if (!failedEvent || failedEvent.requestedResumeToken === undefined || failedEvent.requestedResumeType === undefined) {
+        return true;
+      }
+      return hasClaudeResumeIdentityWork(
+        this.sessionRegistry,
+        sessionId,
+        runtime,
+        failedEvent.requestedResumeToken,
+        failedEvent.requestedResumeType,
+      );
+    };
+
+    const probeBinding: NodeBinding = {
+      id: `session-transport:${snapshot.session_id}`,
+      nodeId: snapshot.node_id,
+      attachmentType: "tmux",
+      tmuxSession: sessionName,
+      tmuxWindow: null,
+      tmuxPane: null,
+      cmuxWorkspace: null,
+      cmuxSurface: null,
+      updatedAt: "",
+      cwd: snapshot.cwd ?? "",
+    };
+
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<ReadinessResult>((_, reject) => {
+      timeoutTimer = setTimeout(() => reject(new Error("readiness probe timeout")), 5000);
+    });
+
+    let readiness: ReadinessResult;
+    try {
+      readiness = await Promise.race([checker.checkReady(probeBinding), timeoutPromise]);
+    } catch {
+      return false;
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+    }
+
+    let emittedReady = false;
+
+    this.db.transaction(() => {
+      const current = this.getReconciliationSnapshot(sessionName);
+      if (!current || JSON.stringify(current) !== JSON.stringify(snapshot)) return;
+      if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return;
+
+      const currentIdentityWork = hasClaudeIdentityWork(
+        current.node_id,
+        current.session_id,
+        current.runtime,
+      );
+
+      if (readiness.ready) {
+        if (currentIdentityWork) {
+          this.db.prepare(`
+            UPDATE sessions
+            SET startup_status = 'attention_required'
+            WHERE id = ? AND startup_status = 'failed'
+          `).run(snapshot.session_id);
+          return;
+        }
+
+        const result = this.db.prepare(`
+          UPDATE sessions
+          SET startup_status = 'ready',
+              startup_completed_at = ?
+          WHERE id = ? AND startup_status IN ('failed', 'attention_required')
+        `).run(new Date().toISOString(), snapshot.session_id);
+
+        if (result.changes > 0) {
+          emittedReady = true;
+        }
+        return;
+      }
+
+      if (isAttentionRequiredReadinessCode(readiness.code)) {
+        this.db.prepare(`
+          UPDATE sessions
+          SET startup_status = 'attention_required'
+          WHERE id = ? AND startup_status = 'failed'
+        `).run(snapshot.session_id);
+      }
+    }).immediate();
+
+    if (emittedReady && this.eventBus) {
+      this.eventBus.emit({
+        type: "node.startup_ready",
+        rigId: snapshot.rig_id,
+        nodeId: snapshot.node_id,
+        previousStatus: snapshot.startup_status as "failed" | "attention_required",
+      });
+      return true;
+    }
+
+    return false;
   }
 }

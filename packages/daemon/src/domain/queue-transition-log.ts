@@ -127,6 +127,17 @@ function recentChange(row: RecentQueueTransitionRow): string | null {
   return null;
 }
 
+/** The recent-activity qualifying rule, as a predicate on a transition and its predecessor's state.
+ * A same-state note (blocked after blocked, in-progress after in-progress) never qualifies. */
+function qualifiesAsRecent(row: Pick<RecentQueueTransitionRow, "state" | "closure_reason">, previousState: string | null): boolean {
+  return (row.state === "in-progress" && (previousState === "pending" || previousState === "blocked"))
+    || (row.state === "blocked" && previousState !== null && previousState !== "blocked")
+    || row.closure_reason === "handed_off_to"
+    || (row.state === "done" && row.closure_reason === "no-follow-on")
+    || ["failed", "denied", "canceled"].includes(row.state)
+    || ["denied", "canceled", "escalation"].includes(row.closure_reason ?? "");
+}
+
 /**
  * Append-only transition log. Domain code MUST NOT update or delete rows here.
  * This log is the authoritative audit trail for queue state evolution.
@@ -141,6 +152,8 @@ export class QueueTransitionLog {
   private readonly hasIdentityProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly historySource: string;
+  /** The history tables this schema has: the live table, and the archive where it exists. */
+  private readonly historyTables: string[];
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -155,9 +168,11 @@ export class QueueTransitionLog {
     // SELECT * cannot union the archive's extra archived_at column with the live table.
     const fields = ["transition_id", "qitem_id", "ts", "state", "transition_note", "actor_session",
       "closure_reason", "closure_target", "identity_provenance", "owner_notification_kind", "owner_notification_level"];
+    this.historyTables = [];
     const sources = ["queue_transitions", "queue_transitions_archive"].flatMap((table) => {
       const available = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
       if (available.size === 0) return [];
+      this.historyTables.push(table);
       return [`SELECT ${fields.map((field) => available.has(field) ? field : `NULL AS ${field}`).join(", ")} FROM ${table}`];
     });
     this.historySource = `(${sources.join(" UNION ALL ")})`;
@@ -285,45 +300,7 @@ export class QueueTransitionLog {
     const sessionPatterns = rigNames.map((rig) => `%@${rig.replace(/%/g, "\\%").replace(/_/g, "\\_")}`);
     const scopeSql = sessionPatterns.map(() => "(q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')").join(" OR ");
     const scopeParams = sessionPatterns.flatMap((pattern) => [pattern, pattern]);
-    // Keep display metadata out of the full-history window/sort. Fetch it only
-    // for the qualified window; limiting raw history would change predecessors.
-    const rows = this.db.prepare(`
-      WITH rig_history AS (
-        SELECT
-          t.transition_id,
-          t.qitem_id,
-          t.ts,
-          t.state,
-          t.actor_session,
-          t.closure_reason,
-          t.closure_target,
-          LAG(t.state) OVER (
-            PARTITION BY t.qitem_id
-            ORDER BY t.transition_id
-          ) AS previous_state
-        FROM ${this.historySource} t
-        JOIN queue_items q ON q.qitem_id = t.qitem_id
-        WHERE ${scopeSql}
-      ), qualifying AS (
-        SELECT * FROM rig_history
-        WHERE (state = 'in-progress' AND previous_state IN ('pending', 'blocked'))
-           OR (state = 'blocked' AND previous_state IS NOT NULL AND previous_state <> 'blocked')
-           OR closure_reason = 'handed_off_to'
-           OR (state = 'done' AND closure_reason = 'no-follow-on')
-           OR state IN ('failed', 'denied', 'canceled')
-           OR closure_reason IN ('denied', 'canceled', 'escalation')
-      ), latest AS (
-        SELECT * FROM qualifying
-        ORDER BY ts DESC, transition_id DESC
-        LIMIT ?
-      )
-      SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session,
-             t.closure_reason, t.closure_target, q.tags, q.summary, t.previous_state,
-             q.destination_session, q.source_session
-      FROM latest t
-      JOIN queue_items q ON q.qitem_id = t.qitem_id
-      ORDER BY t.ts DESC, t.transition_id DESC
-    `).all(...scopeParams, limit) as RecentQueueTransitionRow[];
+    const rows = this.newestQualifying(scopeSql, scopeParams, limit);
 
     return rows.reverse().flatMap((row) => {
       const change = recentChange(row);
@@ -343,6 +320,51 @@ export class QueueTransitionLog {
         ...recentTarget(row),
       }];
     });
+  }
+
+  /** The newest `limit` qualifying in-scope transitions, newest first. The scope's items are resolved
+   * once; live and archived history is then walked newest-first in (ts, transition_id) order on an
+   * index that carries qitem_id, so a transition outside the scope is rejected from its index entry
+   * without reading its row, and the walk stops at the limit. A candidate's predecessor is the same
+   * item's greatest earlier transition_id across both tables: the value LAG over the item's full
+   * history gave, so a same-state note never qualifies. */
+  private newestQualifying(scopeSql: string, scopeParams: string[], limit: number): RecentQueueTransitionRow[] {
+    // `+t.qitem_id` keeps the scope list from driving a per-item index lookup (which would then sort);
+    // the walk order comes from the (ts, transition_id, qitem_id) index, and the two tables merge.
+    const walk = this.db.prepare(`
+      WITH scope_items(qitem_id) AS MATERIALIZED (SELECT q.qitem_id FROM queue_items q WHERE ${scopeSql})
+      ${this.historyTables.map((table) => `
+      SELECT t.transition_id, t.qitem_id, t.ts, t.state, t.actor_session, t.closure_reason, t.closure_target
+      FROM ${table} t
+      WHERE +t.qitem_id IN (SELECT qitem_id FROM scope_items)`).join(" UNION ALL ")}
+      ORDER BY ts DESC, transition_id DESC`);
+    // max() with a bare column reads the state from the row holding the max, one per table.
+    const predecessors = this.historyTables.map((table) => this.db.prepare(
+      `SELECT MAX(transition_id) AS transition_id, state FROM ${table} WHERE qitem_id = ? AND transition_id < ?`,
+    ));
+    const metadata = this.db.prepare(
+      "SELECT tags, summary, destination_session, source_session FROM queue_items WHERE qitem_id = ?",
+    );
+    type WalkedRow = Pick<RecentQueueTransitionRow, "transition_id" | "qitem_id" | "ts" | "state" | "actor_session" | "closure_reason" | "closure_target">;
+    const previousState = (row: WalkedRow): string | null => {
+      let found: { transition_id: number | null; state: string | null } = { transition_id: null, state: null };
+      for (const predecessor of predecessors) {
+        const candidate = predecessor.get(row.qitem_id, row.transition_id) as { transition_id: number | null; state: string | null };
+        if (candidate.transition_id !== null && (found.transition_id === null || candidate.transition_id > found.transition_id)) found = candidate;
+      }
+      return found.state;
+    };
+    const rows: RecentQueueTransitionRow[] = [];
+    // Reads inside the loop are allowed while the walk's iterator is open, and they see the walk's
+    // snapshot; leaving the loop releases it.
+    for (const row of walk.iterate(...scopeParams) as Iterable<WalkedRow>) {
+      const previous = row.state === "in-progress" || row.state === "blocked" ? previousState(row) : null;
+      if (!qualifiesAsRecent(row, previous)) continue;
+      const item = metadata.get(row.qitem_id) as Pick<RecentQueueTransitionRow, "tags" | "summary" | "destination_session" | "source_session">;
+      rows.push({ ...row, ...item, previous_state: previous });
+      if (rows.length >= limit) break;
+    }
+    return rows;
   }
 
   listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {

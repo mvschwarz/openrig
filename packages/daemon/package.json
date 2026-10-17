@@ -74,6 +74,10 @@
       "types": "./dist/health-detectors-surface.d.ts",
       "import": "./dist/health-detectors-surface.js"
     },
+    "./workflow-scope": {
+      "types": "./dist/workflow-scope-surface.d.ts",
+      "import": "./dist/workflow-scope-surface.js"
+    },
     "./local-reading": {
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"

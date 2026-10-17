@@ -15,6 +15,7 @@ import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow, resolveActiveSnapshotSession, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
+import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts } from "./restore-policy.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
  *  is surfaced as `stale` (age-based staleness — the "stale while running" signal
@@ -131,6 +132,7 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
 function intendedActionFor(
   resolution: ActiveOccupantResolution<PreviewSessionRow>,
   freshRequested: boolean,
+  seat: RestoreSeatFacts,
   absentHistory: { logicalId: string; rigName: string; row: PreviewSessionRow | null },
 ): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
   // OPR.0.5.7.1 — a broken authoritative relation beats --fresh, exactly as
@@ -156,7 +158,7 @@ function intendedActionFor(
     };
   }
   const occupant = resolution.kind === "resolved" ? resolution.session : null;
-  const policy = occupant?.restorePolicy ?? "resume_if_possible";
+  const policy = effectiveRestorePolicy(seat, occupant?.restorePolicy);
   const sourceRecorded = !!occupant?.resumeType && occupant.resumeType !== "none";
   if (policy === "resume_if_possible" && sourceRecorded && occupant?.resumeToken) {
     return { intendedAction: "resume-original" };
@@ -242,9 +244,15 @@ export function buildRestorePlanPreview(
     const runtimeError = resolution.kind !== "ambiguous"
       ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[savedNodeId]?.runtime)
       : null;
+    // The runtimes and recorded sessions restore reads the seat's policy through: the snapshot's own node, else the live one.
+    const seat: RestoreSeatFacts = {
+      savedRuntime: snapshot?.data.nodes?.find(saved => saved.logicalId === node.logicalId)?.runtime ?? node.runtime,
+      currentRuntime: node.runtime,
+      recordedSessions: sessionRows.filter((row) => row.nodeId === savedNodeId),
+    };
     const { intendedAction, reason } = runtimeError
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
-      : intendedActionFor(resolution, freshRequested,
+      : intendedActionFor(resolution, freshRequested, seat,
         { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId) });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
@@ -263,7 +271,8 @@ export function buildRestorePlanPreview(
       // no resumable token → restore needs an explicit --fresh (never
       // silent); runtime mismatches and broken relations cannot be resolved
       // by a fresh request, so --fresh must not be suggested as their remedy.
-      freshRequired: runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing",
+      // A terminal has no token to find and relaunches fresh on its own.
+      freshRequired: runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing" && !isOrdinaryTerminalSeat(seat),
       ...(runtimePrompt ? { runtimePrompt } : {}),
     };
   });

@@ -14,6 +14,7 @@ import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { observeSolePane, paneObservationVerdict } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
+import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -33,6 +34,8 @@ interface LaunchOpts {
   silenceWindowSeconds?: number;
   /** A deliberate fresh occupant is distinct from initial rig boot in the tenure ledger. */
   occupantKind?: OccupantKind;
+  /** One-off env for this launch only (`rig up --env`); wins over the spec's env and is not saved. */
+  env?: SeatEnv;
 }
 
 interface NodeLauncherDeps {
@@ -139,18 +142,43 @@ export class NodeLauncher {
 
     // Create tmux session with OpenRig identity env vars. A duplicate is a
     // collision, never authority to kill an unmanaged same-name session.
-    const openRigEnv = compactEnv({
+    const specEnv = this.rigRepo.getEffectiveSeatEnv(node.id);
+    const launchEnv = (oneOff?: SeatEnv) => compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
       OPENRIG_RUNTIME: node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
+      ...seatEnvLaunchVars(mergeSeatEnv(specEnv, oneOff)),
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
+    const openRigEnv = launchEnv(opts?.env);
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
     const tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
+    }
+
+    // A one-off `rig up --env` value is on the first pane's command line and, because that is how
+    // `new-session -e` works, in the session environment, which a respawned pane (a handover
+    // successor) inherits. The first pane has already started with it, so take it back out of the
+    // session: the spec's or OpenRig's own value for a name they set, no value for the rest.
+    if (opts?.env && Object.keys(opts.env).length > 0) {
+      const failed = await this.dropOneOffFromSession(sessionName, Object.keys(opts.env), launchEnv());
+      if (failed) {
+        // The first pane has already started with the one-off, so this is a stopped launch, not an
+        // undone one. Say whether the new session (the one this launch just created) is gone, and
+        // never include tmux's text or a value.
+        let removed = false;
+        try { removed = (await this.tmuxAdapter.killSession(sessionName)).ok; } catch { /* not confirmed */ }
+        return {
+          ok: false,
+          code: "seat_env_cleanup_failed",
+          message: removed
+            ? `Could not take the --env setting ${failed} out of the new session "${sessionName}" environment, so the launch was stopped and the session was removed. Run it again.`
+            : `Could not take the --env setting ${failed} out of the new session "${sessionName}" environment, so the launch was stopped, and the session could not be confirmed removed. It may still hold the --env values in its terminal and environment and nothing is bound to it: check it and remove it before running this again.`,
+        };
+      }
     }
 
     // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
@@ -253,6 +281,27 @@ export class NodeLauncher {
       binding: binding!,
       warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
     };
+  }
+
+  /**
+   * Put each one-off name back to what the session would have had without it: `baseline` has the
+   * value the spec or OpenRig set for it, and a name with none is unset (the server's own value, if
+   * it has one, is what a later pane gets). `TMUX` and `TMUX_PANE` belong to tmux and are left alone.
+   * Returns the name that could not be restored, or undefined when all were. The message built from
+   * it carries no value: tmux errors repeat the command line.
+   */
+  private async dropOneOffFromSession(session: string, names: string[], baseline: Record<string, string>): Promise<string | undefined> {
+    for (const name of names) {
+      if (name === "TMUX" || name === "TMUX_PANE") continue;
+      try {
+        const value = baseline[name];
+        if (value !== undefined) await this.tmuxAdapter.setSessionEnv(session, name, value);
+        else await this.tmuxAdapter.unsetSessionEnv(session, name);
+      } catch {
+        return name;
+      }
+    }
+    return undefined;
   }
 }
 

@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import { seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
@@ -62,6 +63,9 @@ export interface SuccessorNode {
    *  Same continuity rationale as model — populated by the caller from node provenance; absent → the
    *  adapter emits no -p flag (unchanged for legacy/unpinned seats). */
   codexConfigProfile?: string | null;
+  /** The seat's declared launch environment (its rig's `env:` with the member's over it). The
+   *  successor is the same seat, so it gets the same environment; absent = none declared. */
+  seatEnv?: SeatEnv;
 }
 
 export type SuccessorLaunchResult =
@@ -181,6 +185,7 @@ export class SuccessorSessionLauncher {
       OPENRIG_RUNTIME: input.node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
+      ...seatEnvLaunchVars(input.node.seatEnv ?? {}),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration ?? undefined,
     });
     const cwd = input.node.cwd ?? undefined;

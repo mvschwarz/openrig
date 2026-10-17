@@ -4,6 +4,7 @@ import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadiness } from "./proof/judgments.js";
 import { lifecycleObligations, requiredLifecycleSteps } from "./lifecycle-obligations.js";
 import { QueueWakeRepository } from "./queue-wake-repository.js";
+import { isTypedGateBlocker } from "./queue-repository.js";
 // S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
 // execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
 // honesty, parallelism health), EVERY field derived at read time.
@@ -804,7 +805,20 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       /* unreachable candidate — keep scanning */
     }
   }
-  for (const r of rows.filter((r) => r.state === "in-progress")) {
+  // A lane is a row doing the slice's work. A row parked on `external:<what>`
+  // is also listed, as a waiting lane: `external:` records an outside dependency
+  // (a review, a decision, a capacity limit, a lifecycle step). It does not mean an
+  // outside party owns the work, or that the parked seat is the slice's builder.
+  // It stays marked `waiting` so it is never mistaken for active work, and it
+  // yields to an in-progress lane on the same slice. Rows parked on a qitem, a
+  // human seat, or a fold:/auth: gate are not lanes.
+  const sliceKey = (slice: string): string => slices.find((s) => s.id === slice || s.dir === slice)?.dir ?? slice;
+  const activeSlices = new Set(
+    rows.filter((r) => r.state === "in-progress").flatMap((r) => sliceOfRow(r) ?? []).map(sliceKey),
+  );
+  const isExternalPark = (r: QueueRowLite): boolean =>
+    r.state === "blocked" && isTypedGateBlocker(r.blocked_on) && r.blocked_on!.startsWith("external:");
+  for (const r of rows.filter((r) => r.state === "in-progress" || (isExternalPark(r) && !activeSlices.has(sliceKey(sliceOfRow(r) ?? ""))))) {
     const slice = sliceOfRow(r);
     if (!slice) continue;
     const wtMatch = r.body?.match(WORKTREE_LINE);
@@ -862,6 +876,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
             source: "SeatActivityService arbitrated seat state (no answer floors INDETERMINATE, never idle/dead)",
           },
       pickup,
+      waiting: r.state === "blocked" ? { on: r.blocked_on } : null,
       source: { qitem_id: r.qitem_id },
     });
   }
@@ -1251,7 +1266,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     sequenced.next_up_basis = `Attributed proof readiness ${readiness!.revision}; dependency eligibility ${derived.eligible}`;
   }
   const q6 = {
-    lanes_live: lanes.length,
+    lanes_live: lanes.filter((l) => l.waiting === null).length,
     lanes_possible: q2.filter((s) => s.next_up === true).length,
     idle_seats_with_capacity: { value: idleSeats, basis: idleBasis },
     heavy_slot_holder: heavyRow

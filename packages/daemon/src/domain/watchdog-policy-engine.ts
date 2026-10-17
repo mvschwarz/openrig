@@ -227,7 +227,22 @@ export class WatchdogPolicyEngine {
     return this.policies.get(name);
   }
 
+  private inactiveJobResult(jobId: string): EvaluationResult | null {
+    const job = this.jobsRepo.getByIdOrThrow(jobId);
+    if (job.state === "active") return null;
+    return {
+      job,
+      outcome: { action: "skip", reason: "job_not_active" },
+      history: null,
+      delivery: null,
+      meaningful: false,
+    };
+  }
+
   async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string): Promise<EvaluationResult> {
+    // A prior job's delivery may have yielded since the scheduler selected this row.
+    const inactive = this.inactiveJobResult(job.jobId);
+    if (inactive) return inactive;
     const policy = this.resolvePolicy(job.policy);
     const evaluatedAt = this.now().toISOString();
     const receiptCutoffAt = evaluationPassStartedAt ?? evaluatedAt;
@@ -334,6 +349,11 @@ export class WatchdogPolicyEngine {
     };
 
     const outcome = this.resolveQueueWait?.({ jobId: job.jobId }) ?? await policy.evaluate(policyJob);
+
+    // Stop, park completion or seat handover may retire the job while its policy awaits I/O.
+    // Discard every outcome before it can deliver or overwrite the retirement's state.
+    const retired = this.inactiveJobResult(job.jobId);
+    if (retired) return retired;
 
     if (outcome.action === "skip") {
       // POC parity: skip clears actionable. Loud-vs-quiet decides
