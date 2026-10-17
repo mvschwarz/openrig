@@ -59,9 +59,11 @@ function parsePreset(name: string, path: string, text: string): AgentAppPresetLo
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is
- *  started through `/usr/bin/env`, so operators, redirections, substitutions and newlines wouldn't apply to the program
- *  (and an alias isn't a program). Single and double quotes may group an argument; a backslash is accepted only inside
- *  single quotes, where the shell reads it literally. */
+ *  typed into the seat pane's shell as `/usr/bin/env K=V … <command>` (or staged into a script run by sh), so an
+ *  operator, redirection, substitution, history expansion or newline would act on that line outside the program, and an
+ *  alias isn't a program. Keeping to one program and its arguments keeps shell syntax out of the line; it doesn't
+ *  isolate the program from a shell (`sh -c '…'` is still a program and its arguments). Single and double quotes may
+ *  group an argument; a backslash or `!` is accepted only inside single quotes, where the shell reads it literally. */
 function shellSyntaxIn(command: string): string | null {
   let quote: "'" | '"' | null = null;
   for (let i = 0; i < command.length; i++) {
@@ -70,6 +72,7 @@ function shellSyntaxIn(command: string): string | null {
     if (quote === "'") { if (c === "'") quote = null; continue; }
     // The shell reads \" or \' as a literal quote, not a grouping one; a scan without escapes would misread what follows.
     if (c === "\\") return "a backslash escape";
+    if (c === "!") return "! (history expansion)";
     if (c === "\n" || c === "\r") return "a newline";
     if (c === "`") return "`…` (command substitution)";
     if (c === "$" && next === "(") return "$(…) (command substitution)";

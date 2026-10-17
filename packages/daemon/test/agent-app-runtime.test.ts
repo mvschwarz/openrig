@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type Database from "better-sqlite3";
 import { listAgentAppPresets, loadAgentAppPreset } from "../src/domain/agent-app-presets.js";
 import { AgentAppRuntimeAdapter, seatAdapter, withAgentAppResolver, withAgentApps } from "../src/adapters/agent-app-runtime-adapter.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -19,7 +18,10 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { agentAppPaneActivity, classifyPaneActivity } from "../src/domain/session-transport.js";
 import type { RuntimeAdapter, NodeBinding } from "../src/domain/runtime-adapter.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
+import Database from "better-sqlite3";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const dirs: string[] = [];
 const dbs: Database.Database[] = [];
@@ -77,14 +79,16 @@ describe("agent app presets", () => {
     // The shell reads \" as a literal quote, so the && here would run.
     ["a backslash escape", 'echo \\" && echo injected \\"'],
     ["a backslash escape", 'node app.mjs --label "say \\"hi\\""'],
-  ])("refuses shell syntax (%s) in the command, since it's started without a shell", (shown, command) => {
+    ["! (history expansion)", "node app.mjs --last !!"],
+    ["! (history expansion)", 'node app.mjs --label "hi!"'],
+  ])("keeps shell syntax (%s) out of the launch line typed into the pane's shell", (shown, command) => {
     const found = loadAgentAppPreset("synth", presets({ "synth.yaml": GOOD.replace("command: synth-app --serve", `command: ${command}`) }));
     expect(found).toMatchObject({ ok: false, kind: "incompatible" });
     expect(!found.ok && found.message).toContain(`command must be a single program and its arguments; shell syntax such as ${shown} isn't supported: put it in a script and name the script`);
   });
 
   it("accepts a program whose arguments are quoted, operators inside single quotes included", () => {
-    const command = `node "/srv/my apps/app.mjs" --label 'a|b && c' --name "two words" --path 'C:\\apps\\x'`;
+    const command = `node "/srv/my apps/app.mjs" --label 'a|b && c!' --name "two words" --path 'C:\\apps\\x'`;
     const found = loadAgentAppPreset("synth", presets({ "synth.yaml": GOOD.replace("command: synth-app --serve", `command: ${command}`) }));
     expect(found).toMatchObject({ ok: true, preset: { command } });
   });
@@ -268,6 +272,37 @@ describe("the pane reader for an agent app", () => {
     expect(agentAppPaneActivity(prompt, "synth")).toBe(prompt);
     const busy = classifyPaneActivity("⠋ Working (esc to interrupt)");
     expect(agentAppPaneActivity(busy, "synth")).toBe(busy);
+  });
+});
+
+describe("activity after the seat's occupant is replaced under the same session name", () => {
+  it("follows the new occupant's own selection: a free-text occupant's quiet screen reads idle, as on main", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "agent-app-swap-"));
+    dirs.push(scratch);
+    const socket = join(scratch, "tmux.sock");
+    const tmux = async (...args: string[]) => (await promisify(execFile)("tmux", ["-S", socket, ...args])).stdout;
+    const db = new Database(join(scratch, "state.db"));
+    dbs.push(db);
+    db.exec(`CREATE TABLE nodes(id TEXT PRIMARY KEY, runtime TEXT);
+      CREATE TABLE sessions(id INTEGER, node_id TEXT, session_name TEXT, status TEXT, agent_app TEXT);
+      CREATE TABLE bindings(node_id TEXT, attachment_type TEXT);`);
+    try {
+      const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell path"); }, undefined, async argv => tmux(...argv.slice(1)));
+      // A reader clock ten seconds ahead makes the real window timestamps quiet without sleeping.
+      const svc = new SeatActivityService({ tmux: adapter, defaultWindowSeconds: 3, now: () => new Date(Date.now() + 10_000) });
+      db.prepare("INSERT INTO nodes VALUES ('n1', 'synth')").run();
+      db.prepare("INSERT INTO sessions VALUES (1, 'n1', 'work-worker@r', 'running', 'synth')").run();
+      await tmux("new-session", "-d", "-s", "work-worker@r", "sleep 60");
+      await svc.pollAllRunningTmuxSeats(db);
+      expect(svc.getSeatState("n1")).toMatchObject({ activity: "unknown", decidedBy: null });
+      // The same seat and session name, now a free-text self-attach with no recorded selection; no sweep saw it absent.
+      db.prepare("INSERT INTO sessions VALUES (2, 'n1', 'work-worker@r', 'running', NULL)").run();
+      await svc.pollAllRunningTmuxSeats(db);
+      await svc.pollAllRunningTmuxSeats(db);
+      expect(svc.getSeatState("n1")).toMatchObject({ activity: "idle-at-prompt", decidedBy: "window-sampling" });
+    } finally {
+      await tmux("kill-server").catch(() => {});
+    }
   });
 });
 

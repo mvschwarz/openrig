@@ -768,10 +768,16 @@ interface BindingRow {
   updated_at: string;
 }
 
+const sessionsHaveAgentApp = new WeakMap<Database.Database, boolean>();
+
 /** The SQL that reads a session's recorded agent app: `<alias>.agent_app`, or NULL on a schema without that column
- *  (as other optional columns are read), so a partial schema reads every seat as before. */
+ *  (as other optional columns are read), so a partial schema reads every seat as before. The schema check is made
+ *  once per database: the column only appears through a migration, which runs before these reads. */
 export function sessionAgentAppSelect(db: Database.Database, alias = "s"): string {
-  return (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_app")
-    ? `${alias}.agent_app`
-    : "NULL";
+  let has = sessionsHaveAgentApp.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_app");
+    sessionsHaveAgentApp.set(db, has);
+  }
+  return has ? `${alias}.agent_app` : "NULL";
 }

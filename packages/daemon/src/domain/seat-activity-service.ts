@@ -11,7 +11,7 @@ import type {
   RungHealthEvent,
   RungTrust,
 } from "./activity-taxonomy.js";
-import { EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
+import { AGENT_APP_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
 import { sessionAgentAppSelect } from "./session-registry.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
@@ -265,11 +265,11 @@ export class SeatActivityService {
       // touching the launch machinery.
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        if (!known || known.inventory === null || known.sessionName !== r.session_name) {
-          this.declareRungInventory(
-            { seatNodeId: r.node_id, sessionName: r.session_name },
-            runtimeRungInventory(r.runtime, r.agent_app),
-          );
+        const inventory = runtimeRungInventory(r.runtime, r.agent_app);
+        // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
+        const agentAppChanged = !!known && (known.inventory === AGENT_APP_RUNG_INVENTORY) !== (inventory === AGENT_APP_RUNG_INVENTORY);
+        if (!known || known.inventory === null || known.sessionName !== r.session_name || agentAppChanged) {
+          this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
         }
       }
 
