@@ -231,6 +231,14 @@ same view and plan, or creates one if none matches, preserving its config and ex
 caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
 without opening a window or putting the view in another session.
 
+The shared TUI (`rig tui --shared`) runs in the daemon's tmux server, so its own environment never
+carries the Herdr you are looking at; the markers are on the tmux client attached to it. When you
+open a terminal view from it on Linux, the TUI passes the markers of the client that was active last
+(normally the one that pressed the key) to the command, which then opens the view in that Herdr. With
+no client attached, more than one client active in the same second, or a client that isn't in Herdr
+or can't be read, nothing is passed and the result is what it was before. Other platforms, and every
+other way of running `rig terminal open`, keep the previous result too.
+
 On Linux, a local graphical display and a supported hosting terminal are required
 (Ghostty, GNOME Terminal, Konsole or xterm). Linux reports a window request; verify
 what actually appeared. SSH, headless, CI and unsupported Linux hosts get a
