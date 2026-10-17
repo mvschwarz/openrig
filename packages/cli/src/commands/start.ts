@@ -524,7 +524,7 @@ Examples:
           }
 
           const resStatus = res.data["status"] as string;
-          const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string }>) ?? [];
+          const nodes = (res.data["nodes"] as Array<{ logicalId: string; status: string; error?: string; canonicalSessionName?: string }>) ?? [];
           const rigResult = res.data["rigResult"] as string | undefined;
 
           if (!opts.json) {
@@ -579,7 +579,9 @@ Examples:
             } else {
               // Headless: report honestly, no auto-substitute.
               for (const n of awaiting) {
-                if (!opts.json) console.error(`    ${n.logicalId}: awaiting-decision -- to fresh-prime: rig up --existing ${rigName} --fresh ${n.logicalId}`);
+                // `rig up --existing` is refused while any seat is live, which is the state after a partial restore.
+                const session = n.canonicalSessionName ?? `${n.logicalId.replace(/\./g, "-")}@${rigName}`;
+                if (!opts.json) console.error(`    ${n.logicalId}: awaiting-decision -- to fresh-prime: rig seat launch ${session} --fresh --reason "fresh-prime after restore"`);
               }
             }
           }
