@@ -173,6 +173,25 @@ export interface PiOccupantScope {
   notBeforeMs: number;
 }
 
+/** Pi's thinking levels for `--thinking` and the `--model` suffix (`pi --help`; the same at the
+ *  tested 0.87.1 baseline and 1.3.0). */
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** The model ids a Pi pin can resolve to, in Pi's own order (`parseModelPattern`): the whole pin
+ *  first, then with each trailing `:<thinking level>` removed in turn. Pi records the model without
+ *  the level, so `openrouter/x-ai/grok-4:high` matches a `grok-4` record, and a model id that
+ *  really ends in `:high` still matches as itself. Any other `:` suffix, such as OpenRouter's
+ *  `:free`, stays part of the id, and the provider is never touched. */
+export function piPinReadings(pinned: string): string[] {
+  const readings = [pinned.trim()];
+  for (;;) {
+    const last = readings[readings.length - 1]!;
+    const colon = last.lastIndexOf(":");
+    if (colon === -1 || !PI_THINKING_LEVELS.has(last.slice(colon + 1))) return readings;
+    readings.push(last.slice(0, colon));
+  }
+}
+
 /** The Pi runtime's effective model, `provider/model`, from the NEWEST determinate assistant
  *  record in the session file — provided that record is this occupant's own. Pi's `model` is the
  *  runtime's own record of what answered; `responseModel` (a routed/dated API variant) is not

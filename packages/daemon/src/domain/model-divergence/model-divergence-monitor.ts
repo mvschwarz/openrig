@@ -22,6 +22,7 @@
 
 import { createHash } from "node:crypto";
 import { CANONICAL_MODEL_PINS } from "../spec-validation-advisory.js";
+import { piPinReadings } from "./effective-model-readers.js";
 
 export interface PinnedSeat {
   nodeId: string;
@@ -191,7 +192,9 @@ export class ModelDivergenceMonitor {
     }
     this.pendingPolls.delete(key);
     this.pendingReasons.delete(key);
-    if (modelsMatch(seat.pinnedModel, read.model)) {
+    // A Pi pin can carry Pi's own `:<thinking level>` suffix; it matches any reading Pi itself tries.
+    const pins = seat.runtime === "pi" ? piPinReadings(seat.pinnedModel) : [seat.pinnedModel];
+    if (pins.some((pin) => modelsMatch(pin, read.model))) {
       this.settled.add(key);
       return;
     }
