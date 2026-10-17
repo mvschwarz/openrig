@@ -144,6 +144,7 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 - **Questions:** [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a)
 - **Bugs and feature requests:** [open an issue](https://github.com/mvschwarz/openrig/issues/new/choose)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md) · [Getting help](.github/SUPPORT.md)
+- **Working on OpenRig with a coding agent?** Start with the `developing-openrig` skill in `.agents/skills/` (Claude Code: `.claude/skills/`) and [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Videos:** [youtube.com/@openrig](https://www.youtube.com/@openrig)
 - **Releases:** [GitHub Releases](https://github.com/mvschwarz/openrig/releases) and npm `@openrig/cli`
 
