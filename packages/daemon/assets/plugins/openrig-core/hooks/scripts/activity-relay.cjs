@@ -11,12 +11,13 @@ const path = require("node:path");
 // OpenRig daemon's /api/activity/hooks endpoint for real-time UI seat-status.
 // Best-effort only: 1.5s timeout, errors swallowed, never blocks the agent loop.
 //
-// Required environment (injected by the OpenRig daemon when launching the agent):
+// Environment (injected by the OpenRig daemon when launching the agent):
 //   OPENRIG_SESSION_NAME or RIGGED_SESSION_NAME  - tmux session id
 //   OPENRIG_NODE_ID      or RIGGED_NODE_ID       - node id in the rig topology
 //   OPENRIG_RUNTIME      or RIGGED_RUNTIME       - "claude-code" | "codex" | etc.
 //   OPENRIG_URL          or RIGGED_URL           - daemon base URL
-//   OPENRIG_ACTIVITY_HOOK_TOKEN or RIGGED_ACTIVITY_HOOK_TOKEN - bearer auth
+//   OPENRIG_ACTIVITY_HOOK_TOKEN or RIGGED_ACTIVITY_HOOK_TOKEN - optional fast path;
+//     otherwise bearer auth is read from OPENRIG_HOME/activity-endpoint.json
 
 async function readStdin() {
   return new Promise((resolve) => {
@@ -88,12 +89,11 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
 //   1. env OPENRIG_URL / token (unchanged fast path).
 //   2. B1: synthesize the base URL from OPENRIG_HOST + OPENRIG_PORT (both present
 //      in a launched seat's env) when the URL is absent.
-//   3. B3: file-discovery — read {baseUrl, token} from
-//      OPENRIG_HOME/activity-endpoint.json (default ~/.openrig) for reconcile /
-//      restored seats whose frozen process env lacks the activity vars. The
-//      daemon writes this file at startup. Identity (session/node/runtime) still
-//      comes from env, which previously-launched-then-reconciled seats inherit
-//      from the tmux session env.
+//   3. Read bearer auth from OPENRIG_HOME/activity-endpoint.json (default
+//      ~/.openrig); the token is deliberately omitted from tmux env/argv. The
+//      same file supplies the URL when a reconcile/restored seat's frozen env
+//      lacks it. The daemon writes this file at startup. Identity
+//      (session/node/runtime) still comes from env.
 function resolveEndpoint(env = process.env) {
   let baseUrl = firstString(env.OPENRIG_URL, env.RIGGED_URL);
   let token = firstString(env.OPENRIG_ACTIVITY_HOOK_TOKEN, env.RIGGED_ACTIVITY_HOOK_TOKEN);

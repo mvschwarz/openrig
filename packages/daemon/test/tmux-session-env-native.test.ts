@@ -15,8 +15,9 @@ async function withServer(mode: "shell" | "argv", check: (adapter: TmuxAdapter, 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tmux-env-"));
   const socket = path.join(home, "owned.sock");
   const env = { ...process.env, HOME: home };
-  delete env.TMUX;
-  delete env.TMUX_TMPDIR;
+  for (const name of Object.keys(env)) {
+    if (/^(?:HERDR|TMUX)/.test(name)) delete env[name];
+  }
   const tmux = async (args: string[]) => (await runFile("tmux", ["-S", socket, ...args], { env })).stdout;
   try {
     await tmux(["-f", "/dev/null", "new-session", "-d", "-s", "worker-long", "-e", "OPENRIG_NODE_ID=neighbor-node", "-e", "OPENRIG_SESSION_NAME=worker-long", "-e", "OPENRIG_RUNTIME=terminal", "sleep 60"]);
@@ -65,6 +66,20 @@ describe.skipIf(process.platform === "win32")("native tmux session launch enviro
         expect(await adapter.getSessionEnv("worker", "OPENRIG_NODE_ID")).toBe("own-node");
         expect(await adapter.getSessionEnv("=worker", "OPENRIG_NODE_ID")).toBe("literal-node");
         expect(await adapter.getSessionEnv(id, "OPENRIG_NODE_ID")).toBe("own-node");
+      });
+    });
+
+    it(`${mode}: a fresh seat gets no activity token in its tmux environment`, async () => {
+      await withServer(mode, async (adapter, home, tmux) => {
+        const token = ["fixture", "only", "activity", "token"].join("-");
+        const result = await adapter.createSession("activity-hook-seat", home, {
+          OPENRIG_HOME: home,
+          OPENRIG_ACTIVITY_HOOK_TOKEN: token,
+        });
+
+        expect(result.ok).toBe(true);
+        expect((await adapter.getSessionEnv("activity-hook-seat", "OPENRIG_ACTIVITY_HOOK_TOKEN")) === "").toBe(true);
+        expect(await nextPaneEnv(home, tmux, "activity-hook-seat")).toContain("OPENRIG_ACTIVITY_HOOK_TOKEN=");
       });
     });
 

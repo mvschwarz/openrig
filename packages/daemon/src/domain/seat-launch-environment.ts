@@ -5,7 +5,8 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
-// Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
+// Provider keys keep their non-typed channel; hook auth comes from the private
+// activity-endpoint.json file rather than launch metadata or tmux arguments.
 export const SEAT_PUBLIC_ENV_KEYS = [
   "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT",
   "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME",
