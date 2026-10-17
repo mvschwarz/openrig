@@ -946,6 +946,44 @@ test("authoring regeneration repairs permission-only drift in generated copies f
   }
 });
 
+test("staged files keep the source's exact mode, so a publishable home passes under umask 0077 and 0022", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  for (const mask of [0o077, 0o022]) {
+    const root = mkdtempSync(join(tmpdir(), "openrig-umask-"));
+    const previous = process.umask(mask);
+    try {
+      const { repoRoot, inputs, layout } = homeFixture(root);
+      write(join(repoRoot, "spec/process/three/scripts/run.sh"), "#!/bin/sh\nexit 0\n");
+      // A clean checkout's modes, whatever the umask that wrote the fixture.
+      for (const path of ["spec/core/two/SKILL.md", "spec/process/three/SKILL.md", "spec/process/three/references/guide.md", "plugin/solo/SKILL.md"]) {
+        chmodSync(join(repoRoot, path), 0o644);
+      }
+      chmodSync(join(repoRoot, "spec/process/three/scripts/run.sh"), 0o755);
+
+      await mirror.regeneratePublicSkills(inputs);
+      for (const copy of ["canonical/process/three", "plugin/three"]) {
+        assert.equal(statSync(join(repoRoot, copy, "SKILL.md")).mode & 0o777, 0o644, `${copy} under ${mask.toString(8)}`);
+        assert.equal(statSync(join(repoRoot, copy, "scripts/run.sh")).mode & 0o777, 0o755, `${copy} under ${mask.toString(8)}`);
+      }
+      assert.deepEqual(
+        await mirror.checkGeneratedEdges({
+          repoRoot,
+          layout,
+          digests: buildEdgeDigests({ repoRoot, layout }),
+          membership: inputs.membership,
+          rules: inputs.rules,
+        }),
+        { stale: false, changes: [] },
+        `umask ${mask.toString(8)}`,
+      );
+      assert.deepEqual((await mirror.regeneratePublicSkills(inputs)).changes, []);
+    } finally {
+      process.umask(previous);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("a missing source refuses before any write, and an undeclared skill stays in place and is reported", async () => {
   const mirror = await import("./mirror-skills.mjs");
   const root = mkdtempSync(join(tmpdir(), "openrig-authoring-visible-"));
