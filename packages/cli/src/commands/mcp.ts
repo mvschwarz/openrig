@@ -25,8 +25,10 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
       let daemonUrl: string;
       if (opts.port) {
         const daemonPort = parseInt(opts.port, 10);
-        if (isNaN(daemonPort)) {
-          console.error("Invalid port number");
+        // A port outside 1..65535 started the server anyway, and then every tool call failed with
+        // "Failed to parse URL". Same parseInt as before, so each --port that worked still does.
+        if (Number.isNaN(daemonPort) || daemonPort < 1 || daemonPort > 65535) {
+          console.error(`Invalid port number: must be an integer in [1, 65535], got "${opts.port}"`);
           process.exitCode = 1;
           return;
         }
