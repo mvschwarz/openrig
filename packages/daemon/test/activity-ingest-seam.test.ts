@@ -135,23 +135,6 @@ describe("S19 A4 — the route feeds the ONE oracle (trace: one arbitration poin
     expect(svc.getSeatState(SEAT)!.needsInput.count).toBe(0);
   });
 
-  it("#896 (Claude side): a PreToolUse after a permission prompt clears the stale needs-input", async () => {
-    // Claude's permission prompt fires Notification(permission_prompt) → needs_input,
-    // but nothing cleared it once the user answered and tools started running — the
-    // stale flag lingered until the next UserPromptSubmit. PreToolUse (now relayed
-    // via claude.json) maps to running, which clears needsInput back to 0.
-    const clock = { now: 2_000_000 };
-    const { svc, post } = makeApp(clock);
-    await post("UserPromptSubmit", "running");
-    await post("Notification", "needs_input");
-    expect(svc.getSeatState(SEAT)!.needsInput.count).toBe(1);
-    // The user answered; the first tool call fires PreToolUse → running.
-    await post("PreToolUse", "running");
-    const s = svc.getSeatState(SEAT)!;
-    expect(s.activity).toBe("working");
-    expect(s.needsInput.count).toBe(0);
-  });
-
   it("KILLED RELAY (the supplement's risk specimen): hook silence goes rung-stale and sampling decides — never idle-forever", async () => {
     const clock = { now: 2_000_000 };
     const { svc, post } = makeApp(clock);

@@ -509,14 +509,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
     defaultWindowSeconds: 3,
-    permissionPromptReader: async (sessionName) => {
-      const activity = await probeSessionActivity({ sessionName, runtime: "codex", attachmentType: "tmux", tmuxAdapter });
+    permissionPromptReader: async (sessionName, runtime) => {
+      if (runtime === "claude-code") {
+        const context = sessionRegistry.findResumeContextByName(sessionName);
+        if (!context || context.runtime !== runtime
+            || sessionRegistry.getBindingForNode(context.nodeId)?.attachmentType !== "tmux") return null;
+      }
+      const activity = await probeSessionActivity({ sessionName, runtime, attachmentType: "tmux", tmuxAdapter,
+        visibleScreenOnly: runtime === "claude-code" });
       if (activity.state === "unknown") return null;
+      if (runtime === "claude-code" && activity.state === "needs_input"
+          && !["permission_prompt", "selection_prompt"].includes(activity.reason)) return null;
       return activity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(activity.reason);
     },
-    permissionPromptChanged: (sessionName, confirmed) => {
+    permissionPromptChanged: (sessionName, confirmed, runtime) => {
       const latest = agentActivityStore.getLatestForNode({ sessionName });
-      agentActivityStore.recordHookEvent({ sessionName, runtime: "codex", generation: latest?.generation,
+      agentActivityStore.recordHookEvent({ sessionName, runtime, generation: latest?.generation,
         hookEvent: confirmed ? "PermissionPromptConfirmed" : "PermissionPromptCleared" });
     },
     eventBus,

@@ -954,7 +954,7 @@ export function makePromptStateReader(deps: {
     const hook = deps.getLatestHook?.(destination), runtime = node?.runtime ?? null;
     if (latestHookWaitsOnPerson(hook, runtime) || latestHookPermissionPending(hook, runtime)) return "blocked";
     if (
-      runtime === "codex" && hook?.rawEvent === "PermissionPromptCleared" &&
+      (runtime === "codex" || runtime === "claude-code") && hook?.rawEvent === "PermissionPromptCleared" &&
       hook.evidenceSource === "runtime_hook" &&
       (hook.stale !== true || hook.reason === "stale_runtime_hook") &&
       Date.parse(hook.eventAt ?? "") > Date.parse(refusedAt)
