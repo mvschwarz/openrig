@@ -14,6 +14,7 @@ import {
   type PaneBindingObservation,
 } from "./pane-binding-observation.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import { witnessedClaudeVersionLabel, type NativeProcessLister } from "./native-process-lineage.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -84,6 +85,8 @@ interface ClaimServiceDeps {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   };
   ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
+  /** #86 — process rows for the native version-label witness; defaults to the OS listing. */
+  listProcesses?: NativeProcessLister;
 }
 
 interface BindOptions {
@@ -119,6 +122,7 @@ export class ClaimService {
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
+  private listProcesses: NativeProcessLister | undefined;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -138,6 +142,7 @@ export class ClaimService {
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
+    this.listProcesses = deps.listProcesses;
   }
 
   private async observeBindingPane(
@@ -505,11 +510,10 @@ export class ClaimService {
     const projectionDrift: string[] = [];
     const paneObservation = await this.observeBindingPane(sessionName);
     if (!paneObservation.ok) projectionDrift.push(paneObservation.detail);
+    const paneTarget = paneObservation.ok ? paneObservation.pane : sessionName;
     let paneCommand: string | null = null;
     try {
-      paneCommand = await this.tmuxAdapter.getPaneCommand(
-        paneObservation.ok ? paneObservation.pane : sessionName,
-      );
+      paneCommand = await this.tmuxAdapter.getPaneCommand(paneTarget);
     } catch { paneCommand = null; }
     if (nodeRow.runtime) {
       const expectation: Record<string, string[]> = {
@@ -520,7 +524,10 @@ export class ClaimService {
       const expected = expectation[nodeRow.runtime];
       if (!paneCommand) {
         projectionDrift.push(`runtime unverified: pane command unreadable; node declares runtime "${nodeRow.runtime}"`);
-      } else if (expected && expected.length > 0 && !expected.includes(paneCommand)) {
+      } else if (expected && expected.length > 0 && !expected.includes(paneCommand)
+        // #86: a native install's version label confirms claude-code only with its OS executable witness.
+        && !(nodeRow.runtime === "claude-code" && await witnessedClaudeVersionLabel(paneCommand,
+          { target: paneTarget, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }))) {
         projectionDrift.push(`runtime unverified: pane command "${paneCommand}" does not confirm runtime "${nodeRow.runtime}"`);
       }
     }
