@@ -557,11 +557,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OPR.0.4.3.28 B2 — self-provision a STABLE activity url+token so launched
   // seats reach the ingest endpoint without operator shell seeding (the
   // confirmed live break). The token persists across daemon restarts (matches
-  // already-launched seats' frozen env); the URL derives from the daemon's
-  // loopback + port (DEFAULT_PORT 7433 fallback). The SAME token becomes both
-  // the ingest expected-token (server dep below) and the seats' env value, so
-  // hook POSTs authenticate. Also snapshotted to activity-endpoint.json for the
-  // relay file-discovery fallback used by reconcile/restored seats (B3).
+  // existing seats and endpoint readers); the URL derives from the daemon's
+  // loopback + port (DEFAULT_PORT 7433 fallback). Hook auth stays in the
+  // mode-0600 activity-endpoint.json file, not tmux argv or seat environment.
   const resolvedActivityHookToken = activityHookToken ?? ensureActivityHookToken(OPENRIG_HOME);
   // Derive from the daemon's OWN bound host+port (honors an explicit OPENRIG_HOST
   // single-host bind; wildcard/absent → loopback) so seats post to a reachable
@@ -586,14 +584,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Shared launch identity/activity env — used by NodeLauncher at launch AND
   // by the seat-handover full-cycle composer when it creates a successor
   // session (OPR.0.4.3.04), so a handed-over successor self-identifies +
-  // reports activity exactly like a launched seat.
+  // reports activity exactly like a launched seat. Hook auth is discovered
+  // from activity-endpoint.json and is deliberately absent from this env.
   const launchSessionEnv: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     OPENRIG_HOME,
     OPENRIG_PORT: openRigPort,
     OPENRIG_HOST: openRigHost,
     OPENRIG_URL: resolvedActivityHookUrl,
-    OPENRIG_ACTIVITY_HOOK_TOKEN: resolvedActivityHookToken,
     ...providerAuthEnv,
     HOME: daemonHome,
     USER: process.env.USER,

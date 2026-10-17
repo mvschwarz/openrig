@@ -308,7 +308,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' -P -F '#{pane_id}'"
       );
     });
 
@@ -320,7 +320,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' -P -F '#{pane_id}'"
       );
     });
 
@@ -332,7 +332,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
+        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' -P -F '#{pane_id}'"
       );
     });
 
@@ -344,7 +344,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(1)).toEqual(["tmux show-environment -g"]); // clean server: nothing to exclude
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
+        "tmux new-session -d -s 'r01-dev1-impl' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' -P -F '#{pane_id}'"
       );
     });
 
@@ -378,7 +378,7 @@ describe("TmuxAdapter", () => {
 
       const cmd = exec.mock.calls[0]![0] as string;
       expect(cmd).toContain("-e 'OPENRIG_TRANSCRIPTS_LINES='");
-      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'");
+      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' -P -F '#{pane_id}'");
     });
 
     it("returns { ok: false, code: 'duplicate_session' } on duplicate", async () => {
@@ -691,7 +691,7 @@ describe("TmuxAdapter", () => {
       // createSession with canonical name
       await adapter.createSession("dev-impl@auth-feats", "/home/user/code");
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'"
+        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' -P -F '#{pane_id}'"
       );
 
       // sendKeys targeting canonical name
@@ -1260,7 +1260,7 @@ describe("TmuxAdapter", () => {
         "tmux set-environment -t %3 -r CLAUDECODE",
         "tmux set-environment -t %3 -r HERDR_PANE_ID",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
-        "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
+        "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' 'codex'",
       ]);
     });
 
@@ -1283,7 +1283,7 @@ describe("TmuxAdapter", () => {
       });
       const result = await new TmuxAdapter(exec).respawnPane("%3", "codex");
       expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("unsupported")] });
-      expect(exec.mock.calls.at(-1)![0]).toBe("tmux respawn-pane -t '%3' 'codex'");
+      expect(exec.mock.calls.at(-1)![0]).toBe("tmux respawn-pane -t '%3' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' 'codex'");
     });
 
     // #771 review: the cleanup fails open. A tmux error there leaves a launch that works today
@@ -1307,7 +1307,7 @@ describe("TmuxAdapter", () => {
       });
       const result = await new TmuxAdapter(exec).respawnPane("%3", "codex");
       expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining("set-environment refused")] });
-      expect(exec.mock.calls.at(-1)![0]).toBe("tmux respawn-pane -t '%3' 'codex'");
+      expect(exec.mock.calls.at(-1)![0]).toBe("tmux respawn-pane -t '%3' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' 'codex'");
     });
   });
 
@@ -1322,7 +1322,7 @@ describe("TmuxAdapter", () => {
       await adapter.respawnPane("%3", "openrig-agent --resume tok");
 
       expect(exec.mock.calls.map((c) => c[0]).slice(0, 1)).toEqual(["tmux show-environment -g"]); expect(exec).toHaveBeenCalledTimes(2);
-      expect(exec.mock.calls[1]![0]).toBe("tmux respawn-pane -t '%3' 'openrig-agent --resume tok'");
+      expect(exec.mock.calls[1]![0]).toBe("tmux respawn-pane -t '%3' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' 'openrig-agent --resume tok'");
       expect(exec.mock.calls[1]![0]).not.toContain(" -k"); // -k clears scrollback — never used
     });
 
@@ -1337,7 +1337,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(0, 1)).toEqual(["tmux show-environment -g"]); expect(exec).toHaveBeenCalledTimes(2);
       expect(exec.mock.calls[1]![0]).toBe(
-        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_NODE_ID=node123' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' 'openrig-agent --resume tok'",
+        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_NODE_ID=node123' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN=' 'openrig-agent --resume tok'",
       );
     });
 
@@ -1352,7 +1352,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec.mock.calls.map((c) => c[0]).slice(0, 1)).toEqual(["tmux show-environment -g"]); expect(exec).toHaveBeenCalledTimes(2);
       expect(exec.mock.calls[1]![0]).toBe(
-        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_SESSION_NAME=dev-impl@rig'",
+        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' -e 'OPENRIG_ACTIVITY_HOOK_TOKEN=' -e 'RIGGED_ACTIVITY_HOOK_TOKEN='",
       );
     });
 

@@ -35,8 +35,21 @@ describe("tmux argv exec path", () => {
       "-c", "/home/user/my project/code",
       "-e", "OPENRIG_TRANSCRIPTS_LINES=", "-e", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=",
       "-e", "PATH=/a b:/c", "-e", "EMPTY=",
+      "-e", "OPENRIG_ACTIVITY_HOOK_TOKEN=", "-e", "RIGGED_ACTIVITY_HOOK_TOKEN=",
       "-P", "-F", "#{pane_id}",
     ], ["tmux", "show-environment", "-g"]]);
+  });
+
+  it("never puts activity-hook token values on tmux argv", async () => {
+    const seen: string[][] = [];
+    const { adapter } = argvAdapter(seen);
+    const token = ["fixture", "only", "activity", "token"].join("-");
+
+    await adapter.createSession("r01-dev1-impl", "/w", { OPENRIG_ACTIVITY_HOOK_TOKEN: token });
+    await adapter.respawnPane("%1", "claude", { env: { OPENRIG_ACTIVITY_HOOK_TOKEN: token } });
+    await adapter.setSessionEnv("r01-dev1-impl", "OPENRIG_ACTIVITY_HOOK_TOKEN", token);
+
+    expect(seen.flat().some((arg) => arg.includes(token))).toBe(false);
   });
 
   it("sendKeys passes key names as separate verbatim units", async () => {
@@ -57,7 +70,7 @@ describe("tmux argv exec path", () => {
     const seen: string[][] = [];
     const { adapter } = argvAdapter(seen);
     await adapter.respawnPane("%1", "codex resume 'tok en'", { cwd: "/w", env: { A: "b c" } });
-    expect(seen).toEqual([["tmux", "show-environment", "-g"], ["tmux", "respawn-pane", "-t", "%1", "-c", "/w", "-e", "A=b c", "codex resume 'tok en'"]]);
+    expect(seen).toEqual([["tmux", "show-environment", "-g"], ["tmux", "respawn-pane", "-t", "%1", "-c", "/w", "-e", "A=b c", "-e", "OPENRIG_ACTIVITY_HOOK_TOKEN=", "-e", "RIGGED_ACTIVITY_HOOK_TOKEN=", "codex resume 'tok en'"]]);
   });
 
   it("capture and display probes build atomic argv (no shell join artifacts)", async () => {

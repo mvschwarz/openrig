@@ -25,6 +25,26 @@ interface TmuxShellCommandOptions {
  */
 export type ArgvExecFn = (argv: string[]) => Promise<string>;
 
+// Activity relays resolve their auth from the mode-0600 endpoint file. Keep
+// these names empty in tmux environments so daemon auth never reaches tmux on
+// argv, and a token from the parent shell cannot override that file.
+const ACTIVITY_HOOK_TOKEN_ENV_KEYS = [
+  "OPENRIG_ACTIVITY_HOOK_TOKEN",
+  "RIGGED_ACTIVITY_HOOK_TOKEN",
+] as const;
+
+function tmuxSeatEnvironment(env: Record<string, string>): Record<string, string> {
+  return {
+    ...env,
+    OPENRIG_ACTIVITY_HOOK_TOKEN: "",
+    RIGGED_ACTIVITY_HOOK_TOKEN: "",
+  };
+}
+
+function tmuxSeatEnvironmentValue(key: string, value: string): string {
+  return (ACTIVITY_HOOK_TOKEN_ENV_KEYS as readonly string[]).includes(key) ? "" : value;
+}
+
 /**
  * Injectable file/buffer operations for `sendText`.
  * Split out so tests can observe temp-file writes and unique-name generation
@@ -592,14 +612,15 @@ export class TmuxAdapter {
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     // These are the daemon's resolved capture settings, not seat overrides.
-    // An empty per-session value prevents the tmux server's inherited values
-    // from pinning an old policy over config.json inside a newly launched seat.
-    // Explicit seat settings remain authoritative.
-    const seatEnv = {
+    // Empty per-session values prevent the tmux server's inherited capture
+    // policy from pinning an old setting over config.json. Activity-hook auth
+    // is the exception to explicit seat values: the relay reads it from the
+    // private endpoint file, so it is never copied into tmux arguments.
+    const seatEnv = tmuxSeatEnvironment({
       OPENRIG_TRANSCRIPTS_LINES: "",
       OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
       ...env,
-    };
+    });
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
     for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
@@ -890,12 +911,13 @@ export class TmuxAdapter {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
+    const respawnEnv = tmuxSeatEnvironment(opts?.env ?? {});
+    for (const [k, v] of Object.entries(respawnEnv)) argv.push("-e", `${k}=${v}`);
     // The respawn command is ONE argv unit: tmux runs it via the shell.
     if (command != null && command.length > 0) argv.push(command);
     const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
+    for (const [k, v] of Object.entries(respawnEnv)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
     if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
@@ -1095,12 +1117,13 @@ export class TmuxAdapter {
   }
 
   /** Set one variable in a session's environment: what its next spawned process inherits, not a
-   *  running one. Callers that pass a value are putting it on a tmux command line. */
+   *  running one. Activity-hook tokens are blanked and read from the protected endpoint file. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    await this.run(["tmux", "set-environment", "-t", target, key, value],
-      `tmux set-environment -t ${shellQuote(target)} ${shellQuote(key)} ${shellQuote(value)}`);
+    const safeValue = tmuxSeatEnvironmentValue(key, value);
+    await this.run(["tmux", "set-environment", "-t", target, key, safeValue],
+      `tmux set-environment -t ${shellQuote(target)} ${shellQuote(key)} ${shellQuote(safeValue)}`);
   }
 
   /** Remove one variable from a session's environment, so a process spawned there afterwards

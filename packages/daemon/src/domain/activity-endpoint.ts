@@ -10,11 +10,10 @@
 // around it (orch-advisor ruling 2026-07-02).
 //
 // - activity-hook-token : durable token, STABLE across daemon restarts so
-//   already-launched seats (whose env froze the token at launch) still
-//   authenticate after a restart.
+//   existing seats and endpoint readers still authenticate after a restart.
 // - activity-endpoint.json : {baseUrl, token} snapshot, re-written each boot,
-//   read by the relay's file-discovery fallback for reconcile/restored seats
-//   whose frozen process env carries no OpenRig activity vars (B3).
+//   read by the relay for bearer auth when token env is intentionally absent,
+//   and as a URL fallback for reconcile/restored seats with no activity vars (B3).
 
 import fs from "node:fs";
 import nodePath from "node:path";
