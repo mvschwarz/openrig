@@ -34,7 +34,7 @@ describe("JSON bodies that are not objects", () => {
     const { app, rigRepo } = createTestApp(db);
     const rigId = rigRepo.createRig("r").id;
     const paths = [
-      "/api/down", "/api/rigs", "/api/up", "/api/bootstrap", "/api/packages/validate", "/api/packages/install",
+      "/api/down", "/api/rigs", "/api/up", "/api/bootstrap/plan", "/api/packages/validate", "/api/packages/install",
       "/api/bundles/create", "/api/bundles/inspect", "/api/bundles/install", "/api/startup/kernel",
       `/api/rigs/${rigId}/up`, `/api/rigs/${rigId}/release`, `/api/rigs/${rigId}/expand`, `/api/rigs/${rigId}/snapshots`,
       "/api/sessions/x/clear-attention",
@@ -44,7 +44,11 @@ describe("JSON bodies that are not objects", () => {
     for (const path of paths) {
       for (const body of ["null", "5", "[]", "\"text\""]) {
         const res = await app.request(path, post(body));
-        expect(res.status, `${path} ${body}`).not.toBe(500);
+        if (path.startsWith("/api/bootstrap")) {
+          expect(res.status, `${path} ${body}`).toBe(400);
+        } else {
+          expect(res.status, `${path} ${body}`).not.toBe(500);
+        }
       }
     }
   });
