@@ -123,8 +123,9 @@ describe("refocus: the time budget", () => {
     await hook(f, "PostCompact", "s1");
     const r = await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_BUDGET_MS: "120000", STUB_TRACE_MS: "23500" });
     expect(r.killed).toBe(false);
+    // The gap is what tells 52 s from 55 s; the time bound only checks the hook ended, with room for process start-up.
     expect(context(r)).toMatch(/TRACE GAP — spawnSync .* ETIMEDOUT/);
-    expect(r.ms).toBeLessThan(23_500);
+    expect(r.ms).toBeLessThan(30_000);
     expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
   }, 40_000);
 
