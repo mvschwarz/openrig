@@ -527,7 +527,11 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig ask <rig> <question>` | — | `--json`<br>`--seat <session-name>`<br>`--session <token>`<br>`--wake <seat[@gen]\|token>`<br>`--runtime <runtime>`<br>`--wake-timeout <seconds>` |
+| `rig ask <rig> <question>` | — | `--json`<br>`--seat <session-name>`<br>`--session <token>`<br>`--wake <target>`<br>`--runtime <runtime>`<br>`--wake-timeout <seconds>` |
+
+Wake seat targets must include the rig: `member@rig` or `member@rig@N` (1 = newest tenure).
+Values without `@` go unchanged to the runtime as a session ID or title; a bare member
+name is not resolved within `<rig>`.
 
 ### chatroom
 
