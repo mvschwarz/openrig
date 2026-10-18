@@ -1540,7 +1540,7 @@ interface SessionTransportDeps {
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
+interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; binding_external: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
   resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
@@ -1563,6 +1563,15 @@ interface SessionReconciliationSnapshot {
   occupant_generation: string | null;
   latest_session_id: string;
   startup_event_seq: number | null;
+}
+
+/** Whether the node's current binding names this session: its tmux session, or the session name a
+ *  registered seat kind binds by. external_cli keeps its tmux-session-only labelling. */
+function boundToName(row: SessionMetaRow | undefined, sessionName: string): boolean {
+  if (!row) return false;
+  if (row.binding_session === sessionName) return true;
+  const kind = row.attachment_type;
+  return !!kind && kind !== "tmux" && kind !== "external_cli" && row.binding_external === sessionName;
 }
 
 export class SessionTransport {
@@ -1605,9 +1614,17 @@ export class SessionTransport {
     this.seatKinds = deps.seatKinds ?? null;
   }
 
-  /** The registered kind that reaches this seat, or null for tmux and external_cli. */
-  private customKind(meta: { attachmentType: string | null }): SeatKind | null {
-    return this.seatKinds?.custom(meta.attachmentType) ?? null;
+  /** The registered kind that reaches this seat, or null for tmux, external_cli, and a session the
+   *  node's current binding no longer names. */
+  private customKind(meta: { attachmentType: string | null; boundToName: boolean }): SeatKind | null {
+    return meta.boundToName ? this.seatKinds?.custom(meta.attachmentType) ?? null : null;
+  }
+
+  /** The registry, for an activity read of a session its registered kind's binding still names;
+   *  null otherwise, so an older name of the node is read as today. No extra read by default. */
+  private boundSeatKinds(sessionName: string): SeatKindRegistry | null {
+    if (!this.seatKinds?.hasCustom()) return null;
+    return this.customKind(this.getSessionMeta(sessionName)) ? this.seatKinds : null;
   }
 
   private seatRef(sessionName: string, meta: ReturnType<SessionTransport["getSessionMeta"]>, kind: SeatKind): SeatRef {
@@ -1653,7 +1670,7 @@ export class SessionTransport {
 
   private getSessionMeta(sessionName: string): {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
-    rotation: ClaudeResumeRotation | null;
+    boundToName: boolean; rotation: ClaudeResumeRotation | null;
   } {
     // One existing statement; P2 reads the binding columns it already joins plus the
     // same current-occupant subselect the delivery guard uses. No extra query.
@@ -1663,6 +1680,7 @@ export class SessionTransport {
         b.attachment_type AS attachment_type,
         n.id AS node_id,
         b.tmux_session AS binding_session,
+        b.external_session_name AS binding_external,
         b.tmux_pane AS pane,
         s.resume_token AS resume_token,
         s.resume_provenance AS resume_provenance,
@@ -1682,10 +1700,12 @@ export class SessionTransport {
       runtime: row?.runtime ?? null,
       attachmentType: row?.attachment_type ?? null,
       nodeId: row?.node_id ?? null,
+      // A registered kind's seat is bound by external_session_name rather than a tmux session.
+      boundToName: boundToName(row, sessionName),
       // The row may be a historical session of a node now bound elsewhere: only a
       // binding whose session IS this name labels pane/occupant; otherwise unknown.
       pane: row?.binding_session === sessionName ? row?.pane ?? null : null,
-      occupant: row?.binding_session === sessionName ? row?.occupant ?? null : null,
+      occupant: boundToName(row, sessionName) ? row?.occupant ?? null : null,
       resumeToken: row?.resume_token ?? null,
       rotation: claudeResumeRotation(row),
     };
@@ -2056,7 +2076,7 @@ export class SessionTransport {
     if (timeoutMs === undefined) return null;
     let meta: {
       runtime: string | null; attachmentType: string | null; nodeId: string | null;
-      pane: string | null; occupant: string | null; resumeToken: string | null;
+      pane: string | null; occupant: string | null; resumeToken: string | null; boundToName: boolean;
     };
     let bound: GuardTarget;
     try {
@@ -3001,7 +3021,7 @@ export class SessionTransport {
           runtime: input.runtime,
           attachmentType: input.attachmentType,
           tmuxAdapter: this.tmuxAdapter,
-          seatKinds: this.seatKinds,
+          seatKinds: this.boundSeatKinds(input.sessionName),
           now,
           captureObserver: this.captureObserver,
           binding: input.binding,
@@ -3018,7 +3038,7 @@ export class SessionTransport {
       runtime: input.runtime,
       attachmentType: input.attachmentType,
       tmuxAdapter: this.tmuxAdapter,
-      seatKinds: this.seatKinds,
+      seatKinds: this.boundSeatKinds(input.sessionName),
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,

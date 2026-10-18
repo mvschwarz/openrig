@@ -627,7 +627,9 @@ export class SeatLifecycleService {
       return {
         ok: false,
         code: "session_not_live",
-        message: `Session "${session.session_name}" is absent in tmux (checked: tmux has-session, POSITIVE absence evidence) — there is nothing to stop.`,
+        message: kindSeat
+          ? `Session "${session.session_name}" is absent (checked: its ${kindSeat.kind.kind} seat host's probe, POSITIVE absence evidence) — there is nothing to stop.`
+          : `Session "${session.session_name}" is absent in tmux (checked: tmux has-session, POSITIVE absence evidence) — there is nothing to stop.`,
         guidance: "A dead seat with stale records is returned to launchable with: rig seat clean",
       };
     }
@@ -1379,7 +1381,9 @@ export class SeatLifecycleService {
       return {
         ok: false,
         code: "tmux_probe_failed",
-        message: `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`,
+        message: kindSeat
+          ? `Stopping "${session.session_name}" through its ${kindSeat.kind.kind} seat host failed: ${kill.message ?? kill.code}`
+          : `tmux kill-session for "${session.session_name}" failed: ${kill.message ?? kill.code}`,
       };
     }
     let persisted: PersistedEvent | null = null;
@@ -1644,14 +1648,18 @@ export class SeatLifecycleService {
       return {
         ok: false,
         code: "tmux_probe_failed",
-        message: `tmux liveness probe for "${sessionName}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so ${refusalConsequence}.`,
+        message: kindSeat
+          ? `The ${kindSeat.kind.kind} seat host's liveness probe for "${sessionName}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so ${refusalConsequence}.`
+          : `tmux liveness probe for "${sessionName}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so ${refusalConsequence}.`,
       };
     }
     if (probe.state === "transport_unavailable") {
       return {
         ok: false,
         code: "tmux_probe_failed",
-        message: `tmux transport unavailable probing "${sessionName}" (${probe.cause}) — session existence was NOT determined (checked: classified tmux probe), so ${refusalConsequence}. Retry when the tmux transport is back.`,
+        message: kindSeat
+          ? `The ${kindSeat.kind.kind} seat host could not be reached probing "${sessionName}" (${probe.cause}) — session existence was NOT determined, so ${refusalConsequence}. Retry when the seat host is back.`
+          : `tmux transport unavailable probing "${sessionName}" (${probe.cause}) — session existence was NOT determined (checked: classified tmux probe), so ${refusalConsequence}. Retry when the tmux transport is back.`,
       };
     }
     return { state: probe.state };

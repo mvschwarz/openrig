@@ -157,10 +157,11 @@ Where it is wired:
 |---|---|---|
 | `NodeLauncher.launchNode` | `TmuxSeatHost.create`, binding `tmux_session`/`tmux_pane` | `LaunchOpts.kind` picks the host; binding `attachment_type=<kind>`, `external_session_name=<session>`; unregistered kind refuses `seat_kind_unknown` |
 | `StartupOrchestrator` launch, readiness, startup text | runtime adapter via `TmuxSeatHost`; text typed into the pane | `host.launch`, `host.checkReady`; startup text through `inbound.deliver` |
-| `SessionTransport.send` / `capture`, rig-wide targets | inline tmux code | `inbound.deliver` / `inbound.capture`; running seats join rig targets |
+| `SessionTransport.send` / `capture`, rig-wide targets | inline tmux code | `inbound.deliver` / `inbound.capture`, only for the session name the binding currently carries; running seats join rig targets |
 | `resolveGuardTarget` | same SQL result | resolves by `external_session_name` for a registered kind only |
 | `probeSessionActivity` (inventory, idle waits) | pane reading | `activity.probe` |
-| Boot reconcile, `rig down`, `rig seat stop`, node removal | `probeSession` / `killSession` | `host.probe` / `host.stop` |
+| Boot reconcile, `rig down`, `rig seat stop`, node removal | `probeSession` / `killSession` | `host.probe` / `host.stop`; refusal text names the seat host, codes unchanged |
+| Node removal's `fallbackDestination` liveness | `hasSession` | `host.probe` must answer `present` |
 
 Continuous activity for a seat without a pane arrives over the existing hook and self-report
 routes (`routes/activity.ts`). The pollers already skip non-tmux rows.

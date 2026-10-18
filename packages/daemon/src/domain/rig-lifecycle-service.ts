@@ -815,7 +815,11 @@ export class RigLifecycleService {
         error: `Fallback destination '${fallbackDestination}' belongs to '${row.logical_id}', which is part of the removal target. No queue or topology changes were made.`,
       };
     }
-    if (!this.tmuxAdapter || !(await this.tmuxAdapter.hasSession(fallbackDestination))) {
+    const seat = this.seatKinds?.forNode(this.sessionRegistry, row.node_id, fallbackDestination) ?? null;
+    const notLive = seat
+      ? (await seat.kind.host.probe(seat.ref)).state !== "present"
+      : !this.tmuxAdapter || !(await this.tmuxAdapter.hasSession(fallbackDestination));
+    if (notLive) {
       return {
         ok: false,
         code: "fallback_not_running",

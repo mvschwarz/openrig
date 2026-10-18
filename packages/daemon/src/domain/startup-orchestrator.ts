@@ -686,7 +686,7 @@ export class StartupOrchestrator {
       } catch (error) {
         // An unavailable observation is not a positive provider prerequisite.
         this.recordSubmissionWarning(deliveryInput, `Post-delivery runtime state is unverified: ${(error as Error).message}`,
-          `Post-delivery runtime state is unverified in ${input.binding.tmuxSession}: ${(error as Error).message}`);
+          `Post-delivery runtime state is unverified in ${this.seatSession(input.binding)}: ${(error as Error).message}`);
       }
     }
 
@@ -956,7 +956,7 @@ export class StartupOrchestrator {
     input.submissionWarnings.push(reason);
     // Keep every observation in the ordinary result, including if a later file fails.
     input.warnings.push(displayWarning ?? (reason === input.stagedSubmissionWarning ? reason
-      : `Startup submission unverified in ${input.binding.tmuxSession}: ${reason}`));
+      : `Startup submission unverified in ${this.seatSession(input.binding)}: ${reason}`));
   }
 
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
