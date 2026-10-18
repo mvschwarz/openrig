@@ -240,8 +240,9 @@ seconds), for up to 30 seconds by default. Change the window with
 `rig config set runtime.readiness_timeout_seconds <1-600>` (or `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`); it
 applies to the next launch. A recognized prompt (the attention codes above) ends the wait at once as
 `attention_required`. A timeout ends startup as `failed` ("Readiness timeout after Ns — harness did not become
-interactive"), and the post-launch files aren't sent. A Codex fork is the exception: its timeout ends as
-`attention_required`, with its startup context kept for `rig seat continue` (see below).
+interactive"), and the post-launch files aren't sent. A Codex fork that the rig launches (a member with
+`session_source.mode: fork`, or an agent image's fork) is the exception: its timeout ends as `attention_required`,
+with its startup context kept for `rig seat continue` (see below). A seat handover's fork has its own readiness check.
 
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
