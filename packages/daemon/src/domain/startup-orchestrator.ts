@@ -262,10 +262,17 @@ export class StartupOrchestrator {
       sessionRegistry: deps.sessionRegistry,
       tmuxAdapter: deps.tmuxAdapter,
       eventBus: deps.eventBus,
+      seatKinds: deps.seatKinds,
     });
   }
 
   private readFile: (path: string) => string;
+
+  /** The seat's name: its tmux session, or a registered kind's session name. */
+  private seatSession(binding: NodeBinding): string | null {
+    if (binding.tmuxSession) return binding.tmuxSession;
+    return this.seatKinds?.custom(binding.attachmentType) ? binding.externalSessionName ?? null : null;
+  }
 
   /** The host that launches and checks this binding's seat: tmux unless a registered kind owns it. */
   private hostFor(binding: NodeBinding): SeatHost {
@@ -813,7 +820,7 @@ export class StartupOrchestrator {
 
       // Execute via tmux
       try {
-        if (!input.binding.tmuxSession) {
+        if (!this.seatSession(input.binding)) {
           errors.push(`No tmux session for action: ${action.value}`);
           continue;
         }
@@ -845,7 +852,8 @@ export class StartupOrchestrator {
     includeDurableObligations = false,
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
     const { binding } = input;
-    if (!binding.tmuxSession) {
+    const seatSession = this.seatSession(binding);
+    if (!seatSession) {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
     }
 
@@ -867,7 +875,7 @@ export class StartupOrchestrator {
       }
     }
 
-    if (includeDurableObligations) prompt += `\n\nThis is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${binding.tmuxSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`;
+    if (includeDurableObligations) prompt += `\n\nThis is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${seatSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`;
 
     // OPR.0.4.3.06 — the per-launch orientation challenge rides along with the
     // identity prompt (after the contract) so no extra send is added.
@@ -897,7 +905,7 @@ export class StartupOrchestrator {
     postLaunchFiles: ResolvedStartupFile[],
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
     const { binding } = input;
-    if (!binding.tmuxSession) {
+    if (!this.seatSession(binding)) {
       return { ok: false, error: "No tmux session for the restore preload prompt" };
     }
 
@@ -935,7 +943,7 @@ export class StartupOrchestrator {
    * for the operator, and nothing is typed on top of it.
    */
   private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
-    if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
+    if (input.adapter.runtime !== "claude-code" || !this.seatSession(input.binding)) return;
     if (!input.lastSubmissionConfirmed) {
       this.recordSubmissionWarning(input, "Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
       return;
@@ -955,6 +963,14 @@ export class StartupOrchestrator {
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
+    const kind = this.seatKinds?.custom(input.binding.attachmentType);
+    if (kind) {
+      const sessionName = input.sessionName ?? input.binding.externalSessionName ?? "";
+      const sent = await kind.inbound.deliver({ nodeId: input.nodeId, sessionName, runtime: input.adapter.runtime, kind: kind.kind, pane: null, occupant: null }, text, {});
+      if (!sent.ok) return { error: sent.error ?? sent.reason ?? "unknown" };
+      input.lastSubmissionConfirmed = sent.verified === true;
+      return null;
+    }
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };

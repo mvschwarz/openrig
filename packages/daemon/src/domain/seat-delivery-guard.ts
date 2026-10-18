@@ -277,15 +277,18 @@ export class SeatDeliveryGuard {
  * seat, so unarchived matches win; archived ones count only when nothing else
  * matches. Exactly one match is still required. */
 export function resolveGuardTarget(db: Database.Database, name: string): GuardTarget | null {
+  // A registered seat kind's seat is bound by its session name, not a tmux session. The two
+  // built-in kinds never match KIND_SESSION, so their rows resolve exactly as before.
+  const KIND_SESSION = `(CASE WHEN coalesce(b.attachment_type,'tmux') NOT IN ('tmux','external_cli') THEN b.external_session_name END)`;
   const rows = db.prepare(`SELECT n.id AS nodeId,
-      coalesce(b.tmux_session, replace(n.logical_id,'.','-') || '@' || r.name) AS session,
+      coalesce(b.tmux_session, ${KIND_SESSION}, replace(n.logical_id,'.','-') || '@' || r.name) AS session,
       b.tmux_pane AS pane,
       (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant,
       r.archived_at AS archivedAt
     FROM nodes n JOIN rigs r ON r.id=n.rig_id LEFT JOIN bindings b ON b.node_id=n.id
-    WHERE n.id=? OR b.tmux_session=? OR b.tmux_pane=? OR n.logical_id=?
+    WHERE n.id=? OR b.tmux_session=? OR b.tmux_pane=? OR n.logical_id=? OR ${KIND_SESSION}=?
       OR (b.tmux_session IS NULL AND replace(n.logical_id,'.','-') || '@' || r.name=?)`)
-    .all(name, name, name, name, name) as Array<GuardTarget & { archivedAt: string | null }>;
+    .all(name, name, name, name, name, name) as Array<GuardTarget & { archivedAt: string | null }>;
   const unarchived = rows.filter((row) => row.archivedAt === null);
   const pool = unarchived.length > 0 ? unarchived : rows;
   if (pool.length !== 1) return null;

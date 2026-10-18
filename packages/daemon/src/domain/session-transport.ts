@@ -21,7 +21,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import type { AttachmentKind } from "./seat-kinds.js";
+import type { AttachmentKind, SeatKind, SeatKindRegistry, SeatRef } from "./seat-kinds.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -1527,6 +1527,8 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -1574,6 +1576,7 @@ export class SessionTransport {
   private runtimeAdapters: Record<string, TransportReadinessChecker>;
   private inFlightReconciliations = new Map<string, Promise<boolean>>();
   private verifyInputBox?: () => boolean;
+  private seatKinds: SeatKindRegistry | null;
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -1592,6 +1595,16 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+    this.seatKinds = deps.seatKinds ?? null;
+  }
+
+  /** The registered kind that reaches this seat, or null for tmux and external_cli. */
+  private customKind(meta: { attachmentType: string | null }): SeatKind | null {
+    return this.seatKinds?.custom(meta.attachmentType) ?? null;
+  }
+
+  private seatRef(sessionName: string, meta: ReturnType<SessionTransport["getSessionMeta"]>, kind: SeatKind): SeatRef {
+    return { nodeId: meta.nodeId, sessionName, runtime: meta.runtime, kind: kind.kind, pane: null, occupant: meta.occupant };
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -1864,6 +1877,11 @@ export class SessionTransport {
       const binding = this.sessionRegistry.getBindingForNode(node.id);
       const latestSession = latestByNode.get(node.id);
 
+      if (binding?.attachmentType && this.seatKinds?.custom(binding.attachmentType) && binding.externalSessionName) {
+        if (latestSession?.status === "running") targets.push({ sessionName: binding.externalSessionName, rigName, nodeLogicalId: node.logicalId });
+        continue;
+      }
+
       if (binding?.attachmentType === "external_cli" && binding.externalSessionName) {
         targets.push({
           sessionName: binding.externalSessionName,
@@ -2044,6 +2062,8 @@ export class SessionTransport {
     } catch {
       return null;
     }
+    // A registered kind's seat takes the leased path; its inbound owns any wait.
+    if (this.customKind(meta)) return null;
     // External CLI seats never wait: main refuses them before anything else,
     // and a probe or wait would only delay that refusal (or mistake it for
     // an absent session).
@@ -2205,6 +2225,9 @@ export class SessionTransport {
     const waitForIdleMs = opts?.waitForIdleMs;
     const waitMode = waitForIdleMs !== undefined;
     let waitEvidence: Pick<SendResult, "activity" | "waitedMs" | "attempts"> = {};
+
+    const kind = this.customKind(sessionMeta);
+    if (kind) return kind.inbound.deliver(this.seatRef(sessionName, sessionMeta, kind), text, opts ?? {});
 
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -3168,6 +3191,8 @@ export class SessionTransport {
 
   async capture(sessionName: string, opts?: { lines?: number }): Promise<CaptureResult> {
     const sessionMeta = this.getSessionMeta(sessionName);
+    const kind = this.customKind(sessionMeta);
+    if (kind) return kind.inbound.capture(this.seatRef(sessionName, sessionMeta, kind), opts?.lines ?? 20);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
         ok: false,
@@ -3325,6 +3350,8 @@ export class SessionTransport {
     if (snapshot.session_status !== "running") return false;
     if (snapshot.session_id !== snapshot.latest_session_id) return false;
     if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return false;
+    // The recovery probe below reads a tmux pane; a registered kind's seat has none.
+    if (this.seatKinds?.hasCustom() && this.customKind(this.getSessionMeta(sessionName))) return false;
 
     const checker = this.runtimeAdapters[snapshot.runtime];
     if (!checker?.checkReady) return false;
