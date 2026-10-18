@@ -38,6 +38,15 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+/** A cadence flag read as it always has been (`parseInt`). When the value as typed is not the
+ *  number sent, say so on stderr, before the daemon answers, so stdout and exit codes are unchanged. */
+function cadenceSeconds(flag: string, value: string): number {
+  const seconds = Number.parseInt(value, 10);
+  if (Number.isNaN(seconds)) console.error(`Warning: ${flag} '${value}' is not a number.`);
+  else if (Number(value) !== seconds) console.error(`Warning: ${flag} '${value}' is being interpreted as ${seconds} seconds.`);
+  return seconds;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -79,25 +88,25 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .option("--spec <path>", "Path to YAML spec file (optional for context-usage-threshold)")
     .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required, workflow-keepalive, idle-gate-qitem, context-usage-threshold)")
     .requiredOption("--target-session <session>", "Canonical <member>@<rig> target")
-    .requiredOption("--interval-seconds <n>", "Evaluation interval (positive integer)", positiveIntArg)
+    .requiredOption("--interval-seconds <n>", "Evaluation interval (positive integer)")
     .requiredOption("--registered-by <session>", "Registering session (for audit)")
     .option("--threshold-bytes <n>", "(context-usage-threshold) transcript byte threshold")
     .option("--threshold-mb <n>", "(context-usage-threshold) transcript threshold in decimal MB")
     .option("--watched-file <path>", "(context-usage-threshold) explicit transcript file; recorded context path is the fallback")
     .option("--requires-job <jobId>", "(context-usage-threshold) require this earlier job's receipt for the same occupant")
     .option("--message <text>", "(context-usage-threshold) message delivered when the threshold fires")
-    .option("--active-wake-interval-seconds <n>", "(pool-ready-specific) wake-up cadence when actionable artifacts exist", positiveIntArg)
-    .option("--scan-interval-seconds <n>", "(pool-ready-specific) artifact pool scan cadence", positiveIntArg)
+    .option("--active-wake-interval-seconds <n>", "(pool-ready-specific) wake-up cadence when actionable artifacts exist")
+    .option("--scan-interval-seconds <n>", "(pool-ready-specific) artifact pool scan cadence")
     .option("--json", "JSON output for agents")
     .addHelpText("after", "\nTranscript density varies by session shape; do not tune a context threshold near the context wall.\n\nThe returned job id can be attached to a deliberate park with: rig queue block <qitemId> --on <blocker> --continuation <what-resumes> --wake-watchdog <jobId>")
     .action(async (opts: {
       spec?: string;
       policy: string;
       targetSession: string;
-      intervalSeconds: number;
+      intervalSeconds: string;
       registeredBy: string;
-      activeWakeIntervalSeconds?: number;
-      scanIntervalSeconds?: number;
+      activeWakeIntervalSeconds?: string;
+      scanIntervalSeconds?: string;
       thresholdBytes?: string;
       thresholdMb?: string;
       watchedFile?: string;
@@ -159,14 +168,21 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
           "",
         ].join("\n");
       }
+      const intervalSeconds = cadenceSeconds("--interval-seconds", opts.intervalSeconds);
+      const activeWakeIntervalSeconds = opts.activeWakeIntervalSeconds
+        ? cadenceSeconds("--active-wake-interval-seconds", opts.activeWakeIntervalSeconds)
+        : undefined;
+      const scanIntervalSeconds = opts.scanIntervalSeconds
+        ? cadenceSeconds("--scan-interval-seconds", opts.scanIntervalSeconds)
+        : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>("/api/watchdog/register", {
           policy: opts.policy,
           specYaml,
           targetSession: opts.targetSession,
-          intervalSeconds: opts.intervalSeconds,
-          activeWakeIntervalSeconds: opts.activeWakeIntervalSeconds,
-          scanIntervalSeconds: opts.scanIntervalSeconds,
+          intervalSeconds,
+          activeWakeIntervalSeconds,
+          scanIntervalSeconds,
           watchedFilePath,
           thresholdBytes,
           requiresJobId: opts.requiresJob,
