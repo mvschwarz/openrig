@@ -125,6 +125,26 @@ describe("scope-view projection (store-direct)", () => {
     expect(d.proofContract[2]!.drops[0]!.artifactType).toBe("guard");
   });
 
+  it("pairs a text evidence ref that YAML.stringify folded onto a continuation line", () => {
+    // `rig proof add` writes the C1 header with YAML.stringify, which folds a long plain scalar.
+    const folded = `---
+slice: OPR.0.5.2.9
+candidate_sha: abc123
+artifact_type: qa
+verdict: PASS
+evidences:
+  - A registered entity cold-DMs from Slack and it queues
+    exactly as today.
+media:
+  - relay-cold-dm.txt
+---
+body`;
+    const d = projectSliceScope(fsFixture({ ...baseFiles, [`${S}/proof/qa-pass-2.md`]: folded }, baseDirs), S)!;
+    expect(d.proof).toEqual({ paired: 3, total: 3 });
+    expect(d.proofContract[1]!.paired).toBe(true);
+    expect(d.proofContract[1]!.drops[0]!.media).toEqual(["relay-cold-dm.txt"]);
+  });
+
   it("PROGRESS.md is NEVER a data source: its lying checkbox moves nothing (the drift-class kill)", () => {
     const withoutProgress = { ...baseFiles };
     delete (withoutProgress as Record<string, string>)[`${S}/PROGRESS.md`];

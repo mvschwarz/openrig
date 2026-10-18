@@ -6,6 +6,7 @@
 // `n`; it is not read here at all. The render never asserts a proven-green the store
 // does not enforce: `paired` means exactly "≥1 C1 drop cites this contract item".
 import * as path from "node:path";
+import YAML from "yaml";
 import { findFrontmatterBlock } from "../frontmatter.js";
 import { readSliceReadiness, readProofContract, type ScopeReadiness, type ProofPolicyRead } from "../proof/judgments.js";
 import { createHash } from "node:crypto";
@@ -80,8 +81,16 @@ function fmValue(fm: string, key: string): string | null {
   return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
 }
 
-/** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. */
+/** Parse a YAML block list under `key:` — the C1 `evidences:` / `media:` shape. Read it
+ * as YAML first, as the Review composer does: `rig proof add` writes the header with
+ * YAML.stringify, which folds a long text ref onto continuation lines. */
 function fmList(fm: string, key: string): string[] {
+  let doc: unknown;
+  try { doc = YAML.parse(fm); } catch { doc = undefined; }
+  if (doc && typeof doc === "object" && !Array.isArray(doc)) {
+    const value = (doc as Record<string, unknown>)[key];
+    return Array.isArray(value) ? value.map((e) => String(e)).filter((e) => e.trim().length > 0) : [];
+  }
   const lines = fm.split(/\r?\n/);
   const out: string[] = [];
   let inKey = false;
