@@ -240,7 +240,8 @@ seconds), for up to 30 seconds by default. Change the window with
 `rig config set runtime.readiness_timeout_seconds <1-600>` (or `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`); it
 applies to the next launch. A recognized prompt (the attention codes above) ends the wait at once as
 `attention_required`. A timeout ends startup as `failed` ("Readiness timeout after Ns — harness did not become
-interactive"), and the post-launch files aren't sent.
+interactive"), and the post-launch files aren't sent. A Codex fork is the exception: its timeout ends as
+`attention_required`, with its startup context kept for `rig seat continue` (see below).
 
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
@@ -254,9 +255,9 @@ one wins, and it needs `idempotent: true`). With `authenticated`, a fresh launch
 and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes --full`
 shows the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
 
-**After a failure.** Delivery, launch and action failures, and readiness timeouts, give `failed`. Every 30 seconds the
-context monitor marks a `failed` or `attention_required` seat `ready` once its pane reads ready, unless fresh context
-is still pending for `rig seat continue`. A seat that timed out can therefore read `ready` without having received its
+**After a failure.** Delivery, launch and action failures, and readiness timeouts other than a Codex fork's, give
+`failed`. Every 30 seconds the context monitor marks a `failed` or `attention_required` seat `ready` once its pane reads
+ready, unless its fresh or Codex fork context is still pending for `rig seat continue`. A seat that timed out can therefore read `ready` without having received its
 post-launch files. If it needs them, first look at what that occupant has done; then
 `rig seat launch <seat> --fresh --reason <text>` starts a blank conversation for the seat. If the occupant is still
 live, the command refuses with `session_live` unless you also pass `--stop`, which replaces that occupant deliberately.
