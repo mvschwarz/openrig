@@ -6,6 +6,8 @@ name: Tests
 # Package suites deny external networking; scenario runtime has no external route.
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -75,6 +77,7 @@ jobs:
       - run: npm run test:repo
 
   package-tests:
+    if: ${{ github.event_name != 'push' }}
     # macOS, the platform OpenRig runs on: several daemon and cli tests read macOS ps columns,
     # file-inode behaviour and release tags.
     runs-on: macos-latest
