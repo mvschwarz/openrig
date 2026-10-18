@@ -18,6 +18,13 @@ export const USAGE_FRESH_FOR_MS = 15 * 60_000;
 /** An observation up to this far in the future is clock skew within tolerance (same rule). */
 export const USAGE_CLOCK_TOLERANCE_MS = 60_000;
 
+/** Whether two readings' reset times name the same window: equal, or within the clock tolerance. */
+export function sameReset(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return a === b;
+  const am = Date.parse(a), bm = Date.parse(b);
+  return Number.isFinite(am) && Number.isFinite(bm) ? Math.abs(am - bm) <= USAGE_CLOCK_TOLERANCE_MS : a === b;
+}
+
 /** Unresolved observations can't be matched to earlier ones, so each read adds its own rows. Keep those
  *  from the most recent few reads: enough to compare the latest with the two before it, and bounded
  *  because nothing else ever removes them. */

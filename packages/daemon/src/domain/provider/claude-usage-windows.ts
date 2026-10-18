@@ -20,7 +20,7 @@ import {
   UNRESOLVED_EARLIER_NOTE,
   UNRESOLVED_NOTE,
   UNRESOLVED_READS_KEPT,
-  USAGE_CLOCK_TOLERANCE_MS,
+  sameReset,
   usageFreshness,
   usageLevel,
   type UsageReadOutcome,
@@ -89,12 +89,6 @@ interface Pick {
   observedAt: string;
   seatSession: string;
   disagreeing: DisagreeingSeat[];
-}
-
-function sameReset(a: string | null, b: string | null): boolean {
-  if (a === null || b === null) return a === b;
-  const am = Date.parse(a), bm = Date.parse(b);
-  return Number.isFinite(am) && Number.isFinite(bm) ? Math.abs(am - bm) <= USAGE_CLOCK_TOLERANCE_MS : a === b;
 }
 
 export function pickClaudeWindows(samples: ClaudeWindowSample[], now: string): Pick[] {
