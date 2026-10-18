@@ -129,7 +129,7 @@ export function parseAgentImageManifest(rawYaml: string, sourcePath: string): Ag
           { sourcePath, index: i },
         );
       }
-      if (path.includes("..") || path.startsWith("/")) {
+      if (path.split(/[\\/]/).includes("..") || path.startsWith("/")) {
         throw new AgentImageError(
           "manifest_invalid",
           `manifest at ${sourcePath} files[${i}].path '${path}' must be a relative path inside the image (no '..', no leading '/')`,

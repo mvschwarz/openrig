@@ -209,6 +209,21 @@ files: []
     expect(lib.list()[0]!.name).toBe("installed");
   });
 
+  it("install accepts a file name with literal dots but rejects a '..' segment", () => {
+    const lib = new AgentImageLibraryService({
+      roots: [{ path: userRoot, sourceType: "user_file" }],
+    });
+    const manifest = (name: string, path: string): AgentImageManifest => ({
+      name, version: "1", runtime: "claude-code",
+      sourceSeat: "x", sourceSessionId: "s", sourceResumeToken: "t",
+      createdAt: "2026-01-01T00:00:00Z", files: [{ path, role: "notes" }],
+    });
+    const targetDir = lib.install(userRoot, manifest("dots", "v1..final.md"), new Map([["v1..final.md", "notes"]]));
+    expect(readFileSync(join(targetDir, "v1..final.md"), "utf-8")).toBe("notes");
+    expect(() => lib.install(userRoot, manifest("escape", "../escape.md"), new Map([["../escape.md", "x"]])))
+      .toThrow(/relative inside the image/);
+  });
+
   it("install rejects duplicate name", () => {
     const lib = new AgentImageLibraryService({
       roots: [{ path: userRoot, sourceType: "user_file" }],
