@@ -218,7 +218,8 @@ export function resolveMouseAction(
   explorerCount: number,
 ): Action | null {
   void state;
-  if ((event.button & 64) === 0) return null;
+  // Bit 1 marks the horizontal wheel (66 left, 67 right); this pane only scrolls vertically.
+  if ((event.button & 64) === 0 || (event.button & 2) !== 0) return null;
   const delta = (event.button & 1) !== 0 ? 3 : -3;
   return event.x <= screen.explorerWidth
     ? { type: "select", delta, rowCount: explorerCount }
