@@ -47,7 +47,7 @@ export function referenceLines(text: string, origin: FileTarget): ContentLine[] 
 }
 
 function headingSlug(value: string): string {
-  return value.trim().toLowerCase().replace(/[^\p{L}\p{N}_\-\s]/gu, "").replace(/\s/g, "-");
+  return value.trim().toLowerCase().replace(/[^\p{L}\p{M}\p{N}_\-\s]/gu, "").replace(/\s/g, "-");
 }
 
 export function fileLines(result: FileReadResult | null | undefined, target: FileTarget, width = 80): ContentLine[] {

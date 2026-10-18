@@ -1405,9 +1405,50 @@ use the `rig` CLI instead, the same way.
    answer in `note`.
 
 Limits today:
-- **Nothing wakes this agent.** `rig send` to an attached external node is refused, and a task's nudge to it is
-  unroutable. It sees new work only when it checks `rig_queue_list` itself.
+- **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to
+  it is unroutable. It sees new work when it checks `rig_queue_list`, or, if its app can run background shell
+  commands, with the opt-in wait below.
 - **Proven surfaces:** treat each app, and each mode inside one, as unproven until it has been run there.
+
+#### Wake on new work (opt-in; off unless the person turns it on)
+
+An agent whose app can run a shell command in the background, and starts a new turn when that command finishes, can
+wait for its own work. Claude Code, including Claude Desktop's Code tab, does this.
+
+- **Only if the person has said they want teammates to be able to wake this session.** Never turn it on yourself, and
+  never change their settings for it.
+- The shell needs this seat's identity: export the `OPENRIG_SESSION_NAME` that the one-time attach printed.
+- Start this as a background command, then end your turn. Don't poll it yourself.
+
+```sh
+# Waits until a task is assigned to this seat, prints it and exits; ends after MAX seconds.
+max=${MAX:-3300}; every=${EVERY:-5}; end=$(( $(date +%s) + max )); checked=0; failing_since=""
+while [ "$(date +%s)" -lt "$end" ]; do
+  if out=$(rig queue list --owned --state pending --json 2>/dev/null); then
+    checked=1; failing_since=""
+    case "$out" in *'"qitemId"'*) printf 'NEW WORK: %s\n' "$out"; exit 0 ;; esac
+  elif [ -z "$failing_since" ]; then
+    failing_since=$(date -u +%H:%M:%SZ)
+  fi
+  sleep "$every"
+done
+why="Run rig queue list --owned to see why (this seat's identity, the daemon) before starting the wait again."
+if [ "$checked" = 0 ]; then
+  echo "Couldn't check for work: every poll failed. $why"; exit 1
+elif [ -n "$failing_since" ]; then
+  echo "Checking stopped working at $failing_since: every poll since then failed. $why"; exit 1
+fi
+echo "No new work before the deadline. Start the wait again."
+```
+
+- **When it wakes you with `NEW WORK`:** `rig queue claim` each item, do it, and close it with the answer. Then start
+  the wait again and end your turn.
+- **Don't leave an item you've seen pending:** it wakes you again at once. Claim it, block it or hand it off.
+- **A failed poll doesn't end the wait;** only new work or the deadline does.
+- **If every poll failed, or every poll since some point did** (the daemon stopped mid-wait), it says so, with when,
+  and exits non-zero instead of reporting no work. A failure followed by a successful poll stays quiet. Find out why
+  with `rig queue list --owned` (usually this seat's identity, or the daemon) before starting the wait again.
+- **If your app stops the background command, or you start a new session,** start the wait again.
 
 ## Troubleshooting and Weird States
 

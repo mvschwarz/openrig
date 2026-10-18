@@ -404,6 +404,14 @@ describe("rig snapshot + restore", () => {
     program.addCommand(restoreCommand(runningDeps(port)));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "missing", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/not found/i);
+    // The hint must be a command `rig snapshot list` accepts (it takes the rig id positionally).
+    const hint = /List snapshots with: rig (.+)$/m.exec(logs.join("\n"))?.[1];
+    expect(hint).toBe("snapshot list rig-1");
+    const list = new Command();
+    list.exitOverride();
+    list.addCommand(snapshotCommand(runningDeps(port)));
+    const listed = await captureLogs(() => list.parseAsync(["node", "rig", ...hint!.split(" ")]));
+    expect(listed.join("\n")).toContain("snap-1");
   });
 
   // Test 7: restore in progress (409)

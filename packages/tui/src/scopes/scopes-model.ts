@@ -3,7 +3,7 @@
 // header and responsive Intent / Requirements / Proof regions. PROGRESS.md still renders
 // ONLY in the `n` narrative panel, never in status, proof, or lock facts.
 import type { Action, ExplorerRow } from "../types.js";
-import type { ContentLine } from "../detail.js";
+import { sliceWhole, type ContentLine } from "../detail.js";
 import type { Token } from "../theme.js";
 
 export interface ScopeDropRef { file: string; artifactType: string | null; verdict: string | null; media: string[] }
@@ -98,7 +98,7 @@ function semantic(parts: Seg[], width: number, action?: Action): ContentLine {
       segs.push(part);
       room -= part.text.length;
     } else {
-      segs.push({ ...part, text: room === 1 ? "…" : `${part.text.slice(0, room - 1)}…` });
+      segs.push({ ...part, text: room === 1 ? "…" : `${sliceWhole(part.text, room - 1)}…` });
       room = 0;
     }
   }
@@ -116,8 +116,9 @@ function wrapText(text: string, width: number): string[] {
       let word = original;
       while (word.length > limit) {
         if (line) { out.push(line); line = ""; }
-        out.push(word.slice(0, limit));
-        word = word.slice(limit);
+        const head = sliceWhole(word, limit) || word.slice(0, 2);
+        out.push(head);
+        word = word.slice(head.length);
       }
       if (!word) continue;
       if (!line) line = word;
