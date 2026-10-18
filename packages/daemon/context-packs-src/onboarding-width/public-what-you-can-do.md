@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-seven top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.10`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.6.11`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -91,6 +91,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   confirm by effect, never relaunch on it. A send or wake to a seat whose latest hook is a
   question waiting for a person is refused with `target_needs_input`, even when its screen
   can't be read: read it with `rig capture` and get the question answered instead of retrying.
+  `--wait-for-idle N` waits before it takes the seat's delivery lease, so other sends and wakes to
+  that seat aren't held behind it; N is a deadline from the start of the wait.
   Over `--host` to an http-registered host, a send that may have reached the remote reads
   `remote-outcome-unknown` ("Delivery UNCONFIRMED"): check the target with `rig capture <session>
   --host <id>` before any resend. Only a host that was never reached reads as unreachable.
@@ -186,10 +188,11 @@ your context, your compaction and your replacement — and it is the only thing 
   `handoff`'s, confirms the row was saved; the owner is woken after that. Before you say they were
   told, read the row's transitions, or use `--verify`. For a seat it reports the wake's terminal
   receipt and any claim separately: an unconfirmed receipt is not a failed handoff, and a claim is
-  pickup, not proof the body was read. For a row the seat already claimed, `outcome` can read
-  `indeterminate` while `claim` is accurate: read `claim`. It isn't a failed handoff, so don't
-  re-run the create. For a registered person who is also a seat with a pane, it also waits,
-  bounded, for the Slack receipt and reports it on its own.
+  pickup, not proof the body was read. For a claimed row whose wake wasn't confirmed, `outcome`
+  reads `claimed`; it isn't a failed handoff, so don't re-run the create. For a registered person
+  who is also a seat with a pane, it also waits for the Slack receipt and reports it on its own,
+  up to the 30-second default, even when Slack isn't set up or the row won't be posted. With `output.compact` on (off by default), the queue write commands print a short
+  receipt and `--full` prints the whole row.
 - **`rig queue show`** — what a row *actually says*. The header is not the body.
 - **`rig queue claim` / `unclaim`** — is this mine and running, or still pending where two agents
   might double-work it. Put it down honestly when it is not yours.
@@ -204,7 +207,11 @@ your context, your compaction and your replacement — and it is the only thing 
   visible**, with a plain-language summary and a pointer to what a human must judge; `resolve`
   writes their decision onto the durable record and wakes the owner. **Closing it would be a lie
   and sitting on it silently is indistinguishable from a crash.** `--wake-after <duration>` arms
-  one wake for this park episode; a new park supersedes it and every exit route retires it.
+  one wake for this park episode; a new park supersedes it and every exit route retires it. In
+  this release a wake the typing guard holds back (`retained`) is recorded as that one fire and
+  later wakes aren't, so the timer isn't retired: it can wake the owner again at each interval
+  while the row stays parked. A row attached to a shared timer with `--wake-watchdog` loses its
+  one wake if that wake is held back.
 - **`rig queue overdue`** — what was claimed and never closed in time. **Defaults to the current
   rig**; ask for more if you mean more.
 - **`rig queue undelivered`** — pending create-path nudge failures only. For gateway or human
@@ -362,7 +369,11 @@ not have to tear one down to change it, and you rarely have to start from nothin
   is archived), so check `rig ps --nodes` first. Launch-created `AGENTS.md` or `CLAUDE` files now show in `git status`.
   `rig up <rig> --existing` puts back the OpenRig guidance blocks `rig down` removed before a
   resumed seat starts. A seat still missing one makes the rig `partially_restored` (its node lists
-  `guidanceGaps`) and `rig up` exits 1.
+  `guidanceGaps`) and `rig up` exits 1. A seat that wasn't running at the snapshot, but whose
+  earlier session left a resume token, stops at `awaiting-decision` instead of starting fresh, in
+  `rig up --existing` and in `rig launch` (exit 1); the message names the command that starts it
+  fresh on purpose. In a pod-aware rig, a seat is rolled back as unresumable only when its runtime
+  reports the conversation missing.
 - **`rig down`** — stop a rig's seats and take it out of the running set. It ends the agents'
   sessions and any work in progress; don't run it on a live team unless the person asked. In
   human mode it first prints one line with each agent's last known activity, or “unknown”: a
@@ -375,7 +386,16 @@ not have to tear one down to change it, and you rarely have to start from nothin
   `rig seat launch <session> --fresh --stop`.
 - **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
   exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
-  siblings and durable work stay put, and unmanaged ambiguity refuses.
+  siblings and durable work stay put, and unmanaged ambiguity refuses. With `--stop`, a seat with a
+  still-live older session is refused before anything is stopped; `--plan` previews it.
+- **`rig seat restart <seat> --keep-conversation --reason <why>`** — restart one Codex seat in its
+  own pane on the same conversation, so it starts again on whatever account its Codex home now
+  holds; it doesn't switch accounts itself. It refuses with nothing stopped unless the seat is a
+  Codex seat OpenRig launched, in a single pane, with a conversation it can prove and unchanged
+  running settings. `--plan` runs every check and stops nothing; `--verify --expect-account
+  <account>` reports `moved` only when a tool turn has completed in the same conversation since
+  the restart and Codex's status names that account. Linux only: on macOS a
+  request that reaches the running-process check refuses before stopping the seat.
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig add` takes the rig's name or ID; a name two active rigs share is refused
   with `rig_ambiguous` and the candidates. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
@@ -483,7 +503,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   updating Codex is the operator's job.
 - **`rig seat set-model` / `stop` / `clean`** — persist the model for later managed resumes, stop
   exactly one live seat (ending its session and any work in progress), or clear a dead seat's
-  stale binding. When the topology is right and only
+  stale binding. A stop is recorded, so the rig doesn't read `degraded` for that seat, and a rig
+  whose seats were all stopped this way reads `stopped`. When the topology is right and only
   the occupant is wrong, use these seat lifecycle verbs or `rig handover`, not a rig down/up cycle.
   Effective-model detection follows the identity-verified current occupant, not a retained
   predecessor; a `<synthetic>` transcript record is skipped, so a PENDING model check is not a
@@ -571,7 +592,8 @@ scheme, and nothing downstream can see it.
   source actually bound. When someone later asks where the contract items came from, the drop's
   own echo is the answer — not a re-read of the files.
 - **`rig proof judge` / `rig proof show`** — record an attributed judgment on a contract item once,
-  then read derived proof, slice, mission and project readiness. The owning scope selects
+  then read derived proof, slice, mission and project readiness. Both take `--project <id>` or a
+  `<project>:` scope prefix. The owning scope selects
   `proofPolicy.judges` (nearest slice, mission or project policy wins); consult `rig proof --help`
   for that setup and the item/evidence selectors. Accept, reject or withdraw against readable
   evidence; corrections preserve history and unrelated judgments without ancestor status edits.
@@ -798,8 +820,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   accounts, what the usage signals say, and whether a seat can be moved without stranding the
   conversation it is in the middle of. **`provider signals` reports anomalies rather than a
   listing** — unbound seats, accounts shared across several seats. A Codex seat showing its
-  usage-limit banner reads activity `unknown` with reason `usage_limit`, and `provider signals` can
-  show a provider-event signal for that seat's account that allows a switch decision.
+  usage-limit banner reads activity `unknown` with reason `usage_limit`, and keeps it while its
+  screen redraws; `provider signals` can show a provider-event signal for that seat's account that
+  allows a switch decision. With `provider.usage_windows` on (off by default), `rig provider status
+  --refresh` reads a Codex login's usage windows once.
 - **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you

@@ -94,6 +94,20 @@ describe("Claude wrapper manual attention recovery", () => {
     expect(f.sendVerify).not.toHaveBeenCalled();
   });
 
+  it("clear-attention names the conversation mismatch, not the sh label", async () => {
+    // The running Claude keeps its launch conversation after the seat's recorded token moved on.
+    const f = fixture("stored-token-0000");
+    f.tmux.getPaneCommand.mockResolvedValue("sh");
+    const result = await f.post();
+    expect(result.status).toBe(422);
+    const text = JSON.stringify(result.body);
+    expect(text).toContain("does not match the seat's record");
+    expect(text).not.toContain("review-t");
+    expect(text).toContain("the seat records stored-t");
+    expect(text).not.toContain("does not positively identify");
+    expect(f.startup()).toBe("attention_required");
+  });
+
   it("does not clear attention using identity text inside settings beside a literal quote", async () => {
     const f = fixture("review-token");
     f.listProcesses.mockResolvedValue([root, { ...child,

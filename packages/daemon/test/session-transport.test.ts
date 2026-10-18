@@ -26,6 +26,7 @@ import { getNodeInventory } from "../src/domain/node-inventory.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
 describe("agent pane activity classifier", () => {
@@ -3327,6 +3328,67 @@ describe("startup readiness reconciliation on session interaction (#7)", () => {
 
       const sessionRow = db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string };
       expect(sessionRow.startup_status).toBe("failed");
+    });
+  });
+
+  // #1405: the shared classifier drives the adapter's readiness here, through the real startup flow.
+  describe("Claude's not-logged-in footer and a current login refusal through startup", () => {
+    const frame = ["", "─".repeat(40), "❯ ", "─".repeat(40), "                    Not logged in · Run /login", "  ⏵⏵ accept edits on (shift+tab to cycle)"];
+    const footerOnly = [" ▐▛███▛█   Claude Code v2.1.296", ...frame].join("\n");
+    const refused = [" ▐▛███▛█   Claude Code v2.1.296", "", "❯ /init", "", "● Not logged in · Please run /login", ...frame].join("\n");
+    const readiness = (paneContent: string) => {
+      const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+      return probe.status === "resumed" ? { ready: true } : { ready: false, code: probe.code, reason: probe.detail };
+    };
+
+    async function startWithPanes(panes: string[]) {
+      const { rig, node, session } = seedRig("claude-code");
+      let reads = 0;
+      const adapter: RuntimeAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => readiness(panes[Math.min(reads++, panes.length - 1)]!)),
+        launchHarness: vi.fn(async () => ({ ok: true })),
+      };
+      const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: mockTmux(), sleep: async () => {} });
+      const result = await orchestrator.startNode({
+        rigId: rig.id, nodeId: node.id, sessionId: session.id,
+        binding: { id: "b1", nodeId: node.id, tmuxSession: "worker-1@test-rig", tmuxWindow: null, tmuxPane: null,
+          cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "." },
+        adapter,
+        plan: { runtime: "claude-code", cwd: ".", entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
+        resolvedStartupFiles: [],
+        startupActions: [{ type: "slash_command", value: "/init", phase: "after_files", appliesOn: ["fresh_start"], idempotent: true }],
+        isRestore: false,
+      });
+      const status = (db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id) as { startup_status: string }).startup_status;
+      const failed = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_failed' ORDER BY seq DESC LIMIT 1").get(node.id) as { payload: string } | undefined;
+      return { result, status, reads: (adapter.checkReady as ReturnType<typeof vi.fn>).mock.calls.length, failedStage: failed ? JSON.parse(failed.payload).stage : null };
+    }
+
+    it("starts a seat that shows only the footer and delivers its startup context", async () => {
+      const started = await startWithPanes([footerOnly]);
+      expect(started.result.ok).toBe(true);
+      expect(started.status).toBe("ready");
+      expect(started.failedStage).toBeNull();
+    });
+
+    it("needs attention when a current refusal is visible at the post-delivery observation", async () => {
+      const started = await startWithPanes([footerOnly, refused]);
+      expect(started.result.ok).toBe(false);
+      expect(started.status).toBe("attention_required");
+      expect(started.failedStage).toBe("post_delivery_readiness");
+    });
+
+    it("does not see a refusal that appears only after the one post-delivery observation", async () => {
+      const started = await startWithPanes([footerOnly, footerOnly, refused]);
+      expect(started.reads).toBe(2);
+      expect(started.result.ok).toBe(true);
+      expect(started.status).toBe("ready");
+      // A later read of the same pane reports it; startup does not wait or poll for one.
+      expect(readiness(refused)).toMatchObject({ ready: false, code: "login_required" });
     });
   });
 
