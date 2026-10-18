@@ -5,7 +5,8 @@
 
 import { basename, dirname, join, relative, isAbsolute, sep } from "node:path";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
-import { readPiEffectiveModel } from "./effective-model-readers.js";
+import { piSeatPinReadings, readPiEffectiveModel } from "./effective-model-readers.js";
+import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
 import { canonicalModelPin } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
 
@@ -370,11 +371,14 @@ export async function readCurrentPiOccupantModel(
   input: PiOccupantRecordInput & { pinnedModel: string },
   deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
   realpath: (path: string) => string | null,
-): Promise<{ ok: true; model: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true; model: string; pinReadings: string[] } | { ok: false; reason: string }> {
   if (!/^[^/\s]+\/\S+$/.test(canonicalModelPin(input.pinnedModel))) {
     return { ok: false, reason: `pin ${input.pinnedModel} does not resolve to a provider/model id a Pi record can match` };
   }
   const selection = await resolveIdentityVerifiedPiRecord(input, deps, realpath);
   if (!selection.ok) return selection;
-  return readPiEffectiveModel(selection.path, { notBeforeMs: selection.notBeforeMs });
+  const read = readPiEffectiveModel(selection.path, { notBeforeMs: selection.notBeforeMs });
+  if (!read.ok) return read;
+  const pins = piSeatPinReadings(input.pinnedModel, piSeatPaths(input.runner.stateRoot, input.sessionName).agentDir);
+  return pins.ok ? { ...read, pinReadings: pins.readings } : pins;
 }

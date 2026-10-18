@@ -6,7 +6,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ModelDivergenceMonitor, type PinnedSeat } from "../src/domain/model-divergence/model-divergence-monitor.js";
+import { ModelDivergenceMonitor, type ModelDivergenceMonitorDeps, type PinnedSeat } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { readCurrentPiOccupantModel, type ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
 import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
 import { piPinReadings } from "../src/domain/model-divergence/effective-model-readers.js";
@@ -72,9 +72,16 @@ interface Fixture {
   paneRoot?: string;
 }
 
-function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir" | "sessionFile">> = {}): Fixture {
+/** `modelsJson`: the seat's Pi models.json under a state root in the temp folder (null = that
+ *  state root with no file). Without it the state root is STATE_ROOT. */
+function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir" | "sessionFile">> & { modelsJson?: string | null } = {}): Fixture {
+  const { modelsJson, ...rest } = overrides;
   const root = mkdtempSync(join(tmpdir(), "pi-emo-"));
   dirs.push(root);
+  if (typeof modelsJson === "string") {
+    mkdirSync(join(root, SESSION, "agent"), { recursive: true });
+    writeFileSync(join(root, SESSION, "agent", "models.json"), modelsJson);
+  }
   const sessionsDir = join(root, SESSION, "sessions");
   mkdirSync(join(sessionsDir, "--p--"), { recursive: true });
   const sessionFile = join(sessionsDir, "--p--", "2026-10-17_s1.jsonl");
@@ -88,8 +95,8 @@ function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir"
     bootAt: BOOT,
     pin: PIN,
     entryPath: ENTRY,
-    stateRoot: STATE_ROOT,
-    ...overrides,
+    stateRoot: modelsJson === undefined ? STATE_ROOT : root,
+    ...rest,
   };
 }
 
@@ -130,12 +137,12 @@ function read(f: Fixture) {
   });
 }
 
-function monitorFor(f: Fixture, runtime = "pi") {
+function monitorFor(f: Fixture, runtime = "pi", readEffectiveModel: ModelDivergenceMonitorDeps["readEffectiveModel"] = () => read(f)) {
   const seat: PinnedSeat = { nodeId: "n1", sessionName: SESSION, rigId: "rig-1", rigName: "r", runtime, pinnedModel: f.pin, generation: "gen-1" };
   const sent: string[] = [];
   const monitor = new ModelDivergenceMonitor({
     listPinnedSeats: () => [seat],
-    readEffectiveModel: () => read(f),
+    readEffectiveModel,
     sendToSession: async (target) => { sent.push(target); return { ok: true }; },
     resolveOrchSeats: () => ["orch-lead@r"],
     resolveOperatorSeat: () => "operator-admin@kernel",
@@ -443,8 +450,60 @@ describe("Pi pin with a :<thinking level> suffix", () => {
     expect(r.pending[0]?.reason).toMatch(/does not resolve to a provider\/model id/);
   });
 
-  it("the suffix is set aside for Pi seats only", async () => {
+  it("the suffix is set aside for Pi seats only: another runtime's read compares the raw pin", async () => {
     const f = fixture([header(T0), assistant(RUNNER_START + 5_000, "claude-fable-5")], { pin: `${PIN}:low` });
-    expect((await pass(monitorFor(f, "omp"))).fired).toHaveLength(1);
+    const withoutReadings = async () => {
+      const r = await read(f);
+      return r.ok ? { ok: true as const, model: r.model } : r;
+    };
+    expect((await pass(monitorFor(f, "omp", withoutReadings))).fired).toHaveLength(1);
+  });
+});
+
+describe("Pi pin that is itself a model id in the seat's models.json", () => {
+  const lab = (...ids: string[]) => JSON.stringify({ providers: { lab: { baseUrl: "http://lab", api: "openai-completions", models: ids.map((id) => ({ id })) } } });
+  const seat = (record: string, pin: string, modelsJson: string | null) =>
+    fixture([header(T0), assistant(RUNNER_START + 5_000, record, { provider: "lab" })], { pin, modelsJson });
+
+  it("a pin that names a defined model is read literally, so the stripped model is a divergence", async () => {
+    const r = await pass(monitorFor(seat("y", "lab/y:high", lab("y:high", "y"))));
+    expect(r.fired).toHaveLength(1);
+    expect(r.fired[0]!.pinnedModel).toBe("lab/y:high");
+    expect(r.fired[0]!.effectiveModel).toBe("lab/y");
+    expect((await pass(monitorFor(seat("y:high", "lab/y:high", lab("y:high", "y"))))).fired).toEqual([]);
+    // Pi's own models.json reading (comments, trailing commas) and its case-insensitive exact match.
+    const commented = `// lab models\n{ "providers": { "lab": { "models": [{ "id": "Y:High" }, { "id": "y" },] } } }`;
+    expect((await pass(monitorFor(seat("y", "lab/y:high", commented)))).fired).toHaveLength(1);
+    expect((await pass(monitorFor(seat("y", "lab/Y:high", lab("y:high", "y"))))).fired).toHaveLength(1);
+  });
+
+  it("a chained suffix is read up to the first defined model", async () => {
+    expect((await pass(monitorFor(seat("y", "lab/y:low:high", lab("y:low", "y"))))).fired).toHaveLength(1);
+    const r = await pass(monitorFor(seat("y:low", "lab/y:low:high", lab("y:low", "y"))));
+    expect(r.fired).toEqual([]);
+    expect(r.pending).toEqual([]);
+  });
+
+  it("the ordinary suffix case is unchanged: only the model is defined, or no models.json at all", async () => {
+    for (const modelsJson of [lab("y"), JSON.stringify({ providers: { other: { models: [{ id: "y:high" }] } } }), "{}", null]) {
+      const r = await pass(monitorFor(seat("y", "lab/y:high", modelsJson)));
+      expect(r.fired).toEqual([]);
+      expect(r.pending).toEqual([]);
+    }
+  });
+
+  it("a models.json that can't be read as Pi's config leaves a suffixed pin pending, never settled or proclaimed", async () => {
+    const bad = ["{ not json", "[]", JSON.stringify({ providers: [] }), JSON.stringify({ providers: { lab: { models: {} } } }), JSON.stringify({ providers: { lab: { models: [{ name: "y" }] } } })];
+    for (const modelsJson of bad) {
+      const r = await pass(monitorFor(seat("y", "lab/y:high", modelsJson)));
+      expect(r.fired).toEqual([]);
+      expect(r.pending[0]?.reason).toMatch(/models\.json .* could not be read as Pi's model config/);
+    }
+  });
+
+  it("a pin without a level suffix never reads models.json", async () => {
+    const r = await pass(monitorFor(seat("y", "lab/y", "{ not json")));
+    expect(r.fired).toEqual([]);
+    expect(r.pending).toEqual([]);
   });
 });
