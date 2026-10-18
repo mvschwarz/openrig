@@ -576,7 +576,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
       summary: z.string().optional().describe("Replace the one-line summary"),
       evidenceRef: z.string().optional().describe("Where the evidence is"),
       blockedOn: z.string().optional().describe("What it waits on, when blocking"),
-      wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking"),
+      wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
     },
     async ({ qitemId, state, closureReason, closureTarget, note, summary, evidenceRef, blockedOn, wakeAfterSeconds }) => {
       try {
