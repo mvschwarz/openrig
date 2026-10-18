@@ -35,9 +35,11 @@ function createLock(lockFile, { staleMs, waitMs, now = Date.now, hooks = {} }) {
         age = now() - fs.statSync(lockFile).mtimeMs;
       } catch (error) {
         if (error?.code !== "ENOENT") return { ok: false, reason: `can't read the lock (${error?.code ?? error})` };
-        // Gone: released between our attempt and this read, so try again, still bounded by the deadline. Still there
-        // (a dangling link): it can't be read or released by anyone, so give up now.
-        try { fs.lstatSync(lockFile); return { ok: false, reason: "the lock path is a dangling link" }; } catch {}
+        // Gone: released between our attempt and this read (another hook may already hold a new one), so try again,
+        // still bounded by the deadline. A dangling link can't be read or released by anyone, so give up now.
+        let link = false;
+        try { link = fs.lstatSync(lockFile).isSymbolicLink(); } catch {}
+        if (link) return { ok: false, reason: "the lock path is a dangling link" };
       }
       if (holder !== undefined && age > staleMs) {
         hooks.beforeTakeover?.();

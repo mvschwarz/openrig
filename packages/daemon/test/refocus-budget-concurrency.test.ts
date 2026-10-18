@@ -145,9 +145,10 @@ describe("refocus: the time budget", () => {
   }, 20_000);
 
   it("with no budget selected, gives main's result: each lookup keeps its 2 s cap, unclipped, inside the 60 s bound", async () => {
-    // Lookups each under their own cap: on main's 5 s registration this was killed; now it completes as main's code does.
+    // Lookups each under their own 2 s cap (with room for a slow runner's process start-up) that together pass 5 s: on
+    // main's 5 s registration this was killed; now it completes as main's code does.
     const f = fixture();
-    const slow = { STUB_WHOAMI_MS: "1900", STUB_TRACE_MS: "1900", STUB_CONTEXT_MS: "1900", OPENRIG_REFOCUS_CONTENT_REF: "refocus/team.md",
+    const slow = { STUB_WHOAMI_MS: "1700", STUB_TRACE_MS: "1700", STUB_CONTEXT_MS: "1700", OPENRIG_REFOCUS_CONTENT_REF: "refocus/team.md",
       OPENRIG_REFOCUS_WORK_NODE: "", OPENRIG_REFOCUS_TREES: "both" };
     await hook(f, "PostCompact", "s1");
     const r = await hook(f, "UserPromptSubmit", "s1", slow);
@@ -319,6 +320,30 @@ describe("refocus: the state lock takes over and releases only its own", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "refocus-lock-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("keeps waiting, rather than giving up, when the lock is released and taken again between its read and its check", () => {
+    const lockFile = join(dir, "s.json.lock");
+    const other = createLock(lockFile, { staleMs: 5_000, waitMs: 300 });
+    expect(other.acquire().ok).toBe(true);
+    // The read finds nothing, the path holds a fresh regular lock again: a live holder, not a dangling link.
+    const realRead = readFileSync;
+    let swapped = false;
+    const fsModule = createRequire(import.meta.url)("node:fs") as { readFileSync: typeof readFileSync };
+    fsModule.readFileSync = ((path: Parameters<typeof readFileSync>[0], ...rest: unknown[]) => {
+      if (!swapped && String(path) === lockFile) {
+        swapped = true;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }
+      return (realRead as (...a: unknown[]) => unknown)(path, ...rest);
+    }) as typeof readFileSync;
+    try {
+      const waiter = createLock(lockFile, { staleMs: 5_000, waitMs: 300 });
+      expect(waiter.acquire()).toEqual({ ok: false, reason: "another hook held the lock past the wait" });
+    } finally {
+      fsModule.readFileSync = realRead;
+    }
+    other.release();
+  });
 
   it("when two contenders both see the same stale lock, only one ends up holding it", () => {
     const lockFile = join(dir, "s.json.lock");
