@@ -96,6 +96,7 @@ import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
+import type { AttachmentKind } from "./domain/seat-kinds.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
@@ -1879,7 +1880,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // inventory: the canonical session name IS the tmux session; no host field).
     const toLiveSeatRow = (e: {
       canonicalSessionName: string | null;
-      attachmentType?: "tmux" | "external_cli" | null;
+      attachmentType?: AttachmentKind | null;
       runtime?: string | null;
       rigName: string;
       logicalId: string;

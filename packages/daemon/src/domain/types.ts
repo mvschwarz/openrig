@@ -1,3 +1,4 @@
+import type { AttachmentKind } from "./attachment-kind.js";
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 
 export interface Rig {
@@ -76,7 +77,7 @@ export interface Edge {
 export interface Binding {
   id: string;
   nodeId: string;
-  attachmentType?: "tmux" | "external_cli";
+  attachmentType?: AttachmentKind;
   tmuxSession: string | null;
   tmuxWindow: string | null;
   tmuxPane: string | null;
@@ -659,7 +660,7 @@ export interface NodeInventoryEntry {
    */
   role: string | null;
   canonicalSessionName: string | null;
-  attachmentType?: "tmux" | "external_cli" | null;
+  attachmentType?: AttachmentKind | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   /** Present only on a community agent app's seat: its label, maintainer and declared limits. */
@@ -834,7 +835,7 @@ export interface NodeWorkspaceInfo {
 export interface NodeDetailPeer {
   logicalId: string;
   canonicalSessionName: string | null;
-  attachmentType?: "tmux" | "external_cli" | null;
+  attachmentType?: AttachmentKind | null;
   runtime: string | null;
 }
 

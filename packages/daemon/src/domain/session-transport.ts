@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { AttachmentKind } from "./seat-kinds.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -471,7 +472,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
 export async function probeSessionActivity(input: {
   sessionName: string | null;
   runtime: string | null;
-  attachmentType: "tmux" | "external_cli" | null | undefined;
+  attachmentType: AttachmentKind | null | undefined;
   tmuxAdapter: TmuxAdapter;
   now?: Date;
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
@@ -2968,7 +2969,7 @@ export class SessionTransport {
         const paneVeto = await probeSessionActivity({
           sessionName: input.sessionName,
           runtime: input.runtime,
-          attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+          attachmentType: input.attachmentType,
           tmuxAdapter: this.tmuxAdapter,
           now,
           captureObserver: this.captureObserver,
@@ -2984,7 +2985,7 @@ export class SessionTransport {
     const probe = await probeSessionActivity({
       sessionName: input.sessionName,
       runtime: input.runtime,
-      attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+      attachmentType: input.attachmentType,
       tmuxAdapter: this.tmuxAdapter,
       now,
       captureObserver: this.captureObserver,

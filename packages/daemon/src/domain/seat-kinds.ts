@@ -1,4 +1,5 @@
 import type { SessionProbe, TmuxResult } from "../adapters/tmux.js";
+import type { AttachmentKind } from "./attachment-kind.js";
 import type { ForkSource, HarnessLaunchResult, NodeBinding, ReadinessResult, RuntimeAdapter } from "./runtime-adapter.js";
 import type { CaptureResult, SendOpts, SendResult } from "./session-transport.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -10,7 +11,7 @@ import type { AgentActivity } from "./types.js";
 // `createDaemon({ seatKinds })` for seats whose agent runs somewhere other than a tmux pane.
 // No kind is registered by default, so every path below takes today's tmux code unchanged.
 
-export type AttachmentKind = "tmux" | "external_cli" | (string & {});
+export type { AttachmentKind };
 
 export const BUILT_IN_ATTACHMENT_KINDS: readonly string[] = ["tmux", "external_cli"];
 
