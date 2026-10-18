@@ -1024,11 +1024,11 @@ export function queueRoutes(): Hono {
     const q = c.req.query();
     const rig = q.rig || undefined;
     const limitRaw = q.limit !== undefined ? Number.parseInt(q.limit, 10) : undefined;
-    // findOverdue binds the limit into SQL; refuse what SQLite cannot bind rather than answer 500.
-    if (limitRaw !== undefined && Math.abs(limitRaw) >= SQL_LIMIT_BOUND) {
+    const limit = limitRaw !== undefined && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+    // findOverdue binds the limit into SQL; refuse a value SQLite cannot bind rather than answer 500.
+    if (limit !== undefined && limit >= SQL_LIMIT_BOUND) {
       return c.json({ error: "limit must be an integer" }, 400);
     }
-    const limit = limitRaw !== undefined && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
     const compact = q.compact === "1" || q.compact === "true";
     const items = getRepo(c).findOverdue({ rig, limit, compact });
     return c.json(items);

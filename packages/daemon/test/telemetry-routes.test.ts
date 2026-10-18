@@ -58,8 +58,16 @@ describe("telemetry routes", () => {
       expect({ limit, status: res.status }).toEqual({ limit, status: 400 });
       expect(((await res.json()) as { error: string }).error).toContain("invalid limit");
     }
-    const ok = await app.request("/api/telemetry/usage/series?seat=burner%40r&limit=9223372036854775295");
-    expect(ok.status).toBe(200);
+    // Limits main served keep their rows.
+    const rows = async (query: string) => {
+      const res = await app.request(`/api/telemetry/usage/series?seat=burner%40r${query}`);
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { rows: unknown[] }).rows;
+    };
+    const all = await rows("");
+    expect(all).toHaveLength(2);
+    expect(await rows("&limit=9223372036854775295")).toEqual(all);
+    expect(await rows("&limit=1")).toHaveLength(1);
   });
 
   // A bound keeps main's handling (text comparison against captured_at unless capturedAtBound reads a full
