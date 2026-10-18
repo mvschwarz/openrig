@@ -160,6 +160,37 @@ describe("opt-in service bundles", () => {
     expect(JSON.stringify(view)).not.toContain("not-a-public-default");
   });
 
+  it("summarizes fields inherited through YAML merge keys", () => {
+    const view = inspect(true, `x-common: &common
+  privileged: true
+  cap_add: [SYS_ADMIN]
+  ports: ["0.0.0.0:80:80"]
+services:
+  app:
+    <<: *common
+    image: example/app:1
+`);
+    expect(view.state).toBe("generated");
+    if (view.state !== "generated") throw new Error(view.reason);
+    expect(view.services).toMatchObject([{ name: "app", privileged: true, capAdd: ["SYS_ADMIN"], ports: ["0.0.0.0:80:80"] }]);
+  });
+
+  it("names every unsummarized service key without exposing its values", () => {
+    const view = inspect(true, `services:
+  app:
+    image: example/app:1
+    network_mode: host
+    pid: host
+    user: private-user-value
+    x-extra: private-extra-value
+`);
+    expect(view.state).toBe("generated");
+    if (view.state !== "generated") throw new Error(view.reason);
+    expect(view.services?.[0]?.notes).toContain("Also declared, not summarized: network_mode, pid, user, x-extra");
+    expect(JSON.stringify(view)).not.toContain("private-user-value");
+    expect(JSON.stringify(view)).not.toContain("private-extra-value");
+  });
+
   it("leaves the old view unchanged while disabled", () => {
     expect(inspect(false)).not.toHaveProperty("services");
   });

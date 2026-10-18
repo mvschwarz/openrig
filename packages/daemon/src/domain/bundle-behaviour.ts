@@ -337,7 +337,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         const content = composeFact.resolution === "archive" ? files.get(composeFact.pathOrRef) : undefined;
         if (content !== undefined) {
           try {
-            const compose = object(parseYaml(content));
+            const compose = object(parseYaml(content, { merge: true }));
             if (!compose.services || Array.isArray(compose.services) || typeof compose.services !== "object") throw new Error("Missing service declarations");
             view.services = Object.entries(object(compose.services)).map(([name, value]) => {
               const service = object(value);
@@ -355,6 +355,9 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
               }
               if (Object.values(env).some(v => v == null || hostDependent(v)) || service.env_file) unresolved.add("environment");
               const notes: string[] = [];
+              const summarized = new Set(["image", "ports", "privileged", "cap_add", "security_opt", "devices", "environment", "volumes", "healthcheck"]);
+              const otherKeys = Object.keys(service).filter(key => !summarized.has(key)).sort();
+              if (otherKeys.length) notes.push(`Also declared, not summarized: ${otherKeys.join(", ")}`);
               if (service.build) notes.push("Build context is declared; its contents and build effects were not evaluated.");
               if (service.env_file) notes.push("Environment files are declared; their contents and effective values are not resolved by this summary.");
               if (service.extends || compose.include) notes.push("Additional Compose sources are not resolved; this summary is incomplete.");

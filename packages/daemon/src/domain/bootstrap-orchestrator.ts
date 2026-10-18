@@ -755,9 +755,10 @@ export class BootstrapOrchestrator {
         }
       : undefined;
     const prelaunchHook = serviceHook && bundleHook
-      ? async (rigId: string) => {
-          const serviceResult = await serviceHook(rigId);
-          return serviceResult.ok ? bundleHook() : serviceResult;
+      ? async (...args: Parameters<typeof serviceHook>) => {
+          const serviceResult = await serviceHook(...args);
+          if (serviceResult.ok) await bundleHook();
+          return serviceResult;
         }
       : serviceHook ?? bundleHook;
     let declaredNonInterruptive: boolean | undefined;

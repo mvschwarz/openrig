@@ -28,6 +28,11 @@ import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
 import { resolveLaunchCwd } from "../src/domain/cwd-resolution.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
+import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import * as preflight from "../src/domain/rigspec-preflight.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
@@ -72,10 +77,11 @@ function realFsOps(): FsOps {
   } as FsOps;
 }
 
-async function buildV2Bundle(workDir: string, services = false): Promise<string> {
+async function buildV2Bundle(workDir: string, services = false, options: { terminal?: boolean; projectName?: string } = {}): Promise<string> {
   const staging = path.join(workDir, "staging");
   fs.mkdirSync(path.join(staging, "agents", "impl"), { recursive: true });
-  fs.writeFileSync(path.join(staging, "rig.yaml"), RIG_YAML + (services ? "\nservices:\n  kind: compose\n  compose_file: compose.yaml\n  down_policy: down\n" : ""));
+  const rigYaml = options.terminal ? RIG_YAML.replace('"local:agents/impl"', 'builtin:terminal').replace('profile: default', 'profile: none').replace('runtime: claude-code', 'runtime: terminal') : RIG_YAML;
+  fs.writeFileSync(path.join(staging, "rig.yaml"), rigYaml + (services ? "\nservices:\n  kind: compose\n  compose_file: compose.yaml\n  down_policy: down\n" + (options.projectName ? `  project_name: ${options.projectName}\n` : "") : ""));
   if (services) fs.writeFileSync(path.join(staging, "compose.yaml"), "services:\n  demo:\n    image: example/demo:1\n");
   fs.writeFileSync(path.join(staging, "agents", "impl", "agent.yaml"), AGENT_YAML);
   const integrity = computeIntegrity(staging, {
@@ -276,6 +282,86 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
     expect(order).toEqual(["boot", "route", "seat"]);
     expect(fs.existsSync(path.join(target, "compose.yaml"))).toBe(true);
   });
+
+  it.each(["rollback", "cleanup-failure", "inherited", "inherited-boot-failure", "ambiguous", "explicit"])(
+    "preserves the composed archive service lifecycle (%s)", async scenario => {
+      vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+      vi.spyOn(preflight, "rigPreflight").mockResolvedValue({ ready: true, errors: [], warnings: [] } as never);
+      const repo = new RigRepository(db), order: string[] = [], commands: string[] = [];
+      const inherited = ["inherited", "inherited-boot-failure", "ambiguous", "explicit"].includes(scenario);
+      const store = (id: string, projectName: string) => repo.setServicesRecord(id, {
+        kind: "compose", specJson: "{}", rigRoot: workDir, composeFile: "compose.yaml", projectName,
+      });
+      const historical = repo.createRig("lifetime-rig"); store(historical.id, "unrelated-history"); repo.archiveRig(historical.id);
+      const predecessors: string[] = [];
+      if (inherited) {
+        const previous = repo.createRig("lifetime-rig"); store(previous.id, "exact-predecessor"); predecessors.push(previous.id);
+        if (scenario === "ambiguous") {
+          const other = repo.createRig("lifetime-rig"); store(other.id, "second-project"); predecessors.push(other.id);
+        }
+      }
+      let currentId: string | undefined;
+      const composeAdapter = new ComposeServicesAdapter(async command => {
+        commands.push(command);
+        if (command.includes("up -d")) order.push("up");
+        if (command.includes("ps --format json") && scenario === "inherited-boot-failure") throw new Error("test status failure after up");
+        if (command.includes("down")) {
+          order.push("down");
+          expect(repo.getServicesRecord(currentId!)).not.toBeNull();
+          if (scenario === "cleanup-failure") throw new Error("test cleanup unavailable");
+        }
+        return "";
+      });
+      const serviceOrchestrator = new ServiceOrchestrator({ rigRepo: repo, composeAdapter });
+      const boot = serviceOrchestrator.boot.bind(serviceOrchestrator);
+      vi.spyOn(serviceOrchestrator, "boot").mockImplementation(async id => { currentId = id; return boot(id); });
+      const remove = repo.deleteRig.bind(repo);
+      vi.spyOn(repo, "deleteRig").mockImplementation(id => { order.push("delete"); return remove(id); });
+      const nodeLauncher = { db, launchNode: vi.fn(async () => {
+        order.push("seat"); return { ok: false, code: "launch_failed", message: "test terminal launch failure" };
+      }) };
+      const actualInstantiator = new PodRigInstantiator({
+        db, rigRepo: repo, podRepo: new PodRepository(db), sessionRegistry: new SessionRegistry(db), eventBus: new EventBus(db),
+        nodeLauncher, startupOrchestrator: { db }, adapters: {}, fsOps: realFsOps(),
+        tmuxAdapter: { probeSession: vi.fn(async () => ({ state: "absent" })) },
+      } as never);
+      const route = vi.fn(async () => { order.push("route"); throw new Error("test routing warning"); });
+      const target = path.join(workDir, "lifecycle-target");
+      const result = await orchestrator({ rigRepo: repo, podInstantiator: actualInstantiator, serviceOrchestrator, routeBundleContents: route }).bootstrap({
+        mode: "apply", sourceKind: "rig_bundle", targetRoot: target,
+        sourceRef: await buildV2Bundle(workDir, true, { terminal: true, projectName: scenario === "explicit" ? "requested-project" : undefined }),
+      });
+      expect(result.status, JSON.stringify(result)).toBe("failed");
+      if (scenario === "ambiguous") {
+        expect(commands).toEqual([]);
+        expect(result.errors.join(" ")).toContain("multiple predecessor Compose projects");
+        for (const id of predecessors) expect(result.errors.join(" ")).toContain(id);
+        expect(route).not.toHaveBeenCalled();
+      } else {
+        const expectedProject = scenario === "explicit" ? "requested-project" : inherited ? "exact-predecessor" : repo.getServicesRecord(currentId!)?.projectName;
+        if (inherited) expect(commands.some(command => command.includes(`-p '${expectedProject}'`) && command.includes("up -d"))).toBe(true);
+        const shouldRollback = !inherited || scenario === "explicit";
+        expect(commands.filter(command => command.includes("down"))).toHaveLength(shouldRollback ? 1 : 0);
+        expect(commands.filter(command => command.includes("down")).every(command => !command.includes("--volumes"))).toBe(true);
+        if (scenario === "cleanup-failure") {
+          expect(repo.getRig(currentId!)).not.toBeNull();
+          expect(repo.getServicesRecord(currentId!)).not.toBeNull();
+          expect(result.errors.join(" ")).toContain("retained for recovery");
+          expect(order).not.toContain("delete");
+        } else {
+          expect(repo.getRig(currentId!)).toBeNull();
+          if (shouldRollback) expect(order.indexOf("down")).toBeLessThan(order.indexOf("delete"));
+        }
+        if (scenario !== "inherited-boot-failure") {
+          expect(order.indexOf("route")).toBeLessThan(order.indexOf("seat"));
+          expect(result.warnings.join(" ")).toContain("test routing warning");
+        }
+      }
+      const remaining = repo.findUnarchivedRigsByName("lifetime-rig").map(record => record.id);
+      expect(remaining).not.toContain(historical.id);
+      if (scenario !== "cleanup-failure") expect(remaining.sort()).toEqual(predecessors.sort());
+    },
+  );
 
   it("plans the target services and view without materialising or launching", async () => {
     vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
