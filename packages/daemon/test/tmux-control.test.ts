@@ -148,12 +148,16 @@ describe("tmuxControlExec", () => {
     const clients = [fakeClient(), fakeClient()];
     let started = 0;
     const { spawned, fallback } = fakeSpawned(() => "spawned read\n");
-    const exec = tmuxControlExec(fallback, { spawnClient: () => clients[started++]!.child, replyTimeoutMs: 50 });
+    // The exec's clock moves only when the test says so: a reply is overdue by the steps below, never by how long a
+    // busy machine takes between them.
+    let clock = 0;
+    const exec = tmuxControlExec(fallback, { spawnClient: () => clients[started++]!.child, replyTimeoutMs: 50, now: () => clock });
 
     const stuckRead = exec(["tmux", "capture-pane", "-p", "-J", "-t", "=seat@rig:", "-S", "-", "-E", "-"]);
     await vi.waitFor(() => expect(clients[0]!.written).toHaveLength(1));
     const writeError = exec(["tmux", "send-keys", "-t", "=seat@rig:", "Enter"]).then(() => null, (err: Error) => err.message);
     await vi.waitFor(() => expect(clients[0]!.written).toHaveLength(2), { interval: 5 });
+    clock += 50; // the read at the head of the line is now overdue
 
     // No reply comes: the client is ended, the read asked of a spawned client, and the write, which was written to the
     // ended client and may have landed, reported failed rather than sent again.
@@ -162,6 +166,7 @@ describe("tmuxControlExec", () => {
     expect(clients[0]!.kill).toHaveBeenCalled();
     expect(spawned.map((argv) => argv[1])).toEqual(["capture-pane"]);
 
+    // The clock stands still: the new client's reply is never overdue, however late it comes.
     const read = exec(["tmux", "display-message", "-p", "-t", "=seat@rig:", "x"]);
     await vi.waitFor(() => expect(clients[1]!.written).toHaveLength(1));
     clients[1]!.answer("x");
