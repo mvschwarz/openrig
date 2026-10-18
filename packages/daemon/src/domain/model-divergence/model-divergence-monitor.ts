@@ -196,7 +196,7 @@ export class ModelDivergenceMonitor {
     this.pendingPolls.delete(key);
     this.pendingReasons.delete(key);
     const pins = read.pinReadings ?? [seat.pinnedModel];
-    if (pins.some((pin) => modelsMatch(pin, read.model))) {
+    if (pins.some((pin) => modelsMatch(pin, read.model, seat.runtime))) {
       this.settled.add(key);
       return;
     }
@@ -276,8 +276,10 @@ export class ModelDivergenceMonitor {
  *  same data before comparing. Never add a second map here, and never token containment: an
  *  unknown alias or a fallback model canonicalizes to itself and still diverges. Raw
  *  pinned/effective strings travel untouched in any proclamation. */
-export function modelsMatch(pinned: string, effective: string): boolean {
-  return canonicalModelPin(pinned) === effective.trim().toLowerCase();
+export function modelsMatch(pinned: string, effective: string, runtime?: string | null): boolean {
+  // Claude's [1m] selects the context window, not a different model. Other runtimes keep it literal.
+  const modelId = (model: string) => runtime === "claude" ? model.trim().replace(/\[1m\]$/i, "") : model;
+  return canonicalModelPin(modelId(pinned)) === modelId(effective).trim().toLowerCase();
 }
 
 /** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
