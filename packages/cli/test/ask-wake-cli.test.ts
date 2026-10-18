@@ -73,6 +73,30 @@ function makeCmd(deps: StatusDeps): Command {
 }
 
 describe("rig ask --wake (L3 CLI)", () => {
+  it("help distinguishes full seat targets from runtime IDs and titles", () => {
+    const runner: WakeRunner = vi.fn();
+    const cmd = askCommand(tokenDeps(runner));
+    let output = "";
+    cmd.configureOutput({ writeOut: text => { output += text; } });
+    cmd.outputHelp();
+    const help = output.replace(/\s+/g, " ");
+    expect(help).toContain("member@rig or member@rig@N (1 = newest tenure)");
+    expect(help).toContain("Values without @ go unchanged to the runtime as a session ID or title");
+    expect(help).toContain("a bare member name is not resolved within <rig>");
+    expect(help).toContain("--wake dev-planner@my-rig");
+    expect(help).toContain("--wake dev-planner@my-rig@2");
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("passes a bare session title unchanged to the runtime without seat resolution", async () => {
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "answer", stderr: "", code: 0, timedOut: false }));
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(tokenDeps(runner)).parseAsync(["node", "rig", "ask", "my-rig", "q", "--wake", "dev-build"]);
+    });
+    expect(runner).toHaveBeenCalledWith("claude", ["-p", "--resume", "dev-build", expect.any(String)], expect.any(Object));
+    expect(exitCode).toBeUndefined();
+  });
+
   // B8-1b missed-site fix (census belt catch, 2026-08-07): the seat-resolve
   // precheck must route through the ONE chokepoint (daemonStatusGuard), not a
   // hand-rolled literal render — the epistemic 3-part lands, the wake-specific
