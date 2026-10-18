@@ -79,25 +79,25 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .option("--spec <path>", "Path to YAML spec file (optional for context-usage-threshold)")
     .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required, workflow-keepalive, idle-gate-qitem, context-usage-threshold)")
     .requiredOption("--target-session <session>", "Canonical <member>@<rig> target")
-    .requiredOption("--interval-seconds <n>", "Evaluation interval (positive integer)")
+    .requiredOption("--interval-seconds <n>", "Evaluation interval (positive integer)", positiveIntArg)
     .requiredOption("--registered-by <session>", "Registering session (for audit)")
     .option("--threshold-bytes <n>", "(context-usage-threshold) transcript byte threshold")
     .option("--threshold-mb <n>", "(context-usage-threshold) transcript threshold in decimal MB")
     .option("--watched-file <path>", "(context-usage-threshold) explicit transcript file; recorded context path is the fallback")
     .option("--requires-job <jobId>", "(context-usage-threshold) require this earlier job's receipt for the same occupant")
     .option("--message <text>", "(context-usage-threshold) message delivered when the threshold fires")
-    .option("--active-wake-interval-seconds <n>", "(pool-ready-specific) wake-up cadence when actionable artifacts exist")
-    .option("--scan-interval-seconds <n>", "(pool-ready-specific) artifact pool scan cadence")
+    .option("--active-wake-interval-seconds <n>", "(pool-ready-specific) wake-up cadence when actionable artifacts exist", positiveIntArg)
+    .option("--scan-interval-seconds <n>", "(pool-ready-specific) artifact pool scan cadence", positiveIntArg)
     .option("--json", "JSON output for agents")
     .addHelpText("after", "\nTranscript density varies by session shape; do not tune a context threshold near the context wall.\n\nThe returned job id can be attached to a deliberate park with: rig queue block <qitemId> --on <blocker> --continuation <what-resumes> --wake-watchdog <jobId>")
     .action(async (opts: {
       spec?: string;
       policy: string;
       targetSession: string;
-      intervalSeconds: string;
+      intervalSeconds: number;
       registeredBy: string;
-      activeWakeIntervalSeconds?: string;
-      scanIntervalSeconds?: string;
+      activeWakeIntervalSeconds?: number;
+      scanIntervalSeconds?: number;
       thresholdBytes?: string;
       thresholdMb?: string;
       watchedFile?: string;
@@ -164,13 +164,9 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
           policy: opts.policy,
           specYaml,
           targetSession: opts.targetSession,
-          intervalSeconds: Number.parseInt(opts.intervalSeconds, 10),
-          activeWakeIntervalSeconds: opts.activeWakeIntervalSeconds
-            ? Number.parseInt(opts.activeWakeIntervalSeconds, 10)
-            : undefined,
-          scanIntervalSeconds: opts.scanIntervalSeconds
-            ? Number.parseInt(opts.scanIntervalSeconds, 10)
-            : undefined,
+          intervalSeconds: opts.intervalSeconds,
+          activeWakeIntervalSeconds: opts.activeWakeIntervalSeconds,
+          scanIntervalSeconds: opts.scanIntervalSeconds,
           watchedFilePath,
           thresholdBytes,
           requiresJobId: opts.requiresJob,

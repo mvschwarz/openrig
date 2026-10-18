@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { WatchdogDeps } from "../src/commands/watchdog.js";
 import { createProgram } from "../src/index.js";
+import { runProgram } from "../src/cli-error.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js");
@@ -138,6 +139,44 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
   // PL-004 Phase D: registration-rejection assertion REPLACED with
   // positive registration-accept. workflow-keepalive is now an
   // accepted policy.
+  it.each([
+    ["--interval-seconds", "5m"],
+    ["--interval-seconds", "1.5"],
+    ["--interval-seconds", "abc"],
+    ["--active-wake-interval-seconds", "30s"],
+    ["--scan-interval-seconds", "10x"],
+  ])("register refuses %s %s instead of registering a different cadence", async (flag, value) => {
+    const { deps, calls } = makeDeps();
+    const tmp = mkdtempSync(join(tmpdir(), "wd-cli-"));
+    const spec = join(tmp, "spec.yaml");
+    writeFileSync(spec, "policy: periodic-reminder\n");
+    const base = ["watchdog", "register", "--spec", spec, "--policy", "periodic-reminder", "--target-session", "alice@rig",
+      "--interval-seconds", "60", "--registered-by", "ops@kernel"];
+    const err: string[] = [];
+    let exitCode = 0;
+    await runProgram(createProgram({ watchdogDeps: deps }), ["node", "rig", ...base, flag, value], {
+      out: () => {},
+      err: (line) => err.push(line),
+      exit: (code) => { exitCode = code; },
+    });
+    expect(exitCode).toBe(1);
+    expect(err.join("\n")).toMatch(/positive integer/);
+    expect(calls.filter((c) => c.path === "/api/watchdog/register")).toEqual([]);
+  });
+
+  it("register sends --interval-seconds 1e3 as 1000 seconds, not 1", async () => {
+    const { deps, calls } = makeDeps();
+    const tmp = mkdtempSync(join(tmpdir(), "wd-cli-"));
+    const spec = join(tmp, "spec.yaml");
+    writeFileSync(spec, "policy: periodic-reminder\n");
+    const program = createProgram({ watchdogDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "watchdog", "register", "--spec", spec, "--policy", "periodic-reminder",
+      "--target-session", "alice@rig", "--interval-seconds", "1e3", "--registered-by", "ops@kernel", "--json"]);
+    const body = calls.find((c) => c.path === "/api/watchdog/register")!.body as Record<string, unknown>;
+    expect(body.intervalSeconds).toBe(1000);
+  });
+
   it("register accepts workflow-keepalive (Phase D enum extension surfaces 201 + job_id)", async () => {
     const { deps, calls } = makeDeps({
       routes: {
