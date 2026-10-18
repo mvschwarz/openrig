@@ -356,6 +356,13 @@ describe("findSlice + resolution variants", () => {
     expect(slice.missionName).toBe("release-0.3.2");
   });
 
+  it("finds the owning mission when the missions root ends in a separator", () => {
+    const withSlash = missionsRoot + path.sep;
+    expect(findSlice(withSlash, "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
+    const abs = path.join(missionsRoot, "release-0.3.2", "slices", "07-target");
+    expect(findSlice(withSlash, abs).missionName).toBe("release-0.3.2");
+  });
+
   it.each(["workspace", "missions", "declared mission"])(
     "resolves a hinted bare slice past an unrelated %s directory",
     (collision) => {

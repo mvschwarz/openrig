@@ -567,9 +567,12 @@ export function findSlice(
 }
 
 function findOwningMission(missionsRoot: string, slicePath: string): string | null {
+  // path.dirname never ends in a separator, so compare against the normalized root
+  // (a configured or --workspace root may be written as `/w/missions/`).
+  const root = path.resolve(missionsRoot);
   let dir = path.dirname(slicePath);
-  while (dir.startsWith(missionsRoot) && dir !== missionsRoot) {
-    if (path.dirname(dir) === missionsRoot) return dir;
+  while (dir.startsWith(root) && dir !== root) {
+    if (path.dirname(dir) === root) return dir;
     dir = path.dirname(dir);
   }
   return null;
