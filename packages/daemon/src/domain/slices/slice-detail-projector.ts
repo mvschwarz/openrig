@@ -54,6 +54,7 @@ import {
   type PhaseDefinition,
   type CurrentStepPayload,
 } from "../workflow/slice-workflow-projection.js";
+import { sliceWhole } from "../text-cut.js";
 
 export interface StoryEvent {
   ts: string;
@@ -887,7 +888,7 @@ export class SliceDetailProjector {
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
-  return `${s.slice(0, n)}…`;
+  return `${sliceWhole(s, n)}…`;
 }
 
 function sessionRigKey(session: string): string {
