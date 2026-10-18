@@ -105,7 +105,11 @@ configurations, as below; do not take the pin from a cached page summary.
      them to https://openrig.dev/rigs/workshop: the bundle ships with broad
      access and non-interruptive mode, bypassing permission prompts and
      supported harness warning dialogs. Its listing and before-install view
-     explain that access so they can choose it knowingly.
+     explain that access so they can choose it knowingly. Its listing has
+     several configurations (`recommended` mixes Claude Code and Codex, plus
+     `all-claude`, `all-codex` and others); name the one that fits the
+     providers they have, and when they say they use only one, offer that
+     one rather than the default.
    - `factory`: seven agents (a lead, an advisor, build, QA, design and two
      independent reviewers) for sustained product work. Built in; it uses the
      most concurrent capacity.
