@@ -1,6 +1,11 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import BetterSqlite3 from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import { lstartToMinTs } from "../src/domain/codex-thread-id.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
@@ -261,5 +266,73 @@ describe("late Codex fork identity", () => {
     expect(results.filter(result => result.ok)).toHaveLength(1);
     expect(tmux.sendText).toHaveBeenCalledTimes(1);
     expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+  });
+  describe("with the real Codex record reader", () => {
+    const START = lstartToMinTs(STARTED)!;
+    let codexHome: string;
+    let logs: BetterSqlite3.Database;
+
+    beforeEach(() => {
+      codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "fork-records-"));
+      logs = new BetterSqlite3(path.join(codexHome, "logs_2.sqlite"));
+      logs.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, ts_nanos INTEGER, process_uuid TEXT, thread_id TEXT)");
+      const state = new BetterSqlite3(path.join(codexHome, "state_5.sqlite"));
+      state.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT, rollout_path TEXT)");
+      for (const id of [CHILD, "01970000-0000-7000-8000-00000000000f"]) state.prepare("INSERT INTO threads VALUES (?, 'cli', ?)").run(id, `${codexHome}/${id}.jsonl`);
+      state.close();
+      // No injected reader: launch and continue read these files through CodexThreadIdResolver.
+      adapter = new CodexRuntimeAdapter({
+        tmux, codexHome,
+        fsOps: { readFile: () => ROLE, exists: file => file.endsWith("role.md"), writeFile: () => {}, mkdirp: () => {}, listFiles: () => [] },
+        listProcesses: async () => processRows,
+        readinessSettings: { resolveOne: () => ({ value: 1 }) } as unknown as Pick<SettingsStore, "resolveOne">,
+        sleep: async () => {},
+      });
+      input = { ...input, adapter };
+    });
+    afterEach(() => { logs.close(); fs.rmSync(codexHome, { recursive: true, force: true }); });
+
+    /** One log row for pid 901, from process instance `instance`, at `ts` (the child's start second by default). */
+    const record = (thread: string, instance: string, ts = START) =>
+      logs.prepare("INSERT INTO logs (ts, ts_nanos, process_uuid, thread_id) VALUES (?, 0, ?, ?)").run(ts, `pid:901:${instance}`, thread);
+
+    it("launch accepts a child whose only record is in its start second", async () => {
+      record(CHILD, "child-instance");
+      expect(await orch.startNode(input)).toMatchObject({ ok: true, continuityOutcome: "forked" });
+      expect(registry.resumeTokenMatches(input.sessionId, "codex_id", CHILD)).toBe(true);
+      expect(tmux.sendText).toHaveBeenCalledWith(input.binding.tmuxSession, ROLE);
+    });
+
+    it("continue delivers once a child's start-second record appears after the launch timed out", async () => {
+      expect(await orch.startNode(input)).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      record(CHILD, "child-instance");
+      expect(await lifecycle().continueStartup("builder@fork-recovery")).toMatchObject({ ok: true, continuityOutcome: "forked" });
+      expect(registry.resumeTokenMatches(input.sessionId, "codex_id", CHILD)).toBe(true);
+      expect(tmux.sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it("still refuses a retired process's start-second record when that process logged earlier (PID reuse)", async () => {
+      record("01970000-0000-7000-8000-00000000000f", "retired-instance", START - 30);
+      record("01970000-0000-7000-8000-00000000000f", "retired-instance");
+      expect(await orch.startNode(input)).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(await lifecycle().continueStartup("builder@fork-recovery")).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(registry.resumeTokenMatches(input.sessionId, "codex_id", "01970000-0000-7000-8000-00000000000f")).toBe(false);
+    });
+
+    it("picks the child over a retired process when both logged in the start second", async () => {
+      record("01970000-0000-7000-8000-00000000000f", "retired-instance", START - 30);
+      record("01970000-0000-7000-8000-00000000000f", "retired-instance");
+      record(CHILD, "child-instance");
+      expect(await orch.startNode(input)).toMatchObject({ ok: true });
+      expect(registry.resumeTokenMatches(input.sessionId, "codex_id", CHILD)).toBe(true);
+    });
+
+    it("refuses when two process instances first logged in the start second", async () => {
+      record(CHILD, "first-instance");
+      record("01970000-0000-7000-8000-00000000000f", "second-instance");
+      expect(await orch.startNode(input)).toMatchObject({ ok: false, startupStatus: "attention_required" });
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
   });
 });

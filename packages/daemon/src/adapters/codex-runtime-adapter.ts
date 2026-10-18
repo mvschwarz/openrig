@@ -170,7 +170,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       resolveHomeDirByPid: this.resolveHomeDirByPid,
     });
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity) => identity === undefined
-      ? this.readThreadIdFromLogs(pid) : threadIdResolver.resolve(pid, identity));
+      ? this.readThreadIdFromLogs(pid) : threadIdResolver.resolveForkChild(pid, identity));
     this.readinessSettings = deps.readinessSettings;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight
