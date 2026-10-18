@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import { serve, type ServerType } from "@hono/node-server";
 import type Database from "better-sqlite3";
@@ -29,7 +30,12 @@ function shippedLoop(): string {
   return match[1]!;
 }
 
-describe.skipIf(process.platform === "win32" || !fs.existsSync(CLI))("the skill's opt-in wake loop", () => {
+describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", () => {
+  it("has a built CLI to run the loop with", () => {
+    // Not a silent skip: the loop runs against this checkout's built `rig`.
+    expect(fs.existsSync(CLI), `build the CLI first (npm run build): ${fileURLToPath(CLI)} is missing`).toBe(true);
+  });
+
   let db: Database.Database;
   let server: ServerType;
   let url: string;
@@ -42,7 +48,7 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(CLI))("the skill'
     root = fs.mkdtempSync(path.join(os.tmpdir(), "wake-loop-"));
     fs.mkdirSync(path.join(root, "bin"));
     // The agent's `rig`: this checkout's built CLI.
-    fs.writeFileSync(path.join(root, "bin", "rig"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(CLI.pathname)} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(root, "bin", "rig"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(CLI))} "$@"\n`, { mode: 0o755 });
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
     queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
@@ -111,6 +117,15 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(CLI))("the skill'
     expect(result.code).toBe(0);
     expect(listCalls).toBeGreaterThanOrEqual(4);
     expect(result.stdout).toMatch(/^NEW WORK: /m);
+  }, 40_000);
+
+  it("doesn't wake for owned work that is already claimed", async () => {
+    const item = await assign(DESK);
+    queue.claim({ qitemId: item.qitemId, destinationSession: DESK } as never);
+    const result = await runLoop(4);
+    expect(result.code).toBe(0);
+    expect(result.stdout).not.toContain("NEW WORK");
+    expect(result.stdout).toContain("No new work before the deadline");
   }, 40_000);
 
   it("ignores work assigned to another seat and ends at its deadline", async () => {
