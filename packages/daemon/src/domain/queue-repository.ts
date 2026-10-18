@@ -3142,6 +3142,11 @@ export class QueueRepository {
     return this.wakeRepo.getStatus(qitemId);
   }
 
+  /** For parked diagnosis only (see QueueWakeRepository.servedByOwnRepeatingReminder). */
+  parkWakeServedByOwnReminder(qitemId: string): boolean {
+    return this.wakeRepo.servedByOwnRepeatingReminder(qitemId);
+  }
+
   /** Park timers a seat swap keeps: each is still its blocked row's current wake and still targets the
    *  row's owner (see QueueWakeRepository.currentParkTimerIds). */
   currentParkTimerIds(): string[] {

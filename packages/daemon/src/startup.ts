@@ -2141,6 +2141,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
                 limit,
               }),
               getParkWake: (qitemId: string) => queueRepoInstance.getParkWakeStatus(qitemId),
+              servedByOwnReminder: (qitemId: string) => queueRepoInstance.parkWakeServedByOwnReminder(qitemId),
             };
             return diagnoseRigParked(
               parkedDeps,

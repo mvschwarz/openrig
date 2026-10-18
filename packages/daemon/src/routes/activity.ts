@@ -482,6 +482,7 @@ activityRoutes.get("/parked", (c) => {
     | {
         list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
+        parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }
     | undefined;
   const rigRepo = c.get("rigRepo" as never) as { db: import("better-sqlite3").Database } | undefined;
@@ -503,6 +504,7 @@ activityRoutes.get("/parked", (c) => {
       limit,
     }),
     getParkWake: (qitemId: string) => queueRepo.getParkWakeStatus(qitemId),
+    servedByOwnReminder: (qitemId: string) => queueRepo.parkWakeServedByOwnReminder?.(qitemId) === true,
   };
 
   // WAVE-O B2 (R2 508e383d): the diagnosis is RIG-SCOPED, never fleet-wide. Resolve ONE
