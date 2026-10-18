@@ -92,6 +92,25 @@ files:
 `, "/x.yaml")).toThrow(/relative path inside the image/);
   });
 
+  it("accepts literal dots inside a path segment but rejects '..' segments", () => {
+    const withPath = (path: string) => `
+name: x
+version: 1
+runtime: claude-code
+source_seat: x
+source_session_id: s
+source_resume_token: t
+files:
+  - path: ${path}
+    role: r
+`;
+    expect(parseAgentImageManifest(withPath("notes/v1..final.md"), "/x.yaml").files[0]!.path).toBe("notes/v1..final.md");
+    expect(parseAgentImageManifest(withPath("release..notes.md"), "/x.yaml").files[0]!.path).toBe("release..notes.md");
+    for (const path of ["../escape.md", "a/../b.md", "a/..", "a\\..\\b.md"]) {
+      expect(() => parseAgentImageManifest(withPath(path), "/x.yaml")).toThrow(/relative path inside the image/);
+    }
+  });
+
   it("rejects file with unsupported suffix", () => {
     expect(() => parseAgentImageManifest(`
 name: x
