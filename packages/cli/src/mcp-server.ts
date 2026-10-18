@@ -515,14 +515,14 @@ export function createMcpServer(client: DaemonClient): McpServer {
   // 21. rig_queue_list — list queue items
   server.tool(
     "rig_queue_list",
-    "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Open items only unless all is set.",
+    "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Without state, open items only (all adds closed ones); a state filter returns exactly those states, closed ones included.",
     {
       owned: z.boolean().optional().describe("Only items assigned to this seat (overrides destination)"),
       mine: z.boolean().optional().describe("Items this seat sent or owns"),
       destination: z.string().optional().describe("Filter by destination seat"),
       source: z.string().optional().describe("Filter by source seat"),
-      state: z.string().optional().describe("Filter by state (comma-separated)"),
-      all: z.boolean().optional().describe("Include closed items"),
+      state: z.string().optional().describe("Only these states, comma-separated; closed states included when named"),
+      all: z.boolean().optional().describe("Without state: include closed items"),
       limit: z.number().int().positive().optional().describe("Result limit (default 100)"),
     },
     async ({ owned, mine, destination, source, state, all, limit }) => {
