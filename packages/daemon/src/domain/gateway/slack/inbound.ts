@@ -789,7 +789,9 @@ export class InboundRouter {
       else { failedHosts.add(e.ev.host); stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 }); }
     }
     if (sent < entries.length) this.deps.log?.(`relay retry: ${entries.length - sent} kept unsent for unreachable host(s) ${[...failedHosts].join(", ")}`);
-    store.replaceBatch(entries, stillFailing);
+    if (!store.replaceBatch(entries, stillFailing)) {
+      this.deps.log?.("relay dead-letter file couldn't be read again: left as it was for the next retry pass");
+    }
     return { retried: sent, landed };
   }
 
