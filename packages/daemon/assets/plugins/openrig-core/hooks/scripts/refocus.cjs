@@ -36,9 +36,12 @@ const lookupTimeout = (reserve = 0) => Math.min(LOOKUP_CAP_MS, budgetLeftMs() - 
 // Normal managed restore advances on ~30 s polls with a 10 s idle wait.
 // A lost daemon stage must not suppress this occupant's refocus indefinitely.
 const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
-// The per-occupant state lock: how long to wait for it, and when one left by a killed process is stale.
-const LOCK_WAIT_MS = 1_000;
+// The per-occupant state lock: when one left by a killed process is stale, and how long to wait for it. A live holder
+// keeps it for milliseconds and a stale one is broken, so waiting past the stale age always ends holding the lock.
 const LOCK_STALE_MS = 5_000;
+const LOCK_WAIT_MS = LOCK_STALE_MS + 1_000;
+// The issue report after a failed attempt gets this long, after the budget and still well inside the outer bound.
+const REPORT_MS = 1_500;
 // A delivery claim lasts for the budget plus this margin, so a claim left by a killed hook can't hold refocus back.
 const CLAIM_MARGIN_MS = 2_000;
 
@@ -418,8 +421,9 @@ function runsForThisSeatsProject(env = process.env) {
 
   // Two hook processes for one occupant can overlap (two prompts, or a prompt still delivering when a PostCompact
   // lands). Each read-modify-write of this occupant's state runs under an exclusive lock file beside it; the lock is
-  // held for milliseconds, never across the trace. A lock left by a killed process goes stale after a few seconds, and
-  // a hook that can't take it in time goes on without it rather than hold up the turn.
+  // held for milliseconds, never across the trace. A lock left by a killed process goes stale after a few seconds and
+  // is broken. Only a lock file that can't be created at all (an unwritable state folder) leaves the hook going on
+  // without it, as it always did, rather than failing the turn.
   const lockFile = `${stateFile}.lock`;
   let lockHeld = false;
   const lock = () => {
@@ -586,7 +590,7 @@ function runsForThisSeatsProject(env = process.env) {
     },
   });
   process.stdout.write(output, (error) => {
-    recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error) });
+    recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error), deadlineMs: BUDGET_MS + REPORT_MS });
     // Re-read under the lock: an event retained while this delivery ran (a PostCompact) must survive it.
     lock();
     state = readState() || state;

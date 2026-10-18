@@ -4,7 +4,7 @@
 // harness overlaps these events natively is not established here.
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,9 +30,11 @@ function fixture(): Fixture {
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
   const sleep = (name: string) => `[ -n "$${name}" ] && sleep "$(awk -v m="$${name}" 'BEGIN{printf "%.3f", m/1000}')"`;
+  // An issue report takes a moment to answer, as the daemon does, and is logged only once it has answered.
   writeFileSync(join(bin, "rig"), `#!/bin/sh
-echo "rig $*" >> "${log}"
+[ "$1" = stream ] || echo "rig $*" >> "${log}"
 case "$1 $2" in
+  "stream emit") sleep 0.2; echo "rig $*" >> "${log}"; echo '{}';;
   "queue whoami") ${sleep("STUB_WHOAMI_MS")}; echo '{"role":{"state":"no-record","files":[]},"currentWorkBasis":"none"}';;
   "config --json") echo '{}';;
   "context get") ${sleep("STUB_CONTEXT_MS")}; echo "CONFIGURED REFOCUS CONTENT";;
@@ -137,7 +139,8 @@ describe("refocus: the time budget", () => {
       expect(context(r)).toContain("REFOCUS");
       expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
     }
-    expect(healthOf(f)).toEqual([expect.objectContaining({ failures: 3 })]);
+    // The third failure's issue report gets its own time after the budget, so it is made and confirmed.
+    expect(healthOf(f)).toEqual([expect.objectContaining({ failures: 3, reportedAt: expect.any(String) })]);
     expect(readFileSync(f.log, "utf8").split("\n").filter((l) => l.startsWith("rig stream")).length).toBe(1);
   }, 40_000);
 });
@@ -180,6 +183,34 @@ describe("refocus: overlapping events for one occupant", () => {
     ]);
     expect(runs.map((r) => context(r).includes("REFOCUS"))).toEqual([true, true]);
     expect([stateOf(f, "s1")["pendingOn"], stateOf(f, "s2")["pendingOn"]]).toEqual([undefined, undefined]);
+  }, 20_000);
+
+  it("waits for an occupant's state lock held by another hook, rather than writing without it", async () => {
+    const f = fixture();
+    await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_NOW: "1" });
+    const lockFile = join(f.home, "refocus", `${SEAT}__s1.json.lock`);
+    writeFileSync(lockFile, "");
+    const compact = hook(f, "PostCompact", "s1");
+    await wait(1_800);
+    // Still held: nothing written yet.
+    expect(stateOf(f, "s1")["pendingOn"]).toBeUndefined();
+    rmSync(lockFile);
+    const r = await compact;
+    expect(r.ms).toBeGreaterThanOrEqual(1_800);
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
+    expect(existsSync(lockFile)).toBe(false);
+  }, 20_000);
+
+  it("breaks a lock left by a killed hook once it is stale", async () => {
+    const f = fixture();
+    await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_NOW: "1" });
+    const lockFile = join(f.home, "refocus", `${SEAT}__s1.json.lock`);
+    writeFileSync(lockFile, "");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile, old, old);
+    const r = await hook(f, "PostCompact", "s1");
+    expect(r.ms).toBeLessThan(3_000);
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
   }, 20_000);
 
   it("doesn't let a claim left by a killed delivery hold the refocus back", async () => {

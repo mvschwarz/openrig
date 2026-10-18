@@ -72,7 +72,8 @@ refocus must never break a seat's turn.
 **Overlapping events.** Two hook runs for the same seat and occupant take turns on its state, using a lock file beside
 the state file that is held for milliseconds. A prompt that is delivering a refocus marks it as claimed, so an
 overlapping prompt leaves it alone. A `PostCompact` that lands during a delivery stays due for the next prompt. A claim
-left by a killed hook lapses after the budget plus 2 seconds.
+left by a killed hook lapses after the budget plus 2 seconds. A lock left by a killed hook is broken once it is 5 seconds
+old. After a failed attempt, the issue report gets its own 1.5 seconds after the budget.
 
 Failed trace or configured-content resolution keeps refocus due. After three
 consecutive failed attempts for the same seat and occupant, the hook emits one
