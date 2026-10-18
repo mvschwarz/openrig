@@ -1,7 +1,8 @@
 import { fileTargetForPath } from "./reading.js";
 import { terminalExplorerRows } from "./terminals/terminal-model.js";
 import { CONFIG_CATEGORIES } from "./config/config-model.js";
-import { availableTabs } from "./commands/registry.js";
+import { availableTabs, COMMAND_REGISTRY } from "./commands/registry.js";
+import { filterPalette } from "./commands/palette.js";
 import { DEFAULT_TIME_ZONE, resolveTimeZone } from "./time.js";
 // ONE instance-scoped view-state with ONE mutation path (dispatch) — PIN 1.
 // No module-level state anywhere in this file (FR-13). The section set is a
@@ -245,7 +246,10 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return next.palette ? { ...next, palette: { query: action.query, selection: 0 } } : next;
     case "palette-move": {
       if (!next.palette) return next;
-      const sel = Math.max(0, next.palette.selection + action.delta);
+      // Clamp to the matches Help shows (their count does not depend on context), so
+      // overshooting the last row cannot leave later up-presses with nothing to undo.
+      const last = Math.max(0, filterPalette(next.palette.query, COMMAND_REGISTRY, "").length - 1);
+      const sel = Math.min(last, Math.max(0, next.palette.selection + action.delta));
       return { ...next, palette: { ...next.palette, selection: sel } };
     }
     case "style": {
