@@ -814,6 +814,10 @@ export class StartupOrchestrator {
     stage?: StartupFailureStage,
     hasPendingWork?: boolean,
   ): StartupResult {
+    if (status === "attention_required" && typeof pendingContext === "object") {
+      // The reasons above stay visible; this only says what the status means for the fork.
+      errors.push("The fork's startup context is waiting to be sent: this attention status doesn't mean the forked conversation is healthy, and its own id isn't verified yet");
+    }
     if (status === "attention_required" && pendingContext && input.binding.tmuxSession) {
       errors.push(`After resolving it in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);
     }

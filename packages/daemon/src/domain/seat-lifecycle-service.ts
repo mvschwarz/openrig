@@ -9,7 +9,7 @@ import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
 import type { NodeLauncher } from "./node-launcher.js";
-import type { StartupOrchestrator } from "./startup-orchestrator.js";
+import type { PendingStartupContext, StartupOrchestrator } from "./startup-orchestrator.js";
 import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
@@ -753,7 +753,7 @@ export class SeatLifecycleService {
     // Recheck after the asynchronous native observation; startNode immediately
     // records pending before its first await, consuming the retained permission.
     if (this.latestSession(node.id)?.id !== session.id || this.sessionRegistry.getBindingForNode(node.id)?.tmuxPane !== pane.pane
-      || this.startupOrchestrator.pendingStartupContext(node.id, session.id)?.eventSeq !== pending.eventSeq) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
+      || !this.stillPending(node.id, session.id, pending)) return { ok: false as const, code: "continuation_unavailable", message: "Startup changed during the readiness check. Refresh." };
     const result = await this.startupOrchestrator.startNode({
       rigId: seat.rigId, nodeId: node.id, sessionId: session.id,
       binding: { ...binding, cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: resolveSeatEffort(node).effective ?? undefined, codexConfigProfile: node.codexConfigProfile ?? undefined },
@@ -811,6 +811,14 @@ export class SeatLifecycleService {
    * mismatched sessions. Return its session row or a refusal, including unknown pane
    * observations, without stopping, repairing, or starting a tmux server.
    */
+  /** Whether the context found before the native check is still owed. A fork continuation needs the exact
+   *  same pending event: its child is verified against that attempt. A fresh continuation keeps main's
+   *  check (fresh context still pending for this occupant), so another pending event doesn't refuse it. */
+  private stillPending(nodeId: string, sessionId: string, pending: PendingStartupContext): boolean {
+    const now = this.startupOrchestrator?.pendingStartupContext(nodeId, sessionId);
+    return pending.mode === "fork" ? now?.eventSeq === pending.eventSeq : now?.mode === "fresh";
+  }
+
   private async validateFreshCollision(resolved: ResolvedSeat, canonicalSessionName: string, stop: boolean): Promise<LatestSessionRow | SeatRefusal> {
     const currentSession = this.latestSession(resolved.nodeId);
     const currentBinding = this.sessionRegistry.getBindingForNode(resolved.nodeId);

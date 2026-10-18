@@ -242,6 +242,29 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(delivery).not.toHaveBeenCalled();
   });
 
+  it("continues a fresh occupant once when another pending event for it arrives during the readiness check", async () => {
+    const seat = seedSeat();
+    adapter.checkReady = async () => ({ ready: false, code: "hook_trust_gate", reason: "native gate" });
+    const first = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(first.ok).toBe(false);
+    const occupant = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string };
+    let reported = false;
+    adapter.checkReady = async () => {
+      // The same occupant's fresh context is reported pending again while `continue` observes the pane.
+      if (!reported) {
+        reported = true;
+        eventBus.emit({ type: "node.startup_failed", rigId: seat.rig.id, nodeId: seat.node.id, sessionId: occupant.id,
+          error: "native gate reported again", freshContextPending: true });
+      }
+      return { ready: true };
+    };
+    const delivery = vi.spyOn(adapter, "deliverStartup");
+    expect(await service.continueStartup(seat.sessionName)).toMatchObject({ ok: true });
+    expect(delivery).toHaveBeenCalledTimes(1);
+    expect((await service.continueStartup(seat.sessionName)).ok).toBe(false);
+    expect(delivery).toHaveBeenCalledTimes(1);
+  });
+
   it("supersedes detached history so a later reboot identifies the deliberate successor", async () => {
     const seat = seedSeat();
     alive.delete(seat.sessionName);

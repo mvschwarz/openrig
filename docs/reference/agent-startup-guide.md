@@ -41,10 +41,14 @@ They are recognized from each harness's English prompt text.
 ## Continue a Codex fork whose child ID arrived late
 
 For a member with `session_source.mode: fork`, OpenRig waits for Codex's new
-child thread ID before sending its role and other startup prompts. This capture
-uses `runtime.readiness_timeout_seconds` (30 seconds by default, configurable
-from 1 to 600 seconds), as does the later readiness check. The two waits have
-separate budgets.
+child thread ID before sending its role and other startup prompts. It saves the
+ID and sends the role only for a verified child: the bound pane's foreground
+process forks the requested parent, and its own native record, matched to its
+start time, supplies the ID. This capture uses `runtime.readiness_timeout_seconds`
+(30 seconds by default, configurable from 1 to 600 seconds), as does the later
+readiness check. The two waits have separate budgets. A seat handover with
+`--source fork:<seat>` is different: its fork carries the conversation itself,
+and a missed ID capture leaves the ID pending rather than stopping the handover.
 
 If the ID is still unavailable, the seat reports `attention_required` and keeps
 its startup context pending. Wait for the child to finish starting, resolve any

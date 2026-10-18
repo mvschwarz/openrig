@@ -32,6 +32,7 @@ describe("late Codex fork identity", () => {
   let readinessSeconds: number;
   let duringRead: (() => void) | undefined;
   let identityReads: Array<[number, string | undefined]>;
+  let pidOnlyRecord: boolean;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -49,6 +50,7 @@ describe("late Codex fork identity", () => {
     readinessSeconds = 30;
     duringRead = undefined;
     identityReads = [];
+    pidOnlyRecord = false;
     processRows = [
       { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "sh", startedAt: STARTED, command: "sh" },
       { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: STARTED, command: `codex fork ${PARENT}` },
@@ -70,6 +72,8 @@ describe("late Codex fork identity", () => {
       readThreadIdByPid: (pid, identity) => {
         identityReads.push([pid, identity]);
         duringRead?.();
+        // A reused PID: an older record matches the PID alone, never this process's start time.
+        if (pidOnlyRecord) return identity === undefined ? threadId : undefined;
         return ++reads > availableAfter ? threadId : undefined;
       },
       readinessSettings: { resolveOne: () => ({ value: readinessSeconds }) } as unknown as Pick<SettingsStore, "resolveOne">,
@@ -160,6 +164,22 @@ describe("late Codex fork identity", () => {
     if (shape === "missing start") delete child.startedAt;
     expect(await lifecycle().continueStartup("builder@fork-recovery")).toMatchObject({ ok: false, startupStatus: "attention_required" });
     expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(orch.canContinueStartup(input.nodeId, input.sessionId)).toBe(true);
+  });
+
+  it.each(["reused PID", "different parent", "background", "helper"])("refuses an unproved child at launch: %s", async shape => {
+    threadId = CHILD;
+    const child = processRows[1]!;
+    if (shape === "reused PID") pidOnlyRecord = true;
+    if (shape === "different parent") child.command = `codex fork ${CHILD}`;
+    if (shape === "background") child.pgid = 800;
+    if (shape === "helper") { child.command = `helper codex fork ${PARENT}`; child.executableName = "helper"; }
+    readinessSeconds = 1;
+    const result = await orch.startNode(input);
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(result.ok ? "" : result.errors.join(" ")).toContain("waiting to be sent");
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(registry.resumeTokenMatches(input.sessionId, "codex_id", CHILD)).toBe(false);
     expect(orch.canContinueStartup(input.nodeId, input.sessionId)).toBe(true);
   });
 

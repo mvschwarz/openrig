@@ -256,10 +256,10 @@ cited here by number with the code that carries them):
 - **`rig seat continue <seat>`** — when a fresh launch stops at a native
   prompt before its startup context is delivered, the startup orchestrator
   fails it as `attention_required` and adds "run: rig seat continue
-  <session>" (`startup-orchestrator.ts:600`). The command
-  (`packages/cli/src/commands/seat.ts:633`) calls
-  `POST /api/seat/continue/:seatRef` (`routes/seat.ts:293`), which runs
-  `continueFreshStartup` (`seat-lifecycle-service.ts:395`): it re-checks the
+  <session>" (`startup-orchestrator.ts:822`). The command
+  (`packages/cli/src/commands/seat.ts:816`) calls
+  `POST /api/seat/continue/:seatRef` (`routes/seat.ts:367`), which runs
+  `continueStartup` (`seat-lifecycle-service.ts:723`): it re-checks the
   binding, pane and runtime, then delivers the pending context to the same
   conversation without relaunching. In a restore, a pod-aware seat in this
   state reports `attention_required` (`restore-orchestrator.ts:1265`). See

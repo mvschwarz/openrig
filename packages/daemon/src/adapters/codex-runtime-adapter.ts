@@ -460,9 +460,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 8);
       if (updatePrompt.failure) return updatePrompt.failure;
-      const threadId = await this.captureFreshThreadId(binding, updatePrompt, {
-        timeoutMs: resolveReadinessTimeoutMs(undefined, this.readinessSettings), excludeThreadId: parentId,
-      });
+      // A handover keeps its own capture and checks (#1216). Any other fork saves an id and sends its
+      // role only for the child `rig seat continue` would also verify: a foreground chain forking this
+      // parent, whose own start-time-gated record supplies the id.
+      const threadId = opts.forkSource.pendingIdAllowed
+        ? await this.captureFreshThreadId(binding, updatePrompt)
+        : await this.captureVerifiedForkId(binding, updatePrompt, parentId,
+          resolveReadinessTimeoutMs(undefined, this.readinessSettings));
       if (updatePrompt.failure) return updatePrompt.failure;
       if (!threadId) {
         // For a handover a missed capture is pending metadata, not a failed launch: the fork returns
@@ -949,32 +953,47 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return Array.from(keys);
   }
 
-  private async captureFreshThreadId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt,
-    opts?: { timeoutMs: number; excludeThreadId: string }): Promise<string | undefined> {
+  private async captureFreshThreadId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt): Promise<string | undefined> {
     const target = binding.tmuxPane ?? binding.tmuxSession;
     if (!target || !this.tmux.getPanePid) return undefined;
 
-    const deadline = opts ? Date.now() + opts.timeoutMs : undefined;
-    const attempts = opts ? Math.max(1, Math.ceil(opts.timeoutMs / 250)) : 20;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      if (attempt > 0 && deadline !== undefined && Date.now() >= deadline) break;
+    for (let attempt = 0; attempt < 20; attempt++) {
       const shellPid = await this.tmux.getPanePid(target);
       if (shellPid) {
         const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
-          const threadId = (await this.readThreadIdByPid(codexPid))?.trim();
-          if (threadId && threadId !== opts?.excludeThreadId) return threadId;
+          const threadId = await this.readThreadIdByPid(codexPid);
+          if (threadId) return threadId;
         }
       }
       if (binding.tmuxSession) {
         await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 1);
         if (updatePrompt.failure) return undefined;
       }
-      const remaining = deadline === undefined ? 250 : Math.min(250, deadline - Date.now());
+      await this.sleep(250);
+    }
+
+    return undefined;
+  }
+
+  /** A fork's own id at launch, from a verified child only (see {@link captureForkIdentity}). Polls for up
+   *  to `timeoutMs`, because a fork's record can appear well after the process starts. */
+  private async captureVerifiedForkId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt, parentId: string,
+    timeoutMs: number): Promise<string | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0 && Date.now() >= deadline) break;
+      const identity = await this.captureForkIdentity(binding, parentId);
+      if (identity) return identity.resumeToken;
+      if (binding.tmuxSession) {
+        await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 1);
+        if (updatePrompt.failure) return undefined;
+      }
+      const remaining = Math.min(250, deadline - Date.now());
       if (remaining <= 0) break;
       await this.sleep(remaining);
     }
-
     return undefined;
   }
 
