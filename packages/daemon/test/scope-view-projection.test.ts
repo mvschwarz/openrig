@@ -90,6 +90,15 @@ describe("scope-view projection (store-direct)", () => {
       "Human specs are one file per human.",
     ]);
   });
+  it("reads `1)` mini-requirements like `1.` ones, as the authored-item grammar does", () => {
+    const dotted = projectSliceScope(fsFixture(baseFiles, baseDirs), S)!;
+    const content = README.replace(/^(\d+)\. /gm, "$1) ");
+    expect(content).not.toBe(README);
+    const detail = projectSliceScope(fsFixture({ ...baseFiles, [`${S}/README.md`]: content }, baseDirs), S)!;
+    expect(detail.miniRequirements).toHaveLength(2);
+    expect(detail.miniRequirements).toEqual(dotted.miniRequirements);
+  });
+
   it("reads a CRLF slice like its LF twin: requirements, evidence pairing and the locked spec path", () => {
     const crlf = (text: string) => text.replace(/\n/g, "\r\n");
     const files = {

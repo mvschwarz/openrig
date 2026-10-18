@@ -104,13 +104,14 @@ function sectionBody(content: string, heading: string): string {
   return section.text.split("\n").slice(1).join("\n").trim();
 }
 
-/** Numbered mini-requirement lines (top-level `N.` items; continuation lines folded in). */
+/** Numbered mini-requirement lines (top-level `N.` or `N)` items, as hasAuthoredNumberedItem
+ * reads them; continuation lines folded in). */
 function miniRequirements(content: string): string[] {
   const body = sectionBody(content, "Mini-requirements");
   const items: string[] = [];
   let current: string | null = null;
   for (const line of body.split(/\r?\n/)) {
-    const m = /^(\d+)\.\s+(.*)$/.exec(line);
+    const m = /^(\d+)[.)]\s+(.*)$/.exec(line);
     if (m) {
       if (current !== null) items.push(current.trim());
       current = m[2]!;
