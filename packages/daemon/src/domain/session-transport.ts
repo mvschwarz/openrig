@@ -2212,6 +2212,11 @@ export class SessionTransport {
         return { ok: false, sessionName, sent: true, outcome: "failed", inputPhase: "written", reason: (error as { code?: string }).code ?? "submit_refused",
           error: `Text was written to '${sessionName}' but Enter was not sent: ${(error as Error).message}` };
       }
+      // A throw after the text write was issued: whether it landed is unknown, so it is not "nothing sent" either.
+      if ((error as { inputAttempted?: boolean }).inputAttempted === true) {
+        return { ok: false, sessionName, outcome: "failed", inputPhase: "attempted", reason: (error as { code?: string }).code ?? "delivery_indeterminate",
+          error: `A text write to '${sessionName}' was issued, but its result was lost: ${(error as Error).message}` };
+      }
       return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
     }
   }
@@ -2800,23 +2805,31 @@ export class SessionTransport {
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
+    // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
+    let writeIssued = false;
+    const tagIssued = (error: unknown): never => {
+      if (writeIssued && error && typeof error === "object") (error as { inputAttempted?: boolean }).inputAttempted = true;
+      throw error;
+    };
     const textResult = await this.runStage(
       "session_transport.send_text",
       () => {
         opts?.beforeWrite?.();
+        writeIssued = true;
         if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
         return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
-    );
+    ).catch(tagIssued);
     if (!textResult.ok) {
-      const policyRefusal = textResult.code.startsWith("draft_");
+      // A draft refusal is the guard holding the write before any input; it is not an attempted write.
+      const policyRefusal = typeof textResult.code === "string" && textResult.code.startsWith("draft_");
       return observe({
         ok: false,
         sessionName,
         reason: policyRefusal ? textResult.code : "send_failed",
         outcome: "failed",
-        inputPhase: "attempted",
+        ...(policyRefusal ? {} : { inputPhase: "attempted" as const }),
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
         ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });

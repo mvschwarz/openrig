@@ -24,7 +24,7 @@ function fixture(compactInstruction = '') {
   let hookActivity: string | null = null;
   let onSleep: (() => void) | undefined;
   // Runs on each text write after it is recorded; may return a receipt to use instead of ok.
-  let onText: ((text: string) => {ok: boolean; message?: string} | void) | undefined;
+  let onText: ((text: string) => {ok: boolean; code?: string; message?: string} | void) | undefined;
   const generation = 'generation-one';
   const db = {prepare: () => ({get: () => undefined, all: () => []})} as any;
   // Every input event in order: a text write with its options, or a key.
@@ -52,7 +52,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; message?: string} | void) => { onText = fn; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -290,8 +290,17 @@ it('automatic: a failed paste after a successful idle wait disarms as uncertain 
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
-  f.onText((text) => (text.startsWith('/compact') ? {ok: false, message: 'paste-buffer: lost reply'} : undefined));
+  // The adapter's real failure shape (TmuxResult: ok false, code, message), as classifyWriteError returns it.
+  f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'unknown', message: 'paste-buffer: lost reply'} : undefined));
+  const real = f.transport.send.bind(f.transport);
+  const results: unknown[] = [];
+  vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => {
+    try { const r = await real(s, text, opts); if (text.startsWith('/compact')) results.push(r); return r; }
+    catch (e) { if (text.startsWith('/compact')) results.push({thrown: String(e), code: (e as any)?.code, inputWritten: (e as any)?.inputWritten}); throw e; }
+  });
   const outcome = await f.e.maybeAutoCompact(input);
+  // The exact transport result for the failed paste, as the enforcer classified it.
+  console.log('F1 transport result:', JSON.stringify(results), 'outcome:', JSON.stringify(outcome), 'writes:', compactWrites(f));
   expect(outcome).not.toEqual({triggered: false, reason: 'waiting_for_idle'});
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
   f.onText(() => undefined);
@@ -363,4 +372,38 @@ it('non-ASCII instruction and path stay within the budget, counted in UTF-16 cod
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(command)).toBe(false);
   }
   expect(composeManagedCompactCommand({compactInstruction: 'Сохрани задачу 🚀', mapPath: null}).command).toContain('Сохрани задачу 🚀');
+});
+
+it('a throw after the write was issued (here, a malformed receipt) is never reported as not sent', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  f.stageMap();
+  // No code: reading the receipt throws inside the transport after the write was handed to the adapter.
+  f.onText((text) => (text.startsWith('/compact') ? {ok: false, message: 'lost'} : undefined));
+  await f.e.maybeAutoCompact(input);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
+  f.onText(() => undefined);
+  for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
+  expect(compactWrites(f)).toBe(1);
+});
+
+it('a draft refusal at the write is the guard holding input, not an attempted write: not sent', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  f.stageMap();
+  f.onText((text) => (text.startsWith('/compact') ? {ok: false, code: 'draft_input_busy', message: 'The seat has an unsubmitted input.'} : undefined));
+  await f.e.maybeAutoCompact(input);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
+});
+
+it('--skip-map with only the temporary map written: the restore request names the .tmp that carries the marker', async () => {
+  const f = fixture();
+  // --skip-map does not wait for a map, so the seat writes it while /compact goes in. stageMap writes only
+  // <map>.tmp, as a seat does; nothing publishes it under --skip-map.
+  f.onText((text) => { if (text.startsWith('/compact')) f.stageMap(); });
+  expect(await f.e.triggerManualCompact({...input, usedPercentage: 40}, {operatorInitiated: true, skipMap: true})).toEqual({triggered: true, stage: 'compact-sent'});
+  const carry = (f.e as any).restoreCarry.get(seat);
+  const restore = (await drainToRestore(f))!;
+  expect(restore).toContain(`This attempt's restore map is ${carry.skipMap.mapPath}.tmp`);
+  expect(restore).not.toContain('No restore map was required');
 });

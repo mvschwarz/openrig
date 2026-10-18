@@ -957,10 +957,12 @@ export class ClaudeCompactionEnforcer {
       const guard = this.sessionTransport.deliveryGuard;
       result = guard ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send) : await send();
     } catch (error) {
-      // A guard refusal is "nothing sent" only when the transport did not mark the text as already written.
+      // A guard refusal is "nothing sent" only when the transport did not mark the write as issued or done.
       const written = (error as { inputWritten?: boolean } | null)?.inputWritten === true;
-      guardRefused = error instanceof DeliveryGuardError && !written;
-      result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain", ...(written ? { sent: true, inputPhase: "written" as const } : {}) };
+      const attempted = (error as { inputAttempted?: boolean } | null)?.inputAttempted === true;
+      guardRefused = error instanceof DeliveryGuardError && !written && !attempted;
+      result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain",
+        ...(written ? { sent: true, inputPhase: "written" as const } : attempted ? { inputPhase: "attempted" as const } : {}) };
     }
     if (!result.ok || result.outcome === "retained") {
       const phase = result.inputPhase;
@@ -999,13 +1001,16 @@ export class ClaudeCompactionEnforcer {
   }
 
   /** The map the restore request names. With --skip-map: a map the seat completed at the attempt path
-   *  anyway (final file ending with its marker), or a plain statement that none was required. */
+   *  anyway, or a plain statement that none was required. Nothing publishes the .tmp under --skip-map, so
+   *  the final path is checked first, then the .tmp, and whichever ends with the marker is named. */
   private restoreMapFields(sessionName: string): { attemptMapPath: string | null; noMapRequired: boolean } {
     const carry = this.restoreCarry.get(sessionName);
     if (!carry?.skipMap) return { attemptMapPath: carry?.mapPath ?? null, noMapRequired: false };
-    let completed = false;
-    try { completed = fs.readFileSync(carry.skipMap.mapPath, "utf8").trimEnd().endsWith(carry.skipMap.marker); } catch { /* none written */ }
-    return completed ? { attemptMapPath: carry.skipMap.mapPath, noMapRequired: false } : { attemptMapPath: null, noMapRequired: true };
+    const { mapPath, marker } = carry.skipMap;
+    const completed = [mapPath, `${mapPath}.tmp`].find((file) => {
+      try { return fs.readFileSync(file, "utf8").trimEnd().endsWith(marker); } catch { return false; }
+    });
+    return completed ? { attemptMapPath: completed, noMapRequired: false } : { attemptMapPath: null, noMapRequired: true };
   }
 
   /** Existing monitor polls and manual waits call this even when context usage is stale. */
