@@ -56,7 +56,7 @@ six runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
 ### The stack
 
 ```text
-CLI (87 top-level commands) / TUI / web UI / MCP (18 tools)
+CLI (87 top-level commands) / TUI / web UI / MCP (23 tools)
       |
       v
 Hono daemon routes (69 app.route() mounts + direct handlers for /healthz,

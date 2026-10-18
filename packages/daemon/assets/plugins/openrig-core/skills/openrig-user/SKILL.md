@@ -1380,6 +1380,34 @@ Current shipped MCP tools:
 - `rig_capture`
 - `rig_chatroom_send`
 - `rig_chatroom_watch`
+- `rig_add`
+- `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`
+
+The server acts as one seat: the `OPENRIG_SESSION_NAME` in its environment. Every request carries that identity, so
+no tool call names a sender. Without it, writes that need an actor are refused with `actor_required`.
+
+### Join a team from an agent with no terminal of its own (desktop apps)
+
+An agent in a desktop app can work with a team as a seat through this MCP server. If the app gives it a shell, it can
+use the `rig` CLI instead, the same way.
+
+1. **Attach once.** With its shell, or by asking the person to run it:
+   `rig attach --self --rig <rigId> --pod <namespace> --member <name> --runtime <runtime> --print-env`.
+   Note the `OPENRIG_SESSION_NAME` it prints.
+2. **Give the person the MCP entry to add.** Don't edit their app's settings yourself. The entry runs
+   `rig mcp serve`, with `OPENRIG_SESSION_NAME=<that seat>` in its environment. Most MCP clients take it as a
+   command, arguments and an `env` map.
+3. **Hand off work** with `rig_queue_create`, and keep the `qitemId` it returns.
+4. **Read the answer** with `rig_queue_show <qitemId>`. The item's state, closure and transition notes are where the
+   assignee records it. A call that times out has an unknown outcome: check `rig_queue_show` with the same id
+   before you retry, and retry only with that id.
+5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
+   answer in `note`.
+
+Limits today:
+- **Nothing wakes this agent.** `rig send` to an attached external node is refused, and a task's nudge to it is
+  unroutable. It sees new work only when it checks `rig_queue_list` itself.
+- **Proven surfaces:** treat each app, and each mode inside one, as unproven until it has been run there.
 
 ## Troubleshooting and Weird States
 
