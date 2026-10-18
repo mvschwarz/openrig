@@ -241,10 +241,13 @@ export interface PiOccupantRecordInput {
   generation: string | null;
   occupantBootAt: string | null;
   binding: { tmuxSession: string | null; tmuxPane: string | null } | null;
-  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder. */
+  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
+   *  runner entry path and state root the adapter itself launches with. */
   runner: {
     state: { ready?: boolean; launchId?: string; sessionFile?: string; exited?: unknown } | null;
     sessionsDir: string;
+    entryPath: string;
+    stateRoot: string;
   };
 }
 
@@ -260,12 +263,17 @@ function flagValue(tokens: string[], flag: string): string | null {
 }
 
 /**
- * Resolve a Pi seat's session file only when the runner the registered pane is running right now is
- * the one that wrote the sidecar: the pane's managed runner process carries `--launch-id` (the
- * adapter mints it per launch attempt and the runner stamps it into every sidecar write), so a
- * sidecar left by an earlier runner — or a runner in another pane under the same name — never
- * answers. The sidecar must say ready and not exited, and its session file must sit under the
- * seat's own sessions folder. `notBeforeMs` scopes the records to this runner's tenure: the later
+ * Resolve a Pi seat's session file only when the registered pane runs exactly one runner for this
+ * seat, in the supported managed-launch shape, and that runner wrote the sidecar. Every managed
+ * launch and resume types `node <runnerEntryPath> --session-name ... --state-root ... --launch-id
+ * ...` into the pane's shell, directly or through a staged script or `/usr/bin/env` that execs it,
+ * so the runner is a direct child of the pane's shell whose command starts with `node` and the
+ * adapter's own entry path. A runner nested in another program, a copy at another path or state
+ * root, or any second process naming this seat with a launch id leaves the seat unknown. This
+ * matches the managed-launch shape; it does not prove the daemon started the runner (one typed by
+ * hand at the pane's prompt has the same shape). The runner's `--launch-id` must equal the
+ * sidecar's, so a sidecar left by an earlier runner never answers. The sidecar must say ready and
+ * not exited, and its session file must sit under the seat's own sessions folder. `notBeforeMs` scopes the records to this runner's tenure: the later
  * of the occupant's boot and the runner process start, both second-resolution stamps, so the whole
  * starting second is excluded (a record in it could be the predecessor's). A resume keeps the same
  * session file, so this is what separates the previous occupant's records from this one's.
@@ -296,25 +304,38 @@ export async function resolveIdentityVerifiedPiRecord(
   const panePid = await deps.getPanePid(binding.tmuxPane);
   if (!panePid) return { ok: false, reason: `registered pane ${binding.tmuxPane} has no live pid` };
   const processes = await deps.listProcesses();
-  // The runner command (and any launch wrapper that carries it whole) names this seat and its
-  // launch id; the Pi child it spawns carries neither.
-  const runners = findDescendants(processes, panePid, (command) => {
+  // Candidates: every process under the pane naming this seat with a launch id, whatever its shape.
+  const candidates = findDescendants(processes, panePid, (command) => {
     const tokens = command.trim().split(/\s+/);
     return flagValue(tokens, "--session-name") === input.sessionName && flagValue(tokens, "--launch-id") !== null;
   }).map((pid) => processes.find((process) => process.pid === pid)!);
-  if (runners.length === 0) {
+  if (candidates.length === 0) {
     return { ok: false, reason: `no managed Pi runner under registered pane ${binding.tmuxPane}` };
   }
-  const paneLaunchIds = new Set(runners.map((runner) => flagValue(runner.command.trim().split(/\s+/), "--launch-id")!));
-  if (paneLaunchIds.size > 1) {
-    return { ok: false, reason: `multiple Pi runner launch ids under registered pane ${binding.tmuxPane}: ${[...paneLaunchIds].join(", ")}` };
+  if (candidates.length > 1) {
+    return { ok: false, reason: `${candidates.length} processes under registered pane ${binding.tmuxPane} name ${input.sessionName} with a launch id` };
   }
-  const paneLaunchId = [...paneLaunchIds][0]!;
+  const runner = candidates[0]!;
+  if (runner.ppid !== panePid) {
+    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} is not a direct child of the pane's shell` };
+  }
+  // The entry path may contain spaces (it is the install location), and ps joins argv with spaces,
+  // so the path is matched as a prefix rather than as one whitespace token.
+  const command = runner.command.trim();
+  const prefix = `node ${input.runner.entryPath} `;
+  if (!command.startsWith(prefix)) {
+    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not run node with the adapter's runner entry path` };
+  }
+  const args = ` ${command.slice(prefix.length)} `;
+  if (!args.includes(` --state-root ${input.runner.stateRoot} `)) {
+    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not use the adapter's state root` };
+  }
+  const paneLaunchId = flagValue(args.trim().split(/\s+/), "--launch-id")!;
   if (paneLaunchId !== launchId) {
     return { ok: false, reason: `Pi runner sidecar launch ${launchId} is not the pane's live runner launch ${paneLaunchId}` };
   }
-  const startedMs = runners.map((runner) => Date.parse(runner.startedAt ?? ""));
-  if (startedMs.some((ms) => !Number.isFinite(ms))) {
+  const startedMs = Date.parse(runner.startedAt ?? "");
+  if (!Number.isFinite(startedMs)) {
     return { ok: false, reason: `the live Pi runner under ${binding.tmuxPane} has no readable start time` };
   }
 
@@ -326,7 +347,7 @@ export async function resolveIdentityVerifiedPiRecord(
   if (inside === null || inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
     return { ok: false, reason: `Pi session file ${sessionFile} is not under the seat's sessions folder` };
   }
-  return { ok: true, path: file!, launchId, notBeforeMs: Math.max(bootAtMs, ...startedMs) + 999 };
+  return { ok: true, path: file!, launchId, notBeforeMs: Math.max(bootAtMs, startedMs) + 999 };
 }
 
 /** A Pi seat's effective-model read as the monitor wires it: the pin must resolve to a

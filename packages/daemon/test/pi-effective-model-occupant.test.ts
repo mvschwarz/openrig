@@ -13,6 +13,8 @@ const SESSION = "dev-impl@r";
 const PANE = "%7";
 const PANE_PID = 4100;
 const PIN = "anthropic/claude-fable-5";
+const ENTRY = "/opt/openrig/dist/adapters/pi-runner.js";
+const STATE_ROOT = "/s";
 const OTHER = "claude-opus-5";
 
 /** The `ps lstart` (LC_ALL=C) spelling of a local time, as the census reports a process start. */
@@ -59,6 +61,11 @@ interface Fixture {
   runnerStart: number;
   bootAt: number;
   pin: string;
+  /** The adapter's runner entry path and state root. */
+  entryPath: string;
+  stateRoot: string;
+  /** Replaces the pane's processes under its shell (default: the managed runner and its Pi child). */
+  paneChildren?: ProcessRow[];
 }
 
 function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir" | "sessionFile">> = {}): Fixture {
@@ -76,19 +83,22 @@ function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir"
     runnerStart: RUNNER_START,
     bootAt: BOOT,
     pin: PIN,
+    entryPath: ENTRY,
+    stateRoot: STATE_ROOT,
     ...overrides,
   };
 }
 
+/** The managed runner command as ps shows it: argv joined by spaces, no shell quoting. */
+function runnerCommand(f: Pick<Fixture, "entryPath" | "stateRoot">, launchId: string, opts: { node?: string; entryPath?: string; stateRoot?: string } = {}): string {
+  return `${opts.node ?? "node"} ${opts.entryPath ?? f.entryPath} --session-name ${SESSION} --state-root ${opts.stateRoot ?? f.stateRoot} --cwd /p --launch-id ${launchId} --approve --model ${PIN}`;
+}
+
 function processes(f: Fixture): ProcessRow[] {
   const rows: ProcessRow[] = [{ pid: PANE_PID, ppid: 1, command: "-bash", startedAt: lstart(f.bootAt) }];
+  if (f.paneChildren) return [...rows, ...f.paneChildren];
   if (f.paneLaunchId) {
-    rows.push({
-      pid: PANE_PID + 1,
-      ppid: PANE_PID,
-      command: `node /opt/openrig/dist/adapters/pi-runner.js --session-name ${SESSION} --state-root /s --cwd /p --launch-id ${f.paneLaunchId} --approve --model ${PIN}`,
-      startedAt: lstart(f.runnerStart),
-    });
+    rows.push({ pid: PANE_PID + 1, ppid: PANE_PID, command: runnerCommand(f, f.paneLaunchId), startedAt: lstart(f.runnerStart) });
     rows.push({ pid: PANE_PID + 2, ppid: PANE_PID + 1, command: "pi --mode rpc --model anthropic/claude-fable-5", startedAt: lstart(f.runnerStart) });
   }
   return rows;
@@ -101,7 +111,7 @@ function read(f: Fixture) {
     generation: "gen-1",
     occupantBootAt: sqliteUtc(f.bootAt),
     binding: { tmuxSession: SESSION, tmuxPane: PANE },
-    runner: { state: f.sidecar, sessionsDir: f.sessionsDir },
+    runner: { state: f.sidecar, sessionsDir: f.sessionsDir, entryPath: f.entryPath, stateRoot: f.stateRoot },
   }, {
     getPanePid: async (target) => (target === PANE ? PANE_PID : null),
     listProcesses: async () => processes(f),
@@ -265,5 +275,84 @@ describe("Pi pin and record spellings", () => {
     const r = await pass(monitorFor(f));
     expect(r.fired).toEqual([]);
     expect(r.pending).toEqual([]);
+  });
+});
+
+describe("Pi runner must match the supported managed-launch shape", () => {
+  const at = lstart(RUNNER_START);
+  const child = (pid: number, ppid: number, command: string): ProcessRow => ({ pid, ppid, command, startedAt: at });
+  const matching = [header(T0), assistant(RUNNER_START + 5_000, "claude-fable-5")];
+  const mismatching = [header(T0), assistant(RUNNER_START + 5_000, OTHER)];
+
+  async function pendingReason(f: Fixture): Promise<string | undefined> {
+    const r = await pass(monitorFor(f));
+    expect(r.fired).toEqual([]);
+    return r.pending[0]?.reason;
+  }
+
+  it("the short form settles: node and the adapter's entry path, a direct child of the pane's shell", async () => {
+    const r = await pass(monitorFor(fixture(matching)));
+    expect(r.fired).toEqual([]);
+    expect(r.pending).toEqual([]);
+  });
+
+  it("the staged and env-wrapper forms settle once they exec the runner, and stay pending before", async () => {
+    const staged = fixture(matching);
+    const runner = runnerCommand(staged, "L2");
+    for (const before of [`/bin/sh /tmp/openrig-launch-1`, `/usr/bin/env OPENRIG_NODE_ID=n1 PATH=/rig/bin:/usr/bin ${runner}`]) {
+      const f = fixture(matching, { paneChildren: [child(PANE_PID + 1, PANE_PID, before)] });
+      expect((await pass(monitorFor(f))).pending).toHaveLength(1);
+    }
+    const r = await pass(monitorFor(fixture(matching, { paneChildren: [child(PANE_PID + 1, PANE_PID, runner)] })));
+    expect(r.pending).toEqual([]);
+  });
+
+  it("a real runner nested inside another program stays pending, even when it wrote the sidecar", async () => {
+    const f = fixture(mismatching, {
+      sidecar: { ready: true, launchId: "L3" },
+      paneChildren: [child(PANE_PID + 1, PANE_PID, "vim notes.md"), child(PANE_PID + 2, PANE_PID + 1, "sh"), child(PANE_PID + 3, PANE_PID + 2, runnerCommand({ entryPath: ENTRY, stateRoot: STATE_ROOT }, "L3"))],
+    });
+    f.sidecar!.sessionFile = f.sessionFile;
+    expect(await pendingReason(f)).toMatch(/not a direct child of the pane's shell/);
+  });
+
+  it("a non-runner process whose arguments carry the flags stays pending", async () => {
+    const f = fixture(mismatching, { paneChildren: [child(PANE_PID + 1, PANE_PID, `grep -- --session-name ${SESSION} --launch-id L2`)] });
+    expect(await pendingReason(f)).toMatch(/does not run node with the adapter's runner entry path/);
+  });
+
+  it("a runner from another path, through another node spelling, or with another state root stays pending", async () => {
+    const shapes: Array<[Parameters<typeof runnerCommand>[2], RegExp]> = [
+      [{ entryPath: "/tmp/copy/pi-runner.js" }, /runner entry path/],
+      [{ node: "/usr/bin/node" }, /runner entry path/],
+      [{ stateRoot: "/elsewhere" }, /state root/],
+    ];
+    for (const [opts, reason] of shapes) {
+      const f = fixture(mismatching, { paneChildren: [child(PANE_PID + 1, PANE_PID, runnerCommand({ entryPath: ENTRY, stateRoot: STATE_ROOT }, "L2", opts))] });
+      expect(await pendingReason(f)).toMatch(reason);
+    }
+  });
+
+  it("several candidates at once stay pending, even when one is the managed runner", async () => {
+    const f = fixture(mismatching, {
+      paneChildren: [
+        child(PANE_PID + 1, PANE_PID, runnerCommand({ entryPath: ENTRY, stateRoot: STATE_ROOT }, "L2")),
+        child(PANE_PID + 2, PANE_PID, "vim"),
+        child(PANE_PID + 3, PANE_PID + 2, runnerCommand({ entryPath: ENTRY, stateRoot: STATE_ROOT }, "L2")),
+      ],
+    });
+    expect(await pendingReason(f)).toMatch(/2 processes under registered pane %7 name dev-impl@r with a launch id/);
+  });
+
+  it("an entry path and state root containing spaces still match", async () => {
+    const spaced = { entryPath: "/opt/Open Rig/dist/adapters/pi-runner.js", stateRoot: "/home/a b/.openrig/state/pi" };
+    const r = await pass(monitorFor(fixture(matching, spaced)));
+    expect(r.fired).toEqual([]);
+    expect(r.pending).toEqual([]);
+    const other = await pass(monitorFor(fixture(mismatching, spaced)));
+    expect(other.fired).toHaveLength(1);
+    // The whole spaced path must match, not its first word.
+    const sibling = fixture(mismatching, { ...spaced, paneChildren: [child(PANE_PID + 1, PANE_PID, runnerCommand({ ...spaced, entryPath: "/opt/Open Other/pi-runner.js" }, "L2"))] });
+    expect(await pendingReason(sibling)).toMatch(/runner entry path/);
   });
 });
