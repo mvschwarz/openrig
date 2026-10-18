@@ -2,9 +2,10 @@
 // Each case runs the real hook as a harness does (JSON on stdin, killed at the registration's outer bound), with a stub
 // `rig` and a stub trace script whose delays are set per case. The overlaps are hook processes overlapping; whether a
 // harness overlaps these events natively is not established here.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,8 @@ const SEAT = "dev-impl@budget-rig";
 
 let root: string | undefined;
 afterEach(() => {
+  // A case that made the state folder read-only may have timed out before putting it back.
+  if (root) try { chmodSync(join(root, "openrig", "refocus"), 0o755); } catch {}
   if (root) rmSync(root, { recursive: true, force: true });
   root = undefined;
 });
@@ -51,7 +54,7 @@ echo "TRACE OK: work and topology"
   return { home, bin, log };
 }
 
-interface Run { killed: boolean; ms: number; stdout: string }
+interface Run { killed: boolean; ms: number; stdout: string; stderr: string }
 
 // Run the hook as the harness does, killed at `outerMs` (both registrations' bound for refocus: 60 s).
 function hook(f: Fixture, event: string, session: string, extra: Record<string, string> = {}, outerMs = 60_000): Promise<Run> {
@@ -67,10 +70,12 @@ function hook(f: Fixture, event: string, session: string, extra: Record<string, 
       },
     });
     let stdout = "";
+    let stderr = "";
     let killed = false;
     child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
     const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, outerMs);
-    child.on("close", () => { clearTimeout(timer); done({ killed, ms: Date.now() - started, stdout }); });
+    child.on("close", () => { clearTimeout(timer); done({ killed, ms: Date.now() - started, stdout, stderr }); });
     child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: session, transcript_path: transcript, prompt: "next" }));
   });
 }
@@ -139,14 +144,34 @@ describe("refocus: the time budget", () => {
     expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
   }, 20_000);
 
-  it("finishes inside today's 5 s bound when its lookups together would pass it, and records the failure", async () => {
-    // Each lookup is under its own 2 s cap; together they passed 5 s and the harness killed the hook with no record.
+  it("with no budget selected, gives main's result: each lookup keeps its 2 s cap, unclipped, inside the 60 s bound", async () => {
+    // Lookups each under their own cap: on main's 5 s registration this was killed; now it completes as main's code does.
     const f = fixture();
     const slow = { STUB_WHOAMI_MS: "1900", STUB_TRACE_MS: "1900", STUB_CONTEXT_MS: "1900", OPENRIG_REFOCUS_CONTENT_REF: "refocus/team.md",
       OPENRIG_REFOCUS_WORK_NODE: "", OPENRIG_REFOCUS_TREES: "both" };
     await hook(f, "PostCompact", "s1");
+    const r = await hook(f, "UserPromptSubmit", "s1", slow);
+    expect(r.killed).toBe(false);
+    expect(context(r)).toContain("TRACE OK: work and topology");
+    expect(context(r)).toContain("CONFIGURED REFOCUS CONTENT");
+    expect(stateOf(f, "s1")).toMatchObject({ firedOn: "UserPromptSubmit" });
+    // A content-REF seat with a slow whoami gets main's full 2 s trace, not a shorter one (completes on main in ~2.9 s).
+    const g = fixture();
+    await hook(g, "PostCompact", "s1");
+    const ref = await hook(g, "UserPromptSubmit", "s1", { STUB_WHOAMI_MS: "1000", STUB_TRACE_MS: "1500", STUB_CONTEXT_MS: "300",
+      OPENRIG_REFOCUS_CONTENT_REF: "refocus/team.md", OPENRIG_REFOCUS_WORK_NODE: "", OPENRIG_REFOCUS_TREES: "both" });
+    expect(context(ref)).toContain("TRACE OK: work and topology");
+    expect(context(ref)).not.toContain("TRACE GAP");
+  }, 40_000);
+
+  it("with a budget selected, ends lookups that together pass it as a reported gap, and records the failure", async () => {
+    // A 4.6 s budget gives each lookup a ~2 s cap; three of them pass the budget, so the last is clipped.
+    const f = fixture();
+    const slow = { OPENRIG_REFOCUS_BUDGET_MS: "4600", STUB_WHOAMI_MS: "1950", STUB_TRACE_MS: "1950", STUB_CONTEXT_MS: "1950",
+      OPENRIG_REFOCUS_CONTENT_REF: "refocus/team.md", OPENRIG_REFOCUS_WORK_NODE: "", OPENRIG_REFOCUS_TREES: "both" };
+    await hook(f, "PostCompact", "s1");
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const r = await hook(f, "UserPromptSubmit", "s1", slow, 5_000);
+      const r = await hook(f, "UserPromptSubmit", "s1", slow);
       expect(r.killed).toBe(false);
       expect(context(r)).toContain("REFOCUS");
       expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
@@ -154,7 +179,7 @@ describe("refocus: the time budget", () => {
     // The third failure's issue report gets its own time after the budget, so it is made and confirmed.
     expect(healthOf(f)).toEqual([expect.objectContaining({ failures: 3, reportedAt: expect.any(String) })]);
     expect(readFileSync(f.log, "utf8").split("\n").filter((l) => l.startsWith("rig stream")).length).toBe(1);
-  }, 40_000);
+  }, 60_000);
 });
 
 describe("refocus: overlapping events for one occupant", () => {
@@ -231,9 +256,111 @@ describe("refocus: overlapping events for one occupant", () => {
     const killed = await hook(f, "UserPromptSubmit", "s1", { STUB_TRACE_MS: "3000" }, 500);
     expect(killed.killed).toBe(true);
     expect(stateOf(f, "s1")["delivering"]).toBeDefined();
-    // The claim lasts the budget (4.5 s) plus a 2 s margin.
-    await wait(6_700);
+    // The claim lasts as long as its owner could still be running: budget 4.5 s + report 1.5 s + closing lock 6 s + 0.5 s.
+    // Within that, a second prompt leaves the refocus to it (still due); after it, the refocus is delivered.
+    await wait(6_000);
+    const inside = await hook(f, "UserPromptSubmit", "s1");
+    expect(context(inside)).toBe("");
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
+    await wait(7_000);
     const next = await hook(f, "UserPromptSubmit", "s1");
     expect(context(next)).toContain("REFOCUS (just compacted");
-  }, 30_000);
+  }, 40_000);
+});
+
+describe("refocus: a lock that can't be taken never holds the turn", () => {
+  const cases: Array<[string, (lockFile: string) => void]> = [
+    ["a directory at the lock path", (lockFile) => mkdirSync(lockFile)],
+    ["a dangling link at the lock path", (lockFile) => symlinkSync(join(dirname(lockFile), "nowhere"), lockFile)],
+  ];
+  for (const [name, plant] of cases) {
+    it(`with ${name}, ends at once at both lock sites, delivers, and says it went on without the lock`, async () => {
+      const f = fixture();
+      await hook(f, "PostCompact", "s1");
+      plant(join(f.home, "refocus", `${SEAT}__s1.json.lock`));
+      const r = await hook(f, "UserPromptSubmit", "s1");
+      expect(r.killed).toBe(false);
+      expect(r.ms).toBeLessThan(3_000);
+      expect(context(r)).toContain("REFOCUS (just compacted");
+      expect(r.stderr).toContain("going on without it");
+      // Both lock sites (the start and the closing write) fell back the same way, and the outcome was recorded.
+      expect(r.stderr.split("going on without it").length - 1).toBe(2);
+      expect(stateOf(f, "s1")["pendingOn"]).toBeUndefined();
+    }, 20_000);
+  }
+
+  it.skipIf(process.getuid?.() === 0)("with a stale lock in a folder it can't change, ends at once at both lock sites", async () => {
+    const f = fixture();
+    await hook(f, "PostCompact", "s1");
+    const dir = join(f.home, "refocus");
+    const lockFile = join(dir, `${SEAT}__s1.json.lock`);
+    writeFileSync(lockFile, "dead-owner");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile, old, old);
+    chmodSync(dir, 0o555);
+    try {
+      const r = await hook(f, "UserPromptSubmit", "s1");
+      expect(r.killed).toBe(false);
+      expect(r.ms).toBeLessThan(3_000);
+      expect(r.stderr.split("going on without it").length - 1).toBe(2);
+      expect(context(r)).toContain("REFOCUS (just compacted");
+    } finally {
+      chmodSync(dir, 0o755);
+    }
+  }, 20_000);
+});
+
+describe("refocus: the state lock takes over and releases only its own", () => {
+  const { createLock } = createRequire(import.meta.url)(join(PLUGIN, "hooks/scripts/refocus-lock.cjs")) as {
+    createLock: (file: string, opts: { staleMs: number; waitMs: number; hooks?: { beforeTakeover?: () => void } }) => {
+      acquire: () => { ok: boolean; reason?: string }; release: () => void; token: string; isHeld: () => boolean;
+    };
+  };
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "refocus-lock-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("when two contenders both see the same stale lock, only one ends up holding it", () => {
+    const lockFile = join(dir, "s.json.lock");
+    writeFileSync(lockFile, "dead-owner");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile, old, old);
+    const b = createLock(lockFile, { staleMs: 5_000, waitMs: 300 });
+    let raced = false;
+    // A reads the stale lock, then B takes it over and holds a fresh one before A moves anything.
+    const a = createLock(lockFile, { staleMs: 5_000, waitMs: 300, hooks: { beforeTakeover: () => {
+      if (raced) return;
+      raced = true;
+      expect(b.acquire()).toEqual({ ok: true });
+    } } });
+    const got = a.acquire();
+    expect(got.ok).toBe(false);
+    expect(b.isHeld()).toBe(true);
+    expect(a.isHeld()).toBe(false);
+    // B's lock is where it was, with B's token, and nothing else was left behind.
+    expect(readFileSync(lockFile, "utf8")).toBe(b.token);
+    expect(readdirSync(dir)).toEqual(["s.json.lock"]);
+  });
+
+  it("releases only a lock that still holds its own token", () => {
+    const lockFile = join(dir, "s.json.lock");
+    const a = createLock(lockFile, { staleMs: 5_000, waitMs: 300 });
+    expect(a.acquire().ok).toBe(true);
+    // Another owner's lock now sits at the path (A's was broken as stale while A was suspended).
+    writeFileSync(lockFile, "another-owner");
+    a.release();
+    expect(readFileSync(lockFile, "utf8")).toBe("another-owner");
+  });
+
+  it("gives up at its deadline while a live holder keeps the lock", () => {
+    const lockFile = join(dir, "s.json.lock");
+    const holder = createLock(lockFile, { staleMs: 5_000, waitMs: 300 });
+    expect(holder.acquire().ok).toBe(true);
+    const started = Date.now();
+    const waiter = createLock(lockFile, { staleMs: 5_000, waitMs: 300 });
+    expect(waiter.acquire()).toEqual({ ok: false, reason: "another hook held the lock past the wait" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    holder.release();
+    expect(waiter.acquire().ok).toBe(true);
+  });
 });

@@ -12,6 +12,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const { recordRefocusResult } = require("./refocus-health.cjs");
+const { createLock } = require("./refocus-lock.cjs");
 
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
@@ -24,8 +25,9 @@ const REPORT_MS = 1_500;
 // The hook's whole time budget. Both registrations allow this hook 60 s (hooks/claude.json, hooks/codex.json); the
 // default keeps today's 4.5 s, and OPENRIG_REFOCUS_BUDGET_MS selects a longer one. After the budget, a delivery still
 // reports a failure and takes the occupant's lock to record its outcome, so the longest budget leaves room for both
-// (and a margin) before the outer bound: 52 s. Each lookup's own cap scales with the budget (2 s at the default), and
-// every lookup is also clipped to what's left of it, so a slow lookup leaves an honest gap instead of the harness's kill.
+// (and a margin) before the outer bound: 52 s. With no budget selected, every lookup keeps its fixed 2 s cap, exactly as
+// before, so a default fire gives the same result. A selected budget scales each cap with it and also clips every lookup
+// to what's left of the budget, so a slow lookup leaves an honest gap and the hook still ends inside the outer bound.
 const OUTER_TIMEOUT_MS = 60_000;
 const DEFAULT_BUDGET_MS = 4_500;
 const MAX_BUDGET_MS = OUTER_TIMEOUT_MS - REPORT_MS - LOCK_WAIT_MS - 500;
@@ -39,13 +41,16 @@ const CONTENT_LOOKUP_TIMEOUT_MS = LOOKUP_CAP_MS;
 const MIN_LOOKUP_MS = 250;
 const budgetLeftMs = () => Math.floor(BUDGET_MS - process.uptime() * 1_000);
 const contentReserveMs = () => (process.env.OPENRIG_REFOCUS_CONTENT_REF ? CONTENT_LOOKUP_TIMEOUT_MS : 0);
-// A lookup's timeout: its cap, or what's left of the budget after the later lookups' reserve, whichever is less.
-const lookupTimeout = (reserve = 0) => Math.min(LOOKUP_CAP_MS, budgetLeftMs() - reserve);
+const SELECTED_BUDGET = BUDGET_MS !== DEFAULT_BUDGET_MS;
+// A lookup's timeout: its fixed cap by default; with a selected budget, its cap or what's left of the budget after the
+// later lookups' reserve, whichever is less.
+const lookupTimeout = (reserve = 0) => SELECTED_BUDGET ? Math.min(LOOKUP_CAP_MS, budgetLeftMs() - reserve) : LOOKUP_CAP_MS;
 // Normal managed restore advances on ~30 s polls with a 10 s idle wait.
 // A lost daemon stage must not suppress this occupant's refocus indefinitely.
 const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
-// A delivery claim lasts for the budget plus this margin, so a claim left by a killed hook can't hold refocus back.
-const CLAIM_MARGIN_MS = 2_000;
+// A delivery claim lasts as long as its owner can still be running (its budget, the failure report, the closing lock and
+// a margin), so no second prompt delivers while it is alive. A claim left by a killed hook holds refocus back that long.
+const CLAIM_LIFETIME_MS = BUDGET_MS + REPORT_MS + LOCK_WAIT_MS + 500;
 
 function runtime() {
   const index = process.argv.indexOf("--runtime");
@@ -422,38 +427,17 @@ function runsForThisSeatsProject(env = process.env) {
   };
 
   // Two hook processes for one occupant can overlap (two prompts, or a prompt still delivering when a PostCompact
-  // lands). Each read-modify-write of this occupant's state runs under an exclusive lock file beside it; the lock is
-  // held for milliseconds, never across the trace. A lock left by a killed process goes stale after a few seconds and
-  // is broken. Only a lock file that can't be created at all (an unwritable state folder) leaves the hook going on
-  // without it, as it always did, rather than failing the turn.
-  const lockFile = `${stateFile}.lock`;
-  let lockHeld = false;
+  // lands). Each read-modify-write of this occupant's state runs under an exclusive lock beside it (refocus-lock.cjs),
+  // held for milliseconds, never across the trace, and every wait for it ends by its deadline. When the lock can't be
+  // taken (an unwritable folder, something else at its path, a holder that outlasts the wait), the hook goes on exactly as
+  // it did before there was a lock and says so: an event is never dropped and a turn is never held for it.
+  const stateLock = createLock(`${stateFile}.lock`, { staleMs: LOCK_STALE_MS, waitMs: LOCK_WAIT_MS });
   const lock = () => {
-    const until = Date.now() + LOCK_WAIT_MS;
-    for (;;) {
-      try {
-        fs.mkdirSync(stateDir, { recursive: true });
-        fs.closeSync(fs.openSync(lockFile, "wx"));
-        lockHeld = true;
-        return;
-      } catch (error) {
-        if (error?.code !== "EEXIST") return;
-      }
-      try {
-        if (Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
-          fs.unlinkSync(lockFile);
-          continue;
-        }
-      } catch { continue; }
-      if (Date.now() >= until) return;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
+    try { fs.mkdirSync(stateDir, { recursive: true }); } catch {}
+    const got = stateLock.acquire();
+    if (!got.ok) process.stderr.write(`refocus: couldn't take ${seat}'s state lock (${got.reason}); going on without it\n`);
   };
-  const unlock = () => {
-    if (!lockHeld) return;
-    lockHeld = false;
-    try { fs.unlinkSync(lockFile); } catch {}
-  };
+  const unlock = () => stateLock.release();
   const finish = () => {
     unlock();
     process.exit(0);
@@ -532,7 +516,7 @@ function runsForThisSeatsProject(env = process.env) {
   // One delivery at a time per occupant: a prompt claims the delivery, and an overlapping prompt that finds a live
   // claim leaves the refocus to it. A claim outlives its process only until the budget (plus a margin) has passed.
   const claimed = state.delivering;
-  if (claimed && Date.now() - Date.parse(claimed.at) >= 0 && Date.now() - Date.parse(claimed.at) < BUDGET_MS + CLAIM_MARGIN_MS) finish();
+  if (claimed && Date.now() - Date.parse(claimed.at) >= 0 && Date.now() - Date.parse(claimed.at) < CLAIM_LIFETIME_MS) finish();
   const claim = { token: crypto.randomUUID(), at: new Date().toISOString(), pendingSeq: Number(state.pendingSeq || 0) };
   state.delivering = claim;
   persist();
