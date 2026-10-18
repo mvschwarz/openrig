@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { AttachmentKind, SeatKind, SeatKindRegistry, SeatRef } from "./seat-kinds.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -471,7 +472,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
 export async function probeSessionActivity(input: {
   sessionName: string | null;
   runtime: string | null;
-  attachmentType: "tmux" | "external_cli" | null | undefined;
+  attachmentType: AttachmentKind | null | undefined;
   tmuxAdapter: TmuxAdapter;
   now?: Date;
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
@@ -481,6 +482,8 @@ export async function probeSessionActivity(input: {
   timerlessStatusIsLive?: boolean;
   /** The seat's community agent app (`agentAppOf`): its idle-looking screen reads unknown. */
   agentApp?: string | null;
+  /** Seat kinds registered beyond tmux; a registered kind's seat is read by its own probe. */
+  seatKinds?: SeatKindRegistry | null;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -508,6 +511,11 @@ export async function probeSessionActivity(input: {
       sampledAt,
       evidence: null,
     };
+  }
+  const kind = input.seatKinds?.custom(attachmentType) ?? null;
+  if (kind) {
+    return kind.activity.probe({ nodeId: binding?.nodeId ?? null, sessionName, runtime, kind: kind.kind,
+      pane: binding?.pane ?? null, occupant: binding?.occupant ?? null }, now ?? new Date());
   }
   if (attachmentType === "external_cli") {
     return {
@@ -1526,11 +1534,13 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
+interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; binding_external: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
   resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
@@ -1555,6 +1565,15 @@ interface SessionReconciliationSnapshot {
   startup_event_seq: number | null;
 }
 
+/** Whether the node's current binding names this session: its tmux session, or the session name a
+ *  registered seat kind binds by. external_cli keeps its tmux-session-only labelling. */
+function boundToName(row: SessionMetaRow | undefined, sessionName: string): boolean {
+  if (!row) return false;
+  if (row.binding_session === sessionName) return true;
+  const kind = row.attachment_type;
+  return !!kind && kind !== "tmux" && kind !== "external_cli" && row.binding_external === sessionName;
+}
+
 export class SessionTransport {
   readonly db: Database.Database;
   private rigRepo: RigRepository;
@@ -1573,6 +1592,7 @@ export class SessionTransport {
   private runtimeAdapters: Record<string, TransportReadinessChecker>;
   private inFlightReconciliations = new Map<string, Promise<boolean>>();
   private verifyInputBox?: () => boolean;
+  private seatKinds: SeatKindRegistry | null;
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -1591,6 +1611,24 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+    this.seatKinds = deps.seatKinds ?? null;
+  }
+
+  /** The registered kind that reaches this seat, or null for tmux, external_cli, and a session the
+   *  node's current binding no longer names. */
+  private customKind(meta: { attachmentType: string | null; boundToName: boolean }): SeatKind | null {
+    return meta.boundToName ? this.seatKinds?.custom(meta.attachmentType) ?? null : null;
+  }
+
+  /** The registry, for an activity read of a session its registered kind's binding still names;
+   *  null otherwise, so an older name of the node is read as today. No extra read by default. */
+  private boundSeatKinds(sessionName: string): SeatKindRegistry | null {
+    if (!this.seatKinds?.hasCustom()) return null;
+    return this.customKind(this.getSessionMeta(sessionName)) ? this.seatKinds : null;
+  }
+
+  private seatRef(sessionName: string, meta: ReturnType<SessionTransport["getSessionMeta"]>, kind: SeatKind): SeatRef {
+    return { nodeId: meta.nodeId, sessionName, runtime: meta.runtime, kind: kind.kind, pane: null, occupant: meta.occupant };
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -1632,7 +1670,7 @@ export class SessionTransport {
 
   private getSessionMeta(sessionName: string): {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
-    rotation: ClaudeResumeRotation | null;
+    boundToName: boolean; rotation: ClaudeResumeRotation | null;
   } {
     // One existing statement; P2 reads the binding columns it already joins plus the
     // same current-occupant subselect the delivery guard uses. No extra query.
@@ -1642,6 +1680,7 @@ export class SessionTransport {
         b.attachment_type AS attachment_type,
         n.id AS node_id,
         b.tmux_session AS binding_session,
+        b.external_session_name AS binding_external,
         b.tmux_pane AS pane,
         s.resume_token AS resume_token,
         s.resume_provenance AS resume_provenance,
@@ -1661,10 +1700,12 @@ export class SessionTransport {
       runtime: row?.runtime ?? null,
       attachmentType: row?.attachment_type ?? null,
       nodeId: row?.node_id ?? null,
+      // A registered kind's seat is bound by external_session_name rather than a tmux session.
+      boundToName: boundToName(row, sessionName),
       // The row may be a historical session of a node now bound elsewhere: only a
       // binding whose session IS this name labels pane/occupant; otherwise unknown.
       pane: row?.binding_session === sessionName ? row?.pane ?? null : null,
-      occupant: row?.binding_session === sessionName ? row?.occupant ?? null : null,
+      occupant: boundToName(row, sessionName) ? row?.occupant ?? null : null,
       resumeToken: row?.resume_token ?? null,
       rotation: claudeResumeRotation(row),
     };
@@ -1863,6 +1904,11 @@ export class SessionTransport {
       const binding = this.sessionRegistry.getBindingForNode(node.id);
       const latestSession = latestByNode.get(node.id);
 
+      if (binding?.attachmentType && this.seatKinds?.custom(binding.attachmentType) && binding.externalSessionName) {
+        if (latestSession?.status === "running") targets.push({ sessionName: binding.externalSessionName, rigName, nodeLogicalId: node.logicalId });
+        continue;
+      }
+
       if (binding?.attachmentType === "external_cli" && binding.externalSessionName) {
         targets.push({
           sessionName: binding.externalSessionName,
@@ -2030,7 +2076,7 @@ export class SessionTransport {
     if (timeoutMs === undefined) return null;
     let meta: {
       runtime: string | null; attachmentType: string | null; nodeId: string | null;
-      pane: string | null; occupant: string | null; resumeToken: string | null;
+      pane: string | null; occupant: string | null; resumeToken: string | null; boundToName: boolean;
     };
     let bound: GuardTarget;
     try {
@@ -2043,6 +2089,8 @@ export class SessionTransport {
     } catch {
       return null;
     }
+    // A registered kind's seat takes the leased path; its inbound owns any wait.
+    if (this.customKind(meta)) return null;
     // External CLI seats never wait: main refuses them before anything else,
     // and a probe or wait would only delay that refusal (or mistake it for
     // an absent session).
@@ -2204,6 +2252,9 @@ export class SessionTransport {
     const waitForIdleMs = opts?.waitForIdleMs;
     const waitMode = waitForIdleMs !== undefined;
     let waitEvidence: Pick<SendResult, "activity" | "waitedMs" | "attempts"> = {};
+
+    const kind = this.customKind(sessionMeta);
+    if (kind) return kind.inbound.deliver(this.seatRef(sessionName, sessionMeta, kind), text, opts ?? {});
 
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -2968,8 +3019,9 @@ export class SessionTransport {
         const paneVeto = await probeSessionActivity({
           sessionName: input.sessionName,
           runtime: input.runtime,
-          attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+          attachmentType: input.attachmentType,
           tmuxAdapter: this.tmuxAdapter,
+          seatKinds: this.boundSeatKinds(input.sessionName),
           now,
           captureObserver: this.captureObserver,
           binding: input.binding,
@@ -2984,8 +3036,9 @@ export class SessionTransport {
     const probe = await probeSessionActivity({
       sessionName: input.sessionName,
       runtime: input.runtime,
-      attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+      attachmentType: input.attachmentType,
       tmuxAdapter: this.tmuxAdapter,
+      seatKinds: this.boundSeatKinds(input.sessionName),
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
@@ -3167,6 +3220,8 @@ export class SessionTransport {
 
   async capture(sessionName: string, opts?: { lines?: number }): Promise<CaptureResult> {
     const sessionMeta = this.getSessionMeta(sessionName);
+    const kind = this.customKind(sessionMeta);
+    if (kind) return kind.inbound.capture(this.seatRef(sessionName, sessionMeta, kind), opts?.lines ?? 20);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
         ok: false,
@@ -3324,6 +3379,8 @@ export class SessionTransport {
     if (snapshot.session_status !== "running") return false;
     if (snapshot.session_id !== snapshot.latest_session_id) return false;
     if (!isRecoverableStartupFailure(this.db, snapshot.node_id, snapshot.session_id)) return false;
+    // The recovery probe below reads a tmux pane; a registered kind's seat has none.
+    if (this.seatKinds?.hasCustom() && this.customKind(this.getSessionMeta(sessionName))) return false;
 
     const checker = this.runtimeAdapters[snapshot.runtime];
     if (!checker?.checkReady) return false;

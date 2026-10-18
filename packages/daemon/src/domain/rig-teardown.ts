@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { SeatKindRegistry } from "./seat-kinds.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { EventBus } from "./event-bus.js";
 import { RigNotFoundError } from "./errors.js";
@@ -39,6 +40,8 @@ interface TeardownDeps {
   eventBus: EventBus;
   resumeMetadataRefresher?: ResumeMetadataRefresher;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 interface LatestNodeSession {
@@ -148,9 +151,10 @@ export class RigTeardownOrchestrator {
         this.db, session.sessionName, session.nodeId, { ignoreArchived: true },
       ) !== null;
       let absent = ownedByAnotherRig;
-      if (!absent && this.deps.tmuxAdapter.probeSession) {
+      const seat = this.deps.seatKinds?.forNode(this.deps.sessionRegistry, session.nodeId, session.sessionName, session.runtime) ?? null;
+      if (!absent && (seat || this.deps.tmuxAdapter.probeSession)) {
         try {
-          const probe = await this.deps.tmuxAdapter.probeSession(session.sessionName);
+          const probe = seat ? await seat.kind.host.probe(seat.ref) : await this.deps.tmuxAdapter.probeSession(session.sessionName);
           absent = probe.state === "absent";
           if (probe.state !== "present" && !absent) {
             result.errors.push(`Could not confirm session '${session.sessionName}' is absent: ${probe.state === "transport_unavailable" ? probe.cause : probe.state}`);
@@ -164,7 +168,7 @@ export class RigTeardownOrchestrator {
         }
       }
       const killResult = absent ? { ok: false, code: "session_not_found" } :
-        await this.deps.tmuxAdapter.killSession(session.sessionName);
+        seat ? await seat.kind.host.stop(seat.ref) : await this.deps.tmuxAdapter.killSession(session.sessionName);
 
       const missingSession = (killResult as { code?: string; message?: string }).code === "session_not_found" &&
         !/no server running/i.test((killResult as { message?: string }).message ?? "");

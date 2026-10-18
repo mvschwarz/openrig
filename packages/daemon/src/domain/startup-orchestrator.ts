@@ -11,6 +11,8 @@ import type {
   ProjectionResult, StartupDeliveryResult, ForkSource,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
+import type { SeatHost, SeatKindRegistry } from "./seat-kinds.js";
+import { TmuxSeatHost } from "./tmux-seat-host.js";
 import type { ProjectionPlan } from "./projection-planner.js";
 import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
@@ -203,6 +205,8 @@ interface StartupOrchestratorDeps {
   readinessSettings?: Pick<SettingsStore, "resolveOne">;
   /** Process observation for a Claude resume launch's own record of its process (#1077). */
   listProcesses?: NativeProcessLister;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 /**
@@ -235,6 +239,8 @@ export class StartupOrchestrator {
   private sessionTransport: SessionTransport;
   private readinessSettings: Pick<SettingsStore, "resolveOne">;
   private listProcesses: NativeProcessLister | undefined;
+  private tmuxSeatHost: TmuxSeatHost;
+  private seatKinds: SeatKindRegistry | null;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -247,6 +253,8 @@ export class StartupOrchestrator {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
     this.listProcesses = deps.listProcesses;
+    this.tmuxSeatHost = new TmuxSeatHost({ tmuxAdapter: deps.tmuxAdapter });
+    this.seatKinds = deps.seatKinds ?? null;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -254,10 +262,22 @@ export class StartupOrchestrator {
       sessionRegistry: deps.sessionRegistry,
       tmuxAdapter: deps.tmuxAdapter,
       eventBus: deps.eventBus,
+      seatKinds: deps.seatKinds,
     });
   }
 
   private readFile: (path: string) => string;
+
+  /** The seat's name: its tmux session, or a registered kind's session name. */
+  private seatSession(binding: NodeBinding): string | null {
+    if (binding.tmuxSession) return binding.tmuxSession;
+    return this.seatKinds?.custom(binding.attachmentType) ? binding.externalSessionName ?? null : null;
+  }
+
+  /** The host that launches and checks this binding's seat: tmux unless a registered kind owns it. */
+  private hostFor(binding: NodeBinding): SeatHost {
+    return this.seatKinds?.custom(binding.attachmentType)?.host ?? this.tmuxSeatHost;
+  }
 
   /** The process this Claude resume launch started, as the launch itself observes it (#1077): the one
    *  the adapter's readiness check pinned first, else one observed now. A rotation its hook later
@@ -417,7 +437,7 @@ export class StartupOrchestrator {
               this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
             } catch { /* best-effort: without it a rotation stays unproved, as before */ }
           }
-          const launchResult = await input.adapter.launchHarness(input.binding, {
+          const launchResult = await this.hostFor(input.binding).launch(input.binding, input.adapter, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
@@ -650,7 +670,7 @@ export class StartupOrchestrator {
     // so the remaining file list alone does not tell us whether context was sent.
     if (postLaunchFiles.length > 0 || deliveryInput.sendOrder > 0) {
       try {
-        const readiness = await input.adapter.checkReady(input.binding);
+        const readiness = await this.hostFor(input.binding).checkReady(input.binding, input.adapter);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
           const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
             this.sessionRegistry,
@@ -666,7 +686,7 @@ export class StartupOrchestrator {
       } catch (error) {
         // An unavailable observation is not a positive provider prerequisite.
         this.recordSubmissionWarning(deliveryInput, `Post-delivery runtime state is unverified: ${(error as Error).message}`,
-          `Post-delivery runtime state is unverified in ${input.binding.tmuxSession}: ${(error as Error).message}`);
+          `Post-delivery runtime state is unverified in ${this.seatSession(input.binding)}: ${(error as Error).message}`);
       }
     }
 
@@ -724,7 +744,7 @@ export class StartupOrchestrator {
     const maxDelay = 16_000;
 
     while (true) {
-      const result = await adapter.checkReady(binding);
+      const result = await this.hostFor(binding).checkReady(binding, adapter);
       if (result.ready) return result;
       if (isAttentionRequiredReadinessCode(result.code)) {
         return result;
@@ -800,7 +820,7 @@ export class StartupOrchestrator {
 
       // Execute via tmux
       try {
-        if (!input.binding.tmuxSession) {
+        if (!this.seatSession(input.binding)) {
           errors.push(`No tmux session for action: ${action.value}`);
           continue;
         }
@@ -832,7 +852,8 @@ export class StartupOrchestrator {
     includeDurableObligations = false,
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
     const { binding } = input;
-    if (!binding.tmuxSession) {
+    const seatSession = this.seatSession(binding);
+    if (!seatSession) {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
     }
 
@@ -854,7 +875,7 @@ export class StartupOrchestrator {
       }
     }
 
-    if (includeDurableObligations) prompt += `\n\nThis is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${binding.tmuxSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`;
+    if (includeDurableObligations) prompt += `\n\nThis is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${seatSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`;
 
     // OPR.0.4.3.06 — the per-launch orientation challenge rides along with the
     // identity prompt (after the contract) so no extra send is added.
@@ -884,7 +905,7 @@ export class StartupOrchestrator {
     postLaunchFiles: ResolvedStartupFile[],
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
     const { binding } = input;
-    if (!binding.tmuxSession) {
+    if (!this.seatSession(binding)) {
       return { ok: false, error: "No tmux session for the restore preload prompt" };
     }
 
@@ -922,7 +943,7 @@ export class StartupOrchestrator {
    * for the operator, and nothing is typed on top of it.
    */
   private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
-    if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
+    if (input.adapter.runtime !== "claude-code" || !this.seatSession(input.binding)) return;
     if (!input.lastSubmissionConfirmed) {
       this.recordSubmissionWarning(input, "Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
       return;
@@ -935,13 +956,21 @@ export class StartupOrchestrator {
     input.submissionWarnings.push(reason);
     // Keep every observation in the ordinary result, including if a later file fails.
     input.warnings.push(displayWarning ?? (reason === input.stagedSubmissionWarning ? reason
-      : `Startup submission unverified in ${input.binding.tmuxSession}: ${reason}`));
+      : `Startup submission unverified in ${this.seatSession(input.binding)}: ${reason}`));
   }
 
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
+    const kind = this.seatKinds?.custom(input.binding.attachmentType);
+    if (kind) {
+      const sessionName = input.sessionName ?? input.binding.externalSessionName ?? "";
+      const sent = await kind.inbound.deliver({ nodeId: input.nodeId, sessionName, runtime: input.adapter.runtime, kind: kind.kind, pane: null, occupant: null }, text, {});
+      if (!sent.ok) return { error: sent.error ?? sent.reason ?? "unknown" };
+      input.lastSubmissionConfirmed = sent.verified === true;
+      return null;
+    }
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };

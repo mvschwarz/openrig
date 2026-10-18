@@ -2160,6 +2160,9 @@ export class PodRigInstantiator {
       id: launchResult.binding.id,
       nodeId: input.nodeId,
       tmuxSession: launchResult.binding.tmuxSession,
+      // A registered seat kind's seat is bound by its kind and session name, not a tmux session.
+      attachmentType: launchResult.binding.attachmentType,
+      externalSessionName: launchResult.binding.externalSessionName,
       tmuxWindow: null,
       tmuxPane: null,
       cmuxWorkspace: null,
@@ -2409,6 +2412,9 @@ export class PodRigInstantiator {
       id: launchResult.binding.id,
       nodeId: input.nodeId,
       tmuxSession: launchResult.binding.tmuxSession,
+      // A registered seat kind's seat is bound by its kind and session name, not a tmux session.
+      attachmentType: launchResult.binding.attachmentType,
+      externalSessionName: launchResult.binding.externalSessionName,
       tmuxWindow: null,
       tmuxPane: null,
       cmuxWorkspace: null,
