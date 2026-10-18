@@ -60,24 +60,20 @@ session has no identity), and it degrades to silence on unrelated hook errors.
 **Time budget.** By default each lookup (the trace, the content REF, `rig queue whoami`, `rig config`) gets 2 seconds,
 as before, and a slow one ends as a reported gap (`TRACE GAP`, `REFOCUS CONTENT REF FAILED`, or a role marked
 unknown). Set `OPENRIG_REFOCUS_BUDGET_MS` in a seat's environment to give a slow trace more time, up to 52000 (52 s).
-Each lookup's cap then grows in proportion (at 45000 the trace may take 20 seconds), and every lookup is also cut to
-what is left of that budget, so the attempt delivers what it has, counts as failed, and still has time to record its
-outcome. Both registrations allow `refocus.cjs` 60 seconds; the other OpenRig hooks keep their 5 seconds. A hook that
-hangs outside its lookups can hold a prompt for up to those 60 seconds, and a default fire that hits a failure report
-and a contended lock can take about 12 seconds.
+Each lookup's cap then grows in proportion (at 45000 the trace may take 20 seconds; at 52000, about 23), and every lookup
+is also cut to what is left of that budget, so the attempt delivers what it has and counts as failed. After a failed
+attempt, the issue report gets its own 1.5 seconds once the lookups are done. Both registrations allow `refocus.cjs` 60
+seconds, where they used to stop it at 5; the other OpenRig hooks keep theirs. So a default fire whose lookups together
+pass 5 seconds now completes instead of being stopped with nothing delivered, and a hook that hangs outside its lookups
+can hold a prompt for up to those 60 seconds.
 
 A configured REF resolution failure degrades loudly in the delivered payload while still completing the hook — a
 refocus must never break a seat's turn.
 
-**Overlapping events.** Two hook runs for the same seat and occupant take turns on its state, using a lock beside the
-state file that holds its owner's token and is held for milliseconds. A prompt that is delivering a refocus claims it,
-so an overlapping prompt leaves it alone; the claim lasts as long as its owner can still be running (the budget, the
-failure report, the closing lock and a margin: 12.5 seconds by default), so after a killed hook the refocus is delivered
-again only once that has passed. A `PostCompact` that lands during a delivery stays due for the next prompt. A lock
-left by a killed hook is taken over once it is 5 seconds old, and only by one hook; a lock is released only by its
-owner. When the lock can't be taken at all (an unwritable folder, something else at its path), the hook goes on as it
-did before there was a lock and says so on stderr, rather than wait. After a failed attempt, the issue report gets its
-own 1.5 seconds after the budget.
+**Overlapping events (unresolved).** Two hook runs for the same seat and occupant are not serialized. If they overlap,
+a `PostCompact` recorded while a prompt is delivering can be lost, and one refocus can be delivered twice. This is
+reproduced between hook processes; whether a harness overlaps these events for one session is not established, so it is
+an open gap, not one shown to be safe.
 
 Failed trace or configured-content resolution keeps refocus due. After three
 consecutive failed attempts for the same seat and occupant, the hook emits one
