@@ -114,6 +114,7 @@ import { modePostureCoexistSchema } from "./migrations/109_mode_posture_coexist.
 import { workflowInstanceScopeSchema } from "./migrations/110_workflow_instance_scope.js";
 import { queueTransitionsTsQitemSchema } from "./migrations/112_queue_transitions_ts_qitem.js";
 import { appliedLaunchDaemonOptOutSchema } from "./migrations/113_applied_launch_daemon_opt_out.js";
+import { sessionAgentAppSchema } from "./migrations/114_session_agent_app.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -227,4 +228,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   seatEnvSchema,
   queueTransitionsTsQitemSchema,
   appliedLaunchDaemonOptOutSchema,
+  sessionAgentAppSchema,
 ];

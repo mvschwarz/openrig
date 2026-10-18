@@ -361,7 +361,7 @@ pods:
 **Where the declared names reach, by runtime.** Declared values are handed to the seat's terminal as tmux environment, so most seats take them as given:
 
 - Plain Claude Code (no permission mode selected), Codex and terminal seats take a spec `HOME`, `PATH` or `CLAUDE_CONFIG_DIR` as given.
-- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded.
+- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded. A seat that selected the shipped `openrig-core` plugin also has `CLAUDE_CODE_PLUGIN_DIRS` (the vendored plugin, added after a list the seat declares itself) among its declared names, so it is forwarded like the others and the plugin's hooks load in a seat with a permission mode as in one without; a seat that didn't select the plugin has no such name added.
 - Codex seats run OpenRig's own Codex executable whatever a spec `PATH` says, and use the daemon's `CODEX_HOME` when the daemon has one.
 - On Pi and OMP seats the values reach the terminal. The agent process gets only what the runner passes on, so a spec or one-off value reaches it only for the names the runner always passes: `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL` and `TMPDIR`. Pi's agent process receives the runner's `HOME`, so a spec or one-off `HOME` value that reaches the runner is passed to Pi; OMP's agent process gets its seat state directory (`$OPENRIG_HOME/state/omp/<seat>`, see Oh My Pi below) as `HOME`, so a `HOME` value does not reach it. The selected provider's variables are passed separately, as described under each runtime.
 
@@ -630,8 +630,26 @@ The harness readiness window defaults to 30 seconds. On a loaded machine, set
 `rig config set runtime.readiness_timeout_seconds 60` to give new seats and
 handover successors longer to become interactive. The setting accepts 1–600
 seconds, applies to the next launch without a daemon restart, and can also be
-set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It does not change the
-time spent by the runtime adapter before readiness polling starts.
+set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It also bounds how long a
+restore keeps watching a Claude seat whose resume is still starting, so raising
+it for slow fresh launches lengthens that wait too. The wait is about the
+setting in total per seat, counting the usual 3.2-second check: the adapter polls
+for the rest of it (nominally: it counts polls, and each poll's tmux and process
+reads add a little). A restore
+starts seats one after another, so each seat that never starts Claude adds up to
+about this much, minus the 3.2 seconds, to the restore; the time adds up seat by
+seat, and a longer setting means a longer wait before a stuck seat is reported.
+A seat that is still not interactive then ends `attention_required` with its
+launch and resume token kept, and the later readiness wait is skipped for it.
+That holds at every setting: at 1–3 seconds there are no extra polls, but an
+unresolved boot is still kept rather than failed. A pane that shows a Codex or
+another conversation's Claude is not waited for. `rig up` and
+`rig launch` wait 120 seconds for the daemon, so a restore of several stuck
+seats can pass that (in one measurement, about 31 seconds a seat at the
+default, 95 for three). A client timeout and exit code 1 do not mean the
+restore was rolled back or that it should be run again; check the real state
+first with `rig ps`. Apart from this, the setting does not change the time
+spent by the runtime adapter before readiness polling starts.
 
 ---
 

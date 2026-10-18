@@ -228,7 +228,9 @@ This gives access to the shared pool: skills such as `systematic-debugging`, `ve
 `development-team` and `test-driven-development`; the `openrig-core` plugin, which carries `openrig-user` and OpenRig's
 other skills; and runtime resources such as `claude-default-settings`, `claude-default-mcp`, `codex-default-config` and
 `claude-activity-hooks`. Agents select the ones they need via profile `uses`, for example
-`plugins: [shared:openrig-core]`.
+`plugins: [shared:openrig-core]`. That selection projects the plugin's skills into the seat. For a Claude seat it also loads
+the plugin's hooks, through a `CLAUDE_CODE_PLUGIN_DIRS` the daemon sets for a seat that selected `openrig-core` (see
+`refocus-channel.md`); a seat that didn't select it gets neither.
 
 ---
 

@@ -41,12 +41,12 @@ describe("RECENT queue transition projection", () => {
     rig: string,
     state: string,
     tags: string[] = [],
-    extra: { handedOffFrom?: string; summary?: string } = {},
+    extra: { handedOffFrom?: string; summary?: string | null; body?: string } = {},
   ): void {
     db.prepare(`INSERT INTO queue_items (
       qitem_id, ts_created, ts_updated, source_session, destination_session,
       state, priority, tags, handed_off_from, summary, body
-    ) VALUES (?, ?, ?, ?, ?, ?, 'routine', ?, ?, ?, 'body text must never classify an event')`).run(
+    ) VALUES (?, ?, ?, ?, ?, ?, 'routine', ?, ?, ?, ?)`).run(
       id,
       "2026-09-03T20:00:00.000Z",
       "2026-09-03T20:00:00.000Z",
@@ -55,7 +55,8 @@ describe("RECENT queue transition projection", () => {
       state,
       JSON.stringify(tags),
       extra.handedOffFrom ?? null,
-      extra.summary ?? `Summary for ${id}`,
+      "summary" in extra ? extra.summary : `Summary for ${id}`,
+      extra.body ?? "body text must never classify an event",
     );
   }
 
@@ -153,6 +154,88 @@ describe("RECENT queue transition projection", () => {
     const response = await app.request("/api/queue/recent-transitions?rig=rig-a&limit=20");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(rows);
+  });
+
+  describe("a row with no summary", () => {
+    function claimed(id: string, extra: Parameters<typeof item>[4]): void {
+      item(id, "rig-a", "in-progress", [], extra);
+      transition(id, "pending");
+      transition(id, "in-progress");
+    }
+    const entry = (id: string) => repo.listRecentTransitions("rig-a").find((row) => row.qitemId === id)!;
+
+    it("keeps summary empty and offers the body's first non-blank line as bodyPreview, whether the summary is null, empty or only spaces", () => {
+      claimed("q-null", { summary: null, body: "\n  \n  Review the retry change  \nsecond line" });
+      claimed("q-empty", { summary: "", body: "Fix the flaky restore test\nwith detail" });
+      claimed("q-spaces", { summary: "  \u00a0\t ", body: "Check the upgrade path" });
+      expect(entry("q-null")).toMatchObject({ summary: null, bodyPreview: "Review the retry change" });
+      expect(entry("q-empty")).toMatchObject({ summary: null, bodyPreview: "Fix the flaky restore test" });
+      expect(entry("q-spaces")).toMatchObject({ summary: null, bodyPreview: "Check the upgrade path" });
+    });
+
+    it("gives no preview to a row with an authored summary, an empty or whitespace-only body, or no line within the first 2,000 characters", () => {
+      claimed("q-authored", { summary: "  Authored subject  ", body: "Body line that must not appear" });
+      claimed("q-empty-body", { summary: null, body: "" });
+      claimed("q-blank", { summary: null, body: " \n\t\n\u00a0 " });
+      claimed("q-far", { summary: null, body: `${" \n".repeat(1001)}Review the restore path` });
+      claimed("q-edge", { summary: null, body: `${" ".repeat(1998)}\nLast line inside the window` });
+      expect(entry("q-authored")).toMatchObject({ summary: "Authored subject", bodyPreview: null });
+      expect(entry("q-empty-body")).toMatchObject({ summary: null, bodyPreview: null });
+      expect(entry("q-blank")).toMatchObject({ summary: null, bodyPreview: null });
+      expect(entry("q-far")).toMatchObject({ summary: null, bodyPreview: null });
+      // 1,998 spaces + "\n" put "L" at character 2,000: inside the window, so it is found (and cut by the window).
+      expect(entry("q-edge").bodyPreview).toBe("L");
+      claimed("q-edge-out", { summary: null, body: `${" ".repeat(1999)}\nFirst line after the window` });
+      expect(entry("q-edge-out").bodyPreview).toBeNull();
+    });
+
+    it("cuts a long first line at 240 code points without splitting a character", () => {
+      claimed("q-long", { summary: null, body: `${"é".repeat(300)}\nnext` });
+      claimed("q-exact", { summary: null, body: "x".repeat(240) });
+      claimed("q-emoji", { summary: null, body: "😀".repeat(241) });
+      expect(entry("q-long").bodyPreview).toBe(`${"é".repeat(237)}...`);
+      expect(entry("q-exact").bodyPreview).toBe("x".repeat(240));
+      expect(entry("q-emoji").bodyPreview).toBe(`${"😀".repeat(237)}...`);
+    });
+
+    it("reads the body only for a row whose summary is blank, by the same rule as trim()", () => {
+      // The body is read through substr(); replace it with a counting copy to see which rows reach it.
+      const reads: string[] = [];
+      db.function("substr", (text: unknown, from: unknown, length: unknown) => {
+        reads.push(String(text).slice(0, 12));
+        return Array.from(String(text)).slice(Number(from) - 1, Number(from) - 1 + Number(length)).join("");
+      });
+      claimed("q-authored", { summary: "Authored subject", body: "AUTHORED body" });
+      claimed("q-padded", { summary: "  \u00a0Padded subject\t ", body: "PADDED body" });
+      claimed("q-null", { summary: null, body: "NULL body" });
+      claimed("q-empty", { summary: "", body: "EMPTY body" });
+      claimed("q-nbsp", { summary: "\u00a0\u00a0", body: "NBSP body" });
+      claimed("q-tab", { summary: "\t\t", body: "TAB body" });
+      claimed("q-mixed", { summary: " \t\u00a0\r\n\u2003\ufeff", body: "MIXED body" });
+      const rows = repo.listRecentTransitions("rig-a");
+      expect(reads.sort()).toEqual(["EMPTY body", "MIXED body", "NBSP body", "NULL body", "TAB body"]);
+      expect(Object.fromEntries(rows.map((row) => [row.qitemId, row.bodyPreview]))).toEqual({
+        "q-authored": null, "q-padded": null,
+        "q-null": "NULL body", "q-empty": "EMPTY body", "q-nbsp": "NBSP body", "q-tab": "TAB body", "q-mixed": "MIXED body",
+      });
+    });
+
+    it("ends the preview at an embedded NUL, and gives none when the NUL comes before any text", () => {
+      claimed("q-nul-late", { summary: null, body: "Review the restore\u0000 path\nnext" });
+      claimed("q-nul-first", { summary: null, body: "\u0000Review the restore path" });
+      claimed("q-nul-after-blank", { summary: null, body: "\n  \u0000Review the restore path" });
+      expect(entry("q-nul-late").bodyPreview).toBe("Review the restore");
+      expect(entry("q-nul-first").bodyPreview).toBeNull();
+      expect(entry("q-nul-after-blank").bodyPreview).toBeNull();
+    });
+
+    it("does not let the body change what the event is, and the route serves the same entries", async () => {
+      claimed("q-words", { summary: null, body: "Completed, denied, failed and canceled" });
+      const [row] = repo.listRecentTransitions("rig-a");
+      expect(row).toMatchObject({ qitemId: "q-words", change: "claimed", targetKind: "qitem", target: "q-words", summary: null, bodyPreview: "Completed, denied, failed and canceled" });
+      const response = await app.request("/api/queue/recent-transitions?rig=rig-a");
+      expect(await response.json()).toEqual([row]);
+    });
   });
 
   it("qualifies complete live/archive histories before selecting the newest twenty", () => {

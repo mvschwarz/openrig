@@ -31,6 +31,12 @@ export interface ResolvedResources {
   runtimeResources: QualifiedResource[];
 }
 
+/** Where each selected plugin resolved to, as the projection and the plugin-skill loadout see it. */
+export function selectedPluginPaths(resources: ResolvedResources): string[] {
+  return resources.plugins.map((plugin) =>
+    resolvePluginPath((plugin.resource as PluginResource).source.path, plugin.sourcePath));
+}
+
 export interface ResolvedNodeConfig {
   runtime: string;
   model: string | undefined;

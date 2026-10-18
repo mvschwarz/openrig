@@ -52,6 +52,14 @@ describe("parsePolicySpec — frontmatter contract + preserved body", () => {
     const p = parsed(CONFIG_STANDARD);
     expect(p.frontmatter).toMatchObject({ surface: "config", default_posture: "allow", allow: ["push_to_remote"], destructive_class: ["delete_everything"] });
   });
+  it("reads a CRLF spec like its LF twin and preserves the body bytes", () => {
+    const lf = parsed(CONFIG_STANDARD);
+    const crlf = parsed(CONFIG_STANDARD.replace(/\n/g, "\r\n"));
+    expect(crlf.frontmatter).toEqual(lf.frontmatter);
+    expect(crlf.body).toBe(lf.body.replace(/\n/g, "\r\n"));
+    expect(validatePolicySpec(crlf.frontmatter)).toEqual({ ok: true, errors: [] });
+  });
+
   it("a spec with no frontmatter block is a parse error (never throws)", () => {
     const r = parsePolicySpec("# just a body\nno frontmatter\n");
     expect("error" in r).toBe(true);

@@ -324,6 +324,15 @@ function draftComposerLine(lines: string[], verdict: PaneActivityClassification)
   return lines[last]!.trim();
 }
 
+/** A community agent app's screen never proves it's idle: a quiet prompt can be an approval or a pause, so its idle
+ *  reading becomes unknown. Positive work and attention are kept. `agentApp` is the seat's recorded selection
+ *  (`agentAppOf`); without it the classification is returned as it is. */
+export function agentAppPaneActivity(classification: PaneActivityClassification, agentApp: string | null | undefined): PaneActivityClassification {
+  return agentApp && classification.state === "agent_idle"
+    ? { state: "unknown", reason: "agent_app_no_idle_signal", evidence: classification.evidence }
+    : classification;
+}
+
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
@@ -470,6 +479,8 @@ export async function probeSessionActivity(input: {
   binding?: Omit<ObservedBinding, "sessionName">;
   /** See ClassifyPaneOptions.timerlessStatusIsLive. */
   timerlessStatusIsLive?: boolean;
+  /** The seat's community agent app (`agentAppOf`): its idle-looking screen reads unknown. */
+  agentApp?: string | null;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -583,7 +594,7 @@ export async function probeSessionActivity(input: {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
     const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
-    let classification = classifyPaneActivity(paneContent ?? "", classifyOptions);
+    let classification = agentAppPaneActivity(classifyPaneActivity(paneContent ?? "", classifyOptions), input.agentApp);
     // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
     // as a draft, one capture with styling is classified on its own. Newer attention or work there is
     // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;

@@ -17,6 +17,7 @@ import {
   QueueRepository,
   QueueRepositoryError,
   classifyNudgeFailure,
+  hasLinkedSuccessor,
 } from "../src/domain/queue-repository.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import type { PersistedEvent } from "../src/domain/types.js";
@@ -1465,5 +1466,49 @@ describe("QueueRepository.listOpenObligations: same rows, order and limit as lis
     }
     // The histories reach every state the parked read filters on, and a closed one it must drop.
     expect([...seen].sort()).toEqual([...states].sort());
+  });
+});
+
+describe("hasLinkedSuccessor", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema]);
+    repo = new QueueRepository(db, new EventBus(db));
+  });
+
+  afterEach(() => db.close());
+
+  it("recognizes successor linked via handed_off_from", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const successor = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "next", handedOffFrom: source.qitemId });
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(true);
+    expect(hasLinkedSuccessor(db, source.qitemId, successor.qitemId)).toBe(true);
+  });
+
+  it("recognizes successor linked via chainOfRecord", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const successor = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "next", chainOfRecord: [source.qitemId] });
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(true);
+    expect(hasLinkedSuccessor(db, source.qitemId, successor.qitemId)).toBe(true);
+  });
+
+  it("excludes source row itself even if destination matches target", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    expect(hasLinkedSuccessor(db, source.qitemId, source.qitemId)).toBe(false);
+    expect(hasLinkedSuccessor(db, source.qitemId, "b@r")).toBe(false);
+  });
+
+  it("does not treat candidate with malformed chain_of_record as linked", async () => {
+    const source = await repo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "work" });
+    const candidate = await repo.create({ sourceSession: "b@r", destinationSession: "c@r", body: "candidate" });
+    db.prepare("UPDATE queue_items SET chain_of_record = 'not-valid-json' WHERE qitem_id = ?").run(candidate.qitemId);
+
+    expect(hasLinkedSuccessor(db, source.qitemId, "c@r")).toBe(false);
+    expect(hasLinkedSuccessor(db, source.qitemId, candidate.qitemId)).toBe(false);
   });
 });

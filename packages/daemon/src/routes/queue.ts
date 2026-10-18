@@ -1053,7 +1053,9 @@ export function queueRoutes(): Hono {
 
   // GET /recent-transitions — one bounded, read-only topology chronology over
   // typed queue state/closure facts. `scope=instance` spans local rigs in ONE
-  // read; a rig query stays backward-compatible. MUST precede /:qitemId.
+  // read; a rig query stays backward-compatible. Each entry's `summary` is the authored
+  // subject (null when none); `bodyPreview` is display text derived from the body for a row
+  // with no summary (see RecentQueueTransition). MUST precede /:qitemId.
   app.get("/recent-transitions", (c) => {
     const scopeKind = c.req.query("scope")?.trim();
     const rig = c.req.query("rig")?.trim();

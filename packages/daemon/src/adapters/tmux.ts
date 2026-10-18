@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
 import { randomUUID } from "node:crypto";
 import { parentSessionEnvKeys } from "../domain/parent-session-env.js";
+import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -469,6 +470,11 @@ export class TmuxAdapter {
   private async run(argv: string[], legacy?: string): Promise<string> {
     if (this.argvExec) return this.argvExec(argv);
     return this.exec(legacy ?? posixJoinArgv(argv));
+  }
+
+  /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
+  async closeControlClient(): Promise<void> {
+    await (this.argvExec as Partial<TmuxControlExec> | undefined)?.close?.();
   }
 
   /** Start an empty native terminal server, without inventing a seat/session. */

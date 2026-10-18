@@ -253,6 +253,37 @@ describe("queue routes", () => {
     expect(queueRepo.list({ limit: 100 })).toHaveLength(2);
   });
 
+  it("handoffAdvisory guides callers to rig queue handoff commands", async () => {
+    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "task", nudge: false });
+    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.handoffAdvisory?.status).toBe("unverified");
+    expect(body.handoffAdvisory?.message).toContain("rig queue handoff");
+    expect(body.handoffAdvisory?.message).toContain("handoff-and-complete");
+    expect(body.handoffAdvisory?.message).toContain("a local handoff is atomic");
+    expect(body.handoffAdvisory?.message).toContain("across hosts the successor is created first and the source closed after");
+    expect(body.handoffAdvisory?.message).toContain("re-running the same handoff is idempotent");
+  });
+
+  it("handoffAdvisory is not hidden by candidate with malformed chain_of_record", async () => {
+    const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "task", nudge: false });
+    const candidate = await queueRepo.create({ sourceSession: "b@r", destinationSession: "next@r", body: "corrupted candidate", nudge: false });
+    db.prepare("UPDATE queue_items SET chain_of_record = 'not-valid-json' WHERE qitem_id = ?").run(candidate.qitemId);
+
+    const res = await app.request(`/api/queue/${source.qitemId}/update`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ state: "done", closureReason: "handed_off_to", closureTarget: "next@r" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.handoffAdvisory?.status).toBe("unverified");
+    expect(body.handoffAdvisory?.message).toContain("rig queue handoff");
+  });
+
   it("keeps legacy custody note appends and explicit reopen/repair available", async () => {
     const source = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "legacy", nudge: false });
     queueRepo.update({ qitemId: source.qitemId, actorSession: "b@r",
