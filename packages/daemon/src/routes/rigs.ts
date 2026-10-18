@@ -376,7 +376,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
   // stale-cache protection rather than an inconsistency).
   const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
   const inventoryWithActivityOnly = tmuxAdapter
-    ? await attachAgentActivity(inventory, { ...inventoryCaptureOptions(getRepo(c).db, c.get("shadowCapture" as never) as ShadowCapture | undefined), tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, seatActivity: seatActivityService, captureFallback: graphFull })
+    ? await attachAgentActivity(inventory, { ...inventoryCaptureOptions(getRepo(c).db, c.get("shadowCapture" as never) as ShadowCapture | undefined), tmuxAdapter, seatKinds: c.get("seatKinds" as never) as import("../domain/seat-kinds.js").SeatKindRegistry | undefined, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, seatActivity: seatActivityService, captureFallback: graphFull })
     : inventory;
   const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {
     db: getRepo(c).db,

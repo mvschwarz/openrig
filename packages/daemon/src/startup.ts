@@ -96,7 +96,7 @@ import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
-import type { AttachmentKind } from "./domain/seat-kinds.js";
+import { SeatKindRegistry, type AttachmentKind, type SeatKind } from "./domain/seat-kinds.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
@@ -217,6 +217,9 @@ interface DaemonOptions {
   terminalBearerToken?: string | null;
   /** Overrides the `ui.enabled` setting (tests). */
   webUiEnabled?: boolean;
+  /** Seat kinds beyond tmux, for an embedder whose seats run somewhere other than a tmux pane.
+   *  Keyed by `bindings.attachment_type`; none by default. */
+  seatKinds?: readonly SeatKind[];
 }
 
 interface DaemonResult {
@@ -504,6 +507,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // An injected exec has no server of its own: printed attach commands stay in the default form.
   setDaemonTmuxServer(opts?.tmuxExec ? [] : tmuxServerArgs(process.env));
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
+  const seatKinds = new SeatKindRegistry(opts?.seatKinds ?? []);
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
 
@@ -639,6 +643,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     sessionEnv: launchSessionEnv,
     runtimeSessionEnv,
     tmuxOptionDefaults,
+    seatKinds,
   });
 
   const snapshotRepo = new SnapshotRepository(db);
@@ -699,7 +704,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Reconcile all managed rigs — marks stale sessions as detached.
   // Capture aggregate counts and log a compact summary so cold-start truth
   // repair is visible in daemon output instead of silently swallowed.
-  const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter });
+  const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter, seatKinds });
   const rigs = rigRepo.listRigs();
   let reconcileChecked = 0;
   let reconcileDetached = 0;
@@ -820,7 +825,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { PiRuntimeAdapter } = await import("./adapters/pi-runtime-adapter.js");
   const { OmpRuntimeAdapter } = await import("./adapters/omp-runtime-adapter.js");
 
-  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, seatKinds, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveHooksEnabled: async () => {
@@ -1186,7 +1191,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     activityEnv: { url: resolvedActivityHookUrl, token: resolvedActivityHookToken },
   });
   const rigLifecycleService = new RigLifecycleService({
-    db, rigRepo, sessionRegistry, discoveryRepo, eventBus, queueRepo: queueRepoInstance, tmuxAdapter,
+    db, rigRepo, sessionRegistry, discoveryRepo, eventBus, queueRepo: queueRepoInstance, tmuxAdapter, seatKinds,
   });
   const rigExpansionService = new RigExpansionService({ db, rigRepo, eventBus, nodeLauncher, podInstantiator, sessionRegistry });
 
@@ -1260,6 +1265,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     nodeLauncher,
     startupOrchestrator,
     tmuxAdapter,
+    seatKinds,
     tmuxOptionDefaults,
     sessionEnv: launchSessionEnv,
     runtimeSessionEnv,
@@ -1327,7 +1333,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       },
     }),
     teardownOrchestrator: new RigTeardownOrchestrator({
-      db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher, serviceOrchestrator,
+      db, rigRepo, sessionRegistry, tmuxAdapter, snapshotCapture, eventBus, resumeMetadataRefresher, serviceOrchestrator, seatKinds,
     }),
     podInstantiator,
     podBundleSourceResolver,
@@ -1339,6 +1345,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         rigRepo,
         sessionRegistry,
         tmuxAdapter,
+        seatKinds,
         agentActivityStore,
         eventBus,
         slowOpRecorder,

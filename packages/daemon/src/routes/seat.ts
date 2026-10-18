@@ -235,6 +235,7 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
     eventBus: c.get("eventBus" as never) as EventBus,
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
+    seatKinds: (c.get("seatKinds" as never) as import("../domain/seat-kinds.js").SeatKindRegistry | undefined) ?? undefined,
     nodeLauncher: c.get("nodeLauncher" as never) as import("../domain/node-launcher.js").NodeLauncher,
     startupOrchestrator: (c.get("startupOrchestrator" as never) as import("../domain/startup-orchestrator.js").StartupOrchestrator | undefined) ?? undefined,
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,

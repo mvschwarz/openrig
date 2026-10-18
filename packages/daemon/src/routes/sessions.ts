@@ -62,6 +62,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
     nodeLauncher: c.get("nodeLauncher" as never) as NodeLauncher,
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
+    seatKinds: c.get("seatKinds" as never) as import("../domain/seat-kinds.js").SeatKindRegistry | undefined,
     cmuxAdapter: c.get("cmuxAdapter" as never) as CmuxAdapter,
     agentActivityStore: c.get("agentActivityStore" as never) as AgentActivityStore | undefined,
     seatActivityService: c.get("seatActivityService" as never) as SeatActivityService | undefined,
@@ -139,6 +140,7 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const withActivity = await attachAgentActivity(inventory, {
     ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture),
     tmuxAdapter: deps.tmuxAdapter,
+    seatKinds: deps.seatKinds,
     activityStore: deps.agentActivityStore,
     structuralActivity: deps.seatStructuralActivityService,
     // ACTIVITY D1+D2 — the SAME SeatActivityService instance `attachTerminalActivityAndWork` reads
@@ -185,7 +187,7 @@ nodesRoutes.get("/:logicalId", async (c) => {
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
   // Node DETAIL is a single node — the per-node tmux capture is cheap here, so
   // detail always runs the full fallback (freshest needs_input for the one seat).
-  const [detailWithActivity] = await attachAgentActivity([detail], { ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture), tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore, seatActivity: deps.seatActivityService, captureFallback: true });
+  const [detailWithActivity] = await attachAgentActivity([detail], { ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture), tmuxAdapter: deps.tmuxAdapter, seatKinds: deps.seatKinds, activityStore: deps.agentActivityStore, seatActivity: deps.seatActivityService, captureFallback: true });
   const [detailWithTerminalAndWork] = attachTerminalActivityAndWork(detailWithActivity ? [detailWithActivity] : [detail], {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
