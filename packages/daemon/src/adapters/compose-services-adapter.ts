@@ -111,7 +111,8 @@ export class ComposeServicesAdapter {
       const output = await this.exec(cmd);
       const parseInput = this.extractComposePsPayload(output);
       const services = this.parseComposePs(parseInput);
-      if (parseInput !== "" && services.length === 0) {
+      // `[]` is how array-format Compose releases report a project with no containers.
+      if (parseInput !== "" && services.length === 0 && !/^\[\s*\]$/.test(parseInput)) {
         return { ok: false, services: [], error: "docker compose ps returned unparseable JSON output" };
       }
       return { ok: true, services };
