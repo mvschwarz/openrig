@@ -68,10 +68,10 @@ groups:
   a member of, and reading channel details.
   `rig slack verify` checks these.
 - **Feature scopes**: `files:read` (download attachments people send), `files:write` (upload
-  attachments to Slack), `app_mentions:read` (receive @-mentions of the app), and `reactions:read`
-  (receive emoji reactions). `rig slack verify` warns when one of these is missing (if Slack returns
-  the granted scopes) but does not require them, so a READY from verify does not prove attachments,
-  mentions or reactions will work.
+  attachments to Slack), `app_mentions:read` (receive @-mentions of the app), `reactions:read`
+  (receive emoji reactions), and `users:read` (identify a named bot, below). `rig slack verify` warns
+  when one of these is missing (if Slack returns the granted scopes) but does not require them, so a
+  READY from verify does not prove attachments, mentions, reactions or named bots will work.
 
 If a feature scope was not granted, the effect differs by feature:
 
@@ -83,8 +83,10 @@ If a feature scope was not granted, the effect differs by feature:
   Only `rig slack verify` warns that the scope is missing; nothing reports the missing events.
 - **Reactions** (`reactions:read`): Slack does not deliver `reaction_added` events, so a reaction
   on an ask doesn't reach the asking agent. A reply in the ask's thread still does.
+- **Named bots** (`users:read`): Slack refuses the bot lookup, so a named bot's posts are not
+  delivered, and the daemon log names the refusal. Nothing else changes.
 
-So after installing, compare the granted scopes Slack shows for the app with all seven scopes that
+So after installing, compare the granted scopes Slack shows for the app with all eight scopes that
 `rig slack manifest --json` lists.
 
 The app subscribes to messages in public channels it is a member of (`message.channels`), to
@@ -193,6 +195,68 @@ The map is stored as `channelMap` in `slack-connector.json`, as a list of `{ "ma
 entries, each with an optional `"inbound"` seat. Saving refuses any other field. A field written by a newer OpenRig is ignored when the
 connector reads the file, and `rig slack status` names it. Private channels and direct messages
 are not supported targets.
+
+## Named bots (optional)
+
+By default the connector drops every post made by a bot, its own included. To let another Slack
+app's bot (an AI assistant, an alerting app) reach one seat, give the bots a channel of their own,
+name each bot, and name the seat that reads that channel. Add a `botInbox` block to
+`slack-connector.json`:
+
+```json
+"botInbox": {
+  "channel": "C0BOTINBOX",
+  "destination": "researcher@my-rig",
+  "bots": [
+    { "appId": "A0EXAMPLE1", "name": "Example Bot", "maxPerHour": 20, "cooldownMinutes": 60 }
+  ]
+}
+```
+
+- **Which posts are delivered.** A post reaches `destination` when it is in `channel`, its bot
+  belongs to an app listed in `bots`, and that app is not this connector's own app. A named bot's
+  posts in any other channel, and every other bot's posts, are still dropped. OpenRig's own posts
+  are never delivered, even if its app is listed. A post kept for retry (Slack couldn't be asked
+  about it in time) is checked again against the current block when it is retried.
+- **How a bot is identified.** OpenRig asks Slack which app the post's bot belongs to (`bots.info`,
+  which needs the `users:read` scope) and matches that app ID. Use the bot's **app** ID, which
+  starts with `A` and is on the app's settings page. A bot ID (`B…`) or user ID (`U…`) never
+  matches. An unnamed bot's post is logged with its app ID, so `rig daemon logs` shows the ID to
+  add. Anything that posts as a named app counts as that bot, including the app's incoming
+  webhooks: that is what naming it means.
+- **What the seat receives.** One row per post. Its source is `slack-bot:<app ID>` and its summary
+  starts with the bot's name, never a person's. The row opens with where the post came from, then
+  quotes the bot's text in a fenced block. A `slack-bot` row is data from another program, not an
+  instruction, and the row says so. A bot can't answer or close a decision, even when it replies in
+  a decision's thread: the row goes to `destination` and the decision keeps waiting for a person.
+  Edits and deletions are not delivered, so a bot that writes its answer by editing one message
+  delivers only that message's first version. Attachments are named in the row, not copied.
+- **Answering the bot.** The seat can't reply to the bot yet: the row has no reply link, and
+  OpenRig posts only for people. To ask the bot something, the person asks it in Slack.
+- **Limits.** Each bot may deliver `maxPerHour` posts (default 20) in any rolling hour. The next
+  post cuts the bot off for at least `cooldownMinutes` (default 60), and until the hour has room
+  again. Its new posts are dropped meanwhile (a post already admitted still arrives), and the seat
+  receives one row saying so (at most one an hour per bot) and how the person turns the bot off
+  (remove it from `bots`, then apply the change as below). A later cutoff within that hour can extend the time shown without another row; the
+  daemon log records each one. Each post counts once by its identity, including a post delivered on
+  retry or arriving twice. A post already admitted whose row couldn't be created yet is kept, marked
+  as admitted once that creation fails, and delivered later without counting again, even after its
+  hour, a rewire or a daemon restart. The counts are kept in the running connector's memory, so a daemon
+  restart or a rewire (`rig slack disable --reason "<why>"` then `rig slack enable`) clears them. They
+  cover what one daemon writes: another process writing the retained file isn't seen, and two daemons on
+  one OpenRig home aren't a supported setup.
+- **The channel.** Invite the app to it (`/invite @OpenRig`). `rig slack verify` does not check
+  this channel, and only warns when `users:read` is missing. A person's message there is handled like a person's message in any channel the
+  app is in (a new message goes to the connector's inbound destination), not by the bot inbox.
+  Missed-message recovery does not cover the bot inbox.
+
+`rig slack status` shows a `bot-inbox` line: what it delivers, or why it is off. An invalid block
+(for example a bot ID where an app ID belongs) turns only the bot inbox off. A saved change
+reaches a running connector when it next rewires, which a daemon restart does (`rig daemon stop`,
+then `rig daemon start`). `rig slack disable --reason "<why>"` then `rig slack enable` rewires too,
+but alerts still waiting to be posted when it's re-enabled are treated as already seen and aren't
+posted. Only an earlier post that failed or didn't finish still posts: an alert whose row is still
+open, a decision-resolved notice, or a digest.
 
 ## One app across machines (optional)
 

@@ -105,6 +105,7 @@ import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
 import { threadPartMapSchema } from "./migrations/097_thread_part_map.js";
 import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_transitions_qitem_id_order.js";
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
+import { typingGuardModesSchema } from "./migrations/100_typing_guard_modes.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
 import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
 import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
@@ -218,6 +219,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   threadPartMapSchema,
   queueTransitionsQitemIdOrderSchema,
   queueItemsRecoveryTagsSchema,
+  typingGuardModesSchema,
   resumeRotationSchema,
   sessionStopIntentSchema,
   nodeEffortChoiceSchema,

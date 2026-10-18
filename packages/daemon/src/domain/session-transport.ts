@@ -1,7 +1,9 @@
+import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
-import { COLLAPSED_PASTE, composerRegion, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { COLLAPSED_PASTE, composerRegion, isComposerFooter, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
+  composerContainsOwnedText,
   composerNumberedChoicePattern,
   composerPromptClassForRuntime,
   composerPromptIsAmbiguous,
@@ -14,9 +16,15 @@ import {
   COMPOSER_SELECTION_SCAN_PATTERN,
   findComposerInputLineIndex,
   stripComposerPromptGlyph,
+  readComposerPromptLine,
+  COMPOSER_COLLAPSED_PASTE_PATTERN,
+  type ComposerInput,
+  type ComposerSnapshot,
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
+import { DraftAwareDelivery, type GuardedDeliverySummary } from "./draft-aware-delivery.js";
+import type { OutboxEntry } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
@@ -185,6 +193,16 @@ const CLAUDE_TIMERLESS_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S.*(?:…|\.{3
 export interface ClassifyPaneOptions {
   /** Treat a timer-less live status row above the composer as work in progress. */
   timerlessStatusIsLive?: boolean;
+  /** Opted-in typing guards retain styling and cursor evidence for this read. */
+  composerSnapshot?: ComposerSnapshot;
+  runtime?: string | null;
+}
+
+/** The current Claude footer follows the input frame; earlier examples are history or draft text. */
+function findClaudeFooterIndex(lines: string[]): number {
+  let bar = lines.length - 1;
+  while (bar >= 0 && (!lines[bar]!.trim() || CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(lines[bar]!.trim())))) bar--;
+  return bar;
 }
 
 function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
@@ -193,8 +211,7 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   // Exhausting the scan without reaching the status head is unknown, not idle.
   const lines = paneContent.split("\n").slice(-20)
     .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
-  let bar = lines.length - 1;
-  while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
+  const bar = findClaudeFooterIndex(lines);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
   const modeFooter = CLAUDE_MODE_FOOTER.test(lines[bar]?.trim() ?? "");
   let indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
@@ -206,13 +223,14 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
     // Keep Codex footers and a bare prompt with no visible block on their old path.
     if (bar < 2 || !CLAUDE_ANCHORED_MODE_FOOTER.test(lines[bar]!.trim())) return null;
     prompt = lines[bar - 1] ?? "";
-    indent = /^([ \t]*)❯\s*$/.exec(prompt)?.[1];
+    const input = readComposerPromptLine(prompt, composerPromptClassForRuntime("claude-code"));
+    indent = input && !input.text.trim() ? input.indent : undefined;
     if (indent === undefined) return null;
     statusStart = bar - 2;
   } else {
     const upper = lines[bar - 3] ?? "";
     if (!upper.startsWith(indent) || !/^─{3,}(?: .+ ─+)?$/.test(upper.slice(indent.length)) ||
-        !prompt.startsWith(`${indent}❯`) || !/^❯(?:\s|$)/.test(prompt.slice(indent.length))) return null;
+        !prompt.startsWith(`${indent}❯`) || !readComposerPromptLine(prompt, composerPromptClassForRuntime("claude-code"))) return null;
   }
 
   let liveStatus: string | null = null;
@@ -235,6 +253,139 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus };
 }
 
+const unknown = (): ComposerInput => ({ state: "unknown", rows: [], columns: 0, cursorAtEnd: false, collapsedPaste: null });
+const rule = (line: string): boolean => /^[─━═-]{6,}(?: .+ [─━═-]+)?$/.test(line.trim());
+const codexFooter = (line: string): boolean => isComposerFooter(line)
+  || /(?:\b\d+% context left\b|\bContext \[)/.test(line);
+
+/** Preserve faint styling so autocomplete ghosts can be separated from authored
+ * text. Color channel values must never be interpreted as style codes. */
+function styledTextLines(screen: string) {
+  let faint = false;
+  return screen.replace(/\r\n/g, "\n").split("\n").map(raw => {
+    let text = "", offset = 0;
+    const faintCells: boolean[] = [];
+    const append = (value: string) => { text += value; faintCells.push(...Array<boolean>(value.length).fill(faint)); };
+    for (const match of raw.matchAll(/\x1b\[([0-9;:]*)m/g)) {
+      append(raw.slice(offset, match.index));
+      const codes = match[1]!.split(";");
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i]!;
+        if (/^(?:38|48|58):/.test(code)) continue; // Colon-form color is one parameter.
+        if (code === "38" || code === "48" || code === "58") {
+          const skip = codes[i + 1] === "5" ? 2 : codes[i + 1] === "2" ? (codes[i + 2] === "" ? 5 : 4) : 0;
+          // Color channels are not style codes. Ambiguous compound sequences
+          // provide no faint-style proof, rather than interpreting an RGB 2 as dim.
+          if (!skip || i + skip !== codes.length - 1) { faint = false; break; }
+          i += skip;
+        } else if (code === "" || code === "0" || code === "22") faint = false;
+        else if (code === "2") faint = true;
+      }
+      offset = match.index! + match[0].length;
+    }
+    append(raw.slice(offset));
+    return { text, faintCells };
+  });
+}
+
+/** Inspect only the visible input containing the current cursor. Activity, hook
+ * freshness and text elsewhere in the pane are not evidence that input is empty.
+ */
+export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime: string | null = null, owned?: import("./composer-prompts.js").ComposerOwnership): ComposerInput {
+  const promptClass = composerPromptClassForRuntime(runtime);
+  if (!snapshot || snapshot.inMode) return unknown();
+  const { x, y, width, height } = snapshot.cursor;
+  if (![x, y, width, height].every(Number.isInteger) || x < 0 || y < 0 || x >= width || y >= height || width < 3 || height < 1) return unknown();
+  const styled = styledTextLines(snapshot.screen);
+  const lines = styled.map(line => line.text);
+  if (lines.at(-1) === "") lines.pop();
+  if (lines.length > height || !lines[y]) return unknown();
+  const footerAt = findClaudeFooterIndex(lines);
+  const footer = lines[footerAt]?.trim() ?? "";
+  let claudeEnd = footerAt - 1;
+  while (claudeEnd >= 0 && !lines[claudeEnd]!.trim()) claudeEnd--;
+  const candidates: ComposerInput[] = [];
+  for (let start = 0; start <= y; start++) {
+    const prompt = readComposerPromptLine(lines[start] ?? "", promptClass);
+    if (!prompt || !/^ *$/.test(prompt.indent)) continue;
+    const numbered = composerSelectionPrefixPattern(promptClass).test(lines[start]!.trimStart()) || /^\d+[.)]\s/.test(prompt.text);
+    const prefix = prompt.prefix;
+    let end = -1;
+    if (prompt.glyph === "❯") {
+      // Share the main reader's terminal footer anchor. A quoted frame within a
+      // multiline draft cannot supply either the closing rule or its indentation.
+      const alignedRule = (line: string) => rule(line) && line.length - line.trimStart().length === prompt.indent.length;
+      if ((!isComposerFooter(footer) && !CLAUDE_MODE_FOOTER.test(footer))
+        || !alignedRule(lines[start - 1] ?? "") || !alignedRule(lines[claudeEnd] ?? "")) continue;
+      end = claudeEnd;
+    } else {
+      for (let i = start + 1; i < lines.length; i++) {
+        if (lines[i]!.trim()) continue;
+        const tail = lines.slice(i + 1).filter(line => line.trim());
+        if (lines[i + 1]?.trim() && tail.length === 1 && codexFooter(tail[0]!.trim())) { end = i; break; }
+      }
+    }
+    if (end <= y || x < prefix) continue;
+    const rows = [prompt.text];
+    let valid = true;
+    for (let i = start + 1; i < end; i++) {
+      const line = lines[i]!;
+      if (line.trim() && !line.startsWith(" ".repeat(prefix))) { valid = false; break; }
+      rows.push(line.slice(prefix));
+    }
+    if (!valid) continue;
+    // A suggestion is a wholly dim suffix beginning at the current cursor.
+    // A literal placeholder or text before a moved cursor remains authored input.
+    const cursorRow = y - start;
+    let ghost: ComposerInput["ghost"];
+    const currentRow = rows[cursorRow]!;
+    let cursorOffset = x === prefix ? 0 : -1;
+    let offset = 0;
+    for (const character of currentRow) {
+      offset += character.length;
+      if (stringWidth(currentRow.slice(0, offset)) === x - prefix) cursorOffset = offset;
+    }
+    if (cursorOffset >= 0) {
+      const suffix = rows.slice(cursorRow).map((row, i) => ({
+        text: row.slice(i === 0 ? cursorOffset : 0),
+        faint: styled[y + i]!.faintCells.slice(prefix + (i === 0 ? cursorOffset : 0), prefix + row.length),
+      }));
+      if (suffix.some(row => row.text.length > 0) && suffix.every(row => row.faint.every(Boolean))) {
+        ghost = { line: y, offset: prefix + cursorOffset, continuationRows: rows.length - cursorRow - 1 };
+        rows.splice(cursorRow + 1);
+        rows[cursorRow] = currentRow.slice(0, cursorOffset);
+      }
+    }
+    const visible = rows.map(line => line.trimEnd());
+    // The cursor bounds authored whitespace on the last input row. Captures may
+    // omit trailing blank cells or include screen padding; neither changes the bytes to submit.
+    if (cursorRow === rows.length - 1) {
+      const cellWidth = stringWidth(rows[cursorRow]!);
+      if (x - prefix >= cellWidth) visible[cursorRow] = rows[cursorRow]! + " ".repeat(x - prefix - cellWidth);
+      else if (cursorOffset >= 0 && !rows[cursorRow]!.slice(cursorOffset).trim()) visible[cursorRow] = rows[cursorRow]!.slice(0, cursorOffset);
+    }
+    const atStart = y === start && x === prefix;
+    const empty = atStart && rows.length === 1 && rows[0] === "";
+    const last = visible.length - 1;
+    const cursorAtEnd = y === start + last && x === prefix + stringWidth(visible[last] ?? "");
+    const label = visible.length === 1 && COMPOSER_COLLAPSED_PASTE_PATTERN.test(visible[0]!) ? visible[0]! : null;
+    const frame = JSON.stringify([prompt.glyph, prefix, width, footer]);
+    const input: ComposerInput = { state: empty ? "empty" : "text", rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
+      ...(ghost ? { ghost } : {}) };
+    // A numbered body is allowed only as this operation's exact text in its
+    // previously empty composer. A newly observed menu gains no such authority.
+    if (numbered && !(owned?.frame === frame && composerContainsOwnedText(input, owned.text))) continue;
+    if (owned?.frame === frame && cursorAtEnd && visible.join("\n").includes("[Pasted text #")
+      && hasExpectedStagedText(`${prompt.glyph} ${visible.join("\n")}`, owned.text, runtime)) {
+      input.collapsedPaste = visible.join("\n");
+      input.pasteMatchesExpected = true;
+    }
+    candidates.push(input);
+  }
+  return candidates.length === 1 ? candidates[0]! : unknown();
+}
+
+
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
   const rawLines = paneContent.split("\n").map((line) => line.trimEnd());
   let lastLineIndex = rawLines.length - 1;
@@ -251,7 +402,8 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   if (priorLine.trim().length === 0) return null;
 
   const priorTrimmed = priorLine.trim();
-  const looksLikeDraft = PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(priorTrimmed));
+  const prompt = readComposerPromptLine(priorLine);
+  const looksLikeDraft = prompt !== null && prompt.text.trim().length > 0;
   const looksLikeSelection = COMPOSER_SELECTION_PATTERN.test(priorTrimmed);
   if (!looksLikeDraft || looksLikeSelection) return null;
 
@@ -334,6 +486,16 @@ export function agentAppPaneActivity(classification: PaneActivityClassification,
 }
 
 export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
+  if (options.composerSnapshot) {
+    const snapshot = options.composerSnapshot;
+    const { ghost } = inspectComposerInput(snapshot, options.runtime);
+    const lines = styledTextLines(snapshot.screen).map(line => line.text);
+    if (ghost) {
+      lines[ghost.line] = lines[ghost.line]!.slice(0, ghost.offset);
+      lines.splice(ghost.line + 1, ghost.continuationRows);
+    }
+    paneContent = lines.join("\n");
+  }
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
@@ -479,6 +641,8 @@ export async function probeSessionActivity(input: {
   binding?: Omit<ObservedBinding, "sessionName">;
   /** See ClassifyPaneOptions.timerlessStatusIsLive. */
   timerlessStatusIsLive?: boolean;
+  /** Supplied only by an active draft-aware send; ordinary observations stay unchanged. */
+  composerSnapshot?: () => Promise<ComposerSnapshot | null>;
   /** The seat's community agent app (`agentAppOf`): its idle-looking screen reads unknown. */
   agentApp?: string | null;
 }): Promise<AgentActivity> {
@@ -591,10 +755,12 @@ export async function probeSessionActivity(input: {
   };
   const captureSeq = observed ? nextCaptureSeq++ : 0;
   try {
-    const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
+    const snapshot = input.composerSnapshot ? await input.composerSnapshot().catch(() => null) : null;
+    const paneContent = snapshot?.screen ?? await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
     const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
-    let classification = agentAppPaneActivity(classifyPaneActivity(paneContent ?? "", classifyOptions), input.agentApp);
+    let classification = agentAppPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
+      composerSnapshot: snapshot ?? undefined, runtime }), input.agentApp);
     // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
     // as a draft, one capture with styling is classified on its own. Newer attention or work there is
     // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;
@@ -1354,6 +1520,12 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
+  /** Internal provenance derived by the authenticated transport route. */
+  identityProvenance?: string;
+  /** Internal wake provenance, never accepted from the public transport route. */
+  queueWake?: boolean;
+  /** Internal observation of a completed input effect; never a permission callback. */
+  onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
@@ -1444,6 +1616,7 @@ export interface SendResult {
    */
   outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained";
   outboxIds?: string[];
+  delivery?: GuardedDeliverySummary;
   warning?: string;
   error?: string;
   reason?: string;
@@ -1562,6 +1735,7 @@ interface SessionReconciliationSnapshot {
 
 export class SessionTransport {
   readonly db: Database.Database;
+  readonly guardedDelivery?: DraftAwareDelivery;
   private rigRepo: RigRepository;
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
@@ -1596,6 +1770,13 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some(c => c.name === "guard_delivery")) this.guardedDelivery = new DraftAwareDelivery(this.db, guard,
+      (session, text, opts) => this.sendUnguarded(session, text, opts));
+  }
+
+  configureGuardedWakes(applicable: (entries: readonly OutboxEntry[]) => boolean): void {
+    this.guardedDelivery?.configureWakes(applicable);
   }
 
   attachRuntimeAdapters(adapters: Record<string, TransportReadinessChecker>): void {
@@ -1901,6 +2082,14 @@ export class SessionTransport {
     return pref.desired || pref.effective ? target : null;
   }
 
+  draftAwareTarget(sessionName: string) {
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const target = guard?.maybeTarget(sessionName);
+    if (!guard || !target) return null;
+    const policy = guard.configuration(target.nodeId);
+    return policy.desired.mode === "draft-aware" || policy.effective.mode === "draft-aware" ? target : null;
+  }
+
   /** Deliver text and Enter to the resolved recipient under the send guards.
    * With verification requested, compare rendered message counts, excluding
    * agent input; a confirmed render does not prove agent consumption. */
@@ -1915,8 +2104,8 @@ export class SessionTransport {
     }
     const outbox = new OutboxHandler(this.db);
     const ids = opts?.committedOutboxIds ?? [opts?.deliveryId ?? `guard-send-${randomUUID()}`];
-    const retainedResult = (): SendResult => ({ ok: true, sessionName, outcome: "retained", sent: false, verified: false,
-      outboxIds: ids, reason: "typing_guard_enabled", warning: `Retained, not delivered. Inspect with rig seat held-messages ${sessionName}; disabling does not replay held messages.` });
+    const retainedResult = (reason = "typing_guard_enabled"): SendResult => ({ ok: true, sessionName, outcome: "retained", sent: false, verified: false,
+      outboxIds: ids, reason, warning: `Retained, not delivered. Inspect with rig seat held-messages ${sessionName}; changing protection does not replay held messages.` });
     try {
       if (opts?.committedOutboxIds) {
         const target = guard.target(sessionName);
@@ -1928,6 +2117,8 @@ export class SessionTransport {
           }
         }
       }
+      const existing = this.guardedDelivery?.existing(sessionName, text, opts ?? {}, ids);
+      if (existing) return existing;
       // Idempotent readback also after disabling: an old retained ID never becomes a new send.
       // (P2: this readback is NOT a new retention and is outside the retained_no_write seam.)
       if (!opts?.committedOutboxIds && opts?.deliveryId) {
@@ -1974,7 +2165,15 @@ export class SessionTransport {
           sendOpts = { ...opts, preWaitedIdle: pre.evidence, preWaitBound: pre.bound };
         }
       }
-      const result = await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, sendOpts), async target => {
+      const result = await guard.operation(sessionName, async () => {
+        if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
+          return this.guardedDelivery.send(sessionName, text, sendOpts ?? {}, ids);
+        }
+        const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
+        return prior ?? this.sendUnguarded(sessionName, text, sendOpts);
+      }, async target => {
+        const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
+        if (prior) return prior;
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         this.db.transaction(() => {
           for (const id of ids) {
@@ -1982,6 +2181,7 @@ export class SessionTransport {
             if (opts?.committedOutboxIds && (!prior || prior.destinationSession !== sessionName)) throw new Error("Committed wake target/ID mismatch");
             outbox.retain(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
+              identityProvenance: opts?.identityProvenance,
             }, target, !!opts?.committedOutboxIds);
           }
         })();
@@ -2047,7 +2247,10 @@ export class SessionTransport {
       const preTarget = guard.maybeTarget(sessionName);
       if (!preTarget) return null;
       const prePref = guard.preference(preTarget.nodeId);
-      if (prePref.effective || prePref.desired) return null;
+      // Hold mode retains in the lease, and draft-aware mode reads the input there first and returns its
+      // immediate result (held, or refused with its reason): neither takes the lease-free wait. A
+      // draft-aware send whose input is empty waits for idle inside the lease, as before this wait existed.
+      if (prePref.effective || prePref.desired || prePref.desiredMode === "draft-aware" || prePref.effectiveMode === "draft-aware") return null;
       meta = this.getSessionMeta(sessionName);
       bound = guard.target(sessionName);
     } catch {
@@ -2334,6 +2537,7 @@ export class SessionTransport {
           error: `submitOnly refused: the pane of '${sessionName}' does not show the expected staged text — pressing Enter here could drive something else entirely. Nothing was submitted.`,
         };
       }
+      this.tmuxAdapter.deliveryGuard?.expectStagedInput(sessionName, expected);
       const targetFailure = await checkClaudeTarget();
       if (targetFailure) return targetFailure;
       const copyModeFailure = await leavePaneMode("Nothing was submitted.");
@@ -2346,6 +2550,7 @@ export class SessionTransport {
       if (!submitResult.ok) {
         return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
+      try { opts.onInputEffect?.("submitted"); } catch { /* Observation cannot change an input result. */ }
       return observe({ ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true });
     }
 
@@ -2605,16 +2810,18 @@ export class SessionTransport {
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
+      const policyRefusal = textResult.code.startsWith("draft_");
       return observe({
         ok: false,
         sessionName,
-        reason: "send_failed",
+        reason: policyRefusal ? textResult.code : "send_failed",
         outcome: "failed",
         inputPhase: "attempted",
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
-        ...(waitMode ? { sent: false, ...waitEvidence } : {}),
+        ...(waitMode || policyRefusal ? { sent: false, ...waitEvidence } : {}),
       });
     }
+    try { opts?.onInputEffect?.("pasted"); } catch { /* Observation cannot change a completed paste. */ }
 
     // 4. Wait 200ms (spike-proven delay)
     await this.sleep(200);
@@ -2660,16 +2867,18 @@ export class SessionTransport {
       throw error;
     }
     if (!submitResult.ok) {
+      const policyRefusal = submitResult.code.startsWith("draft_");
       return observe({
         ok: false,
         sessionName,
-        reason: "submit_failed",
+        reason: policyRefusal ? submitResult.code : "submit_failed",
         outcome: "failed",
         inputPhase: "written",
         error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
-        ...(waitMode ? { sent: true, ...waitEvidence } : {}),
+        ...(waitMode || policyRefusal ? { sent: true, ...waitEvidence } : {}),
       });
     }
+    try { opts?.onInputEffect?.("submitted"); } catch { /* Observation cannot change a completed submission. */ }
 
     const interaction = promptOverride ? { promptInteraction: "enter-sent" as const } : {};
 
@@ -2939,6 +3148,8 @@ export class SessionTransport {
     readinessFromPaneOnly?: boolean;
   }): Promise<AgentActivity> {
     const now = this.now();
+    const composerSnapshot = this.tmuxAdapter.deliveryGuard?.needsInputCheck(input.sessionName)
+      ? () => this.tmuxAdapter.captureComposerSnapshot(input.binding?.pane ?? input.sessionName) : undefined;
     const hookActivity = this.agentActivityStore?.getLatestForNode({
       sessionName: input.sessionName,
       now,
@@ -2989,6 +3200,7 @@ export class SessionTransport {
         // vetoes (→ refuse); an unknown pane (the flaky-Codex case this trust
         // exists for) or a clean idle pane does NOT veto → trust the stale hook.
         const paneVeto = await probeSessionActivity({
+          composerSnapshot,
           sessionName: input.sessionName,
           runtime: input.runtime,
           attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
@@ -3005,6 +3217,7 @@ export class SessionTransport {
     }
 
     const probe = await probeSessionActivity({
+      composerSnapshot,
       sessionName: input.sessionName,
       runtime: input.runtime,
       attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,

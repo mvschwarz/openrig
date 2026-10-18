@@ -187,6 +187,8 @@ export const SETTINGS_VALID_KEYS = [
   "output.whoami_peers",
   // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view; daemon-read, twin of the CLI key.
   "provider.usage_windows",
+  // Service-backed archives, including packing, preview and durable-target admission; default off.
+  "bundle.services_enabled",
   // Slice 18 (OPR.0.7.0.18) — the subscription move record and its reads; default off, twin of the CLI key.
   "provider.subscription_moves",
   "usage.pi_cost_facts",
@@ -299,6 +301,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
+  "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
   "provider.subscription_moves": { primary: "OPENRIG_PROVIDER_SUBSCRIPTION_MOVES" },
   "usage.pi_cost_facts": { primary: "OPENRIG_USAGE_PI_COST_FACTS" },
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
@@ -384,6 +387,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
+  "bundle.services_enabled": ["bundle", "servicesEnabled"],
   "provider.subscription_moves": ["provider", "subscriptionMoves"],
   "usage.pi_cost_facts": ["usage", "piCostFacts"],
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
@@ -664,6 +668,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "output.compact": return false;
     case "output.whoami_peers": return 8;
     case "provider.usage_windows": return false;
+    case "bundle.services_enabled": return false;
     // Slice 18 — the subscription move record is off until the switch is on.
     case "provider.subscription_moves": return false;
     // Slice 02 — Pi cost facts from persisted entries; off until the switch is on.

@@ -57,11 +57,23 @@ that request asks the seat to read the refocusing skill and consume the delivere
 traces rather than rerun them, and the read-depth audit accounts for them. Otherwise the hook
 is a no-op (it writes a stderr advisory when the transcript shrinks or the
 session has no identity), and it degrades to silence on unrelated hook errors.
-Both runtimes stop the hook after 5 seconds, and the content REF lookup gets 2;
-a slow REF shows as `REFOCUS CONTENT REF FAILED`. A
-configured REF resolution failure instead degrades
-loudly in the delivered payload while still completing the hook — a refocus
-must never break a seat's turn.
+**Time budget.** By default each lookup (the trace, the content REF, `rig queue whoami`, `rig config`) gets 2 seconds,
+as before, and a slow one ends as a reported gap (`TRACE GAP`, `REFOCUS CONTENT REF FAILED`, or a role marked
+unknown). Set `OPENRIG_REFOCUS_BUDGET_MS` in a seat's environment to give a slow trace more time, up to 52000 (52 s).
+Each lookup's cap then grows in proportion (at 45000 the trace may take 20 seconds; at 52000, about 23), and every lookup
+is also cut to what is left of that budget, so the attempt delivers what it has and counts as failed. After a failed
+attempt, the issue report gets its own 1.5 seconds once the lookups are done. Both registrations allow `refocus.cjs` 60
+seconds, where they used to stop it at 5; the other OpenRig hooks keep theirs. So a default fire whose lookups together
+pass 5 seconds now completes instead of being stopped with nothing delivered, and a hook that hangs outside its lookups
+can hold a prompt for up to those 60 seconds.
+
+A configured REF resolution failure degrades loudly in the delivered payload while still completing the hook — a
+refocus must never break a seat's turn.
+
+**Overlapping events (unresolved).** Two hook runs for the same seat and occupant are not serialized. If they overlap,
+a `PostCompact` recorded while a prompt is delivering can be lost, and one refocus can be delivered twice. This is
+reproduced between hook processes; whether a harness overlaps these events for one session is not established, so it is
+an open gap, not one shown to be safe.
 
 Failed trace or configured-content resolution keeps refocus due. After three
 consecutive failed attempts for the same seat and occupant, the hook emits one
