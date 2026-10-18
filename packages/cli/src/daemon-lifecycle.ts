@@ -70,12 +70,13 @@ export interface GetDaemonStatusOptions {
   cleanupStaleState?: boolean;
 }
 
-/** True for `http://host[:port]` with no path, query or fragment: the only OPENRIG_URL shape
- *  getDaemonUrl's host-and-port rebuild reaches unchanged. */
+/** True for `http://host:port` with an explicit, non-default port and no path, query or
+ *  fragment: the only OPENRIG_URL shape getDaemonUrl's host-and-port rebuild reaches unchanged
+ *  (without a port, or with :80, which URL reports as no port, status falls back to 7433). */
 function isPlainHttpOrigin(url: string): boolean {
   try {
     const u = new URL(url);
-    return u.protocol === "http:" && u.pathname === "/" && !u.search && !u.hash && !url.endsWith("/");
+    return u.protocol === "http:" && u.port !== "" && u.pathname === "/" && !u.search && !u.hash && !url.endsWith("/");
   } catch {
     return false;
   }

@@ -25,13 +25,14 @@ describe("OPENRIG_URL with a trailing slash", () => {
     ["http://127.0.0.1:7433//", "http://127.0.0.1:7433"],
     ["http://h:7433/p/", "http://h:7433/p"],
     ["https://h/", "https://h"],
-    ["http://h:7433/?a=b/", "http://h:7433?a=b/"],
-    ["http://h:7433/p/#x/", "http://h:7433/p#x/"],
+    ["http://h:7433/?a=b/", "http://h:7433/?a=b/"],
+    ["http://h:7433/p/?x", "http://h:7433/p/?x"],
+    ["http://h:7433/p/#x/", "http://h:7433/p/#x/"],
     ["http://h:7433", "http://h:7433"],
     ["/", "/"],
     ["//", "//"],
     ["http://", "http://"],
-  ])("normalizeOpenRigUrl(%s) strips path slashes only: %s", (raw, normalized) => {
+  ])("normalizeOpenRigUrl(%s) is %s (a query or fragment URL stays as written)", (raw, normalized) => {
     expect(normalizeOpenRigUrl(raw)).toBe(normalized);
   });
 
@@ -49,6 +50,10 @@ describe("OPENRIG_URL with a trailing slash", () => {
     ["http://127.0.0.1:7555/p/", "http://127.0.0.1:7555/p//healthz"],
     ["https://127.0.0.1:7555/", "https://127.0.0.1:7555//healthz"],
     ["http://127.0.0.1:7555/?x=1", "http://127.0.0.1:7555/?x=1/healthz"],
+    // No explicit port (or :80, which URL reports as none): status would hand commands 7433,
+    // so the probe must not succeed on port 80 for them.
+    ["http://127.0.0.1/", "http://127.0.0.1//healthz"],
+    ["http://127.0.0.1:80/", "http://127.0.0.1:80//healthz"],
   ])("getDaemonStatus probes %s as main does (%s)", async (url, probed) => {
     vi.stubEnv("OPENRIG_URL", url);
     const { urls, deps } = probeDeps(() => false);
@@ -90,5 +95,29 @@ describe("OPENRIG_URL with a trailing slash", () => {
       readFile: () => { throw new Error("no endpoint file"); },
     });
     expect(endpoint).toEqual({ baseUrl: "http://127.0.0.1:7555", token: "tok" });
+  });
+
+  it.each([
+    ["http://127.0.0.1:7555/p/?x=1", "http://127.0.0.1:7555/p/?x=1/api/ps"],
+    ["http://127.0.0.1:7555/p/#frag", "http://127.0.0.1:7555/p/#frag/api/ps"],
+  ])("a default DaemonClient keeps main's base for %s", async (url, requested) => {
+    vi.stubEnv("OPENRIG_URL", url);
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (u: string | URL | Request) => {
+      urls.push(String(u));
+      return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const client = new DaemonClient(undefined, { fetchImpl });
+    expect(client.baseUrl).toBe(url);
+    await client.get("/api/ps");
+    expect(urls).toContain(requested);
+  });
+
+  it("the startup-proof endpoint picks RIGGED_URL like every other reader when OPENRIG_URL is empty", () => {
+    const endpoint = resolveStartupProofEndpoint({
+      env: { OPENRIG_URL: "", RIGGED_URL: "http://127.0.0.1:7556/", OPENRIG_ACTIVITY_HOOK_TOKEN: "tok" },
+      readFile: () => { throw new Error("no endpoint file"); },
+    });
+    expect(endpoint).toEqual({ baseUrl: "http://127.0.0.1:7556", token: "tok" });
   });
 });

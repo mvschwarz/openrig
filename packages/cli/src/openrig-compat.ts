@@ -55,12 +55,12 @@ function warnOnce(key: string, message: string): void {
   console.warn(message);
 }
 
-export function readOpenRigEnv(primary: string, legacy?: string): string | undefined {
-  const primaryValue = process.env[primary];
+export function readOpenRigEnv(primary: string, legacy?: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const primaryValue = env[primary];
   if (primaryValue !== undefined && primaryValue !== "") return primaryValue;
 
   if (legacy) {
-    const legacyValue = process.env[legacy];
+    const legacyValue = env[legacy];
     if (legacyValue !== undefined && legacyValue !== "") {
       warnOnce(`env:${legacy}`, `Warning: ${legacy} is deprecated; use ${primary} instead.`);
       return legacyValue;
@@ -70,21 +70,20 @@ export function readOpenRigEnv(primary: string, legacy?: string): string | undef
   return undefined;
 }
 
-/** An explicit daemon URL with trailing slashes removed from its path only, so
- *  `http://h:7433/` addresses the same daemon as `http://h:7433`. A query or fragment is
- *  kept exactly as written, and a value that would strip down to no host (such as `/`)
- *  is returned unchanged, so it stays an explicit (if invalid) target. */
+/** An explicit daemon URL with trailing slashes removed, so `http://h:7433/` addresses the
+ *  same daemon as `http://h:7433`. A URL with a query or fragment is returned exactly as
+ *  written, and so is a value that would strip down to no host (such as `/`), which stays
+ *  an explicit (if invalid) target. */
 export function normalizeOpenRigUrl(raw: string): string {
-  const split = raw.search(/[?#]/);
-  const head = split < 0 ? raw : raw.slice(0, split);
-  const stripped = head.replace(/\/+$/, "");
-  if (!/:\/\/[^/]/.test(stripped)) return raw;
-  return stripped + (split < 0 ? "" : raw.slice(split));
+  if (/[?#]/.test(raw)) return raw;
+  const stripped = raw.replace(/\/+$/, "");
+  return /:\/\/[^/]/.test(stripped) ? stripped : raw;
 }
 
-/** OPENRIG_URL (legacy RIGGED_URL), normalized by normalizeOpenRigUrl. */
-export function readOpenRigUrl(): string | undefined {
-  const raw = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+/** OPENRIG_URL (legacy RIGGED_URL), normalized by normalizeOpenRigUrl. `env` defaults to
+ *  process.env; callers with an injected environment pass theirs. */
+export function readOpenRigUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL", env);
   return raw === undefined ? undefined : normalizeOpenRigUrl(raw);
 }
 
