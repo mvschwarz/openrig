@@ -89,7 +89,7 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
       servedByOwnReminder: (qitemId) => (queue as unknown as { parkWakeServedByOwnReminder?: (id: string) => boolean })
         .parkWakeServedByOwnReminder?.(qitemId) === true,
     }, { seatNodeId, sessionName: SEAT });
-    return { parked: d.parked, healthy: d.obligations.held[0]?.healthy, held: d.obligations.held[0] };
+    return { parked: d.parked, healthy: d.obligations.held[0]?.healthy, held: d.obligations.held[0], reason: d.reason };
   }
 
   describe("now healthy (the changed result)", () => {
@@ -100,7 +100,8 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
       fire(job, "ok");
       park(q, { watchdogId: job });
       fire(job, "ok");
-      expect(diagnose()).toMatchObject({ parked: false, healthy: true, held: { servedByOwnReminder: true } });
+      expect(diagnose()).toMatchObject({ parked: false, healthy: true, held: { servedByOwnReminder: true },
+        reason: "stopped with 1 HELD row(s), all healthy: 0 with a live wake, 1 served by its own repeating reminder — not parked" });
       // The wake status itself is unchanged for every other reader.
       expect(queue.getParkWakeStatus(q)).toMatchObject({ phase: "fired", live: false, unconsumed: true });
     });
@@ -115,12 +116,22 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
     });
   });
 
+  it("names the served rows apart from the rows with a live wake", async () => {
+    const served = await row();
+    const job = reminder();
+    park(served, { watchdogId: job });
+    fire(job, "ok");
+    const live = await row();
+    park(live, { watchdogId: reminder() });
+    expect(diagnose().reason).toBe("stopped with 2 HELD row(s), all healthy: 1 with a live wake, 1 served by its own repeating reminder — not parked");
+  });
+
   describe("unchanged: parked diagnosis reads as before", () => {
-    it("before the reminder's first fire, the row is already healthy", async () => {
+    it("before the reminder's first fire, the row is already healthy, with the existing reason", async () => {
       const q = await row();
       park(q, { watchdogId: reminder() });
       const d = diagnose();
-      expect(d).toMatchObject({ parked: false, healthy: true });
+      expect(d).toMatchObject({ parked: false, healthy: true, reason: "stopped with 1 HELD row(s), all healthy with a live wake — not parked" });
       expect(d.held).not.toHaveProperty("servedByOwnReminder");
     });
 

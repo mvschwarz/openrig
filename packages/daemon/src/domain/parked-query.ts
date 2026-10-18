@@ -180,13 +180,16 @@ export function diagnoseSeatParked(
   const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0;
   const parked = stopped && (open.length > 0 || unhealthyHeld.length > 0);
   const unconsumed = unhealthyHeld.filter((row) => row.wake?.unconsumed);
+  const served = held.filter((row) => row.servedByOwnReminder).length;
   const reason = parked
     ? state.needsInput.count > 0
       ? `needs-input (${state.needsInput.reason ?? "unanswered block"}) with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
       : `idle-at-prompt with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
     : stopped
       ? held.length > 0
-        ? `stopped with ${held.length} HELD row(s), all healthy with a live wake — not parked`
+        ? served > 0
+          ? `stopped with ${held.length} HELD row(s), all healthy: ${held.length - served} with a live wake, ${served} served by its own repeating reminder — not parked`
+          : `stopped with ${held.length} HELD row(s), all healthy with a live wake — not parked`
         : "stopped but the board is clean"
       : `working — not parked`;
 
