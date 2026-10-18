@@ -1422,28 +1422,32 @@ wait for its own work. Claude Code, including Claude Desktop's Code tab, does th
 
 ```sh
 # Waits until a task is assigned to this seat, prints it and exits; ends after MAX seconds.
-max=${MAX:-3300}; every=${EVERY:-5}; end=$(( $(date +%s) + max )); checked=0
+max=${MAX:-3300}; every=${EVERY:-5}; end=$(( $(date +%s) + max )); checked=0; failing_since=""
 while [ "$(date +%s)" -lt "$end" ]; do
   if out=$(rig queue list --owned --state pending --json 2>/dev/null); then
-    checked=1
+    checked=1; failing_since=""
     case "$out" in *'"qitemId"'*) printf 'NEW WORK: %s\n' "$out"; exit 0 ;; esac
+  elif [ -z "$failing_since" ]; then
+    failing_since=$(date -u +%H:%M:%SZ)
   fi
   sleep "$every"
 done
-if [ "$checked" = 1 ]; then
-  echo "No new work before the deadline. Start the wait again."
-else
-  echo "Couldn't check for work: every poll failed. Run rig queue list --owned to see why (this seat's identity, the daemon) before starting the wait again."
-  exit 1
+why="Run rig queue list --owned to see why (this seat's identity, the daemon) before starting the wait again."
+if [ "$checked" = 0 ]; then
+  echo "Couldn't check for work: every poll failed. $why"; exit 1
+elif [ -n "$failing_since" ]; then
+  echo "Checking stopped working at $failing_since: every poll since then failed. $why"; exit 1
 fi
+echo "No new work before the deadline. Start the wait again."
 ```
 
 - **When it wakes you with `NEW WORK`:** `rig queue claim` each item, do it, and close it with the answer. Then start
   the wait again and end your turn.
 - **Don't leave an item you've seen pending:** it wakes you again at once. Claim it, block it or hand it off.
 - **A failed poll doesn't end the wait;** only new work or the deadline does.
-- **If every poll failed, it says so and exits non-zero** instead of reporting no work. Find out why with
-  `rig queue list --owned` (usually this seat's identity, or the daemon) before starting the wait again.
+- **If every poll failed, or every poll since some point did** (the daemon stopped mid-wait), it says so, with when,
+  and exits non-zero instead of reporting no work. A failure followed by a successful poll stays quiet. Find out why
+  with `rig queue list --owned` (usually this seat's identity, or the daemon) before starting the wait again.
 - **If your app stops the background command, or you start a new session,** start the wait again.
 
 ## Troubleshooting and Weird States

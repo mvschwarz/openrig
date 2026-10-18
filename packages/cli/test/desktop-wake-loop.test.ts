@@ -41,6 +41,7 @@ describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", ()
   let url: string;
   let root: string;
   let failLists = 0;
+  let failListsAfter = Infinity; // every list request after this many fails, as if the daemon stopped
   let listCalls = 0;
   let queue: QueueRepository;
 
@@ -60,13 +61,17 @@ describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", ()
       },
     });
     failLists = 0;
+    failListsAfter = Infinity;
     listCalls = 0;
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({
         fetch: (request: Request) => {
           if (new URL(request.url).pathname === "/api/queue/list") {
             listCalls++;
-            if (failLists > 0) { failLists--; return new Response(JSON.stringify({ error: "fixture: daemon busy" }), { status: 503 }); }
+            if (failLists > 0 || listCalls > failListsAfter) {
+              if (failLists > 0) failLists--;
+              return new Response(JSON.stringify({ error: "fixture: daemon busy" }), { status: 503 });
+            }
           }
           return app.fetch(request);
         },
@@ -136,6 +141,22 @@ describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", ()
     expect(result.stdout).not.toContain("NEW WORK");
     expect(result.stdout).not.toContain("No new work");
     expect(result.stdout).toContain("Couldn't check for work: every poll failed.");
+  }, 40_000);
+
+  it("reports when checking stopped working, and exits non-zero, after an early success and failures to the deadline", async () => {
+    failListsAfter = 1; // one empty successful poll, then the daemon stops answering
+    const result = await runLoop(4);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).not.toContain("No new work");
+    expect(result.stdout).toMatch(/Checking stopped working at \d{2}:\d{2}:\d{2}Z: every poll since then failed\./);
+  }, 40_000);
+
+  it("stays quiet when a failed poll is followed by a successful one", async () => {
+    failLists = 2; // two failures, then the daemon answers again (with no work)
+    const result = await runLoop(4);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("No new work before the deadline");
+    expect(result.stdout).not.toContain("Checking stopped working");
   }, 40_000);
 
   it("ignores work assigned to another seat and ends at its deadline", async () => {
