@@ -10,6 +10,9 @@ import {
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
 
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+// Codex's own rust-v0.156.1 snapshot at b412ff32c417f855c2b2d1581b77058eed87c84b:
+// https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/tui/src/onboarding/snapshots/codex_tui__onboarding__trust_directory__tests__renders_snapshot_for_git_repo.snap
+const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
 
 describe("default-path consent", () => {
   it.each([CLAUDE_BYPASS_CONSENT, CLAUDE_BYPASS_CONSENT.replace("    No, exit\n  ❯ Yes, I accept", "  ❯ No, exit\n    Yes, I accept")])("recognizes the current consent menu", screen => {
@@ -547,6 +550,32 @@ describe("native resume probe", () => {
       code: "trust_gate",
       detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
     });
+  });
+
+  it.each(["codex", "node", "bash"])("recognizes the Codex 0.156.1 trust snapshot under %s", (paneCommand) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent: currentTrustPrompt }))
+      .toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("does not let a custom model footer hide the current trust prompt", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n  Context 81% left · GPT-6-Astra high`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    "Trust this folder?",
+    "› 1. Trust and continue\n  2. Quit",
+    'The guide asks "Trust this folder?" and offers Trust and continue.',
+  ])("does not classify incomplete or quoted current trust wording: %s", paneContent => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }).code)
+      .not.toBe("trust_gate");
+  });
+
+  it("accepts the current TUI after a dismissed current trust snapshot", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\nOpenAI Codex (v0.156.1)\n› Ask Codex to do anything`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
   });
 
   it("classifies Codex as active when the current TUI appears below an old trust prompt in scrollback", () => {
