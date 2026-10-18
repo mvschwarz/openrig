@@ -120,4 +120,15 @@ describe("OPENRIG_URL with a trailing slash", () => {
     });
     expect(endpoint).toEqual({ baseUrl: "http://127.0.0.1:7556", token: "tok" });
   });
+
+  it.each([
+    [{ OPENRIG_URL: "   ", RIGGED_URL: "http://127.0.0.1:7556" }, "http://127.0.0.1:7556"],
+    [{ OPENRIG_URL: " http://127.0.0.1:7555/ " }, "http://127.0.0.1:7555"],
+  ])("the startup-proof endpoint trims and skips blank URLs as before (%o)", (urls, baseUrl) => {
+    const endpoint = resolveStartupProofEndpoint({
+      env: { ...urls, OPENRIG_ACTIVITY_HOOK_TOKEN: "tok" },
+      readFile: () => { throw new Error("no endpoint file"); },
+    });
+    expect(endpoint).toEqual({ baseUrl, token: "tok" });
+  });
 });

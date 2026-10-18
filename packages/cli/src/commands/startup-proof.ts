@@ -34,7 +34,9 @@ export function resolveStartupProofEndpoint(deps: StartupProofDeps = {}): Endpoi
   const env = deps.env ?? process.env;
   const readFile = deps.readFile ?? ((p: string) => fs.readFileSync(p, "utf8"));
   const home = first(env["OPENRIG_HOME"], env["RIGGED_HOME"]) ?? path.join(os.homedir(), ".openrig");
-  let baseUrl = readOpenRigUrl(env) ?? null;
+  // Startup proof has always trimmed these and skipped blank ones; keep that, then pick and
+  // normalize through the shared reader like every other OPENRIG_URL reader.
+  let baseUrl = readOpenRigUrl({ OPENRIG_URL: env["OPENRIG_URL"]?.trim(), RIGGED_URL: env["RIGGED_URL"]?.trim() }) ?? null;
   let token = first(env["OPENRIG_ACTIVITY_HOOK_TOKEN"], env["RIGGED_ACTIVITY_HOOK_TOKEN"]);
 
   if (!baseUrl || !token) {
