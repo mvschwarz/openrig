@@ -159,6 +159,24 @@ describe("computeTopBurn — tokens/hour + window velocity, facts not judgments"
     expect(w.percentPerHour).toBe(20); // +40% over 2h
   });
 
+  it("a provider window that reset inside the span reports no velocity, never a negative one", () => {
+    store.appendProviderWindowSample(
+      { seatSession: "a@r", window: "five_hour", usedPercent: 90, resetsAt: "2026-08-07T11:00:00.000Z", asOf: "2026-08-07T10:00:00.000Z" },
+      "2026-08-07T10:00:00.000Z",
+    );
+    store.appendProviderWindowSample(
+      { seatSession: "a@r", window: "five_hour", usedPercent: 5, resetsAt: "2026-08-07T16:00:00.000Z", asOf: "2026-08-07T12:00:00.000Z" },
+      "2026-08-07T12:00:00.000Z",
+    );
+    seedContext(store, "a@r", "2026-08-07T10:00:00.000Z", 1000, 0);
+    seedContext(store, "a@r", "2026-08-07T12:00:00.000Z", 2000, 0);
+    const top = computeTopBurn(db, { windowHours: 4, nowIso: NOW });
+    const w = top.ranked[0]!.windows.find((x) => x.window === "five_hour")!;
+    expect(w.usedPercentFirst).toBe(90);
+    expect(w.usedPercentLast).toBe(5);
+    expect(w.percentPerHour).toBeNull(); // was (5 - 90) / 2 = -42.5
+  });
+
   it("topN caps the ranking; the cap is reported so truncation is never silent", () => {
     for (let i = 0; i < 5; i += 1) {
       seedContext(store, `s${i}@r`, "2026-08-07T10:00:00.000Z", 0, 0);

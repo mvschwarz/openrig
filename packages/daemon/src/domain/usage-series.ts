@@ -220,8 +220,11 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
       const first = rows[0]!;
       const last = rows[rows.length - 1]!;
       const wSpan = hoursBetween(first.capturedAt, last.capturedAt);
+      // A falling percentage means the window reset inside the span: the two readings belong
+      // to different windows, so like a token reset it yields no velocity, never a negative one.
       const measurable =
-        rows.length >= 2 && wSpan > 0 && first.windowUsedPercent !== null && last.windowUsedPercent !== null;
+        rows.length >= 2 && wSpan > 0 && first.windowUsedPercent !== null && last.windowUsedPercent !== null
+        && last.windowUsedPercent >= first.windowUsedPercent;
       windows.push({
         window: w,
         usedPercentFirst: first.windowUsedPercent,
