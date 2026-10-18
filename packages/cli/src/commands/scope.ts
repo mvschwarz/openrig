@@ -796,13 +796,8 @@ function resolveMissionCreateRoot(override: string | null | undefined, advisorie
     fs.existsSync(childMissionsRoot) && fs.statSync(childMissionsRoot).isDirectory();
   const directMissionsRoot = path.basename(candidate) === "missions" && !hasChildMissionsRoot;
   const workspaceRoot = directMissionsRoot ? path.dirname(candidate) : candidate;
-  if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
-    throw new ScopeCliError({
-      fact: `Explicit workspace root is not a readable directory: ${workspaceRoot}.`,
-      consequence: "Mission not created.",
-      action: "Create the workspace directory or pass --workspace with an existing workspace root.",
-    });
-  }
+  // A missing workspace is created at the named path by the mission's own mkdir, after rendering; it never falls
+  // back to the configured root. A path that can't be created reports the filesystem's own error there.
 
   // A named workspace uses its project.yaml missions.root, as work positions do; a named missions folder is used as is.
   const missionsRoot = directMissionsRoot ? candidate : readProjectMissionsRoot(workspaceRoot, advisories);

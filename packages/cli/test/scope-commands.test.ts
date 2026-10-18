@@ -91,7 +91,8 @@ interface CaptureResult {
   stderr: string;
 }
 
-async function run(args: string[], workspace: string): Promise<CaptureResult> {
+/** Run `rig scope <args> --workspace <dirname(workspace)>`, or with no --workspace when `workspace` is null. */
+async function run(args: string[], workspace: string | null): Promise<CaptureResult> {
   const stdoutBuf: string[] = [];
   const stderrBuf: string[] = [];
   const origWrite = process.stdout.write.bind(process.stdout);
@@ -108,7 +109,7 @@ async function run(args: string[], workspace: string): Promise<CaptureResult> {
   program.addCommand(scopeCommand());
   program.exitOverride();
   try {
-    await program.parseAsync(["node", "rig", "scope", ...args, "--workspace", path.dirname(workspace)]);
+    await program.parseAsync(["node", "rig", "scope", ...args, ...(workspace === null ? [] : ["--workspace", path.dirname(workspace)])]);
   } catch (err) {
     const msg = (err as Error).message ?? "";
     if (!msg.startsWith("__EXIT__")) {
@@ -805,6 +806,63 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     const listed = await run(["mission", "ls", "--json"], named);
     expect(listed.exitCode).toBe(0);
     expect(listed.stdout).toContain("read-back");
+  });
+
+  for (const [via, named] of [
+    ["--workspace", "project"],
+    ["OPENRIG_WORK_ROOT", "project"],
+    ["--workspace naming its missions folder", "missions"],
+  ] as const) {
+    it(`creates under a missing workspace named by ${via}, reads it back, and leaves the configured root alone`, async () => {
+      const absent = path.join(env.root, "not-yet", via.replace(/\W+/g, "-"));
+      const workspace = path.join(absent, named);
+      const missionsRoot = named === "missions" ? workspace : path.join(workspace, "missions");
+      const configuredRoot = path.join(env.root, "configured", via.replace(/\W+/g, "-"), "missions");
+      fs.mkdirSync(configuredRoot, { recursive: true });
+      const priorSlicesRoot = process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+      const priorWorkRoot = process.env.OPENRIG_WORK_ROOT;
+      process.env.OPENRIG_WORKSPACE_SLICES_ROOT = configuredRoot;
+      const byEnv = via === "OPENRIG_WORK_ROOT";
+      if (byEnv) process.env.OPENRIG_WORK_ROOT = workspace;
+      else delete process.env.OPENRIG_WORK_ROOT;
+      const naming = byEnv ? null : path.join(workspace, "child");
+      try {
+        expect(fs.existsSync(absent)).toBe(false);
+
+        const created = await run(["mission", "create", "first-anywhere", "--json"], naming);
+        expect(created.exitCode).toBe(0);
+        expect(JSON.parse(created.stdout).mission.path).toBe(path.join(missionsRoot, "first-anywhere"));
+        expect(fs.existsSync(path.join(missionsRoot, "first-anywhere", "SPEC.md"))).toBe(true);
+
+        const shown = await run(["mission", "show", "first-anywhere", "--json"], naming);
+        expect(shown.exitCode).toBe(0);
+        expect(JSON.parse(shown.stdout).mission.path).toBe(path.join(missionsRoot, "first-anywhere"));
+        expect(fs.readdirSync(configuredRoot)).toEqual([]);
+      } finally {
+        if (priorSlicesRoot === undefined) delete process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+        else process.env.OPENRIG_WORKSPACE_SLICES_ROOT = priorSlicesRoot;
+        if (priorWorkRoot === undefined) delete process.env.OPENRIG_WORK_ROOT;
+        else process.env.OPENRIG_WORK_ROOT = priorWorkRoot;
+      }
+    });
+  }
+
+  it("reports the filesystem's own error for a workspace path that is a file, writing nowhere else", async () => {
+    const workspace = path.join(env.root, "a-file-not-a-folder");
+    writeFile(workspace, "not a workspace\n");
+    const configuredRoot = path.join(env.root, "configured-for-file", "missions");
+    fs.mkdirSync(configuredRoot, { recursive: true });
+    const priorSlicesRoot = process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+    process.env.OPENRIG_WORKSPACE_SLICES_ROOT = configuredRoot;
+    try {
+      const r = await run(["mission", "create", "nowhere", "--json"], path.join(workspace, "child"));
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stdout + r.stderr).toMatch(/ENOTDIR/);
+      expect(fs.readdirSync(configuredRoot)).toEqual([]);
+    } finally {
+      if (priorSlicesRoot === undefined) delete process.env.OPENRIG_WORKSPACE_SLICES_ROOT;
+      else process.env.OPENRIG_WORKSPACE_SLICES_ROOT = priorSlicesRoot;
+    }
   });
 
   it("keeps the conventional missions root, with an advisory, when missions.root leaves the workspace", async () => {
