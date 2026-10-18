@@ -794,7 +794,7 @@ export function explainNativeRejection(rows: NativeProcessRow[], panePid: number
   const { process } = chain[0]!;
   if (runtime === "claude-code") {
     if (!expectedToken) return { kind: "no_recorded_conversation" };
-    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    const launched = claudeSessionToken(rowArgv(process).slice(1));
     if (launched === expectedToken) return { kind: "passes" };
     if (launched === null) return { kind: "names_no_conversation" };
     if (launched === rotation?.token) return rotationProcess(process, rotation) ? { kind: "passes" } : { kind: "rotation_process_mismatch", conversation: launched };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, observeClaudeDelivery, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, observeClaudeDelivery, observeCodexForkProcess, explainNativeRejection, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const born = "2026-10-08T01:00:00Z";
 function rows(): NativeProcessRow[] {
@@ -10,6 +10,20 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("explains a quoted Windows resume using the same argv as identity verification", async () => {
+    const values = rows();
+    values[1]!.command = '"C:\\program space\\codex.exe" resume "exact-id"';
+    expect((await verify(values))?.process.pid).toBe(101);
+    expect(explainNativeRejection(values, 100, "codex", "exact-id", true)).toEqual({ kind: "passes" });
+  });
+  it("observes a quoted Windows fork parent without treating it as a resume", async () => {
+    const values = rows();
+    values[1]!.command = '"C:\\program space\\codex.exe" -s workspace-write fork "parent-id"';
+    const input = { target: "pane", tmux: { getPanePid: async () => 100 }, listProcesses: () => values, parentToken: "parent-id" };
+    expect((await observeCodexForkProcess(input))?.process.pid).toBe(101);
+    expect(await observeCodexForkProcess({ ...input, parentToken: "other-id" })).toBeNull();
+    expect(await verify(values, "parent-id")).toBeNull();
+  });
   it("keeps the current-main Codex launcher-chain proof with Windows quoting", async () => {
     const values = rows();
     values[1]!.command = '"C:\\program space\\codex.exe" resume "exact-id"';
@@ -32,6 +46,7 @@ describe("Windows process ancestry without fabricated foreground groups", () => 
     Object.assign(values[1]!, { executableName: "claude.exe", executablePath: "C:\\program space\\claude.exe", command: '"C:\\program space\\claude.exe" --session-id exact-id' });
     const input = { target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => "claude" }, listProcesses: () => values, expectedToken: "exact-id", selectedExecutable: "C:\\program space\\claude.exe" };
     expect((await verifyClaudePaneProcess(input))?.process.pid).toBe(101);
+    expect(explainNativeRejection(values, 100, "claude-code", "exact-id", true, undefined, input.selectedExecutable)).toEqual({ kind: "passes" });
     expect(await verifyClaudePaneProcess({ ...input, selectedExecutable: "C:\\other\\claude.exe" })).toBeNull();
     expect(await verifyClaudePaneProcess({ ...input, expectedToken: "wrong" })).toBeNull();
     expect(await verifyClaudePaneProcess({ ...input, tmux: { ...input.tmux, getPaneCommand: async () => "pwsh" } })).toBeNull();
