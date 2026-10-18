@@ -356,7 +356,7 @@ describe("Claude context-window pins", () => {
     ["claude-opus-5-5[1m]", "claude-opus-5-5[1m]"],
   ])("matches %s to %s without proclaiming", async (pinnedModel, model) => {
     const { monitor, sent, recorded } = makeMonitor({
-      listPinnedSeats: () => [{ ...SEAT, runtime: "claude", pinnedModel }],
+      listPinnedSeats: () => [{ ...SEAT, runtime: "claude-code", pinnedModel }],
       readEffectiveModel: () => ({ ok: true, model }),
     });
     expect(await monitor.checkOnce()).toEqual([]);
@@ -366,11 +366,11 @@ describe("Claude context-window pins", () => {
   });
 
   it.each([
-    ["claude", "claude-opus-5-5[1m]", "claude-fable-5-1"],
-    ["claude", "claude-opus-5-5[2m]", "claude-opus-5-5"],
-    ["claude", "claude-opus-5-5[1m]-extra", "claude-opus-5-5"],
-    ["claude", "opus[1m]", "claude-opus-5-5"],
-    ["claude", "fable", "claude-fable-5"],
+    ["claude-code", "claude-opus-5-5[1m]", "claude-fable-5-1"],
+    ["claude-code", "claude-opus-5-5[2m]", "claude-opus-5-5"],
+    ["claude-code", "claude-opus-5-5[1m]-extra", "claude-opus-5-5"],
+    ["claude-code", "opus[1m]", "claude-opus-5-5"],
+    ["claude-code", "fable", "claude-fable-5"],
     ["codex", "claude-opus-5-5[1m]", "claude-opus-5-5"],
     ["pi", "claude-opus-5-5[1m]", "claude-opus-5-5"],
     ["omp", "claude-opus-5-5[1m]", "claude-opus-5-5"],

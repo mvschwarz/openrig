@@ -278,7 +278,7 @@ export class ModelDivergenceMonitor {
  *  pinned/effective strings travel untouched in any proclamation. */
 export function modelsMatch(pinned: string, effective: string, runtime?: string | null): boolean {
   // Claude's [1m] selects the context window, not a different model. Other runtimes keep it literal.
-  const modelId = (model: string) => runtime === "claude" ? model.trim().replace(/\[1m\]$/i, "") : model;
+  const modelId = (model: string) => runtime === "claude-code" ? model.trim().replace(/\[1m\]$/i, "") : model;
   return canonicalModelPin(modelId(pinned)) === modelId(effective).trim().toLowerCase();
 }
 
