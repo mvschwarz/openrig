@@ -54,7 +54,8 @@ Use for any substantive work that must not fall through chat — slice handoffs,
 guard verdicts, QA results, full-tip reviews, multi-item batches. Survives agent
 restarts. Tracked in the daemon SQLite schema. Surfaces in Project / queue views
 + in the destination seat's inbox. Tag with mission / slice / gate / checkpoint
-so future-you (and any peer) can find it.
+so future-you (and any peer) can find it. Give the row a `--summary` (its subject, wherever the row is listed)
+and the `project:`, `mission:` and `slice:` tags when it is project work.
 
 Body discipline: substantive bodies go through **`--body-file <path>`** (or `-` for stdin) — the
 purpose-built, corruption-safe surface (it kills the backtick-shell-corruption class for multi-line
@@ -66,7 +67,8 @@ Example:
 ```bash
 rig queue create \
   --destination dev-reviewer@example-project \
-  --tags "mission:data-import,slice:import-report" \
+  --summary "Review the import report: it changes how rows are deduplicated" \
+  --tags "project:example-project,mission:data-import,slice:import-report" \
   --body-file /tmp/import-report-handoff.md
 ```
 
@@ -83,7 +85,8 @@ Example:
 ```bash
 rig queue handoff <qitem-id> \
   --to dev-reviewer@example-project \
-  --tags "mission:data-import,slice:import-report" \
+  --summary "Review the import report: it changes how rows are deduplicated" \
+  --tags "project:example-project,mission:data-import,slice:import-report" \
   --body-file /tmp/import-report-handoff.md
 ```
 
@@ -989,7 +992,8 @@ Walk a seat *through* a pack: each piece is sent into the pane, spaced by `--pac
 - **The orchestrator habit — assign work *with* its context attached:**
   ```bash
   rig context compose --out packs/qitem-brief --from <brief-file> <proof-file>
-  rig queue create --destination dev-driver@build --body-context packs/qitem-brief --summary "…"
+  rig queue create --destination dev-driver@build --body-context packs/qitem-brief \
+    --summary "…" --tags "project:<id>,mission:<id>,slice:<id>"
   ```
   Replace `<brief-file>` and `<proof-file>` with your existing local files. The curated context rides the durable handoff, survives compaction, and is auditable.
 

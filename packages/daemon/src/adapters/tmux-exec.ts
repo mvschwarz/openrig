@@ -1,4 +1,4 @@
-import { exec, execFile } from "node:child_process";
+import { exec, execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -103,3 +103,29 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
     throw withExecOutput(err);
   }
 };
+
+/**
+ * Starts a long-lived tmux client (the daemon's control client, tmux-control.ts) as execArgvCommand starts tmux: the
+ * file resolved on PATH, else, or when that file could not be started, `/bin/sh` once. Resolves once the process runs,
+ * and rejects with the spawn error when even the shell could not start. POSIX only, as control mode is.
+ */
+export async function spawnTmuxClient(args: string[]): Promise<ChildProcessWithoutNullStreams> {
+  const opts = { stdio: "pipe" as const, windowsHide: true };
+  const started = (file: string | null) => new Promise<ChildProcessWithoutNullStreams>((resolve, reject) => {
+    const child = file ? spawn(file, args, opts) : spawn("/bin/sh", ["-c", 'exec "$0" "$@"', "tmux", ...args], opts);
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.off("error", reject);
+      resolve(child);
+    });
+  });
+  const file = resolvedOnPath("tmux");
+  try {
+    return await started(file);
+  } catch (err) {
+    if (!file || !isSpawnError(err)) throw err;
+    // Nothing ran: the next start looks tmux up again.
+    resolved = undefined;
+    return started(null);
+  }
+}

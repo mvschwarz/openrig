@@ -527,6 +527,7 @@ export class WatchdogPolicyEngine {
     if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
+    const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
@@ -560,7 +561,7 @@ export class WatchdogPolicyEngine {
           : delivery.status === "retained" ? { ...(outcome.notes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : outcome.notes ?? null,
     });
     if (!isContextUsageThreshold) {
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
     }
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
     // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
@@ -578,7 +579,14 @@ export class WatchdogPolicyEngine {
       targetSession: outcome.target.session,
       deliveryStatus: delivery.status,
     });
-    this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
+    // The history above audits the actual attempt. A newer park/blocker change
+    // must not receive its receipt or be backed off as though we sent for it.
+    const current = this.jobsRepo.getByIdOrThrow(job.jobId);
+    if (current.state === "active" && current.specYaml === deliverySchedule.specYaml
+      && current.intervalSeconds === deliverySchedule.intervalSeconds
+      && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
+      this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
+    }
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,

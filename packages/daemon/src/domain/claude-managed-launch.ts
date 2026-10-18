@@ -4,6 +4,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
+import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
@@ -35,7 +36,9 @@ export class ClaudeManagedLaunch {
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly rendererEnv: Readonly<NodeJS.ProcessEnv>,
     /** Reads one variable from a seat's tmux session environment (the daemon's tmux adapter). */
-    private readonly readSessionEnv?: (session: string, key: string) => Promise<string | undefined>) {}
+    private readonly readSessionEnv?: (session: string, key: string) => Promise<string | undefined>,
+    /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
+    private readonly pluginsDir?: string) {}
 
   /** Names the seat's rig and member declare in `env:`, plus any one-off `rig up --env` names the
    *  launch recorded on the tmux session. Their values are already in the pane shell, which is
@@ -47,6 +50,9 @@ export class ClaudeManagedLaunch {
         FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?`).get(nodeId) as { member: string | null; rig: string | null } | undefined;
       for (const json of [row?.rig, row?.member]) for (const key of Object.keys(parseStoredSeatEnv(json) ?? {})) keys.add(key);
     } catch { /* A database from before seat env has no columns to read. */ }
+    // A seat that selected the shipped openrig-core plugin has the plugin variable in its pane (the launch, or a
+    // handover's respawned pane, put it there). The session's own name list can predate that, so name it here too.
+    if (seatCorePluginDir({ id: nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir)) keys.add(CLAUDE_PLUGIN_DIRS_ENV);
     if (session && this.readSessionEnv) {
       // A one-off name is a convenience on top of the declared ones. If tmux can't be read, the
       // launch proceeds as it would for a seat with no one-off names.
@@ -167,15 +173,22 @@ export class ClaudeManagedLaunch {
     // the session never reaches a successor pane that was not given it. Set-but-empty stays empty.
     const seatForwarded = seatKeys.filter(key => !inherited.includes(key) && !(key in identity) && !(key in publicEnv))
       .map(key => `\${${key}+"${key}=$${key}"}`);
+    // A seat that loads the openrig-core plugin has its launch project in its pane (OPENRIG_SEAT_PROJECT_DIR): the plugin's
+    // hooks use it to tell the seat from a Claude started elsewhere inside it. Forwarded by name; the pane supplies the value.
+    const loadsCorePlugin = seatCorePluginDir({ id: target.nodeId, runtime: "claude-code" }, this.db, undefined, this.pluginsDir) !== undefined;
+    const projectForwarded = loadsCorePlugin ? [`\${${SEAT_PROJECT_DIR_ENV}+"${SEAT_PROJECT_DIR_ENV}=$${SEAT_PROJECT_DIR_ENV}"}`] : [];
     // Expand in the target pane shell, whose terminal can differ from the daemon.
-    // Empty and absent values remain absent after env -i.
-    const terminal = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+    // Empty and absent values remain absent after env -i. TERM_PROGRAM is how Claude tells it runs
+    // inside tmux; without it Claude never asks tmux for extended keys, and Shift+Enter reaches it
+    // as a plain Enter. TMUX is left out on purpose: a bare `tmux` follows $TMUX ahead of
+    // TMUX_TMPDIR, so tools the seat runs (and any daemon it starts) would follow the seat's own tmux server.
+    const terminal = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
       "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]
       .map(key => `\${${key}:+"${key}=$${key}"}`);
     return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       const launch = Object.entries(launchEnv).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...seatForwarded, ...terminal, ...launch, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
+      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...seatForwarded, ...projectForwarded, ...terminal, ...launch, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });
   }
 }

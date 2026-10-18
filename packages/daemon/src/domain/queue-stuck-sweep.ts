@@ -25,7 +25,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import type Database from "better-sqlite3";
-import { deriveCrossHostSuccessorId, matchesRecordedHandoffTarget, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -220,27 +220,6 @@ function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) 
     }
     return known !== null && known.has(hostId);
   };
-}
-
-function hasSeatTargetSuccessor(db: Database.Database, sourceQitemId: string, target: string): boolean {
-  try {
-    const successor = db
-      .prepare(
-        `SELECT 1 FROM queue_items s
-          WHERE (s.destination_session = ? OR s.qitem_id = ?) AND s.qitem_id != ?
-            AND (s.handed_off_from = ? OR (
-              s.chain_of_record IS NOT NULL
-              AND json_valid(s.chain_of_record)
-              AND EXISTS (
-                SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
-              )
-            )) LIMIT 1`,
-      )
-      .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
-    return Boolean(successor);
-  } catch {
-    return false;
-  }
 }
 
 function hasLiveLadder(db: Database.Database, qitemId: string): boolean {
@@ -560,9 +539,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
               successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
             );
           }
+          if (target === row.qitemId) return true;
           return !deps.queueRepo.getById(target);
         }
-        return !hasSeatTargetSuccessor(deps.db, row.qitemId, target);
+        try {
+          return !hasLinkedSuccessor(deps.db, row.qitemId, target);
+        } catch {
+          return true;
+        }
       });
       if (verificationTargets.length === 0) continue;
       candidates.push({

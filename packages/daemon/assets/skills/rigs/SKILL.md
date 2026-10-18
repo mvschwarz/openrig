@@ -24,8 +24,13 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Check first:** `rig --version`. If it prints a version, go to step 2.
 - **What it needs:** macOS or Linux, Node.js 22 or 24, tmux, and Claude Code or Codex signed in. Check only what's
   missing: `node --version`, `tmux -V`, `claude auth status` or `codex login status`.
-- **Install:** `npm install -g @openrig/cli`, then `rig preflight` (Node, tmux, the daemon port and state folders)
-  and `rig doctor`.
+- **A check that needs the network** (`gh auth status`, a registry or other fetch) can fail falsely in a sandbox without
+  network access, such as Codex's default one. Re-run that one command with network access before you tell the person
+  to sign in again or fix anything.
+- **Install:** `npm install -g @openrig/cli`, then `rig setup --providers codex` (or `claude`, or `both`: the harness
+  the person uses). Setup checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen
+  harness (with npm) if either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`),
+  and adds an OpenRig block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
@@ -118,7 +123,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   actually did (the branch, commit, review or PR text), not just that you sent it.
 - **Give the team more work:** write the goal to a file: what to change, in which repository and branch, what done
   looks like, and that the result comes back to you (the branch or commit, the review, any PR text). Then
-  `rig queue create --source <your name> --destination <seat>@<rig> --body-file <file>`, and tell that agent with
+  `rig queue create --source <your name> --destination <seat>@<rig> --summary "<the goal in a sentence>" --body-file <file>`, and tell that agent with
   `rig send <seat>@<rig> "task <id> is yours"`. A message informs, and a queue task is the work someone owns.
   `--source` names you when this session hasn't joined the team.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.

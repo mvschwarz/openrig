@@ -2313,4 +2313,34 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     const summaryOpt = createCmd.options.find((o) => o.long === "--summary")!;
     expect(summaryOpt.description).toMatch(TEACHES_WHERE);
   });
+
+  // The summary is the row's subject on every surface that lists it, not only the needs-you
+  // view; an agent that reads "needs-you" alone leaves it off a row bound for an agent.
+  const SUBJECT_SURFACES = [/\bRECENT\b/, /\bstory\b/i, /needs-you view/];
+
+  it.each(["create", "handoff", "handoff-and-complete"])(
+    "%s --summary help names every surface that shows the row's subject",
+    (sub) => {
+      const { deps } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      const queueCmd = program.commands.find((c) => c.name() === "queue")!;
+      const cmd = queueCmd.commands.find((c) => c.name() === sub)!;
+      const summaryOpt = cmd.options.find((o) => o.long === "--summary")!;
+      for (const surface of SUBJECT_SURFACES) expect(summaryOpt.description).toMatch(surface);
+    },
+  );
+
+  it("the missing-summary warning names every surface that shows the row's subject", async () => {
+    const { deps } = makeDeps({
+      routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q1", state: "pending" } } },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "a@rig", "--destination", "b@rig", "--body", "x", "--json",
+    ]);
+    const warn = stderrOut.join("");
+    for (const surface of SUBJECT_SURFACES) expect(warn).toMatch(surface);
+  });
 });

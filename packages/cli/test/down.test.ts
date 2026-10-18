@@ -215,6 +215,48 @@ describe("Down CLI", () => {
     expect(exitCode).toBeUndefined(); // 0
   });
 
+  it.each([
+    ["workshop", "'workshop'"],
+    ["my-team", "'my-team'"],
+    ["team's work; draft", "'team'\\''s work; draft'"],
+  ])("prints an explicit existing-rig restore command for %s after a snapshot-backed stop", async (rigName, quotedName) => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", rigName, isUniqueName: true, sessionsKilled: 2,
+        snapshotId: "snap-1", deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs).toContain("Snapshot: snap-1");
+    expect(logs.filter(line => line.startsWith("To restore:"))).toEqual([
+      `To restore: rig up ${quotedName} --existing`,
+    ]);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it.each([
+    { rigName: "workshop", isUniqueName: false },
+    {},
+  ])("keeps the snapshot-ID restore command when the name is not usable: %j", async (nameFields) => {
+    responseOverride = {
+      status: 200,
+      body: {
+        rigId: "rig-1", ...nameFields, sessionsKilled: 2,
+        snapshotId: "snap-1", deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],
+      },
+    };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "down", "rig-1"]);
+    });
+    expect(logs.filter(line => line.startsWith("To restore:"))).toEqual([
+      "To restore: rig restore snap-1 --rig rig-1",
+    ]);
+    expect(exitCode).toBeUndefined();
+  });
+
   // T2a: down alreadyStopped (no delete) -> exit 1
   it("down alreadyStopped with no delete exits 1", async () => {
     responseOverride = {

@@ -562,6 +562,8 @@ export class CodexInPlaceRestart {
         db: this.deps.db, sessionRegistry: this.deps.sessionRegistry, tmux: this.deps.tmux,
         nodeId: target.seat.nodeId, sessionName: target.sessionName, runtime: "codex",
         expectedResumeToken: report.conversationId, requireExactResumeLineage: true, listProcesses: this.listProcesses,
+        // The check repeats up to 31 times; only the final attempt, whose text the report shows, pays the extra read.
+        explainFailure: attempt >= polls,
       });
       const now = await this.observeCodex(report.pane, report.conversationId);
       if (!identity.ok || !now) {

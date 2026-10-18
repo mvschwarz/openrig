@@ -390,7 +390,7 @@ function queueRows(snap: FleetSnapshot): FleetSnapshot["attention"] {
 function recentWorkText(snap: FleetSnapshot, row: RecentTransitionSnap): string {
   const qitem = queueRows(snap).find((candidate) => candidate.qitemId === row.qitemId);
   const work = qitem?.summary?.trim() || qitem?.body.split("\n").find((line) => line.trim())?.trim();
-  return row.summary?.trim() || work || "no work served";
+  return row.summary?.trim() || row.bodyPreview?.trim() || work || "no work served";
 }
 
 function agentDrillForSession(snap: FleetSnapshot, session: string): Action | undefined {

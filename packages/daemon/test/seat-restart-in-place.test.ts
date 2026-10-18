@@ -756,7 +756,8 @@ describe("post-relaunch identity observation window", () => {
     expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "no native evidence" }))
       .toMatchObject({ outcome: "native_unknown" });
     expect(w.replacementYields).toEqual(Array(30).fill(100));
-    expect(w.replacementReads).toBe(62);
+    // The final failed attempt reads the process table once more to name the failing check; earlier attempts do not.
+    expect(w.replacementReads).toBe(63);
     expect(verdicts(w).map(row => row.verdict)).toEqual(Array(31).fill("mismatch"));
     expect(w.events()).toHaveLength(2);
     expect(w.builds).toHaveLength(1);
@@ -775,9 +776,16 @@ describe("post-relaunch identity observation window", () => {
     if (kind === "conflicting native") rows.push(codexRow(401, 351, `resume ${TOKEN}`, LATER, 350));
     if (kind === "wrong OS executable") rows[3] = { ...rows[3]!, executableName: "node" };
     const w = world({ replacementRows: () => rows });
-    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "invalid evidence" })).toMatchObject({ outcome: "native_unknown" });
+    const report = await w.service.restartInPlace({ seatRef: SEAT, reason: "invalid evidence" });
+    expect(report).toMatchObject({ outcome: "native_unknown" });
     expect(w.replacementYields).toEqual([1, 1]);
-    expect(w.replacementReads).toBe(6);
+    // The final failed attempt reads the process table once more to name the failing check; earlier attempts do not.
+    // The wrong-token case says the conversation the running Codex resumed does not match the record, without printing it.
+    expect(w.replacementReads).toBe(7);
+    if (kind === "wrong token") {
+      expect(JSON.stringify(report)).toContain("does not match the seat's record");
+      expect(JSON.stringify(report)).not.toContain("other-th");
+    }
     expect(w.launches).toHaveLength(1);
   });
 
@@ -831,12 +839,13 @@ describe("post-relaunch identity observation window", () => {
     expect(w.launches).toHaveLength(1);
   });
 
-  it.each([[5, "restarted_account_unverified", 7], [7, "native_unknown", 6]] as const)(
+  it.each([[5, "restarted_account_unverified", 7], [7, "native_unknown", 7]] as const)(
     "native appears at OS read %i: respects the last allowed attempt", async (appearAt, outcome, reads) => {
       const rows = replacement("shell_backed");
       const w = world({ replacementRows: read => read < appearAt ? rows.slice(0, -1) : rows });
       expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "budget boundary" })).toMatchObject({ outcome });
       expect(w.replacementYields).toEqual([1, 1]);
+      // The 7 for read 7 includes the one extra read on the final failed attempt (6 before it).
       expect(w.replacementReads).toBe(reads);
     });
 

@@ -165,11 +165,39 @@ if (process.argv.includes('--help')) {
     const f = fixture();
     const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
     const command = prepared.command([]);
-    for (const key of ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+    for (const key of ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
       "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]) {
       expect(command).toContain(`\${${key}:+"${key}=$${key}"}`);
     }
     expect(command).not.toContain("UNAPPROVED_RENDERER_VALUE");
+    expect(command).not.toMatch(/TMUX/);
+  });
+  it.each([
+    ["present", { TERM_PROGRAM: "tmux", TERM_PROGRAM_VERSION: "3.7c" }],
+    ["absent", {}],
+    ["empty", { TERM_PROGRAM: "", TERM_PROGRAM_VERSION: "" }],
+  ])("hands Claude the pane's TERM_PROGRAM when it is %s, so Claude asks tmux for extended keys", async (label, programEnv) => {
+    const f = fixture();
+    // Claude requests extended keys (Shift+Enter) only when it can tell it runs inside tmux.
+    writeFileSync(f.executable, `#!${process.execPath}\n
+if (process.argv.includes('--help')) console.log(${JSON.stringify(help)});
+else console.log(JSON.stringify(Object.fromEntries(['TMUX', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'TMUX_PANE']
+  .filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]))));
+`);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(execFile).mockImplementation(native.execFile);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const command = prepared.command(["--permission-mode", "auto"]);
+    // TMUX is set in every case: it must never reach Claude, because a bare tmux follows it ahead of TMUX_TMPDIR.
+    const paneEnv: Record<string, string> = { ...f.env, TMUX: "/tmp/tmux-1000/default,123,0", TMUX_PANE: "%1", ...programEnv };
+    // Some shells set these themselves; model the absent case before the command expands them.
+    const paneCommand = label === "absent" ? `unset TMUX TERM_PROGRAM TERM_PROGRAM_VERSION; ${command}` : command;
+    const stdout = await new Promise<string>((resolve, reject) => {
+      native.execFile("/bin/sh", ["-c", paneCommand], { encoding: "utf8", timeout: 3000, env: paneEnv },
+        (error, out) => error ? reject(error) : resolve(out));
+    });
+    // An empty or absent variable stays absent; TMUX and TMUX_PANE never arrive.
+    expect(JSON.parse(stdout)).toEqual(label === "present" ? programEnv : {});
   });
   it("detects unset config becoming explicit even when the storage directory stays the same", async () => {
     const f = fixture(); delete f.env.CLAUDE_CONFIG_DIR;

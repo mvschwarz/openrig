@@ -1,8 +1,10 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
-import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
+import { agentAppPaneActivity, classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
+import { agentAppOf } from "./built-in-runtimes.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
+import { sessionAgentAppSelect } from "./session-registry.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -89,7 +91,7 @@ export class SeatStructuralActivityService {
    *  null or failed capture INVALIDATES the prior row (never leaves a stale positive verdict) and
    *  returns null (MUST-FIX 1). `prefetched` (#308) is the sweep's batched capture: a session it holds (null = gone or
    *  empty) is used as is; one it lacks is captured here, per seat. */
-  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null): Promise<StructuralObservation | null> {
+  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, agentApp?: string | null): Promise<StructuralObservation | null> {
     let content: string | null;
     let observedAt: Date | null = null;
     if (prefetched?.has(sessionName)) {
@@ -108,7 +110,7 @@ export class SeatStructuralActivityService {
       this.latestBySession.delete(sessionName);
       return null;
     }
-    const c = classifyPaneActivity(content);
+    const c = agentAppPaneActivity(classifyPaneActivity(content), agentApp);
     const at = observedAt ?? this.now();
     const obs: StructuralObservation = {
       state: c.state,
@@ -139,7 +141,7 @@ export class SeatStructuralActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name, n.runtime as runtime
+        SELECT s.session_name as session_name, n.runtime as runtime, ${sessionAgentAppSelect(db)} as agent_app
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -147,9 +149,10 @@ export class SeatStructuralActivityService {
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
           AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-      `).all() as Array<{ session_name: string; runtime: string | null }>;
+      `).all() as Array<{ session_name: string; runtime: string | null; agent_app: string | null }>;
       const live = new Set(rows.map((r) => r.session_name));
       const runtimeBySession = new Map(rows.map((r) => [r.session_name, r.runtime] as const));
+      const agentAppBySession = new Map(rows.map((r) => [r.session_name, agentAppOf(r.agent_app, r.runtime)] as const));
       for (const s of Array.from(this.latestBySession.keys())) {
         if (!live.has(s)) this.latestBySession.delete(s); // release memory + never serve a stale read
       }
@@ -182,7 +185,7 @@ export class SeatStructuralActivityService {
         : null;
       await Promise.all(due.map(async (r) => {
         try {
-          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null);
+          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null, agentAppBySession.get(r.session_name));
           const seen = activity?.get(r.session_name);
           if (obs && seen !== undefined) this.capturedActivity.set(r.session_name, { activity: seen.activity, size: seen.size, startSec, fullAt: sweepAt.getTime() });
           else this.capturedActivity.delete(r.session_name);

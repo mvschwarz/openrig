@@ -487,6 +487,68 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   return observation;
 }
 
+/** Whether any process in the pane's subtree (the pane's own process included) has a Claude executable anywhere in its
+ *  argv: the recognizer `findExactNativeResumeProcess` (via `commandUsesExpectedToken`) starts from. A Claude run as
+ *  `node …/bin/claude`, or in the background, counts. */
+export function subtreeNamesClaudeExecutable(rows: NativeProcessRow[], panePid: number): boolean {
+  const byParent = new Map<number, NativeProcessRow[]>();
+  for (const row of rows) byParent.set(row.ppid, [...(byParent.get(row.ppid) ?? []), row]);
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const queue = [panePid];
+  const seen = new Set<number>();
+  while (queue.length > 0) {
+    const pid = queue.shift()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const row = byPid.get(pid);
+    if (row && tokens(row.command).some((token) => claudeExecutable(token))) return true;
+    for (const child of byParent.get(pid) ?? []) queue.push(child.pid);
+  }
+  return false;
+}
+
+/** Why `selectNativeProcess` rejects a snapshot, in the same order it checks. Used only to word a failed check;
+ *  a test pins `kind: "passes"` to `selectNativeProcess` returning a process, so the two cannot drift apart. */
+export type NativeRejection =
+  | { kind: "passes" }
+  | { kind: "no_single_process" }
+  | { kind: "no_recorded_conversation" }
+  | { kind: "names_no_conversation" }
+  | { kind: "not_a_resume" }
+  | { kind: "other_conversation"; conversation: string }
+  | { kind: "conflicting_conversations" }
+  | { kind: "rotation_process_mismatch"; conversation: string };
+
+export function explainNativeRejection(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime,
+  expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string): NativeRejection {
+  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
+  const chain = runtime === "codex" ? launcherChain(matches, rows) : matches;
+  if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return { kind: "no_single_process" };
+  const { process } = chain[0]!;
+  if (runtime === "claude-code") {
+    if (!expectedToken) return { kind: "no_recorded_conversation" };
+    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    if (launched === expectedToken) return { kind: "passes" };
+    if (launched === null) return { kind: "names_no_conversation" };
+    if (launched === rotation?.token) return rotationProcess(process, rotation) ? { kind: "passes" } : { kind: "rotation_process_mismatch", conversation: launched };
+    return { kind: "other_conversation", conversation: launched };
+  }
+  const identities = chain.map((link) => codexResumeToken(tokens(link.process.command).slice(1)));
+  if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return { kind: "conflicting_conversations" };
+  if (requireResume) {
+    if (!expectedToken) return { kind: "no_recorded_conversation" };
+    if (identities[0] === undefined) return { kind: "not_a_resume" };
+    if (identities[0] === null) return { kind: "names_no_conversation" };
+    if (identities[0] !== expectedToken) return { kind: "other_conversation", conversation: identities[0] };
+  }
+  if (expectedToken !== undefined) {
+    const named = identities.find((value) => value !== undefined && (!expectedToken || value !== expectedToken));
+    if (named === null) return { kind: "names_no_conversation" };
+    if (typeof named === "string") return { kind: "other_conversation", conversation: named };
+  }
+  return { kind: "passes" };
+}
+
 async function observeNativePaneProcess(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };

@@ -446,6 +446,28 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
     expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
   });
+  it("shows a quiet community agent app as unknown, never idle, and leaves built-in rows as they were", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const quiet = { startupStatus: "ready", sessionStatus: "running", terminalActive: false, agentActivity: { state: "unknown" },
+      activityState: { activity: "unknown", display: "unknown", needsInput: { count: 0, reason: null }, decidedBy: null } };
+    const nodes = [
+      { ...base, ...quiet, logicalId: "dev.app-quiet", runtime: "synth-app", agentApp: { app: "synth-app" } },
+      { ...base, ...quiet, logicalId: "dev.app-moving", runtime: "synth-app", agentApp: { app: "synth-app" }, terminalActive: true },
+      { ...base, ...quiet, logicalId: "dev.app-prompt", runtime: "synth-app", agentApp: { app: "synth-app" }, agentActivity: { state: "needs_input" } },
+      { ...base, ...quiet, logicalId: "dev.pi-quiet", runtime: "pi" },
+      { ...base, ...quiet, logicalId: "dev.claude-quiet", runtime: "claude-code" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    expect(statuses).toEqual({
+      "dev.app-quiet": "unknown",
+      "dev.app-moving": "active",
+      "dev.app-prompt": "needs_input",
+      "dev.pi-quiet": "idle",
+      "dev.claude-quiet": "idle",
+    });
+  });
+
   it("shows confirmed missing sessions as detached unless lifecycle still requires attention", async () => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
     const nodes = [

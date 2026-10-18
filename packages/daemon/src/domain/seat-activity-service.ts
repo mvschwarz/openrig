@@ -11,7 +11,8 @@ import type {
   RungHealthEvent,
   RungTrust,
 } from "./activity-taxonomy.js";
-import { EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
+import { AGENT_APP_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
+import { sessionAgentAppSelect } from "./session-registry.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -235,14 +236,14 @@ export class SeatActivityService {
     try {
       const rows = db.prepare(`
         SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
-          COALESCE(b.attachment_type, 'tmux') as attachment_type
+          COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionAgentAppSelect(db)} as agent_app
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; agent_app: string | null }>;
       const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
       const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
       for (const pane of this.latestByPaneId.keys()) {
@@ -264,11 +265,11 @@ export class SeatActivityService {
       // touching the launch machinery.
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        if (!known || known.inventory === null || known.sessionName !== r.session_name) {
-          this.declareRungInventory(
-            { seatNodeId: r.node_id, sessionName: r.session_name },
-            runtimeRungInventory(r.runtime),
-          );
+        const inventory = runtimeRungInventory(r.runtime, r.agent_app);
+        // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
+        const agentAppChanged = !!known && (known.inventory === AGENT_APP_RUNG_INVENTORY) !== (inventory === AGENT_APP_RUNG_INVENTORY);
+        if (!known || known.inventory === null || known.sessionName !== r.session_name || agentAppChanged) {
+          this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
         }
       }
 
@@ -554,9 +555,12 @@ export class SeatActivityService {
     const nowMs = this.now().getTime();
     for (const rung of EVIDENCE_RUNG_RANK) {
       if (rung === opts.excludeRung) continue;
-      if (this.rungTrust(seat, rung) !== "authoritative") continue;
+      const trust = this.rungTrust(seat, rung);
+      if (trust !== "authoritative" && trust !== "positive-only") continue;
       const evd = this.latestByRung(seat, rung, "activity");
       if (!evd || evd.activity === undefined) continue;
+      // A positive-only rung answers only "working"; its silence leaves the state to the rungs below, or unknown.
+      if (trust === "positive-only" && evd.activity !== "working") continue;
       if (rung === "lifecycle-hooks" && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
       return evd;
     }

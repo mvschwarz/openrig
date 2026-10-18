@@ -136,6 +136,14 @@ Legacy `README.md`, `IMPLEMENTATION-PRD.md`, and pre-convention trees remain
 readable indefinitely. New scaffolds do not create or mirror them, and repair
 is additive: it never deletes, renames, or rewrites legacy bytes.
 
+A slice's frontmatter carries `stage:` (`wip`, `provisional`, `established`,
+`canonical`, or the exits `superseded` and `retired`) and `verified:`
+(`<date> against <source>`). Set them with `rig scope slice stage <slice> <stage>`
+and `rig scope slice verified <slice> --against <source>`; no approval stamp
+changes either. `rig scope` reads an `established` or `canonical` slice whose
+`verified:` is missing, has no source, names a tool-scaffolded placeholder, or is
+older than 90 days as `provisional`.
+
 When the owning scope selects `proofPolicy.judges`, use `rig proof judge` to
 record an attributed accept, reject or withdraw decision on a contract item,
 and `rig proof show` to read derived readiness up through slice, mission and
