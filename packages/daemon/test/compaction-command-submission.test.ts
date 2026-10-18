@@ -17,6 +17,7 @@ const homes: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const h of homes.splice(0)) rmSync(h, {recursive: true, force: true}); });
 
 function fixture(compactInstruction = '') {
+  const policyRef = {compactInstruction};
   const home = mkdtempSync(join(tmpdir(), 'compaction-command-')); homes.push(home);
   let clock = 10_000, activity = 'idle';
   let onSleep: (() => void) | undefined;
@@ -24,25 +25,29 @@ function fixture(compactInstruction = '') {
   const db = {prepare: () => ({get: () => undefined, all: () => []})} as any;
   // Every input event in order: a text write with its options, or a key.
   const events: Array<{kind: 'text'; text: string; bracketed: boolean} | {kind: 'keys'; keys: string[]}> = [];
-  const policy = {enabled: true, thresholdPercent: 80, preCompactInstruction: 'Write a restore map.', compactInstruction, messageInline: '', messageFilePath: '', postRestoreAuditInstruction: ''};
+  const policy = {enabled: true, thresholdPercent: 80, preCompactInstruction: 'Write a restore map.', get compactInstruction() { return policyRef.compactInstruction; }, messageInline: '', messageFilePath: '', postRestoreAuditInstruction: ''};
   const tmux = {
     probeSession: vi.fn(async () => ({state: 'present'})),
     sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return {ok: true}; }),
     sendKeys: vi.fn(async (_: string, keys: string[]) => { events.push({kind: 'keys', keys}); return {ok: true}; }),
   };
   Object.assign(tmux, {deliveryGuard: new SeatDeliveryGuard(db, () => ({nodeId: 'node-one', session: seat, pane: '%1', occupant: generation}))});
-  const transport = new SessionTransport({db, rigRepo: {} as any, sessionRegistry: {} as any, tmuxAdapter: tmux as any, sleep: async (ms) => { clock += ms; }, now: () => new Date(clock), waitForIdlePollMs: 5});
+  // The transport's idle wait runs on real time (Date.now deadlines), so its sleep is a real timer and never moves
+  // the enforcer's clock: a fast machine must not spin the fake clock past the preparation deadline.
+  const transport = new SessionTransport({db, rigRepo: {} as any, sessionRegistry: {} as any, tmuxAdapter: tmux as any, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => new Date(clock), waitForIdlePollMs: 5});
   (transport as any).getSessionMeta = () => ({runtime: 'claude-code', attachmentType: 'tmux', nodeId: 'node-one', pane: '%1', occupant: generation, resumeToken: 'native-one'});
   (transport as any).claudeDeliveryObservation = async () => ({state: 'unknown', detail: 'injected process observation'});
   (transport as any).classifySendReadiness = async () => ({state: activity, reason: 'fixture', evidenceSource: 'fixture'});
   (transport as any).diagnoseProducerLink = async () => 'fixture';
-  const e = new ClaudeCompactionEnforcer({resolveClaudeCompactionPolicy: () => policy} as any, transport, {openrigHome: home, manualPrepWaitMs: 1000, now: () => clock, sleep: async (ms) => { clock += ms; onSleep?.(); }, resolveOccupantGeneration: () => generation});
+  const e = new ClaudeCompactionEnforcer({resolveClaudeCompactionPolicy: () => policy} as any, transport, {openrigHome: home, manualPrepWaitMs: 1000, compactSendIdleWaitMs: 20, now: () => clock, sleep: async (ms) => { clock += ms; onSleep?.(); }, resolveOccupantGeneration: () => generation});
   const stageMap = () => {
     const a = e.getPreparationState(seat)!; mkdirSync(dirname(a.mapPath), {recursive: true});
     writeFileSync(a.mapPath + '.tmp', `# Restore map\nCurrent work and next step.\n${a.marker}\n`);
   };
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
-  return {e, transport, events, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, activity: (s: string) => { activity = s; }, advance: (ms: number) => { clock += ms; }};
+  const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
+  const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
+  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, activity: (s: string) => { activity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -98,8 +103,14 @@ it('automatic: a map that is ready while the seat is mid-turn waits for idle ins
   await f.e.maybeAutoCompact(input);
   f.stageMap();
   f.activity('running');
+  const real = f.transport.send.bind(f.transport);
+  const results: unknown[] = [];
+  vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => { const r = await real(s, text, opts); if (text.startsWith('/compact')) results.push(r); return r; });
   const busy = await f.e.maybeAutoCompact(input);
-  expect(busy.triggered).toBe(false);
+  // The real transport's answer for a busy seat, as the enforcer classified it.
+  console.log('transport result for /compact at a busy seat:', JSON.stringify(results[0]));
+  expect(results[0]).toMatchObject({ok: false, sent: false, waitedMs: expect.any(Number)});
+  expect(busy).toEqual({triggered: false, reason: 'waiting_for_idle'});
   expect(f.compactIndex()).toBe(-1);
   // Still armed: not stopped, nothing sent.
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', compact: 'not_sent'});
@@ -151,4 +162,86 @@ it('route: --state says "submitted, unconfirmed" for the command and never that 
   expect(body.preparation).toMatchObject({compact: 'submitted_unconfirmed', delivery: 'delivered'});
   expect(body.compact).toMatch(/^submitted, unconfirmed: /);
   expect(body.compact).not.toMatch(/\bran\b|compacted|delivered/);
+});
+
+it('automatic: any send that reports nothing sent after an idle wait keeps the attempt armed, whatever its reason string', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  f.stageMap();
+  const real = f.transport.send.bind(f.transport);
+  const notIdle = {ok: false, sessionName: seat, sent: false, reason: 'a_future_not_idle_reason', error: 'busy', activity: {state: 'running', reason: 'fixture', evidenceSource: 'fixture'}, waitedMs: 20, attempts: 3};
+  const spy = vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => text.startsWith('/compact') ? notIdle as any : real(s, text, opts));
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'waiting_for_idle'});
+  console.log('not-idle send result as classified:', JSON.stringify(notIdle));
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', compact: 'not_sent'});
+  spy.mockRestore();
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+});
+
+async function drainToRestore(f: ReturnType<typeof fixture>): Promise<string | undefined> {
+  for (let i = 0; i < 6; i++) {
+    await f.e.maybeAutoCompact({...input, usedPercentage: 10});
+    const restore = f.texts().find((t) => t.startsWith('Please respond to this normal user message now by restoring'));
+    if (restore) return restore;
+  }
+  return undefined;
+}
+
+it('a map path too long for the command still reaches the restore request, exactly', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  const attempt = f.e.getPreparationState(seat)!;
+  // Simulate a deep workspace: the attempt's map path is longer than the command budget allows.
+  const longPath = join(dirname(attempt.mapPath), ...Array.from({length: 6}, () => 'd'.repeat(95)), 'RESTORE-MAP.md');
+  (f.e as any).pendingPreCompactPrep.get(seat).mapPath = longPath;
+  mkdirSync(dirname(longPath), {recursive: true});
+  writeFileSync(longPath + '.tmp', `# map\n${attempt.marker}\n`);
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+  expect(f.compactText()).not.toContain(longPath);
+  const restore = await drainToRestore(f);
+  expect(restore).toContain(longPath);
+});
+
+it('the compaction instruction is fixed when preparation starts; a policy change mid-attempt does not mix in', async () => {
+  const f = fixture('Keep the queue ids.');
+  await f.e.maybeAutoCompact(input);
+  f.policyRef.compactInstruction = 'A different instruction set later.';
+  f.stageMap();
+  await f.e.maybeAutoCompact(input);
+  const command = f.compactText();
+  expect(command).toContain('Keep the queue ids.');
+  expect(command).not.toContain('A different instruction');
+});
+
+it('--skip-map with an instruction too long for the command carries the instruction through the restore request', async () => {
+  const f = fixture(LONG_INSTRUCTION);
+  expect(await f.e.triggerManualCompact({...input, usedPercentage: 40}, {operatorInitiated: true, skipMap: true})).toEqual({triggered: true, stage: 'compact-sent'});
+  expect(f.compactText()).not.toContain('Preserve the current task');
+  const restore = await drainToRestore(f);
+  expect(restore).toContain(LONG_INSTRUCTION.trim().replace(/\s+/g, ' ').slice(0, 300));
+});
+
+it('a failed manual trigger reports the /compact result too', async () => {
+  const f = fixture();
+  f.onSleep(() => f.stageMap());
+  const real = f.transport.send.bind(f.transport);
+  vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => {
+    if (text.startsWith('/compact')) throw new Error('receipt lost');
+    return real(s, text, opts);
+  });
+  const app = new Hono();
+  app.use('*', async (c, next) => {
+    c.set('compactionEnforcer' as never, f.e);
+    c.set('sessionTransport' as never, f.transport);
+    c.set('contextUsageStore' as never, {getForNode: () => ({availability: 'known', usedPercentage: 40})});
+    c.set('db' as never, {prepare: () => ({get: () => ({node_id: 'node-one', runtime: 'claude-code', cwd: null})})});
+    await next();
+  });
+  app.route('/api/compaction', compactionRoutes());
+  (f.transport as any).resolveSessions = async () => ({ok: true, sessions: [seat]});
+  const res = await app.request('/api/compaction/trigger', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session: seat})});
+  const body = await res.json();
+  expect(body.ok).toBe(false);
+  expect(body.preparation).toMatchObject({compact: 'uncertain'});
+  expect(body.compact).toMatch(/^uncertain: /);
 });

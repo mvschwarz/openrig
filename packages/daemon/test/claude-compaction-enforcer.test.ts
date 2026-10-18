@@ -1287,14 +1287,14 @@ describe("ClaudeCompactionEnforcer", () => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
       send.mockImplementationOnce(async () => { await new Promise(resolve => setTimeout(resolve, delayMs)); return { ok: true }; }); // prep lands
-      send.mockImplementationOnce(async () => ({ ok: false, reason: "wait_for_idle_timeout" })); // /compact never idle
+      send.mockImplementationOnce(async () => ({ ok: false, sent: false, reason: "wait_for_idle_timeout" })); // /compact never idle (the real transport reports sent: false)
       // This control exercises transport ordering, not elapsed preparation time.
       // Native fixture file I/O and busy CI scheduling must not consume its 50ms budget.
       const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000 });
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
       expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout",
-        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "delivered" } });
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "delivered", compact: "not_sent" } });
       expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("skipped-or-failed");
 
       // No turn_boundary was seeded, so a below-threshold poll finds nothing to drain.
@@ -1312,7 +1312,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
       expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "mid_work",
-        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "not_sent" } });
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "not_sent", compact: "not_sent" } });
       expect(send).toHaveBeenCalledTimes(1);
     });
 

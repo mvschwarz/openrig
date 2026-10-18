@@ -110,7 +110,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       session: sessionName,
       stage: outcome.stage,
       reason: outcome.reason,
-      ...(outcome.preparation ? { preparation: outcome.preparation } : {}),
+      ...(outcome.preparation ? { preparation: outcome.preparation, compact: compactResultText(outcome.preparation.compact) } : {}),
       error: manualOutcomeMessage(sessionName, outcome),
     }, status);
   });
