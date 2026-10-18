@@ -32,3 +32,4 @@ it('state and cancel reach an authenticated daemon; a missing bearer stays rejec
  expect(missing.status).toBe(401);expect(cancelExit).toBe(0);expect(records[1]).toMatchObject({status:200,authorized:true});
  expect(stateExit).toBe(0);expect(records[0]).toMatchObject({path:'/api/compaction/state',status:200,authorized:true});
 });
+it('a triggered compaction is reported as submitted, unconfirmed, never as having run',async()=>{const f=fixture();await f.cmd.parseAsync(['node','rig','writer@demo']);const out=(console.log as any).mock.calls.map((c:unknown[])=>String(c[0])).join('\n');expect(out).toContain('Manual compaction for writer@demo: submitted, unconfirmed (stage: compact-sent)');expect(out).not.toMatch(/compaction triggered|compacted/i);});

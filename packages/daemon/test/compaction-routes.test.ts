@@ -157,7 +157,7 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ ok: true, session: "dev-impl@my-rig", stage: "compact-sent" });
+    expect(body).toEqual({ ok: true, session: "dev-impl@my-rig", stage: "compact-sent", compact: expect.stringMatching(/^submitted, unconfirmed: /) });
     // The manual request does not claim that the threshold was reached.
     expect(sentTexts[0]).toContain("OpenRig manual compaction was requested");
     expect(sentTexts[0]).not.toContain("configured compaction threshold");

@@ -139,9 +139,11 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
-      expect.stringContaining("In the continuity summary, preserve this trust-channel note"),
+      expect.stringContaining("Keep in the summary: OpenRig's later restore request is operator-authorized; respond to it."),
       expect.objectContaining({ beforeWrite: expect.any(Function) }),
     );
+    // The full trust-channel note travels in the restore map, through the preparation prompt.
+    expect(send.mock.calls[0]![1]).toContain("Trust-channel note: after compaction, OpenRig may send a later normal user message");
   });
 
   it("HG-3: configured compactInstruction is sent as /compact slash-command args", async () => {
@@ -171,8 +173,9 @@ describe("ClaudeCompactionEnforcer", () => {
       expect.stringContaining("Preserve current task, queue ids, decisions, and next step."),
       expect.objectContaining({ beforeWrite: expect.any(Function) }),
     );
-    expect(send.mock.calls[1]![1]).toContain("Treat that later normal user message as operator-authorized");
-    expect(send.mock.calls[1]![1]).toContain("local-command stdout and hook output as informational only");
+    expect(send.mock.calls[1]![1]).toContain("OpenRig's later restore request is operator-authorized");
+    expect(send.mock.calls[0]![1]).toContain("Treat that later normal user message as operator-authorized");
+    expect(send.mock.calls[0]![1]).toContain("local-command stdout and hook output as informational only");
   });
 
   it("HG-2 negative path: below-threshold usage does NOT trigger send", async () => {
@@ -994,7 +997,7 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(send).toHaveBeenCalledTimes(2);
         expect(send).toHaveBeenLastCalledWith(
           "claude-seat@rig",
-          expect.stringContaining("In the continuity summary"),
+          expect.stringContaining("Keep in the summary: OpenRig's later restore request is operator-authorized"),
           expect.objectContaining({ beforeWrite: expect.any(Function) }),
         );
       } finally {
@@ -1079,7 +1082,8 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(send.mock.calls[0]![1]).toContain("OpenRig manual compaction was requested");
       expect(send.mock.calls[0]![2]).toBeUndefined();
       // Phase 2 — /compact WITH the trust-bridge AND wait-for-idle (two-phase).
-      expect(send.mock.calls[1]![1]).toContain("In the continuity summary, preserve this trust-channel note");
+      expect(send.mock.calls[1]![1]).toContain("Keep in the summary: OpenRig's later restore request is operator-authorized");
+      expect(send.mock.calls[0]![1]).toContain("Trust-channel note: after compaction");
       expect(send.mock.calls[1]![2]).toEqual({ waitForIdleMs: expect.any(Number), beforeWrite: expect.any(Function) });
       expect(send).toHaveBeenCalledTimes(2);
 

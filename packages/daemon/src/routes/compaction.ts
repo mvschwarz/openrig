@@ -87,7 +87,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     );
 
     if (outcome.triggered) {
-      return c.json({ ok: true, session: sessionName, stage: outcome.stage });
+      return c.json({ ok: true, session: sessionName, stage: outcome.stage, compact: compactResultText("submitted_unconfirmed") });
     }
 
     const statusMap: Record<string, number> = {
@@ -137,6 +137,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
     const preparation = enforcer.getPreparationState(session);
     return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
+      ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
     });
@@ -153,6 +154,16 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
     ? manualReasonMessage(sessionName, outcome.reason)
     : `/compact was not confirmed (${outcome.reason}). This attempt is disarmed.`;
   return `${effect} for '${sessionName}' (attempt ${prep.attemptId}). ${detail} Its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
+}
+
+/** The /compact command's result in words. `preparation.delivery` is the preparation prompt's delivery;
+ *  this is the command's, and it never claims that compaction ran. */
+export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" | "uncertain"): string {
+  switch (compact) {
+    case "submitted_unconfirmed": return "submitted, unconfirmed: OpenRig sent /compact and Enter to the seat; it does not check whether Claude Code then started compacting.";
+    case "uncertain": return "uncertain: the /compact send's outcome was lost, so it may have reached the seat; it was not retried.";
+    default: return "not sent: OpenRig has not sent /compact for this attempt.";
+  }
 }
 
 function manualReasonMessage(sessionName: string, reason: string): string {
