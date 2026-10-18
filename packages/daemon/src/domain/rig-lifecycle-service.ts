@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import type { SeatKindRegistry } from "./seat-kinds.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
@@ -144,6 +145,8 @@ interface RigLifecycleDeps {
   eventBus: EventBus;
   queueRepo: QueueRepository;
   tmuxAdapter?: TmuxAdapter;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 export class RigLifecycleService {
@@ -154,6 +157,7 @@ export class RigLifecycleService {
   private readonly eventBus: EventBus;
   private readonly queueRepo: QueueRepository;
   private readonly tmuxAdapter: TmuxAdapter | null;
+  private readonly seatKinds: SeatKindRegistry | null;
 
   constructor(deps: RigLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("RigLifecycleService: rigRepo must share the same db handle");
@@ -168,6 +172,7 @@ export class RigLifecycleService {
     this.eventBus = deps.eventBus;
     this.queueRepo = deps.queueRepo;
     this.tmuxAdapter = deps.tmuxAdapter ?? null;
+    this.seatKinds = deps.seatKinds ?? null;
   }
 
   /** Release a current claimed session without killing its external process. */
@@ -511,7 +516,8 @@ export class RigLifecycleService {
 
     let sessionsKilled = 0;
     if (node.latest_session_name && !keepSession) {
-      const kill = await this.tmuxAdapter?.killSession(node.latest_session_name);
+      const seat = this.seatKinds?.forNode(this.sessionRegistry, node.node_id, node.latest_session_name) ?? null;
+      const kill = seat ? await seat.kind.host.stop(seat.ref) : await this.tmuxAdapter?.killSession(node.latest_session_name);
       if (kill && !kill.ok && kill.code !== "session_not_found") {
         return {
           ok: false,

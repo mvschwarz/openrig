@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { SeatKindRegistry } from "./seat-kinds.js";
 
 export interface ReconcileResult {
   checked: number;
@@ -14,6 +15,8 @@ interface ReconcilerDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 // Only an active/non-terminal session can become detached. In particular,
@@ -26,6 +29,7 @@ export class Reconciler {
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
   private tmuxAdapter: TmuxAdapter;
+  private seatKinds: SeatKindRegistry | null;
 
   constructor(deps: ReconcilerDeps) {
     if (deps.db !== deps.sessionRegistry.db) {
@@ -39,6 +43,7 @@ export class Reconciler {
     this.sessionRegistry = deps.sessionRegistry;
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
+    this.seatKinds = deps.seatKinds ?? null;
   }
 
   async reconcile(rigId: string): Promise<ReconcileResult> {
@@ -59,7 +64,8 @@ export class Reconciler {
         // detach stale rows: transport-absence is treated as detachable HERE,
         // by explicit choice at this call site (OPR.0.5.4.2 mini-req 2 — the
         // adapter no longer collapses that decision for its callers).
-        const probe = await this.tmuxAdapter.probeSession(session.sessionName);
+        const seat = this.seatKinds?.forNode(this.sessionRegistry, session.nodeId, session.sessionName) ?? null;
+        const probe = seat ? await seat.kind.host.probe(seat.ref) : await this.tmuxAdapter.probeSession(session.sessionName);
         alive = probe.state === "present";
         checked++;
       } catch (err) {

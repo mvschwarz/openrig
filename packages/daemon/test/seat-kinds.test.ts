@@ -36,11 +36,12 @@ describe("SeatKindRegistry", () => {
 
   it("reads a node's binding only when a custom kind is registered", () => {
     let reads = 0;
-    const sessions = { getBindingForNode: () => { reads++; return { attachmentType: "acp" } as never; } };
+    const sessions = { getBindingForNode: () => { reads++; return { attachmentType: "acp", externalSessionName: "s1" } as never; } };
     expect(new SeatKindRegistry().forNode(sessions, "n1", "s1")).toBeNull();
     expect(reads).toBe(0);
     const found = new SeatKindRegistry([fakeKind("acp")]).forNode(sessions, "n1", "s1", "claude-code");
     expect(reads).toBe(1);
     expect(found?.ref).toEqual({ nodeId: "n1", sessionName: "s1", runtime: "claude-code", kind: "acp", pane: null, occupant: null });
+    expect(new SeatKindRegistry([fakeKind("acp")]).forNode(sessions, "n1", "an-older-session")).toBeNull();
   });
 });

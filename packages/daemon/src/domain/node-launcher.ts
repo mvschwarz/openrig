@@ -6,12 +6,10 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { PersistedEvent } from "./types.js";
 import { validateSessionName, deriveSessionName } from "./session-name.js";
-import {
-  startTranscriptRotation,
-  getTranscriptRotationOptionsFromEnv,
-} from "./transcript-rotation.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
-import { observeSolePane, paneObservationVerdict } from "./pane-binding-observation.js";
+import { paneObservationVerdict } from "./pane-binding-observation.js";
+import type { AttachmentKind, SeatHost, SeatKindRegistry } from "./seat-kinds.js";
+import { TmuxSeatHost } from "./tmux-seat-host.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
@@ -41,6 +39,8 @@ interface LaunchOpts {
    *  seat whose selection includes the vendored openrig-core plugin loads it. Without this the node's saved startup
    *  context is read. */
   pluginPaths?: readonly string[];
+  /** The seat kind to launch. Absent = tmux. Any other kind must be registered in `seatKinds`. */
+  kind?: AttachmentKind;
 }
 
 interface NodeLauncherDeps {
@@ -69,6 +69,8 @@ interface NodeLauncherDeps {
    * skips option application entirely.
    */
   tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
+  /** Seat kinds registered beyond tmux; absent = none. */
+  seatKinds?: SeatKindRegistry;
 }
 
 export class NodeLauncher {
@@ -82,7 +84,8 @@ export class NodeLauncher {
   private runtimeSessionEnv: Record<string, Record<string, string | undefined>>;
   private pluginsDir: string | undefined;
   private defaultSilenceWindowSeconds: number;
-  private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
+  private tmuxSeatHost: TmuxSeatHost;
+  private seatKinds: SeatKindRegistry | null;
 
   constructor(deps: NodeLauncherDeps) {
     // Hard runtime invariant: all domain services must share the same db handle.
@@ -107,7 +110,12 @@ export class NodeLauncher {
     this.runtimeSessionEnv = deps.runtimeSessionEnv ?? {};
     this.pluginsDir = deps.pluginsDir;
     this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
-    this.tmuxOptionDefaults = deps.tmuxOptionDefaults ?? null;
+    this.tmuxSeatHost = new TmuxSeatHost({
+      tmuxAdapter: deps.tmuxAdapter,
+      transcriptStore: this.transcriptStore,
+      tmuxOptionDefaults: deps.tmuxOptionDefaults ?? null,
+    });
+    this.seatKinds = deps.seatKinds ?? null;
   }
 
   async launchNode(
@@ -166,70 +174,26 @@ export class NodeLauncher {
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
     const openRigEnv = launchEnv(opts?.env);
-    const tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
-    if (!tmuxResult.ok) {
-      return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
+    const kind = opts?.kind && opts.kind !== "tmux" ? this.seatKinds?.custom(opts.kind) ?? null : null;
+    if (opts?.kind && opts.kind !== "tmux" && !kind) {
+      return { ok: false, code: "seat_kind_unknown", message: `No seat kind '${opts.kind}' is registered with this daemon` };
+    }
+    const host: SeatHost = kind?.host ?? this.tmuxSeatHost;
+    const seatRef = { nodeId: node.id, sessionName, runtime: node.runtime ?? null, kind: kind?.kind ?? "tmux", pane: null, occupant: null };
+    const created = await host.create({
+      nodeId: node.id,
+      rigName: rig.rig.name,
+      sessionName,
+      cwd: sessionCwd,
+      env: openRigEnv,
+      ...(opts?.env && Object.keys(opts.env).length > 0 ? { oneOffEnv: { names: Object.keys(opts.env), baseline: launchEnv() } } : {}),
+    });
+    if (!created.ok) {
+      return { ok: false, code: created.code, message: created.message };
     }
 
-    // A one-off `rig up --env` value is on the first pane's command line and, because that is how
-    // `new-session -e` works, in the session environment, which a respawned pane (a handover
-    // successor) inherits. The first pane has already started with it, so take it back out of the
-    // session: the spec's or OpenRig's own value for a name they set, no value for the rest.
-    if (opts?.env && Object.keys(opts.env).length > 0) {
-      const failed = await this.dropOneOffFromSession(sessionName, Object.keys(opts.env), launchEnv());
-      if (failed) {
-        // The first pane has already started with the one-off, so this is a stopped launch, not an
-        // undone one. Say whether the new session (the one this launch just created) is gone, and
-        // never include tmux's text or a value.
-        let removed = false;
-        try { removed = (await this.tmuxAdapter.killSession(sessionName)).ok; } catch { /* not confirmed */ }
-        return {
-          ok: false,
-          code: "seat_env_cleanup_failed",
-          message: removed
-            ? `Could not take the --env setting ${failed} out of the new session "${sessionName}" environment, so the launch was stopped and the session was removed. Run it again.`
-            : `Could not take the --env setting ${failed} out of the new session "${sessionName}" environment, so the launch was stopped, and the session could not be confirmed removed. It may still hold the --env values in its terminal and environment and nothing is bound to it: check it and remove it before running this again.`,
-        };
-      }
-    }
-
-    // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
-    const launchWarnings: string[] = [...(tmuxResult.warnings ?? [])];
-
-    // Observe the pane before the DB transaction. A concrete pane is committed
-    // with session+binding; an unresolved pane gets a durable named verdict in
-    // that same transaction rather than carrying an unexplained NULL forward.
-    const paneObservation = await observeSolePane(this.tmuxAdapter, sessionName);
-
-    // 3a2. OPR.0.4.6.02 S1 — apply the daemon's tmux option defaults to the
-    // JUST-CREATED session via the shared applier (mouse/status session-scope
-    // + set-clipboard/copy-command server-scope). Touches only this new
-    // session, never an existing one (BR-1 never-retro). Option-set failures
-    // come back as non-fatal launch warnings.
-    if (this.tmuxOptionDefaults) {
-      launchWarnings.push(...(await this.tmuxOptionDefaults.applyToFreshSession(sessionName)));
-    }
-
-    // 3b. Start transcript rotation (V1 pre-release CLI/daemon Item 1:
-    // bounded capture-pane overwrite replaces the unbounded pipe-pane
-    // mechanism). Failures inside individual rotation ticks are silent
-    // (best-effort); only the transcript directory not being writable
-    // surfaces a launch warning.
-    if (this.transcriptStore?.enabled) {
-      const dirOk = this.transcriptStore.ensureTranscriptDir(rig.rig.name);
-      if (dirOk) {
-        const transcriptPath = this.transcriptStore.getTranscriptPath(rig.rig.name, sessionName);
-        startTranscriptRotation(
-          this.tmuxAdapter,
-          sessionName,
-          transcriptPath,
-          getTranscriptRotationOptionsFromEnv(),
-          getTranscriptRotationOptionsFromEnv,
-        );
-      } else {
-        launchWarnings.push(`Transcript directory creation failed for rig ${rig.rig.name}`);
-      }
-    }
+    const launchWarnings: string[] = created.warnings;
+    const paneObservation = created.paneObservation;
 
     // 4. DB transaction: session + binding + event (atomic)
     let persistedEvent: PersistedEvent;
@@ -244,11 +208,8 @@ export class NodeLauncher {
         );
         createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");
-        this.sessionRegistry.updateBinding(node.id, {
-          tmuxSession: sessionName,
-          ...(paneObservation.ok ? { tmuxPane: paneObservation.pane } : {}),
-        });
-        if (!paneObservation.ok) {
+        this.sessionRegistry.updateBinding(node.id, kind ? { attachmentType: kind.kind, externalSessionName: sessionName } : created.binding);
+        if (paneObservation && !paneObservation.ok) {
           new SeatIdentityStore(this.db).upsert(paneObservationVerdict({
             nodeId: node.id,
             sessionId: session.id,
@@ -266,8 +227,8 @@ export class NodeLauncher {
       });
       persistedEvent = txn();
     } catch (err) {
-      // DB failed — best-effort tmux cleanup
-      await this.tmuxAdapter.killSession(sessionName);
+      // DB failed — best-effort cleanup of the seat just made
+      await host.stop(seatRef);
       return {
         ok: false,
         code: "db_error",
@@ -276,7 +237,7 @@ export class NodeLauncher {
     }
 
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(node.id);
-    this.tmuxAdapter.finishLaunchBinding?.(sessionName);
+    if (!kind) this.tmuxAdapter.finishLaunchBinding?.(sessionName);
 
     // 5. Notify subscribers (best-effort, after commit)
     this.eventBus.notifySubscribers(persistedEvent);
@@ -293,27 +254,6 @@ export class NodeLauncher {
       binding: binding!,
       warnings: launchWarnings.length > 0 ? launchWarnings : undefined,
     };
-  }
-
-  /**
-   * Put each one-off name back to what the session would have had without it: `baseline` has the
-   * value the spec or OpenRig set for it, and a name with none is unset (the server's own value, if
-   * it has one, is what a later pane gets). `TMUX` and `TMUX_PANE` belong to tmux and are left alone.
-   * Returns the name that could not be restored, or undefined when all were. The message built from
-   * it carries no value: tmux errors repeat the command line.
-   */
-  private async dropOneOffFromSession(session: string, names: string[], baseline: Record<string, string>): Promise<string | undefined> {
-    for (const name of names) {
-      if (name === "TMUX" || name === "TMUX_PANE") continue;
-      try {
-        const value = baseline[name];
-        if (value !== undefined) await this.tmuxAdapter.setSessionEnv(session, name, value);
-        else await this.tmuxAdapter.unsetSessionEnv(session, name);
-      } catch {
-        return name;
-      }
-    }
-    return undefined;
   }
 }
 

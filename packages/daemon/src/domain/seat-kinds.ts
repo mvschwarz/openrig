@@ -54,7 +54,9 @@ export interface SeatCreateRequest {
 }
 
 export type SeatCreateResult =
-  | { ok: true; binding: { tmuxSession?: string; tmuxPane?: string; externalSessionName?: string };
+  /** `binding` is tmux's; a registered kind's seat is bound by its session name
+   *  (`bindings.external_session_name`). */
+  | { ok: true; binding: { tmuxSession?: string; tmuxPane?: string };
       /** tmux: the sole-pane observation the launch records with the binding. */
       paneObservation?: import("./pane-binding-observation.js").PaneBindingObservation;
       warnings: string[] }
@@ -103,13 +105,14 @@ export class SeatKindRegistry {
     return kind ? this.kinds.get(kind) ?? null : null;
   }
 
-  /** The registered kind bound to a node, with its ref; null when the node is a built-in kind. */
+  /** The registered kind whose binding names this node's session, with its ref; null when the
+   *  session belongs to a built-in kind. */
   forNode(sessionRegistry: Pick<SessionRegistry, "getBindingForNode">, nodeId: string, sessionName: string,
     runtime: string | null = null): { kind: SeatKind; ref: SeatRef } | null {
     if (!this.hasCustom()) return null;
     const binding = sessionRegistry.getBindingForNode(nodeId);
     const kind = this.custom(binding?.attachmentType);
-    if (!binding || !kind) return null;
+    if (!binding || !kind || binding.externalSessionName !== sessionName) return null;
     return { kind, ref: { nodeId, sessionName, runtime, kind: kind.kind, pane: null, occupant: null } };
   }
 }
