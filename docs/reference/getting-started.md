@@ -104,6 +104,8 @@ user.
 OpenRig view and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
 `~/.claude/skills` and `~/.agents/skills` when the daemon starts. To add it manually, use the release tag matching
 your installed `rig --version`: replace `<release-tag>` below with that tag, including its `v` prefix.
+`rig --version` prints the version and a commit, for example `0.6.11 (379f0a0d)`; the tag is `v0.6.11`.
+The skill is in the repository from v0.6.6; on an older install, use the v0.6.6 tag or upgrade first.
 Choose the command for the agent doing the setup:
 
 ```sh
