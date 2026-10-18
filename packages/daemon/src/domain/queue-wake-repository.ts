@@ -135,6 +135,13 @@ export class QueueWakeRepository {
         ORDER BY transition_id DESC LIMIT 1`,
     ).get(qitemId) as WakeRow | undefined;
     if (!armed || armed.wake_kind !== "watchdog") return false;
+    // That arm must belong to the current park: a row that has left `blocked` since then and was blocked again with no
+    // wake of its own (a gate or a person) wrote no arm, so the earlier park's reminder isn't serving this one.
+    // Note-only transitions stay `blocked`.
+    const leftSince = this.db.prepare(
+      `SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_id > ? AND state <> 'blocked' LIMIT 1`,
+    ).get(qitemId, armed.transition_id);
+    if (leftSince) return false;
     const job = this.db.prepare(
       `SELECT j.policy, j.spec_yaml, j.state, j.target_session, q.destination_session, q.state AS row_state
          FROM watchdog_jobs j JOIN queue_items q ON q.qitem_id = ?
@@ -156,11 +163,14 @@ export class QueueWakeRepository {
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'watchdog_history'",
     ).get() !== undefined;
     if (!hasHistory) return false;
+    // It must have reached this owner: the session the delivery went to, not only the one the job was registered for
+    // (a job's spec can name another target). An unknown delivery target keeps today's result.
     const latest = this.db.prepare(
-      `SELECT outcome, delivery_status FROM watchdog_history
+      `SELECT outcome, delivery_status, delivery_target_session FROM watchdog_history
         WHERE job_id = ? ORDER BY evaluated_at DESC, history_id DESC LIMIT 1`,
-    ).get(armed.wake_ref) as { outcome: string; delivery_status: string | null } | undefined;
-    return latest?.outcome === "sent" && latest.delivery_status === "ok";
+    ).get(armed.wake_ref) as { outcome: string; delivery_status: string | null; delivery_target_session: string | null } | undefined;
+    return latest?.outcome === "sent" && latest.delivery_status === "ok"
+      && latest.delivery_target_session === job.destination_session;
   }
 
   findBlockedQitemsByWatchdog(jobId: string, latestArmedOnly = false): Array<{ qitemId: string; kind: "watchdog" | "timer" }> {

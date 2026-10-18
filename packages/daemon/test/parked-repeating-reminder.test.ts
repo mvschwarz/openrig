@@ -65,12 +65,15 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
     } as never);
   }
   /** One evaluation of the job, as the engine records it: the audit row, then (for a delivery attempt) the row's fire. */
-  function fire(jobId: string, delivery: "ok" | "failed" | "retained" | { skipped: string }, opts: { history?: boolean } = {}) {
+  /** `deliveredTo`: the session the engine delivered to (its spec's target), recorded as history's delivery target;
+   *  the owner unless a test says otherwise, `null` for an unrecorded one. */
+  function fire(jobId: string, delivery: "ok" | "failed" | "retained" | { skipped: string }, opts: { history?: boolean; deliveredTo?: string | null } = {}) {
     const evaluatedAt = new Date(Date.UTC(2026, 9, 18, 3, 0, clock++)).toISOString();
     if (opts.history !== false) {
       history.record(typeof delivery === "object"
         ? { jobId, evaluatedAt, outcome: "skipped", skipReason: delivery.skipped }
         : { jobId, evaluatedAt, outcome: delivery === "retained" ? "skipped" : "sent", deliveryStatus: delivery,
+          deliveryTargetSession: opts.deliveredTo === undefined ? SEAT : opts.deliveredTo,
           ...(delivery === "retained" ? { skipReason: "typing_guard_retained" } : {}) } as never);
     }
     if (typeof delivery !== "object") queue.recordWatchdogWakeAttempt(jobId, delivery);
@@ -172,6 +175,35 @@ describe("parked diagnosis for a row its owner's own repeating reminder serves",
       fire(job, "ok");
       // Any other policy (here an idle gate) doesn't repeat on its own cadence; only a periodic reminder is exempt.
       db.prepare("UPDATE watchdog_jobs SET policy = 'idle-gate-qitem' WHERE job_id = ?").run(job);
+      expect(diagnose()).toMatchObject({ parked: true, healthy: false });
+    });
+
+    it("stranded when the row left blocked and was blocked again with no wake of its own (the earlier park's reminder doesn't serve it)", async () => {
+      const q = await row();
+      const job = reminder();
+      park(q, { watchdogId: job });
+      fire(job, "ok");
+      queue.update({ qitemId: q, actorSession: SEAT, state: "in-progress", transitionNote: "resumed" } as never);
+      queue.update({ qitemId: q, actorSession: SEAT, state: "blocked", blockedOn: "external:vendor", transitionNote: "waiting on the vendor" } as never);
+      fire(job, "ok");
+      const d = diagnose();
+      expect(d).toMatchObject({ parked: true, healthy: false });
+      expect(d.held).not.toHaveProperty("servedByOwnReminder");
+    });
+
+    it("stranded when the reminder delivered to another seat than the row's owner (its spec names another target)", async () => {
+      const q = await row();
+      const job = reminder();
+      park(q, { watchdogId: job });
+      fire(job, "ok", { deliveredTo: OTHER });
+      expect(diagnose()).toMatchObject({ parked: true, healthy: false });
+    });
+
+    it("stranded when the latest delivery's target isn't recorded", async () => {
+      const q = await row();
+      const job = reminder();
+      park(q, { watchdogId: job });
+      fire(job, "ok", { deliveredTo: null });
       expect(diagnose()).toMatchObject({ parked: true, healthy: false });
     });
 
