@@ -38,8 +38,8 @@ This is really **"route work to whoever holds the context,"** with subagents as 
 
 ## Check what kind of agent you're handing it to
 How to brief another agent depends on the model it runs, so check before you hand over anything open-ended.
-`rig ps --nodes` shows the model each seat's spec declares; if it's blank, or you aren't sure, ask the seat which
-model it's running.
+`rig ps --nodes --json` shows the model each seat's spec declares (`model`; `null` if none is declared). A declared
+model can differ from the one running, so if it's null, or you aren't sure, ask the seat which model it's running.
 
 - **Goal-oriented models** are built to take a goal and find the route themselves. Today that's Claude Opus 5.5 or
   newer and any Fable model, and Codex models at the Sol level or above from GPT-5.6 on (GPT-5.6-Sol, GPT-6-Sol,
@@ -50,8 +50,10 @@ model it's running.
   open-ended part yourself.
 
 Describe the task, not the agent: don't tell a model which group it's in, or call it weaker. A model can take a
-label like that literally and work down to it. When a new model ships, treat it as the second group until you know
-where it sits; its maker's own description (frontier or workhorse, versus fast or affordable) is a good first signal.
+label like that literally and work down to it. A newer model in a family above (a later Opus, Fable, or Codex Sol or
+Astra) belongs with the goal-oriented group. A model the lines above can't place, such as a new family or an unfamiliar
+tier, starts in the second group until you know where it sits; its maker's own description (frontier or workhorse,
+versus balanced, fast or affordable) is a good first signal.
 
 ## Hand over intent, not instructions
 Whoever does the work, give them the goal, why it matters, the context you hold and where to find more. When you have
