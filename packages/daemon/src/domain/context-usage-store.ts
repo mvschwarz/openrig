@@ -40,6 +40,8 @@ interface SidecarRaw {
    *  a canonical occupant from a retained predecessor whose launch-time --name aliases the seat. */
   occupant_generation?: string;
   transcript_path?: string;
+  /** Claude's statusline `cost.total_cost_usd`: a cumulative client-side estimate for the native session. */
+  cost?: { total_cost_usd?: number | null } | null;
   sampled_at?: string;
 }
 
@@ -76,6 +78,7 @@ interface CodexTokenCountEvent {
   timestamp?: string;
   payload?: {
     type?: string;
+    rate_limits?: unknown;
     info?: {
       last_token_usage?: CodexTokenUsageRaw;
       model_context_window?: number;
@@ -220,6 +223,7 @@ export class ContextUsageStore {
       sessionName: raw.session_name ?? null,
       sampledAt,
       fresh,
+      clientCostEstimateUsd: typeof raw.cost?.total_cost_usd === "number" && Number.isFinite(raw.cost.total_cost_usd) ? raw.cost.total_cost_usd : null,
     };
   }
 
@@ -472,7 +476,12 @@ export class ContextUsageStore {
       if (!line.includes("\"token_count\"")) continue;
       try {
         const parsed = JSON.parse(line) as CodexTokenCountEvent;
-        if (parsed.payload?.type === "token_count") return parsed;
+        if (parsed.payload?.type === "token_count") {
+          // Native Codex also writes quota-only updates under token_count.
+          // They carry no context measurement and must not replace its timestamp.
+          if (parsed.payload.info == null && parsed.payload.rate_limits != null) continue;
+          return parsed;
+        }
       } catch {
         continue;
       }

@@ -56,6 +56,7 @@ interface NodeEntry {
   runtime: string | null;
   model: string | null;
   sessionStatus: string | null;
+  intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
   // OPR.0.4.3.06 — challenge-verified orientation, distinct from startupStatus.
@@ -76,6 +77,8 @@ interface NodeEntry {
     decidedBy: string | null;
   } | null;
   identityVerdict?: { reason?: string | null } | null;
+  /** A community agent app's seat: its label, maintainer and declared limits. */
+  agentApp?: { app: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -93,6 +96,9 @@ interface NodeEntry {
     evidenceSource: string;
     sampledAt: string;
     evidence: string | null;
+    rawEvent?: string | null;
+    stale?: boolean;
+    fallback?: boolean;
   };
   // PL-012: context-usage block surfaced from the daemon's
   // /api/rigs/:id/nodes route (already populated). Optional because
@@ -199,8 +205,10 @@ const ALLOWED_NODE_FIELDS = new Set([
   "canonicalSessionName",
   "nodeKind",
   "runtime",
+  "agentApp",
   "model",
   "sessionStatus",
+  "intentionallyStopped",
   "startupStatus",
   "restoreOutcome",
   "oriented",
@@ -593,6 +601,20 @@ function needsAttention(node: NodeEntry): boolean {
     || node.agentActivity?.state === "needs_input";
 }
 
+function hasCurrentUsageLimit(node: NodeEntry): boolean {
+  const activity = node.agentActivity;
+  return activity?.state === "unknown" && activity.reason === "usage_limit"
+    && activity.rawEvent === "at_limit" && activity.evidenceSource === "runtime_hook"
+    && activity.stale === false && !activity.fallback;
+}
+
+/** One line per community agent app seat: what OpenRig knows about it, and what it doesn't. */
+export function formatAgentAppLine(seat: string, app: NonNullable<NodeEntry["agentApp"]>): string {
+  if (app.presetError) return `Community app (${seat}): ${app.app}: ${app.presetError}.`;
+  const limits = app.limits.length ? `; declared limits: ${app.limits.join("; ")}` : "";
+  return `Community app (${seat}): ${app.app}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
+}
+
 function missingSessionGuidance(node: NodeEntry): string | null {
   return node.identityVerdict?.reason === "session_missing"
     ? "tmux session missing; restore or relaunch the seat"
@@ -637,6 +659,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // runtime is complete fleet-wide; model is a DECLARATION, absent on 13 of
       // 15 claude-code seats — see formatDeclaredModel for the render rule.
       runtime: n.runtime ?? null,
+      ...(n.agentApp ? { agentApp: n.agentApp } : {}),
       model: n.model ?? null,
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
@@ -644,8 +667,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // OPR.0.4.3.06 — challenge-verified orientation, distinct from ready.
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
-      // activity (state always; short reason only when attention — keep it lean).
-      agentActivity: attention
+      // Keep the current usage limit visible without classifying it as human attention.
+      agentActivity: attention || hasCurrentUsageLimit(n)
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
       // Work counts. Compact keeps the base pending-only key plus the active
@@ -662,6 +685,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // else null (documented FR-4 fallback — not a fabricated timestamp).
       lastActivity: n.agentActivity?.sampledAt ?? n.startupCompletedAt ?? null,
     };
+    if (n.intentionallyStopped !== undefined) compact.intentionallyStopped = n.intentionallyStopped;
     // held/attention reason (short) when present.
     if (n.heldReason) compact.heldReason = n.heldReason;
     if (attention && n.latestError) {
@@ -817,8 +841,8 @@ contextUsage.percent, contextUsage.state. Other keys are rejected.
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, model, sessionStatus,
-startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, agentApp, model, sessionStatus,
+intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
 agentActivity, contextUsage, heldReason.
@@ -1213,7 +1237,7 @@ async function handleNodes(
     console.log(padCompactNodeRow("RIG", "SESSION", "LIFECYCLE", "ACTIVITY", "WORK", "REASON"));
     for (const n of humanList as NodeEntry[]) {
       const attn = needsAttention(n);
-      const reason = missingSessionGuidance(n) ?? (attn
+      const reason = missingSessionGuidance(n) ?? (attn || hasCurrentUsageLimit(n)
         ? (n.latestError ? truncate(n.latestError, 40) : n.agentActivity?.reason ?? "—")
         : "—");
       console.log(padCompactNodeRow(
@@ -1259,6 +1283,9 @@ async function handleNodes(
       console.log(`Startup details (${n.canonicalSessionName ?? n.logicalId}): ${n.latestError}`);
     }
   }
+  for (const n of humanList as NodeEntry[]) {
+    if (n.agentApp) console.log(formatAgentAppLine(n.canonicalSessionName ?? n.logicalId, n.agentApp));
+  }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
     console.log(`... and ${remaining} more node${remaining === 1 ? "" : "s"} (truncated at ${HUMAN_NODE_BUDGET}).`);
@@ -1269,12 +1296,15 @@ async function handleNodes(
   }
 }
 
-function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState">): string {
+function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState" | "agentApp">): string {
   // S19 — render from the served taxonomy state when present: needs-input as
   // count(+reason), otherwise the bridge's display value. No local arbitration.
   const tax = n.activityState;
   if (tax) {
     if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
+    // A community agent app has no needs-input source in that state, so its zero isn't a clearance: a prompt the
+    // screen shows is kept.
+    if (n.agentApp && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
     return tax.display;
   }
   // Legacy fallback (a daemon without the S19 enrichment) — retires with the

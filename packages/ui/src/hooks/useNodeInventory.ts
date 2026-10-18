@@ -8,6 +8,7 @@ export interface AgentActivitySummary {
   evidenceSource: string;
   sampledAt: string;
   eventAt?: string | null;
+  rawEvent?: string | null;
   evidence?: string | null;
   staleness?: number | null;
   stale?: boolean;
@@ -29,7 +30,7 @@ export interface CurrentQitemSummary {
  * so it cannot silently ignore it.
  */
 export interface SeatIdentityVerdictSummary {
-  verdict: "verified" | "mismatch" | "pane_missing" | "tmux_unavailable";
+  verdict: "verified" | "unconfirmed" | "mismatch" | "pane_missing" | "tmux_unavailable";
   evidenceSource?: string | null;
   reason?: string | null;
   evidence?: {

@@ -118,7 +118,7 @@ export function queueRoutes(): Hono {
       return {
         ok: false,
         error: "unknown_target_repo",
-        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --json | jq .workspace.repos to see declared repos`,
+        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --full --json | jq .workspace.repos to see declared repos`,
         meta: { rigName, knownRepos: known },
       };
     }
@@ -182,6 +182,23 @@ export function queueRoutes(): Hono {
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
         : err.code === "workflow_frontier_packet" ? 400
+        // Park/close input the caller can fix (wake options on a non-park transition, closure
+        // fields or blocked_on on a transition that cannot store them) are client errors, not
+        // daemon faults. wake_intent_store_unavailable, outbox_db_mismatch and
+        // terminal_close_without_wake_intent describe the daemon's own state and stay 500.
+        // blocker_not_found / blocker_not_live / blocker_malformed stay 500 on purpose: the CLI
+        // tests pin their exit code 2 (queue-update-metadata-reject-cli.test.ts).
+        : err.code === "closure_fields_not_admitted" ? 400
+        : err.code === "blocked_on_not_admitted" ? 400
+        : err.code === "wake_not_admitted" ? 400
+        : err.code === "wake_ambiguous" ? 400
+        : err.code === "wake_after_invalid" ? 400
+        : err.code === "wake_max_invalid" ? 400
+        : err.code === "wake_message_not_admitted" ? 400
+        : err.code === "wake_message_invalid" ? 400
+        : err.code === "wake_watchdog_not_live" ? 400
+        : err.code === "wake_watchdog_target_mismatch" ? 400
+        : err.code === "wake_self_blocker" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
@@ -337,6 +354,8 @@ export function queueRoutes(): Hono {
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
+      /** How the sender's identity was established, recorded on the source close as a local handoff records it. */
+      identityProvenance?: string | null;
     },
     createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
       (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
@@ -410,6 +429,7 @@ export function queueRoutes(): Hono {
         closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
+        identityProvenance: body.identityProvenance ?? null,
       });
     } catch (err) {
       return errorResponse(c, err);
@@ -609,6 +629,7 @@ export function queueRoutes(): Hono {
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
+      resolution?: unknown;
       blockedOn?: string;
       wakeWatchdogId?: string;
       wakeAfterSeconds?: number;
@@ -632,6 +653,8 @@ export function queueRoutes(): Hono {
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,
+        // Only text can be an outcome; any other value is treated as absent.
+        resolution: typeof body.resolution === "string" ? body.resolution : undefined,
         // OPR.0.4.4.19 FR-6 — the leg-1 park surface: blockedOn plus the
         // park-time summary/evidence_ref persist inputs.
         blockedOn: body.blockedOn,
@@ -695,6 +718,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody);
@@ -774,6 +799,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody);
@@ -859,11 +886,16 @@ export function queueRoutes(): Hono {
     } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
     // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
     // default answer is unchanged. In-progress rows are the candidate evidence, so they come
-    // from the same unbounded read as the derivation; held/next work is a bounded display list.
+    // from the same unbounded read as the derivation; held and next work are bounded display lists.
+    // Each list gets its own bound, so newer pending rows can never push a set-aside row out of
+    // "held" (a parked row silently missing there is the costliest miss).
     if (c.req.query("candidates") === "1") {
-      const heldAndNext = repo.list({ destinationSession: session, state: ["pending", "blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const held = repo.list({ destinationSession: session, state: ["blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const next = repo.list({ destinationSession: session, state: ["pending"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const heldTruncated = held.length > WORK_CANDIDATE_LIST_LIMIT;
+      const nextTruncated = next.length > WORK_CANDIDATE_LIST_LIMIT;
       const workCandidates = deriveWorkCandidates(
-        [...inProgress, ...heldAndNext.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
+        [...inProgress, ...held.slice(0, WORK_CANDIDATE_LIST_LIMIT), ...next.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
         missionsRoot,
         {
           getRow: (qitemId) => repo.getById(qitemId) ?? null,
@@ -871,7 +903,8 @@ export function queueRoutes(): Hono {
         },
       );
       return c.json({ ...position, ...derived, role,
-        workCandidates: { ...workCandidates, heldAndNextTruncated: heldAndNext.length > WORK_CANDIDATE_LIST_LIMIT } });
+        // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
+        workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
     return c.json({ ...position, ...derived, role });
   });
@@ -1020,7 +1053,9 @@ export function queueRoutes(): Hono {
 
   // GET /recent-transitions — one bounded, read-only topology chronology over
   // typed queue state/closure facts. `scope=instance` spans local rigs in ONE
-  // read; a rig query stays backward-compatible. MUST precede /:qitemId.
+  // read; a rig query stays backward-compatible. Each entry's `summary` is the authored
+  // subject (null when none); `bodyPreview` is display text derived from the body for a row
+  // with no summary (see RecentQueueTransition). MUST precede /:qitemId.
   app.get("/recent-transitions", (c) => {
     const scopeKind = c.req.query("scope")?.trim();
     const rig = c.req.query("rig")?.trim();
@@ -1093,7 +1128,24 @@ export function queueRoutes(): Hono {
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
     // #1029: the wake path's own routing decision, so a reader never guesses a registered
     // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
-    return c.json({ ...item, destinationClass: repo.classifyDestinationOf(item.destinationSession).class });
+    // The owner notification level is what the Slack selector keys on: a registered person who
+    // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
+    const closing = repo.closingTransition(qitemId, item.state);
+    return c.json({
+      ...item,
+      // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
+      ...(closing ? { closingTransition: {
+        transitionId: closing.transitionId,
+        ts: closing.ts,
+        state: closing.state,
+        closureReason: closing.closureReason,
+        closureTarget: closing.closureTarget,
+        actorSession: closing.actorSession,
+        transitionNote: closing.transitionNote,
+      } } : {}),
+      destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
+      ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
+    });
   });
 
   // ---- Inbox routes (mailbox) ----

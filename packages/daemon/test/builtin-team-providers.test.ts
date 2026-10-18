@@ -92,6 +92,29 @@ describe("built-in team names and resource resolution", () => {
     });
   }
 
+  // #226: `rig up starter` from a shell at '/' arrives with cwdOverride '/'. The launch continues;
+  // the CLI, which chose that default, warns the person (packages/cli/test/up.test.ts).
+  it("does not refuse the filesystem root as launch cwd, even when it arrives as the cwd override", async () => {
+    const root = join(specs, "rigs/launch/starter");
+    const preflight = await rigPreflight({
+      rigSpecYaml: readFileSync(join(root, "rig.yaml"), "utf8"), rigRoot: root, cwdOverride: "/", fsOps,
+    });
+    expect(preflight.errors.filter((error) => error.includes("filesystem root"))).toEqual([]);
+    expect(preflight.ready).toBe(true);
+  });
+
+  it("a terminal member with an authored `cwd: /` launches without a refusal or a warning (#226)", async () => {
+    const rigSpecYaml = [
+      'version: "0.2"', "name: root-terminal", "pods:", "  - id: ops", "    label: Ops", "    members:",
+      "      - id: shell", '        agent_ref: "builtin:terminal"', '        profile: "none"', "        runtime: terminal", "        cwd: /",
+      "    edges: []", "edges: []",
+    ].join("\n");
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot: tmpdir(), fsOps });
+    expect(preflight.errors).toEqual([]);
+    expect(preflight.warnings.filter((warning) => warning.includes("root"))).toEqual([]);
+    expect(preflight.ready).toBe(true);
+  });
+
   it("an absent unused provider selects the matching kernel, while both available select mixed", () => {
     expect(selectVariant({ claudeCode: "ok", codex: "unavailable" })).toBe("rig-claude-only.yaml");
     expect(selectVariant({ claudeCode: "unavailable", codex: "ok" })).toBe("rig-codex-only.yaml");

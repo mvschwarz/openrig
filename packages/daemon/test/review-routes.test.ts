@@ -146,6 +146,25 @@ describe("GET /api/review/*", () => {
     expect(body.delivered.proofDirPath).toBe("release-t/slices/20-green/proof");
   });
 
+  it("reads a CRLF-saved slice README frontmatter like its LF twin (the slice id survives Windows line endings)", async () => {
+    const dir = writeFixtureSlice(ws, "release-t", "22-crlf", { id: "OPR.T.22", intent: "Words." });
+    const readme = `${dir}/README.md`;
+    fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace(/\n/g, "\r\n"));
+
+    const slice = await (await app.request("/api/review/slice/22-crlf")).json();
+    expect(slice.sliceId).toBe("OPR.T.22");
+  });
+
+  it("reads a CRLF-saved mission README frontmatter like its LF twin (mission id and title survive Windows line endings)", async () => {
+    const dir = writeFixtureSlice(ws, "release-t", "23-in-crlf-mission", {});
+    const missionDir = path.dirname(path.dirname(dir));
+    fs.writeFileSync(`${missionDir}/README.md`, "---\r\nid: OPR.M.T\r\ntitle: Crlf mission\r\n---\r\n\r\n# M\r\n");
+
+    const mission = await (await app.request("/api/review/mission/release-t")).json();
+    expect(mission.missionId).toBe("OPR.M.T");
+    expect(mission.title).toBe("Crlf mission");
+  });
+
   it("routes a claimed-PASS ungated slice into confirm-faithful (regime 2), items stay missing", async () => {
     const dir = writeFixtureSlice(ws, "release-t", "21-claimed", {
       intent: "i",

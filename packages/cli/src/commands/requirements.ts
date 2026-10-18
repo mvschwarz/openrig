@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -8,10 +9,11 @@ export function requirementsCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("requirements").description("Check requirements for a rig spec");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
-  async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
+  async function getTarget(deps: StatusDeps) {
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (!daemonStatusGuard(status)) return null;
-    return deps.clientFactory(getDaemonUrl(status));
+    // Only the recorded local-daemon branch has a PID; URL/config targets may be remote.
+    return { client: deps.clientFactory(getDaemonUrl(status)), local: status.pid !== undefined };
   }
 
   cmd
@@ -19,10 +21,11 @@ export function requirementsCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "Output as parseable JSON")
     .action(async (spec: string, opts: { json?: boolean }) => {
       const deps = getDeps();
-      const client = await getClient(deps);
-      if (!client) { process.exitCode = 1; return; }
+      const target = await getTarget(deps);
+      if (!target) { process.exitCode = 1; return; }
+      const { client, local } = target;
 
-      const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef: spec });
+      const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef: local ? nodePath.resolve(spec) : spec });
 
       if (res.status >= 400) {
         if (opts.json) console.log(JSON.stringify(res.data));

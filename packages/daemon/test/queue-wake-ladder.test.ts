@@ -23,6 +23,11 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
 import { ViewProjector } from "../src/domain/view-projector.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import nodePath from "node:path";
+import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { CodexUsageWindows } from "../src/domain/provider/codex-usage-windows.js";
+import { codexUsageReader } from "../src/domain/provider/codex-usage-reader.js";
+import { ACCOUNT_ANSWER, makeFakeCodex, rateLimitsAnswer } from "./helpers/fake-codex-usage.js";
 import {
   LADDER_ATTEMPT_PREFIX,
   LADDER_RUNG_PREFIX,
@@ -688,6 +693,26 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     });
     expect(repo.list({ limit: 500 }).filter((row) => row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG))).toHaveLength(1);
     expect(calls).toEqual([]);
+  });
+
+  it("slice 01: a ladder tick over the real provider service with usage windows on starts no native read", async () => {
+    const fake = makeFakeCodex();
+    fake.setPlan({ mode: "ok", account: ACCOUNT_ANSWER, rateLimits: rateLimitsAnswer({ secondaryUsed: 100 }) });
+    const windows = new CodexUsageWindows({
+      read: codexUsageReader({ launchPath: `${fake.binDir}${nodePath.delimiter}${process.env.PATH}`, codexHome: fake.codexHome, deadlineMs: 5_000 }),
+    });
+    const svc = new ProviderServiceImpl({
+      db,
+      listRigs: () => [],
+      env: { CODEX_HOME: fake.codexHome } as NodeJS.ProcessEnv,
+      usageWindows: { enabled: () => true, windows },
+    });
+    let reads = 0;
+    const getProviderReadModel = () => { reads += 1; return svc.getReadModel(); };
+    await tick({ now: new Date(), usageLimitJitterSeconds: 0, getProviderReadModel });
+    await tick({ now: new Date(), usageLimitJitterSeconds: 0, getProviderReadModel });
+    expect(reads).toBe(2);
+    expect(fake.spawns()).toBe(0);
   });
 
   it("A FAILED EXPIRY WAKE RESUMES the shipped ladder after the provider reset", async () => {

@@ -143,4 +143,111 @@ export interface FourBlockReadModel {
    *  row per (host, provider) aggregated from the seat-sourced signal rows. Optional so the
    *  sealed assembler stays untouched; the collect layer always populates it. */
   hostUsage?: HostUsageRow[];
+  /** Slice 01 (OPR.0.7.0.1) — observed usage windows by allowance identity, ADDITIVE and present
+   *  only while `provider.usage_windows` is on. Read from memory; never probed by a read. */
+  usage?: ProviderUsageAllowance[];
+  /** Slice 01 — each live seat's CONFIGURED account and its source, kept apart from observed allowances
+   *  (never linked to a usage row). ADDITIVE and present only while `provider.usage_windows` is on. */
+  seatAccounts?: SeatConfiguredAccount[];
+}
+
+/** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
+ *  which login a running session uses. A default login is whatever the daemon's home held at the seat's launch. */
+export type SeatAccountConfiguration =
+  | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
+  | { source: "default_login"; home: string | null; homeNote: string }
+  | { source: "unknown"; reason: string };
+
+export interface SeatConfiguredAccount {
+  seatSession: string;
+  rigName: string;
+  runtime: string;
+  configured: SeatAccountConfiguration;
+  /** A registry row that exists but isn't applied or doesn't match (stale after a runtime change, another
+   *  runtime in its column, or a profile not saved on this host). */
+  registryNotes?: string[];
+  /** Always unlinked: nothing supported links a configured account to an observed allowance. */
+  allowance: { linked: false; reason: string };
+  /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose
+   *  fresh readings disagree with it (possibly a different login, never a verdict). `withheld` when several
+   *  seats share this session name, so samples keyed by it can't be attributed to one seat. */
+  observed?: { windowsSampled?: boolean; lastSampledAt?: string; differsFrom?: string[]; withheld?: true; note?: string };
+}
+
+/** Slice 01 — allowance identity: the usage answer's accountId, else the workspace account/read
+ *  reports, else unresolved; with the bucket (limitId). Email and plan are labels, never identity. */
+export interface UsageAllowanceIdentity {
+  accountId: string | null;
+  workspaceId: string | null;
+  limitId: string;
+  email: string | null;
+  planType: string | null;
+  source: "account/rateLimits/read accountId" | "account/read workspace routing" | "unresolved";
+}
+
+/** Slice 01 — a Claude allowance's identity: the organisation and email `claude auth status` reports, with the
+ *  bucket (the status line's windows cover all models). Claude reports no per-account id, and members of one
+ *  organisation have their own limits, so the email is part of the identity here (unlike Codex). */
+export interface ClaudeUsageIdentity {
+  orgId: string | null;
+  limitId: string;
+  email: string | null;
+  /** Labels only, never part of the key. */
+  orgName: string | null;
+  subscriptionType: string | null;
+  source: "claude auth status orgId and email" | "unresolved";
+}
+
+export interface UsageWindowRow {
+  /** The provider-native window name (Codex: primary / secondary). */
+  window: string;
+  durationMins: number | null;
+  usedPercent: number | null;
+  /** 100 − usedPercent: a percentage; the provider reports no absolute amount. */
+  remainingPercent: number | null;
+  resetsAt: string | null;
+  /** When the native read answered (Claude: the status line's own time for the sample): freshness ages from this. */
+  observedAt: string;
+  /** Claude: the seat whose status-line sample this window is. */
+  seatSession?: string;
+  /** Claude: other seats whose fresh readings of this window disagree (a reset more than 60 s apart), with their own
+   *  numbers, so which login is where can be read from the row. Present only when they disagree. */
+  disagreeingSeats?: Array<{ seatSession: string; usedPercent: number; resetsAt: string | null; observedAt: string }>;
+  level: "ok" | "nearing" | "exhausted" | "unknown";
+  levelReason?: string;
+  freshness: "fresh" | "stale" | "unavailable";
+  freshnessReason?: string;
+}
+
+export interface UsageRefreshOutcome {
+  at: string;
+  outcome: "ok" | "failed";
+  reason?: string;
+  detail?: string;
+}
+
+export interface ProviderUsageAllowance {
+  provider: ProviderKind;
+  /** Null only for the explicit row of a source never read since the daemon started. */
+  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | null;
+  source: { kind: "codex_app_server" | "claude_statusline_samples"; host: "local" };
+  observedAt: string | null;
+  /** Seat links are not observed by this read. */
+  seats: "unknown";
+  windows: UsageWindowRow[];
+  /** The bucket's provider-reported limit evidence (Codex `rateLimitReachedType`), shown once. */
+  limitEvidence: string | null;
+  /** False when this row came from an earlier read than the latest one (kept; the latest read didn't match it;
+   *  its windows read stale: a later read exists). */
+  latestFromSource: boolean;
+  lastRefresh: UsageRefreshOutcome | null;
+  currentAvailability: "known" | "unknown";
+  unavailableReason?: string;
+  /** Claude: how the identity and the windows were joined (identity as of a refresh; windows from seats' samples at
+   *  their own times; not proven to be the same login). */
+  identityNote?: string;
+  /** Present on an unresolved observation: never matched, merged or replaced; kept from the most recent reads. */
+  unresolved?: { note: string; keptReads: number; droppedReads: number };
+  /** Present when rig auth profiles exist: this read covers only the login active in the daemon's CODEX_HOME. */
+  savedProfiles?: { names: string[]; note: string };
 }

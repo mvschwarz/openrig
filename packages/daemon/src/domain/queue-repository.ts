@@ -83,6 +83,9 @@ export function hasLiveHumanGate(item: {
 const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
 const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
 
+/** The actor on the transition routeToFallback writes; the row's own history is how a later reroute finds the line it wrote. */
+const FALLBACK_ACTOR = "system:queue-fallback";
+
 /** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
  *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
  *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
@@ -343,6 +346,9 @@ export interface QueueUpdateInput {
   transitionNote?: string;
   closureReason?: string;
   closureTarget?: string;
+  /** The outcome stored in queue_items.resolution when this update closes a row that is still open;
+   *  appended after anything the row already carries. Ignored on every other update. */
+  resolution?: string;
   /**
    * PL-004 Phase D extension: when set, persists the queue_items.handed_off_to
    * column. Used by workflow-projector for state=handed-off transitions so
@@ -515,6 +521,48 @@ export function deriveCrossHostSuccessorId(
   return `qitem-xh-${digest}`;
 }
 
+/** The retained next owner must describe this closure, not a handoff before a reopen. */
+export function matchesRecordedHandoffTarget(
+  qitemId: string, handedOffTo: string | null, closureTarget: string | null,
+): boolean {
+  if (!handedOffTo || !closureTarget) return false;
+  if (closureTarget === handedOffTo) return true;
+  // Cross-host re-drives preserve the pre-convention member@rig@host target.
+  const legacy = /^(.+)@([A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(closureTarget);
+  if (legacy?.[1] === handedOffTo) return true;
+  const foreign = /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget);
+  return foreign !== null && foreign[1] === deriveCrossHostSuccessorId(qitemId, handedOffTo, foreign[2]!);
+}
+
+/**
+ * Shared read-only lineage helper for handoff advisory and stuck sweep.
+ * Checks whether a local successor item exists matching target (by qitem_id or destination_session)
+ * linked to sourceQitemId (via handed_off_from or chain_of_record membership).
+ *
+ * Excludes source row itself (s.qitem_id != sourceQitemId). Guards chain_of_record with json_valid.
+ * Throws on database/query errors so callers can handle lookup failures with their own policies.
+ */
+export function hasLinkedSuccessor(
+  db: Database.Database,
+  sourceQitemId: string,
+  target: string,
+): boolean {
+  const successor = db
+    .prepare(
+      `SELECT 1 FROM queue_items s
+        WHERE (s.qitem_id = ? OR s.destination_session = ?) AND s.qitem_id != ?
+          AND (s.handed_off_from = ? OR (
+            s.chain_of_record IS NOT NULL
+            AND json_valid(s.chain_of_record)
+            AND EXISTS (
+              SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
+            )
+          )) LIMIT 1`,
+    )
+    .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
+  return Boolean(successor);
+}
+
 /** PL-007 — defensive column probe. Older test fixtures bypass the
  *  canonical migration list, so target_repo may be absent. Mirrors
  *  the `hasNodeColumn` pattern in rig-repository.ts. */
@@ -566,8 +614,17 @@ function compactRow(item: QueueItem): CompactQueueItem {
   return row as unknown as CompactQueueItem;
 }
 
-const COMPACT_QUEUE_COLUMNS =
-  "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo";
+const COMPACT_QUEUE_COLUMN_NAMES = [
+  "qitem_id", "ts_created", "ts_updated", "source_session", "destination_session", "state", "priority", "tier", "tags",
+  "blocked_on", "handed_off_to", "handed_off_from", "expires_at", "closure_reason", "closure_target", "closure_required_at",
+  "claimed_at", "last_nudge_attempt", "last_nudge_result", "last_heartbeat", "resolution", "target_repo",
+] as const;
+const COMPACT_QUEUE_COLUMNS = COMPACT_QUEUE_COLUMN_NAMES.join(", ");
+
+/** The row fields a delivery ledger reads. A compact listing selects only COMPACT_QUEUE_COLUMN_NAMES, so each must be
+ *  one of them: dropping one from that list leaves its field off this type, and its read fails to compile. */
+type LedgerRow = Pick<QueueItemRow, Extract<(typeof COMPACT_QUEUE_COLUMN_NAMES)[number],
+  "qitem_id" | "state" | "blocked_on" | "destination_session" | "ts_created" | "last_nudge_result" | "claimed_at">>;
 
 /**
  * Stamp-at-FORWARD only (founder root invariant 2026-08-27, superseding 51-09 incr 4
@@ -627,6 +684,10 @@ export function destinationRigTeaching(session: string): Record<string, unknown>
  * gateway resolver (how to register + "not an agent seat"). Loads the registry only for
  * the (rare) @external refusal path. Undefined for non-@external / registered / scheme.
  */
+/** Refusal teachings issued because nobody is registered yet (the load result's `noHumans`), so the refusal's
+ *  wording can say so. Kept off the teaching object itself, whose fields are unchanged. */
+const NOBODY_REGISTERED_TEACHINGS = new WeakSet<object>();
+
 export function externalAdmissionTeaching(
   session: string,
   loadRegistry: () => LoadResult = loadHumanRegistry,
@@ -635,6 +696,19 @@ export function externalAdmissionTeaching(
   if (parsed.kind !== "external") return undefined;
   if (resolveExternal(parsed.local, []).kind === "scheme") return undefined;
   const reg = loadRegistry();
+  if (!reg.ok && reg.noHumans) {
+    // Nobody registered yet: not a broken registry. Same fields as below; the hint names the registration verb.
+    const teaching = {
+      externalDomain: parsed.domain,
+      registryLoadError: true,
+      registryError: reg.error,
+      hint:
+        `human registry admission is unavailable because no human is registered yet: ${reg.error}. ` +
+        "Register the person with rig gateway human add; do not downgrade the destination to an agent seat.",
+    };
+    NOBODY_REGISTERED_TEACHINGS.add(teaching);
+    return teaching;
+  }
   if (!reg.ok) {
     return {
       externalDomain: parsed.domain,
@@ -670,7 +744,9 @@ function destinationValidationError(
   if (teaching?.registryLoadError === true) {
     return new QueueRepositoryError(
       "human_registry_unavailable",
-      `${field} ${session} cannot be admitted because the human registry failed to load: ${String(teaching.registryError)}`,
+      NOBODY_REGISTERED_TEACHINGS.has(teaching)
+        ? `${field} ${session} cannot be admitted because no human is registered yet: ${String(teaching.registryError)}`
+        : `${field} ${session} cannot be admitted because the human registry failed to load: ${String(teaching.registryError)}`,
       teaching,
     );
   }
@@ -2068,6 +2144,8 @@ export class QueueRepository {
     /** `handed-off` for /handoff; `done` for /handoff-and-complete. */
     terminalState: "handed-off" | "done";
     transitionNote?: string;
+    /** The sender's recorded provenance, as the local handoff records it. Null only for an in-process caller. */
+    identityProvenance?: string | null;
   }): { item: QueueItem; absorbed: boolean } {
     const source = this.getById(input.qitemId);
     if (!source) {
@@ -2117,6 +2195,7 @@ export class QueueRepository {
         transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
         closureReason: "handed_off_to",
         closureTarget: input.closureTarget,
+        identityProvenance: input.identityProvenance ?? null,
       });
 
       // OPR.0.5.8.1 S1b — third member of the handoff family, same bypass.
@@ -2141,7 +2220,7 @@ export class QueueRepository {
         qitemId: input.qitemId,
         terminalState: input.terminalState,
         actorSession: input.fromSession,
-        identityProvenance: null,
+        identityProvenance: input.identityProvenance ?? null,
         ts,
       })) {
         events.push(dependentEvent);
@@ -2435,16 +2514,17 @@ export class QueueRepository {
       );
     }
     const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
+    const hasValidSummary = typeof input.summary === "string" && input.summary.trim().length > 0;
     const isGuardedTerminal = (["done", "canceled", "handed-off"] as const).includes(
       qitem.state as "done" | "canceled" | "handed-off",
     );
     const isStatePreservingAppend = input.state === undefined || (isGuardedTerminal && input.state === qitem.state);
 
     if (isStatePreservingAppend) {
-      if (input.state === undefined && !hasNote) {
+      if (input.state === undefined && !hasNote && !hasValidSummary) {
         throw new QueueRepositoryError(
           "state_or_note_required",
-          "queue update requires --state or a non-empty --note; nothing was written",
+          "queue update requires --state, a non-empty --note, or a non-empty --summary; nothing was written",
         );
       }
       const disallowed = input.reopen === true
@@ -2457,8 +2537,9 @@ export class QueueRepository {
         || input.wakeMaxSeconds != null
         || input.wakeProgressEvidence != null
         || input.wakeMessage != null
-        || input.summary != null
-        || input.evidenceRef != null;
+        || input.evidenceRef != null
+        || (input.state !== undefined && input.summary != null)
+        || (input.summary != null && !hasValidSummary);
       if (disallowed) {
         throw new QueueRepositoryError(
           "note_append_fields_not_admitted",
@@ -2466,11 +2547,21 @@ export class QueueRepository {
         );
       }
 
+      if (hasValidSummary) {
+        this.persistSummary(input.qitemId, input.summary!);
+      }
+
+      const note = hasValidSummary
+        ? (hasNote
+          ? (input.transitionNote!.includes("(summary updated)") ? input.transitionNote : `${input.transitionNote} (summary updated)`)
+          : "summary updated")
+        : input.transitionNote;
+
       this.transitionLog.append({
         qitemId: input.qitemId,
         state: qitem.state,
         actorSession: input.actorSession,
-        transitionNote: input.transitionNote,
+        transitionNote: note,
         // A note-only append does not clear the claim's retained park gate.
         // Carry its audit pointer so a later state write can end this chain.
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
@@ -2484,7 +2575,7 @@ export class QueueRepository {
         closureReason: null,
         closureTarget: null,
         actorSession: input.actorSession,
-        summary: qitem.summary ?? null,
+        summary: hasValidSummary ? input.summary! : (qitem.summary ?? null),
       });
       return { persistedEvent, persistedEvents: [persistedEvent] };
     }
@@ -2798,6 +2889,15 @@ export class QueueRepository {
     // NULL. The prior `COALESCE(?, blocked_on)` preserved the blocker on every non-blocked
     // transition, leaving dead blockers that nothing audits (the root-cause strand).
     const nextBlockedOn = input.state === "blocked" ? effectiveBlockedOn : null;
+    // The outcome is used only as non-blank text on the update that closes an open row; on any other
+    // update the field is ignored and the row answers as it would without it. It goes after what the row
+    // already carries (a pod-fallback line, or an earlier close's outcome) on its own line, text as sent.
+    const closingResolution = typeof input.resolution === "string" && input.resolution.trim().length > 0
+      && isBlockerLive(qitem.state) && !isBlockerLive(input.state)
+      ? input.resolution : null;
+    const nextResolution = closingResolution === null
+      ? qitem.resolution
+      : qitem.resolution ? `${qitem.resolution}\n${closingResolution}` : closingResolution;
     const notification = this.classifyOwnerNotification({
       action: "update",
       destinationSession: qitem.destinationSession,
@@ -2816,7 +2916,8 @@ export class QueueRepository {
                closure_reason = COALESCE(?, closure_reason),
                closure_target = COALESCE(?, closure_target),
                handed_off_to = COALESCE(?, handed_off_to),
-               blocked_on = ?
+               blocked_on = ?,
+               resolution = ?
          WHERE qitem_id = ?`
       )
       .run(
@@ -2826,6 +2927,7 @@ export class QueueRepository {
         validation.closureTarget,
         input.handedOffTo ?? null,
         nextBlockedOn,
+        nextResolution,
         input.qitemId
       );
 
@@ -3040,6 +3142,11 @@ export class QueueRepository {
     return this.wakeRepo.getStatus(qitemId);
   }
 
+  /** For parked diagnosis only (see QueueWakeRepository.servedByOwnRepeatingReminder). */
+  parkWakeServedByOwnReminder(qitemId: string): boolean {
+    return this.wakeRepo.servedByOwnRepeatingReminder(qitemId);
+  }
+
   /** Park timers a seat swap keeps: each is still its blocked row's current wake and still targets the
    *  row's owner (see QueueWakeRepository.currentParkTimerIds). */
   currentParkTimerIds(): string[] {
@@ -3065,6 +3172,17 @@ export class QueueRepository {
       const wake = this.wakeRepo.getForTransition(transition.transitionId);
       return wake ? { ...transition, wake } : transition;
     });
+  }
+
+  /** The transition that closed a row: the first of the trailing run in its current closed state.
+   *  Later notes and delivery receipts on a closed row repeat that state, so the latest transition
+   *  is not the close. Null while the row is still active (pending, in-progress, blocked). */
+  closingTransition(qitemId: string, currentState: string): ReturnType<QueueTransitionLog["listForQitem"]>[number] | null {
+    if (isBlockerLive(currentState)) return null;
+    const transitions = this.transitionLog.listForQitem(qitemId);
+    let closing = null;
+    for (let i = transitions.length - 1; i >= 0 && transitions[i]!.state === currentState; i--) closing = transitions[i]!;
+    return closing;
   }
 
   /** Read-only scope-aware RECENT projection. Normalization and its hard cap
@@ -3126,11 +3244,21 @@ export class QueueRepository {
       const firedEvents = targets.map(recordFired);
       if (deliveryStatus === "retained") return firedEvents;
       if (usageLimitBlockers.length === 0) {
-        if (parkGeneratedTimer && !backOffQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), jobId, deliveryStatus)) {
-          (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(
+        const jobsRepo = this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db);
+        if (parkGeneratedTimer && !backOffQueueWait(jobsRepo, jobId, deliveryStatus)) {
+          jobsRepo.markTerminal(
             jobId,
             "park_timer_fired_once",
           );
+        } else if (!parkGeneratedTimer) {
+          // A one-shot generated job whose original park has ended and whose last attachment this attempt just
+          // consumed is retired now, not at its next check: while it stayed active, --wake-watchdog could attach
+          // another task to it. Repeating (queue-wait) jobs keep their own lifecycle.
+          const job = jobsRepo.getById(jobId);
+          if (job && !isQueueWait(job.specYaml)) {
+            const reason = this.resolveWatchdogPreDeliveryTerminalReason(jobId);
+            if (reason) jobsRepo.markTerminal(jobId, reason);
+          }
         }
         return firedEvents;
       }
@@ -3278,6 +3406,17 @@ export class QueueRepository {
     return choice?.kind === "fallback" ? describeReplyToFallback(choice) : null;
   }
 
+  /** The parked query's obligation face: open rows to one destination, newest first, without the per-row
+   *  projections list() derives (pickup, waiting view, delivery ledger), which this read never uses. */
+  listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }> {
+    const rows = this.db.prepare(
+      `SELECT qitem_id, state${this.hasSummaryColumn ? ", summary" : ""} FROM queue_items
+        WHERE destination_session = ? AND state IN ('pending', 'in-progress', 'blocked')
+        ORDER BY ts_created DESC LIMIT ?`,
+    ).all(destinationSession, limit) as Array<{ qitem_id: string; state: "pending" | "in-progress" | "blocked"; summary?: string | null }>;
+    return rows.map((r) => ({ qitemId: r.qitem_id, state: r.state, summary: r.summary ?? null }));
+  }
+
   list(opts: QueueListOptions & { compact: true }): CompactQueueItem[];
   list(opts?: QueueListOptions & { compact?: false }): QueueItem[];
   list(opts?: QueueListOptions): Array<QueueItem | CompactQueueItem>;
@@ -3334,9 +3473,11 @@ export class QueueRepository {
         `SELECT ${columns} FROM queue_items ${where} ORDER BY ${orderBy} LIMIT ?`
       )
       .all(...params) as QueueItemRow[];
+    const owners = this.transitionLog.ownerNotificationsForQitems(rows.map((row) => row.qitem_id));
+    const ledgers = this.deliveryOutcomesFor(rows, owners);
     const items = rows.map((r) => {
-      const item = this.rowToItem(r, !opts?.compact);
-      const ledger = this.deliveryOutcomeFor(item.qitemId);
+      const ledger = ledgers.get(r.qitem_id);
+      const item = this.rowToItem(r, !opts?.compact, { owners: owners.get(r.qitem_id) ?? [], ledger: ledger ?? null });
       return {
         ...item,
         deliveryOutcome: ledger?.outcome ?? null,
@@ -3665,9 +3806,14 @@ export class QueueRepository {
   }
 
   /** Null means legacy/no OWNER history; inactive means OWNER history exists
-   *  but the row no longer projects a current human-notification episode. */
-  private currentDeliveryEpisode(item: QueueItem, knownOwner?: QueueTransition): { notificationKey: string; startedAt: string } | "inactive" | null {
-    let transition = knownOwner ?? this.transitionLog.latestOwnerNotificationForQitem(item.qitemId);
+   *  but the row no longer projects a current human-notification episode.
+   *  owners: the row's owner notifications, newest first. */
+  private currentDeliveryEpisode(
+    item: LedgerItem,
+    owners: QueueTransition[],
+    loadRegistry: () => LoadResult,
+  ): { notificationKey: string; startedAt: string } | "inactive" | null {
+    let transition = owners[0];
     if (!transition) return null;
     // A human-decision-resolved notice written BY the transition that closed the row (a human's direct reply closing
     // it) is never posted: the Slack outbound lists active rows only (listHumanAlerts), and that human just answered.
@@ -3676,14 +3822,12 @@ export class QueueRepository {
     // stayed active is a real delivery and keeps its outcome after an agent later closes the row.
     let resolvedBy: string | null = null;
     if (transition.ownerNotificationKind === "human-decision-resolved" && !["pending", "in-progress", "blocked"].includes(transition.state)) {
-      const outbound = this.transitionLog.listForQitem(item.qitemId)
-        .filter((t) => t.ownerNotificationLevel != null && t.ownerNotificationKind != null && t.ownerNotificationKind !== "human-decision-resolved")
-        .sort((a, b) => b.transitionId - a.transitionId)[0];
+      const outbound = owners.find(isOutboundOwnerNotice);
       if (!outbound) return "inactive";
       resolvedBy = transition.actorSession;
       transition = outbound;
     }
-    const registry = this.loadHumanRegistryFn();
+    const registry = loadRegistry();
     if (!registry.ok) return "inactive";
     // After that fallback the recipient is the human who answered: the row may be an agent's that was parked on them
     // (its destination is the agent, and closing cleared blocked_on).
@@ -3712,12 +3856,13 @@ export class QueueRepository {
    *  to a registered human, aliases included) has a POSTED receipt. Legacy rows with no OWNER
    *  history, inactive episodes, never-posted and transport-failed all read false. Same derivation
    *  as deliveryOutcomeFor; it reads row fields, never the waiting view. */
-  humanNotificationPostedThisEpisode(qitemId: string): boolean {
+  humanNotificationPostedThisEpisode(qitemId: string, listed?: ListedLedger): boolean {
     if (!this.hasQueueTransitionsTable) return false;
     // Only the ask's own notification binds a recipient: create writes it in state pending, to the destination of
     // that moment. A park notice (its recipient is not retained), a resolution notice, or a later destination change
     // (routeToFallback opens no new episode) cannot establish that the current destination received this ask.
-    const owner = this.transitionLog.latestOwnerNotificationForQitem(qitemId);
+    const owners = listed?.owners ?? this.transitionLog.ownerNotificationsForQitems([qitemId]).get(qitemId) ?? [];
+    const owner = owners[0];
     if (!owner || owner.state !== "pending") return false;
     if (owner.ownerNotificationKind !== "human-required" && owner.ownerNotificationKind !== "human-update") return false;
     const rerouted = this.db.prepare(
@@ -3725,11 +3870,12 @@ export class QueueRepository {
     ).get(qitemId, owner.transitionId);
     if (rerouted) return false;
     // The ledger's episode exists only when the destination resolves to a registered human (aliases included).
-    const ledger = this.deliveryLedger(qitemId, owner);
+    const ledger = listed ? listed.ledger : this.deliveryLedger(qitemId, owners);
     return ledger !== null && ledger.outcome === "posted" && ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`;
   }
 
-  private deliveryLedger(qitemId: string, knownOwner?: QueueTransition): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null } | null {
+  /** owners: the row's owner notifications as ownerNotificationsForQitems gives them, when the caller read them. */
+  private deliveryLedger(qitemId: string, owners?: QueueTransition[]): DeliveryLedger | null {
     // Some repository-only fixtures intentionally model the pre-transition
     // schema. Delivery projection is additive there: absence means no verdict,
     // never a list failure.
@@ -3737,25 +3883,64 @@ export class QueueRepository {
     const row = this.db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as QueueItemRow | undefined;
     if (!row) return null;
-    // The delivery episode uses row fields, not the waiting/backstop view.
-    // Keep this read fresh without repeating the caller's recovery-tag scan.
-    const item = this.rowToItem(row, false);
-    const episodeState = this.currentDeliveryEpisode(item, knownOwner);
-    if (episodeState === "inactive") return null;
-    const episode = episodeState;
-    const notes = this.db.prepare(
-      `SELECT transition_note FROM queue_transitions
-        WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %'
+    // The delivery episode uses row fields, not the waiting/backstop view. Its receipts are read after it, as they
+    // always were for a single row: a receipt committed while the human registry loads is then seen.
+    return this.deliveryOutcomesFor([row], owners && new Map([[qitemId, owners]]), true).get(qitemId) ?? null;
+  }
+
+  private receiptNotesStatement?: Database.Statement;
+
+  /** The delivery ledger of each row, its reads batched: one read of the rows' owner notifications (unless the caller
+   *  read them already), one of their receipts, the human registry loaded once at most. A single row's
+   *  (deliveryOutcomeFor, show, the sweeps) is a batch of one. receiptsAfterEpisodes: read the receipts once the
+   *  episodes (and so the registry) are worked out, as a single row's ledger does; a listing reads them before. */
+  private deliveryOutcomesFor(rows: LedgerRow[], knownOwners?: Map<string, QueueTransition[]>, receiptsAfterEpisodes = false): Map<string, DeliveryLedger> {
+    const ledgers = new Map<string, DeliveryLedger>();
+    if (!this.hasQueueTransitionsTable || rows.length === 0) return ledgers;
+    const qitemIds = rows.map((row) => row.qitem_id);
+    const owners = knownOwners ?? this.transitionLog.ownerNotificationsForQitems(qitemIds);
+    let notes = receiptsAfterEpisodes ? undefined : this.receiptNotesFor(qitemIds);
+    let registry: LoadResult | undefined;
+    const loadRegistry = () => (registry ??= this.loadHumanRegistryFn());
+    const episodes = rows.map((row) => {
+      const item = ledgerItem(row);
+      return { item, episode: this.currentDeliveryEpisode(item, owners.get(row.qitem_id) ?? [], loadRegistry) };
+    });
+    notes ??= this.receiptNotesFor(qitemIds);
+    for (const { item, episode } of episodes) {
+      if (episode === "inactive") continue;
+      const ledger = this.ledgerOf(item, episode, notes.get(item.qitemId) ?? []);
+      if (ledger) ledgers.set(item.qitemId, ledger);
+    }
+    return ledgers;
+  }
+
+  /** The delivery receipt notes of these qitems, newest first, by qitem. */
+  private receiptNotesFor(qitemIds: string[]): Map<string, string[]> {
+    this.receiptNotesStatement ??= this.db.prepare(
+      `SELECT qitem_id, transition_note FROM queue_transitions
+        WHERE qitem_id IN (SELECT value FROM json_each(?)) AND (transition_note LIKE 'slack-owner-notification-posted %'
                              OR transition_note LIKE 'slack-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
-    ).all(qitemId) as Array<{ transition_note: string }>;
+    );
+    const notes = new Map<string, string[]>();
+    for (const row of this.receiptNotesStatement.all(JSON.stringify(qitemIds)) as Array<{ qitem_id: string; transition_note: string }>) {
+      const own = notes.get(row.qitem_id);
+      if (own) own.push(row.transition_note);
+      else notes.set(row.qitem_id, [row.transition_note]);
+    }
+    return notes;
+  }
+
+  /** The ledger of one row's current episode, from its receipt notes (newest first). */
+  private ledgerOf(item: LedgerItem, episode: { notificationKey: string; startedAt: string } | null, notes: string[]): DeliveryLedger | null {
     const currentNotes = episode
-      ? notes.filter((note) => note.transition_note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
+      ? notes.filter((note) => note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
       : notes;
-    const posted = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-posted "));
-    if (posted) return { outcome: "posted", detail: posted.transition_note, episode };
-    const failed = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-transport-failed "));
-    if (failed) return { outcome: "transport-failed", detail: failed.transition_note, episode };
+    const posted = currentNotes.find((note) => note.startsWith("slack-owner-notification-posted "));
+    if (posted) return { outcome: "posted", detail: posted, episode };
+    const failed = currentNotes.find((note) => note.startsWith("slack-owner-notification-transport-failed "));
+    if (failed) return { outcome: "transport-failed", detail: failed, episode };
     const startedAt = episode?.startedAt ?? item.tsCreated;
     const gatewayRouted = episode !== null || item.lastNudgeResult?.startsWith("gateway-owned") === true;
     if (gatewayRouted) {
@@ -3784,6 +3969,55 @@ export class QueueRepository {
   }
 
   /**
+   * Where, in the row's `resolution`, the fallback line `routeToFallback` last wrote begins; null when it cannot be
+   * told, and the field is then left whole. The row's own transitions say what that reroute printed: a newest-first
+   * seek by row on the live log, then on the archive the retention sweep moves an aged closed row's transitions to,
+   * stopping at the reroute's own transition (the in-process one, with no identity provenance), whose note is `fallback-routed: <from> → <to> (<reason>)`. The line is
+   * `fallback: <reason>`, built from the same printed reason, so it starts at a line start `i` of the field with
+   * `fallback: ` there and the rest of the field, `r`, satisfying note ends with ` (r)`. Neither the destinations nor
+   * the chain are consulted, so how a value was stored cannot matter. At most one `i` can satisfy it when the field
+   * ends with that line: a longer `r` would have to be preceded in the note by ` (`, and a shorter one starts inside the
+   * reason, right after a newline, which is not ` (`.
+   *
+   * A close that came after that reroute from an open state may have appended an outcome behind the line, and an
+   * outcome can read like the line, so then only a field that is nothing but the line (`i` = 0, which an appended
+   * outcome would lengthen) is accepted.
+   */
+  private fallbackLineStart(qitemId: string, resolution: string): number | null {
+    let note: string | null = null;
+    let newerClosed = false;
+    let outcomeMayFollow = false;
+    for (const table of ["queue_transitions", ...(detectTable(this.db, "queue_transitions_archive") ? ["queue_transitions_archive"] : [])]) {
+      // The reroute's transition is written in-process, so it has no identity provenance; the update route records one
+      // on every write and takes the actor and note from the request, so a transition it wrote can carry the same
+      // actor and note without being a reroute (the trust rule replyToChoiceFor uses). A schema without the column
+      // predates the update route's provenance and reads every row as unstamped.
+      const stamped = (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === "identity_provenance");
+      const newestFirst = this.db.prepare(
+        `SELECT state, actor_session, transition_note, ${stamped ? "identity_provenance" : "NULL AS identity_provenance"} FROM ${table} WHERE qitem_id = ? ORDER BY transition_id DESC`,
+      );
+      for (const row of newestFirst.iterate(qitemId) as Iterable<{ state: string; actor_session: string; transition_note: string | null; identity_provenance: string | null }>) {
+        if (newerClosed && isBlockerLive(row.state as QueueState)) outcomeMayFollow = true;
+        if (row.identity_provenance === null && row.actor_session === FALLBACK_ACTOR && row.transition_note?.startsWith("fallback-routed: ")) {
+          note = row.transition_note;
+          break;
+        }
+        newerClosed = !isBlockerLive(row.state as QueueState);
+      }
+      if (note !== null) break;
+    }
+    if (note === null) return null;
+    const printed = note;
+    const startsHere = (i: number) =>
+      resolution.startsWith("fallback: ", i) && (i === 0 || resolution[i - 1] === "\n") && printed.endsWith(` (${resolution.slice(i + "fallback: ".length)})`);
+    if (outcomeMayFollow) return startsHere(0) ? 0 : null;
+    for (let i = 0; i < resolution.length; i = resolution.indexOf("\n", i) + 1 || resolution.length) {
+      if (startsHere(i)) return i;
+    }
+    return null;
+  }
+
+  /**
    * Pod-fallback: redirect qitem to a fallback destination (e.g., when a seat
    * is unreachable). Emits qitem.fallback_routed; preserves chain_of_record.
    */
@@ -3796,6 +4030,17 @@ export class QueueRepository {
     const originalDestination = qitem.destinationSession;
     const newChain = JSON.stringify([...(qitem.chainOfRecord ?? []), `fallback-from:${originalDestination}`]);
 
+    // The field held only a fallback line before a close could store an outcome. The line this method last
+    // wrote is replaced, as it always was; anything else in the field is an outcome (possibly after an
+    // earlier fallback line) and stays, with the new line after it. "The line it last wrote" comes from the
+    // row's own transitions, so no marker is stored in the text. When the row has closed since, the field may
+    // end with an outcome that reads like that line, so then only a field that is exactly the line (an
+    // appended outcome would make it longer) is replaced; with no such reroute transition the field is left whole.
+    const fallbackLine = `fallback: ${reason}`;
+    const start = qitem.resolution ? this.fallbackLineStart(qitemId, qitem.resolution) : null;
+    const kept = qitem.resolution && start !== null ? qitem.resolution.slice(0, Math.max(0, start - 1)) : qitem.resolution;
+    const nextResolution = kept ? `${kept}\n${fallbackLine}` : fallbackLine;
+
     const txn = this.db.transaction(() => {
       this.db
         .prepare(
@@ -3806,7 +4051,7 @@ export class QueueRepository {
                  resolution = ?
            WHERE qitem_id = ?`
         )
-        .run(fallbackDestination, ts, newChain, `fallback: ${reason}`, qitemId);
+        .run(fallbackDestination, ts, newChain, nextResolution, qitemId);
       // A park timer targets the owner that parked the row. Once the row belongs to someone else it must not keep
       // waking the old owner, so it ends here like any other exit from the park. A repeating wait is left running:
       // it resolves its recipient from the row's current owner at delivery (evaluateQueueWait).
@@ -3817,7 +4062,7 @@ export class QueueRepository {
       this.transitionLog.append({
         qitemId,
         state: qitem.state,
-        actorSession: "system:queue-fallback",
+        actorSession: FALLBACK_ACTOR,
         transitionNote: `fallback-routed: ${originalDestination} → ${fallbackDestination} (${reason})`,
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined,
       });
@@ -3933,12 +4178,13 @@ export class QueueRepository {
     try { return this.activityReader?.(session) ?? null; } catch { return null; }
   }
 
-  waitingView(qitemId: string): WaitingView | null {
+  /** listed: the row's owner notifications and ledger, when a listing read them for all its rows. */
+  waitingView(qitemId: string, listed?: ListedLedger): WaitingView | null {
     const view = readWaitingView(this.db, qitemId, this.activityReader);
     if (view && ["pending", "in-progress"].includes(view.state)) {
       // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
-      const awaitingHuman = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId);
+      const awaitingHuman = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
       if (awaitingHuman) {
         view.nextBackstop = { owner: view.owner, mechanism: "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
       }
@@ -3952,22 +4198,13 @@ export class QueueRepository {
   }
 
   private handoffAdvisory(row: QueueItemRow): QueueItem["handoffAdvisory"] {
-    // handoff() creates its local successor in the same transaction. Do not
-    // scan successor history again on every projection of those source rows.
-    if (row.state === "handed-off" || !isTerminalState(row.state)
+    // Generic updates can write handed-off and retain a previous handoff's owner
+    // after reopening. Skip only when that owner still matches this closure.
+    if ((row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitem_id, row.handed_off_to, row.closure_target)) || !isTerminalState(row.state)
       || row.closure_reason !== "handed_off_to" || !row.closure_target) return undefined;
     const target = row.closure_target;
     try {
-      const successor = this.db.prepare(
-        `SELECT 1 FROM queue_items s
-          WHERE (s.qitem_id = ? OR s.destination_session = ?) AND s.qitem_id != ?
-            AND (s.handed_off_from = ? OR EXISTS (
-              SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
-            )) LIMIT 1`,
-      ).get(target, target, row.qitem_id, row.qitem_id, row.qitem_id);
-      // A linked row may have handed on to another owner. Its current state
-      // does not establish whether later hops still hold the work.
-      if (successor) return undefined;
+      if (hasLinkedSuccessor(this.db, row.qitem_id, target)) return undefined;
     } catch {
       // Optional reporting must not fail a close that has already committed,
       // or describe an unavailable lookup as proof of a missing local row.
@@ -3979,16 +4216,16 @@ export class QueueRepository {
       target,
       reason: "no-live-local-successor",
       message: foreignTarget
-        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup.`
-        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID.`,
+        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup. Use 'rig queue handoff' or 'handoff-and-complete': a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`
+        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID. Use 'rig queue handoff' or 'handoff-and-complete': a local handoff is atomic, across hosts the successor is created first and the source closed after, and an uncertain result is reconciled by its exact id, since re-running the same handoff is idempotent.`,
     };
   }
 
-  private rowToItem(row: QueueItemRow, includeWaiting = true): QueueItem {
+  private rowToItem(row: QueueItemRow, includeWaiting = true, listed?: ListedLedger): QueueItem {
     // S04 — derive the pickup receipt at the ONE shared projection point (list/show/overdue
     // all flow through here), so the park-vs-strand question is answered by the row face.
     const meaningful = lastMeaningfulTransition(this.db, row.qitem_id);
-    const waiting = includeWaiting ? this.waitingView(row.qitem_id) : null;
+    const waiting = includeWaiting ? this.waitingView(row.qitem_id, listed) : null;
     const activity = this.ownerActivity(row.destination_session);
     const pickup = derivePickup({
       state: row.state,
@@ -4044,6 +4281,30 @@ export class QueueRepository {
       targetRepo: row.target_repo ?? null,
     };
   }
+}
+
+/** The row fields a delivery ledger reads, as rowToItem presents them. */
+type LedgerItem = Pick<QueueItem, "qitemId" | "state" | "blockedOn" | "destinationSession" | "tsCreated" | "lastNudgeResult">;
+
+type DeliveryLedger = { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null };
+
+/** A listed row's owner notifications (newest first) and its delivery ledger, read once for the whole listing. */
+type ListedLedger = { owners: QueueTransition[]; ledger: DeliveryLedger | null };
+
+function ledgerItem(row: LedgerRow): LedgerItem {
+  return {
+    qitemId: row.qitem_id,
+    state: row.state as QueueState,
+    blockedOn: row.blocked_on,
+    destinationSession: row.destination_session,
+    tsCreated: row.ts_created,
+    lastNudgeResult: presentedNudgeResult(row.last_nudge_result, row.claimed_at),
+  };
+}
+
+/** A notice sent to the owner, as opposed to the resolution notice a human's own answer writes. */
+function isOutboundOwnerNotice(t: QueueTransition): boolean {
+  return t.ownerNotificationLevel != null && t.ownerNotificationKind != null && t.ownerNotificationKind !== "human-decision-resolved";
 }
 
 function isQueueState(value: unknown): value is QueueState {

@@ -12,6 +12,7 @@ import { resolveCrossHostTarget } from "../cross-host-target.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
+import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -20,6 +21,10 @@ const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 // fetch's 10 s connect timeout, so a host that never accepts the connection still reads as unreachable. A send
 // that outlasts it reads as unconfirmed, never as failed.
 const CROSS_HOST_SEND_TIMEOUT_MS = 30_000;
+
+/** The shared composer glyph set (Claude `❯`, Codex `›`, Codex 0.153 `»`) from the daemon's
+ * composer-prompts surface, so the CLI staged check can never disagree with the daemon guard. */
+const PROMPT_LINE_PATTERN = new RegExp(`^\\s*[${COMPOSER_PROMPT_CLASS}]`);
 
 /**
  * Wrap a `rig send` body with an email-style envelope so the recipient
@@ -94,7 +99,7 @@ export function wrapSendBody(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   const reply = senderLabel.endsWith("@external")
-    ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --body "..." --verify`
+    ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --summary "<one line>" --body "..." --verify`
     : `↩ Reply: rig send ${senderLabel} "..."`;
   return [...header, "---", body, "---", reply].join("\n");
 }
@@ -149,9 +154,9 @@ function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boole
   console.error(`  ${action}`);
 }
 
-/** Reject content that cannot communicate anything, before a transport call. */
-export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", json = false): boolean {
-  if (body.trim().length > 0) return false;
+/** Ordinary messages require content; explicit key input only requires nonzero bytes. */
+export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", json = false, explicitInteraction = false): boolean {
+  if (explicitInteraction ? body.length > 0 : body.trim().length > 0) return false;
   const fact = `rig ${verb}: message is empty or whitespace-only.`;
   const consequence = "The message transport did not run and nothing was delivered.";
   const action = "Check whether shell backtick or $() substitution collapsed the argument, or whether a --body-file/stdin source resolved to 0 bytes; provide non-empty content.";
@@ -267,7 +272,26 @@ determined (unknown / missing / stale telemetry) the send PROCEEDS with an
 advisory note — telemetry is advisory, not authority over whether agents can
 communicate. Use --wait-for-idle to send only after explicit idle evidence. Use
 --verify to confirm the message appeared in the pane only; it is not agent
-acknowledgement.
+acknowledgement. With transport.verify_input_box on, a Claude Code or Codex send
+reads verified only when the seat was proven idle before the paste (its screen
+matched an idle layout recorded from Claude Code 2.1.296 or Codex 0.160.0; a
+screen that names another version reads unconfirmed, and a matching layout that
+shows no version is evidence about the layout, not the version) and its input
+box held the exact text, word boundaries kept, before Enter and was empty after
+it: the box was cleared, normally by that Enter (a clear by anything else at
+that moment, or a text the agent runs as a command, looks the same). A Claude
+Code seat OpenRig launched counts as idle in any posture it launches when the
+row two above its empty box is the last turn's completion row ("✻ Cooked for 9s
+· done 5:24 PM", time of day today) or, before its first turn, blank under the
+welcome banner; a blank row under transcript text, or anything else there, reads
+unconfirmed. On Claude Code only a text shown inline in the box can verify: a
+multi-line text, including every enveloped send and queue wake, collapses to a
+paste label and reads unconfirmed. A send to a busy seat, or to a seat whose
+screen is not a known idle layout, always reads unconfirmed; a turn that starts
+in the ~200 ms before Enter is caught only when the screen shows it. An audited
+prompt answer (--dangerously-interact) is not checked and reads unconfirmed.
+The extra reads add up to about 500 ms before Enter and 500 ms before the reply
+(budgets, not guarantees).
 
 A mid-task/busy target now sends-with-advisory by default (busy is not a block);
 --force is a back-compat no-op and never bypasses the interactive-prompt/permission
@@ -366,7 +390,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           process.exitCode = 1;
           return;
         }
-        if (refuseEmptyMessage(message, "send", Boolean(opts.json))) return;
+        if (refuseEmptyMessage(message, "send", Boolean(opts.json), Boolean(opts.dangerouslyInteract))) return;
         if (opts.host) {
           console.error("--host (cross-host) supports single-seat sends only; --to/--pod/--rig are local.");
           process.exitCode = 1;
@@ -388,7 +412,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         process.exitCode = 1;
         return;
       }
-      if (!opts.context && refuseEmptyMessage(text!, "send", Boolean(opts.json))) return;
+      if (!opts.context && refuseEmptyMessage(text!, "send", Boolean(opts.json), Boolean(opts.dangerouslyInteract))) return;
 
       // The endpoint selects delivery; the local durable store identifies the origin.
       const localDaemonUrl = await resolveLocalDaemonUrl(deps);
@@ -465,7 +489,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         const warn = walkSizedWarning(resolved, session);
         if (warn && !opts.json) console.log(`Advisory: ${warn}`);
       }
-      if (refuseEmptyMessage(payload, "send", Boolean(opts.json))) return;
+      if (refuseEmptyMessage(payload, "send", Boolean(opts.json), Boolean(opts.dangerouslyInteract))) return;
       // Send/broadcast header (ruling 03c35295): a directed `rig send` is a DM — stamp it at send-time
       // (Sent: MM-DD HH:MMZ) so transcripts are timestamped; the To line stays the single recipient.
       const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, { stampISO: new Date().toISOString() });
@@ -550,7 +574,10 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           const verified = res.data["verified"] as boolean | undefined;
           console.log(`Verified: ${verified ? "yes" : "no"}`);
           const outcome = res.data["outcome"] as string | undefined;
-          if (outcome === "delivered") {
+          const inputBoxLine = inputBoxDeliveryLine(outcome, res.data["inputBox"], session);
+          if (inputBoxLine) {
+            console.log(inputBoxLine);
+          } else if (outcome === "delivered") {
             console.log("Delivery: delivered (message landed; render confirmed)");
           } else if (outcome === "rendered-unconfirmed") {
             console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
@@ -633,6 +660,43 @@ async function classifyDeliveryEffect(
     : { checked: true, state: "staged", remedy: "submitted-cleared" };
 }
 
+const SEAT_READING_WORDS: Record<string, string> = {
+  idle: "idle",
+  "not-idle": "not idle (a running turn, a queue, a pending input or a paste hint showed)",
+  unknown: "not a known idle layout",
+};
+
+const INPUT_BOX_READING_WORDS: Record<string, string> = {
+  exact: "the exact text",
+  ambiguous: "the text, but a line break in the box may split a word (word boundaries uncertain)",
+  empty: "empty",
+  queued: "queued or possibly queued (a queued label, or a turn was running)",
+  hidden: "a collapsed paste (text hidden)",
+  other: "other text",
+  unrecognized: "layout not recognized",
+  unavailable: "no capture",
+};
+
+/** The Delivery line for a send verified by its input box (transport.verify_input_box), shared by the local
+ *  and cross-host printers. Null when the result carries no inputBox, so the legacy lines print verbatim. */
+function inputBoxDeliveryLine(outcome: string | undefined, inputBox: unknown, session: string): string | null {
+  if (!inputBox || typeof inputBox !== "object") return null;
+  const box = inputBox as { seat?: unknown; before?: unknown; after?: unknown; sameProcess?: unknown };
+  const words = (reading: unknown) => INPUT_BOX_READING_WORDS[String(reading)] ?? String(reading);
+  if (outcome === "delivered") {
+    return "Delivery: delivered (seat idle before the paste; input box: the exact text before Enter, empty after it, same pane process; not agent acknowledgement)";
+  }
+  if (outcome !== "rendered-unconfirmed") return null;
+  // `rig capture` is an optional look, never a required follow-up, and nothing here suggests sending again.
+  const look = `not a failure; to look, optionally: rig capture ${session}`;
+  if (box.before === "unchecked") {
+    return `Delivery: rendered-unconfirmed (input box not checked: an audited prompt answer is typed as keys and its box is not read; ${look})`;
+  }
+  const paneProcess = box.sameProcess === true ? "" : "; pane process changed or unknown";
+  const seat = box.seat === undefined ? "" : `seat before the paste: ${SEAT_READING_WORDS[String(box.seat)] ?? String(box.seat)}; `;
+  return `Delivery: rendered-unconfirmed (${seat}input box before Enter: ${words(box.before)}; after Enter: ${words(box.after)}${paneProcess}; ${look})`;
+}
+
 /** Renders an EffectCheck on the human surface — shared wording across the
  *  single-send and fan-out paths so the report is identical everywhere. */
 function effectHumanLines(effect: EffectCheck, session: string): string[] {
@@ -687,10 +751,10 @@ async function detectStagedAtPrompt(
   const lines = pane.split("\n");
   let lastPrompt = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^\s*[❯›]/.test(lines[i]!)) { lastPrompt = i; break; }
+    if (PROMPT_LINE_PATTERN.test(lines[i]!)) { lastPrompt = i; break; }
   }
   if (lastPrompt === -1) return { state: "not-staged" };
-  const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(/^\s*[❯›]/, "");
+  const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(PROMPT_LINE_PATTERN, "");
   // IDENTITY FIRST (round-2 F2, desk-binding): the literal-residual match uses
   // the daemon submit-precheck's own normalization (strip ALL whitespace,
   // contiguous containment) so a detector-positive is compatible with the
@@ -904,7 +968,10 @@ async function runHttpHostSend(
     const verified = data["verified"] as boolean | undefined;
     console.log(`Verified: ${verified ? "yes" : "no"}`);
     const outcome = data["outcome"] as string | undefined;
-    if (outcome === "delivered") {
+    const inputBoxLine = inputBoxDeliveryLine(outcome, data["inputBox"], session);
+    if (inputBoxLine) {
+      console.log(inputBoxLine);
+    } else if (outcome === "delivered") {
       console.log("Delivery: delivered (message landed; render confirmed)");
     } else if (outcome === "rendered-unconfirmed") {
       console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);

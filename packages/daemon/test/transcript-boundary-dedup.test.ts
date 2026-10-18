@@ -31,6 +31,8 @@ describe.skipIf(process.platform === "win32")("native transcript boundary replay
         if (command.includes("capture-pane")) captures += 1;
         return result.stdout;
       });
+      // No activity hint: every tick captures, so the header merge runs on each of them.
+      Object.assign(tmuxAdapter, { readAllSessionWindowActivity: undefined });
       const readyDeadline = Date.now() + 2000;
       while (!(await tmuxAdapter.capturePaneContent(sessionName, 20))?.includes("stable terminal output") && Date.now() < readyDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));

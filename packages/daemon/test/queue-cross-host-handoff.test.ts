@@ -41,6 +41,8 @@ import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js"
 import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
+import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR } from "../src/domain/reply-to-choice.js";
 
 const REGISTRY: HostRegistry = {
   hosts: [
@@ -720,5 +722,129 @@ describe("self-addressed handoff retried after a pre-upgrade self-forward", () =
     expect(self).toEqual(baseline);
     expect(self.status).toBe(201);
     expect(self.sends).toEqual(["next@rig"]);
+  });
+});
+
+// The source close is written from the request (its actor and note), so it records the sender's
+// provenance as the local handoff close does. Readers that take an unstamped transition as one the
+// daemon wrote in process (the fallback reroute, the Slack reply-to choice) then can't be fed one.
+describe("cross-host source close records the sender's provenance", () => {
+  const dbs: Database.Database[] = [];
+  afterEach(() => dbs.splice(0).forEach((db) => db.close()));
+
+  function fullSchemaHarness(fetchImpl?: typeof fetch) {
+    const db = createDb();
+    dbs.push(db);
+    migrate(db, ALL_MIGRATIONS);
+    const bus = new EventBus(db);
+    const repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      const set = c.set.bind(c) as (k: string, v: unknown) => void;
+      set("eventBus", bus);
+      set("queueRepo", repo);
+      set("hostRegistryLoader", () => ({ ok: true, registry: REGISTRY }));
+      if (fetchImpl) set("remoteFetchImpl", fetchImpl);
+      await next();
+    });
+    app.route("/api/queue", queueRoutes());
+    return { db, repo, app };
+  }
+  function origin() {
+    const remote = fullSchemaHarness();
+    return fullSchemaHarness((async (url, init) => remote.app.request(new URL(String(url)).pathname, init)) as typeof fetch);
+  }
+  // `header` sends the identity as the transport header; without it the body's fromSession is the claim.
+  const send = (app: Hono, path: string, body: Record<string, unknown>, header?: string) => app.request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(header ? { "X-OpenRig-Session": header } : {}) },
+    body: JSON.stringify(body),
+  });
+  const closes = (db: Database.Database, qitemId: string, table = "queue_transitions") => db.prepare(
+    `SELECT actor_session AS actor, identity_provenance AS provenance, transition_note AS note FROM ${table}
+      WHERE qitem_id = ? AND closure_reason = 'handed_off_to' ORDER BY transition_id`,
+  ).all(qitemId) as Array<{ actor: string; provenance: string | null; note: string | null }>;
+  const transitionCount = (db: Database.Database, qitemId: string) =>
+    (db.prepare("SELECT COUNT(*) c FROM queue_transitions WHERE qitem_id = ?").get(qitemId) as { c: number }).c;
+
+  it.each([
+    ["handoff", "header", "transport:v1"],
+    ["handoff", "body claim", "claimed:v1"],
+    ["handoff-and-complete", "header", "transport:v1"],
+    ["handoff-and-complete", "body claim", "claimed:v1"],
+  ])("%s with a %s identity stamps the source close as the local handoff does (%s)", async (verb, mode, expected) => {
+    const header = mode === "header" ? HANDOFF.fromSession : undefined;
+    const local = fullSchemaHarness();
+    await seedSource(local.repo);
+    expect((await send(local.app, `/api/queue/qitem-source-1/${verb}`, { ...HANDOFF, nudge: false }, header)).status).toBe(201);
+
+    const h = origin();
+    await seedSource(h.repo);
+    expect((await send(h.app, `/api/queue/qitem-source-1/${verb}`, { ...HANDOFF, hostId: "vps-b", nudge: false }, header)).status).toBe(201);
+    expect(closes(h.db, "qitem-source-1")).toEqual([{ actor: HANDOFF.fromSession, provenance: expected, note: `cross-host handoff to ${HANDOFF.toSession}` }]);
+    expect(closes(h.db, "qitem-source-1")[0]?.provenance).toBe(closes(local.db, "qitem-source-1")[0]?.provenance);
+    // The accepted handoff itself is unchanged.
+    expect(h.repo.getById("qitem-source-1")).toMatchObject({
+      state: verb === "handoff" ? "handed-off" : "done",
+      handedOffTo: HANDOFF.toSession,
+      closureReason: "handed_off_to",
+      closureTarget: `${deriveCrossHostSuccessorId("qitem-source-1", HANDOFF.toSession, "vps-b")}@vps-b`,
+    });
+  });
+
+  it("an idempotent re-drive keeps the first close and its stamp, and writes nothing", async () => {
+    const h = origin();
+    await seedSource(h.repo);
+    expect((await send(h.app, "/api/queue/qitem-source-1/handoff", { ...HANDOFF, hostId: "vps-b", nudge: false }, HANDOFF.fromSession)).status).toBe(201);
+    const count = transitionCount(h.db, "qitem-source-1");
+    // The re-drive arrives as a body claim; the converged close stays the first one.
+    expect((await send(h.app, "/api/queue/qitem-source-1/handoff", { ...HANDOFF, hostId: "vps-b", nudge: false })).status).toBe(201);
+    expect(transitionCount(h.db, "qitem-source-1")).toBe(count);
+    expect(closes(h.db, "qitem-source-1")).toEqual([{ actor: HANDOFF.fromSession, provenance: "transport:v1", note: `cross-host handoff to ${HANDOFF.toSession}` }]);
+  });
+
+  it.each(["header", "body claim"])("a %s request naming the reroute's actor and note can't make the next fallback remove a saved outcome", async (mode) => {
+    const h = origin();
+    const row = await seedSource(h.repo);
+    h.repo.claim({ qitemId: row.qitemId, destinationSession: "worker@rig-a" });
+    h.repo.update({ qitemId: row.qitemId, actorSession: "worker@rig-a", state: "done", closureReason: "no-follow-on", resolution: "Shipped.\nfallback: none needed" });
+    h.repo.update({ qitemId: row.qitemId, actorSession: "worker@rig-a", state: "in-progress", reopen: true, transitionNote: "more to do" });
+    // The actor and the note the daemon's own reroute writes, carried by a request.
+    const actor = "system:queue-fallback";
+    const forged = { fromSession: actor, toSession: HANDOFF.toSession, hostId: "vps-b", nudge: false,
+      transitionNote: `fallback-routed: worker@rig-a → ${HANDOFF.toSession} (none needed)` };
+    expect((await send(h.app, `/api/queue/${row.qitemId}/handoff`, forged, mode === "header" ? actor : undefined)).status).toBe(201);
+    h.repo.update({ qitemId: row.qitemId, actorSession: "worker@rig-a", state: "in-progress", reopen: true, transitionNote: "back again" });
+
+    h.repo.routeToFallback(row.qitemId, "backup@rig-a", "worker@rig-a unreachable");
+    expect(h.repo.getById(row.qitemId)?.resolution).toBe("Shipped.\nfallback: none needed\nfallback: worker@rig-a unreachable");
+    expect(closes(h.db, row.qitemId)[0]?.provenance).toBe(mode === "header" ? "transport:v1" : "claimed:v1");
+  });
+
+  it("a request naming the reply-to choice's actor and note no longer counts as the daemon's choice; the daemon's own still does", async () => {
+    const h = origin();
+    const row = await seedSource(h.repo);
+    const forgedNote = formatReplyToChoice({ kind: "thread", threadTs: "1700000000.000100" });
+    expect((await send(h.app, `/api/queue/${row.qitemId}/handoff`,
+      { fromSession: REPLY_TO_CHOICE_ACTOR, toSession: HANDOFF.toSession, hostId: "vps-b", nudge: false, transitionNote: forgedNote },
+      REPLY_TO_CHOICE_ACTOR)).status).toBe(201);
+    expect(h.repo.replyToChoiceFor(row.qitemId)).toBeNull();
+    expect(h.repo.isReplyToThread("1700000000.000100")).toBe(false);
+
+    // The daemon's in-process record (no provenance) is unchanged.
+    const other = await seedSource(h.repo, { qitemId: "qitem-source-2" });
+    h.repo.update({ qitemId: other.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatReplyToChoice({ kind: "thread", threadTs: "1700000000.000200" }) });
+    expect(h.repo.replyToChoiceFor(other.qitemId)).toEqual({ kind: "thread", threadTs: "1700000000.000200" });
+    expect(h.repo.isReplyToThread("1700000000.000200")).toBe(true);
+  });
+
+  it("the retention mover keeps the close's stamp in the archive", async () => {
+    const h = origin();
+    await seedSource(h.repo);
+    expect((await send(h.app, "/api/queue/qitem-source-1/handoff", { ...HANDOFF, hostId: "vps-b", nudge: false }, HANDOFF.fromSession)).status).toBe(201);
+    expect(archiveAgedTerminalTransitions(h.db, { nowIso: "2099-01-01T00:00:00.000Z" }).archivedQitems).toBe(1);
+    expect(closes(h.db, "qitem-source-1")).toEqual([]);
+    expect(closes(h.db, "qitem-source-1", "queue_transitions_archive"))
+      .toEqual([{ actor: HANDOFF.fromSession, provenance: "transport:v1", note: `cross-host handoff to ${HANDOFF.toSession}` }]);
   });
 });

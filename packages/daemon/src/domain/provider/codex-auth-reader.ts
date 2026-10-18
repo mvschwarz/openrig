@@ -18,10 +18,22 @@ export interface CodexSeatRow {
   updatedTs: string;
 }
 
+/** How the seat registry read went: absent (ENOENT), read, or unreadable (the error code only, never contents). */
+export interface CodexSeatRegistryRead {
+  status: "absent" | "read" | "unreadable";
+  code?: string;
+  /** Rows skipped because they don't have the six columns. */
+  malformedRows: number;
+}
+
 export interface CodexAuthMetadata {
   /** Profile NAMES (opaque, non-secret refs) — never file contents. */
   profiles: string[];
   seats: CodexSeatRow[];
+  /** Additive: lets a caller tell a supported absence from an unreadable or malformed registry. */
+  registry?: CodexSeatRegistryRead;
+  /** Additive: how the profile folder read went (absent, read, or unreadable with the error code only). */
+  profilesRead?: { status: "absent" | "read" | "unreadable"; code?: string };
 }
 
 const SEAT_COLUMN_COUNT = 6;
@@ -37,45 +49,61 @@ function resolveCodexHome(env: NodeJS.ProcessEnv): { profileDir: string; registr
   };
 }
 
-// Profile NAMES only — the *.json file contents (token-class) are never opened.
-function listProfiles(profileDir: string): string[] {
+// Profile NAMES only — the *.json file contents (token-class) are never opened. Mirrors readSeats: a missing
+// folder means none saved; any other error is unreadable (the code only), with `profiles` still [].
+function listProfiles(profileDir: string): { profiles: string[]; profilesRead: NonNullable<CodexAuthMetadata["profilesRead"]> } {
   try {
-    return fs
+    const profiles = fs
       .readdirSync(profileDir)
       .filter((n) => n.endsWith(".json"))
       .map((n) => n.slice(0, -".json".length))
       .sort();
-  } catch {
-    return [];
+    return { profiles, profilesRead: { status: "read" } };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT"
+      ? { profiles: [], profilesRead: { status: "absent" } }
+      : { profiles: [], profilesRead: { status: "unreadable", code: code ?? "unknown" } };
   }
 }
 
-function readSeats(registryPath: string): CodexSeatRow[] {
+function readSeats(registryPath: string): { seats: CodexSeatRow[]; registry: CodexSeatRegistryRead } {
   let raw: string;
   try {
     raw = fs.readFileSync(registryPath, "utf8");
-  } catch {
-    return [];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT"
+      ? { seats: [], registry: { status: "absent", malformedRows: 0 } }
+      : { seats: [], registry: { status: "unreadable", code: code ?? "unknown", malformedRows: 0 } };
   }
   const rows: CodexSeatRow[] = [];
+  let malformedRows = 0;
   for (const line of raw.split("\n")) {
     if (line.length === 0) continue;
     const cols = line.split("\t");
-    if (cols.length !== SEAT_COLUMN_COUNT) continue; // skip malformed rows — never fabricate fields
+    if (cols.length !== SEAT_COLUMN_COUNT) { // skip malformed rows — never fabricate fields
+      malformedRows += 1;
+      continue;
+    }
     // Length is exactly 6 above, so the tuple destructure is total (satisfies noUncheckedIndexedAccess).
     const [seat, rig, runtime, cwd, authProfile, updatedTs] = cols as [string, string, string, string, string, string];
     if (seat === "seat") continue; // the header row
     rows.push({ seat, rig, runtime, cwd, authProfile, updatedTs });
   }
-  return rows;
+  return { seats: rows, registry: { status: "read", malformedRows } };
 }
 
 /** Read the codex-auth on-disk METADATA (profile names + seat registry). Never throws; never
  *  surfaces token-class content. Absent home/files yield empty arrays. */
 export function readCodexAuthMetadata(env: NodeJS.ProcessEnv = process.env): CodexAuthMetadata {
   const { profileDir, registryPath } = resolveCodexHome(env);
+  const { seats, registry } = readSeats(registryPath);
+  const { profiles, profilesRead } = listProfiles(profileDir);
   return {
-    profiles: listProfiles(profileDir),
-    seats: readSeats(registryPath),
+    profiles,
+    seats,
+    registry,
+    profilesRead,
   };
 }

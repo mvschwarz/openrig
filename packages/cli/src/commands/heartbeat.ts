@@ -192,7 +192,7 @@ export function analyzeHeartbeat(input: {
 }
 
 export function parseQueueFile(sharedDocsRoot: string, queueFile: string): QueueEntry[] {
-  const content = fs.readFileSync(queueFile, "utf8");
+  const content = fs.readFileSync(queueFile, "utf8").replace(/\r\n/g, "\n");
   const rig = deriveRigName(sharedDocsRoot, queueFile);
   const owner = deriveOwner(queueFile);
   const session = deriveSessionName(owner, rig);
@@ -355,7 +355,7 @@ function latestProof(body: string, now: Date): HeartbeatProof | null {
     proofs.push({ at: timestamp, ageSeconds: age, line, path });
   }
 
-  proofs.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+  proofs.sort((a, b) => parseTimestamp(a.at)!.getTime() - parseTimestamp(b.at)!.getTime());
   return proofs.at(-1) ?? null;
 }
 

@@ -34,6 +34,8 @@ export function buildNativeResumeCommand(
   resumeToken: string | null,
   sessionName?: string | null,
   codexConfigProfile?: string | null,
+  /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
+  codexDaemonOptOut?: boolean,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -41,7 +43,7 @@ export function buildNativeResumeCommand(
     return `claude --resume ${shellQuote(resumeToken)}${nameSuffix}`;
   }
   if (runtime === "codex") {
-    return buildCodexResumeCore(resumeToken, codexConfigProfile);
+    return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);
   }
   return null;
 }
@@ -124,7 +126,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for project MCP server approval before the session can become interactive.",
       };
     }
-    if (looksLikeClaudeLoginPrompt(paneContent)) {
+    if (hasCurrentClaudeLoginRefusal(paneContent)) {
       return {
         status: "failed",
         code: "login_required",
@@ -325,9 +327,42 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   return numberedOption;
 }
 
-function looksLikeClaudeLoginPrompt(paneContent: string): boolean {
-  return paneContent.includes("Not logged in")
-    && paneContent.includes("Run /login");
+// Claude's interactive refusals of a request for a missing, expired or revoked login (code.claude.com/docs/en/errors).
+// Only these exact messages count. A 401 reads "Please run /login · API Error: 401 …" with a varying tail, and a
+// reply or tool output can start with the same words, so this input can't tell a real one apart.
+const CLAUDE_LOGIN_REFUSALS = new Set([
+  "Not logged in · Please run /login",
+  "Login expired · Please run /login",
+  "OAuth token revoked · Please run /login",
+]);
+
+// A refusal blocks only as Claude's latest response. The persistent "Not logged in · Run /login" footer says only
+// that Claude holds no credential of its own, and a gateway can still authenticate its requests. Claude starts a
+// reply with ● or ⏺ at column 0 and a result with ⎿ two cells in, continuing either on indented rows up to a blank
+// row; an indented marker is quoted text. The last ❯ row is the input box only when no response follows it;
+// otherwise it is a submitted prompt and no box is drawn. A refusal counts when it is the last response after the
+// last submitted prompt, so older scrollback, quoted text and a refusal followed by a newer reply or prompt do not.
+function hasCurrentClaudeLoginRefusal(paneContent: string): boolean {
+  const lines = paneContent.split(/\r?\n/);
+  const isPrompt = (line: string) => /^\s*❯/.test(line);
+  const isResponse = (line: string) => /^[●⏺]/.test(line) || /^ {2}⎿/.test(line);
+  const prompts: number[] = [];
+  const responses: Array<{ at: number; text: string }> = [];
+  for (let at = 0; at < lines.length; at++) {
+    const line = lines[at]!;
+    if (isPrompt(line)) prompts.push(at);
+    if (!isResponse(line)) continue;
+    let text = line.replace(/^\s*[●⏺⎿]/, "");
+    // Claude wraps its own rows with a short hanging indent; a right-aligned footer is not a continuation.
+    for (let next = at + 1; next < lines.length && /^ {1,6}\S/.test(lines[next]!) && !isPrompt(lines[next]!)
+      && !isResponse(lines[next]!); next++) text += ` ${lines[next]}`;
+    responses.push({ at, text: text.replace(/\s+/g, " ").trim() });
+  }
+  const lastPrompt = prompts.at(-1) ?? -1;
+  const inputBox = responses.some(({ at }) => at > lastPrompt) ? lines.length : lastPrompt;
+  const turnStart = prompts.filter((at) => at < inputBox).at(-1) ?? -1;
+  const latest = responses.filter(({ at }) => at > turnStart && at < inputBox).at(-1)?.text;
+  return latest !== undefined && CLAUDE_LOGIN_REFUSALS.has(latest);
 }
 
 function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {

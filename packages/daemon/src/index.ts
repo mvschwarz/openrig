@@ -1,11 +1,13 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
+import { removeParentSessionEnv } from "./domain/parent-session-env.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
@@ -303,6 +305,8 @@ export async function startServer(port?: number) {
     bindHosts = bindPlan.hosts;
   }
 
+  // The fresh-DB Codex probe runs inside createDaemon, before the shutdown handlers below exist.
+  const disarmStartupSignals = endProbeGroupsOnStartupSignal();
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
     bearerToken,
@@ -382,10 +386,12 @@ export async function startServer(port?: number) {
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
       ["timers", () => {
+        deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
         if (stuckSweepTimer) clearInterval(stuckSweepTimer);
       }],
+      ["runtime-probes", () => stopRuntimeProbes()],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
@@ -397,6 +403,8 @@ export async function startServer(port?: number) {
       ["wake-ladder", () => wakeLadderScheduler?.stop()],
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
       ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
+      // After the last request: the tmux control client ends and its session goes with it.
+      ["tmux-control", () => deps.tmuxAdapter.closeControlClient()],
       ["recorder", async () => {
         deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {
@@ -408,6 +416,7 @@ export async function startServer(port?: number) {
     markClean: () => deps.daemonLifecycleStore.recordStop(deps.daemonBootEpoch, new Date().toISOString()),
   });
   // Repeated signals join the first shutdown instead of bypassing its evidence.
+  disarmStartupSignals();
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
@@ -425,5 +434,9 @@ const isDirectRun =
   import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isDirectRun) {
+  // Before anything spawns: the tmux server this daemon starts passes its
+  // environment to every seat, so drop the launching session's identity.
+  const removed = removeParentSessionEnv(process.env);
+  if (removed.length) console.log(`[openrig] Seats will not inherit the launching session's ${removed.join(", ")}.`);
   startServer();
 }

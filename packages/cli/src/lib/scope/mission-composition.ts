@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseDocument } from "yaml";
 import { ScopeCliError } from "./types.js";
+import { pendingCompletedSliceRefs, markSliceRegistrationsVerified } from "./slice-claims.js";
 import {
   LifecycleManifestValidationError,
   validateMissionComposition,
@@ -30,11 +31,12 @@ interface LoadedComposition {
 export function planMissionMembershipAdd(
   missionPath: string,
   ref: string,
-  order: number,
+  order?: number,
 ): MissionCompositionEdit | null {
   const loaded = loadMissionComposition(missionPath);
   if (!loaded) return null;
   assertSafeRelative(ref);
+  order ??= (loaded.members.at(-1)?.order ?? 0) + 10;
   if (!Number.isInteger(order)) fail(`Membership order for ${ref} must be an integer.`);
   if (loaded.members.some((member) => path.normalize(member.ref) === path.normalize(ref))) {
     fail(`Mission composition already contains ${ref}.`);
@@ -46,6 +48,65 @@ export function planMissionMembershipAdd(
     .sort((a, b) => a.order - b.order);
   return renderEdit(loaded, members);
 }
+
+/** Repair only positively unfinished registrations into a fresh union, then verify
+ *  this creator's entry. Rename is not compare-and-swap: a later writer can
+ *  still supersede a verified snapshot, so completed scaffolds stay on disk. */
+export async function appendMissionMembership(
+  missionPath: string,
+  ref: string,
+): Promise<void> {
+  const attempts = 10;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const edit = planCompletedSliceMembership(missionPath, ref);
+    // README-backed legacy missions do not have a composition manifest.
+    if (!edit) {
+      markSliceRegistrationsVerified(missionPath, [ref]);
+      return;
+    }
+    try {
+      applyMissionCompositionEdits([edit]);
+      const current = loadMissionComposition(missionPath);
+      if (current?.members.some((member) => path.normalize(member.ref) === path.normalize(ref))) {
+        markSliceRegistrationsVerified(missionPath, current.members.map((member) => member.ref));
+        return;
+      }
+    } catch (error) {
+      if (!(error instanceof MissionCompositionChangedError)) throw error;
+    }
+    if (attempt < attempts - 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 91)));
+    }
+  }
+  throw new ScopeCliError({
+    fact: `Could not verify membership for ${ref} after ${attempts} attempts.`,
+    consequence: "The complete slice scaffold was kept on disk; this create did not report success.",
+    action: "Inspect mission.yaml, then run a later slice create to repair unfinished registration.",
+  });
+}
+
+/** Preserve authored members and add only positively pending complete scaffolds, plus the
+ *  caller's completed entry. Existing active flags and orders remain intact. */
+function planCompletedSliceMembership(missionPath: string, ref: string): MissionCompositionEdit | null {
+  const loaded = loadMissionComposition(missionPath);
+  if (!loaded) return null;
+  assertSafeRelative(ref);
+  const members = [...loaded.members];
+  const present = new Set(members.map((member) => path.normalize(member.ref)));
+  const completed = pendingCompletedSliceRefs(missionPath);
+  completed.push(ref);
+  let order = Math.max(0, ...members.map((member) => member.order));
+  for (const completedRef of completed) {
+    const normalized = path.normalize(completedRef);
+    if (present.has(normalized)) continue;
+    order += 10;
+    members.push({ ref: completedRef, order, active: true });
+    present.add(normalized);
+  }
+  return renderEdit(loaded, members);
+}
+
+class MissionCompositionChangedError extends ScopeCliError {}
 
 export function planMissionMembershipRemove(
   missionPath: string,
@@ -73,7 +134,7 @@ export function applyMissionCompositionEdits(edits: MissionCompositionEdit[]): v
   // overwrite another agent's authored membership or partially change a move.
   for (const edit of unique) {
     if (fs.readFileSync(edit.manifestPath, "utf8") !== edit.original) {
-      throw new ScopeCliError({
+      throw new MissionCompositionChangedError({
         fact: `Mission composition changed since this edit was planned: ${edit.manifestPath}.`,
         consequence: "Scope composition was not changed.",
         action: "Read the current mission.yaml and retry the scope operation.",

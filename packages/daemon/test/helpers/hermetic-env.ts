@@ -26,6 +26,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { realRuntimesRequested, writeRuntimeStubs } from "../../../../test/stub-runtimes.js";
 
 /**
  * Inherited environment variables that redirect the CLI/daemon client at a
@@ -329,6 +330,9 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   for (const dir of [home, openrigHome, stateDir, tmuxTmpDir, tmuxWrapperDir]) {
     mkdirSync(dir, { recursive: true });
   }
+  // codex and claude resolve to stubs inside the scaffold, so a scenario daemon never runs the host's
+  // real binaries (they can hang under a scratch HOME). Tests that opt into real runtimes keep them.
+  const runtimeStubDir = realRuntimesRequested(baseEnv) ? undefined : writeRuntimeStubs(root);
 
   // Test-only command seam: every child `tmux` call gets one explicit private
   // socket. TMUX_TMPDIR remains for compatibility, but is never the selector.
@@ -367,7 +371,7 @@ process.exit(result.status ?? 1);
   // -S socket is the identity-bearing half, so a missing directory cannot make a
   // later invocation fall back to the operator's default server.
   env.TMUX_TMPDIR = tmuxTmpDir;
-  env.PATH = `${tmuxWrapperDir}${delimiter}${originalPath}`;
+  env.PATH = [tmuxWrapperDir, runtimeStubDir, originalPath].filter(Boolean).join(delimiter);
   // Forced-local: never resolve/attach the shared fleet kernel.
   env.OPENRIG_NO_KERNEL = "1";
   // A3-R3 injected clock: the ONLY sanctioned way OPENRIG_TEST_CLOCK_NOW is set —

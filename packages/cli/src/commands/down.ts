@@ -5,6 +5,7 @@ import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} 
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { resolveRigHandle } from "../rig-handle.js";
+import { shellQuote } from "../cross-host-executor.js";
 
 interface TeardownResult {
   rigId: string;
@@ -224,7 +225,7 @@ rig up <rig> --existing brings it back, resuming each seat's conversation where 
         const rigName = (res.data as Record<string, unknown>)["rigName"] as string | undefined;
         const isUniqueName = (res.data as Record<string, unknown>)["isUniqueName"] as boolean | undefined;
         if (rigName && isUniqueName !== false) {
-          console.log(`To restore: rig up ${rigName}`);
+          console.log(`To restore: rig up ${shellQuote(rigName)} --existing`);
         } else {
           console.log(`To restore: rig restore ${result.snapshotId} --rig ${rigId}`);
         }

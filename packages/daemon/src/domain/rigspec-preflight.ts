@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
-import { runtimeProbeFailure } from "../adapters/preflight-exec.js";
+import { runtimeProbeFailure, runtimeProbeTimeout } from "../adapters/preflight-exec.js";
 import { piVersionNotice } from "../adapters/pi-readiness.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
@@ -79,15 +79,16 @@ export class RigSpecPreflight {
     // cwd existence
     for (const node of spec.nodes) {
       if (node.cwd) {
-        if (!existsSync(node.cwd)) {
-          errors.push(`cwd '${node.cwd}' does not exist for node '${node.id}'`);
+        const cwd = resolveAuthoredCwd(node.cwd, null);
+        if (!existsSync(cwd)) {
+          errors.push(`cwd '${cwd}' does not exist for node '${node.id}'`);
         } else {
           try {
-            if (!statSync(node.cwd).isDirectory()) {
-              errors.push(`cwd '${node.cwd}' is not a directory for node '${node.id}'`);
+            if (!statSync(cwd).isDirectory()) {
+              errors.push(`cwd '${cwd}' is not a directory for node '${node.id}'`);
             }
           } catch {
-            errors.push(`cwd '${node.cwd}' is not accessible for node '${node.id}'`);
+            errors.push(`cwd '${cwd}' is not accessible for node '${node.id}'`);
           }
         }
       }
@@ -106,7 +107,7 @@ export class RigSpecPreflight {
           if (node.runtime === "pi") warnings.push(piVersionNotice(output));
         } catch (err) {
           if (node.runtime === "pi") errors.push(...piAvailabilityFailure(err, warnings));
-          else errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
+          else errors.push(runtimeProbeTimeout(err) ?? `Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
         }
       }
     }
@@ -135,8 +136,10 @@ import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
-import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
+import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
+import { loadAgentAppPreset } from "./agent-app-presets.js";
+import { BUILT_IN_RUNTIMES } from "./built-in-runtimes.js";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import {
   resolvePermissionPolicyAttachment,
@@ -146,7 +149,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = BUILT_IN_RUNTIMES;
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -381,9 +384,12 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
         }
       }
 
-      // Check runtime
+      // Check runtime: a built-in, or a community agent app whose preset is installed and usable.
       if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
-        errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}"`);
+        const app = loadAgentAppPreset(member.runtime);
+        if (!app.ok) {
+          errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
+        }
       }
 
       // Check cwd (required, already validated by RigSpec schema, but double-check)
@@ -447,6 +453,11 @@ export async function verifyPiRuntimeAvailable(
 }
 
 function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
+  const timedOut = runtimeProbeTimeout(err);
+  if (timedOut) {
+    warnings.push(timedOut);
+    return [];
+  }
   const detail = runtimeProbeFailure(err);
   if (detail === "ENOENT" || detail.includes("executable not found on PATH")) {
     warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
@@ -463,6 +474,8 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     await exec(RUNTIME_COMMANDS["omp"]!);
     return [];
   } catch (err) {
+    const timedOut = runtimeProbeTimeout(err);
+    if (timedOut) return [timedOut];
     return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
   }
 }

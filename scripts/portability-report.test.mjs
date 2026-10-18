@@ -96,3 +96,79 @@ test("the report says so when nothing is found and groups findings when somethin
   assert.match(report, /## Home path \(1\)/);
   assert.match(report, /docs\/a\.md:10/);
 });
+
+test("the CLI executes through a script path containing spaces and a hash", async () => {
+  const { mkdtempSync, symlinkSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { spawnSync } = await import("node:child_process");
+  const temp = mkdtempSync(join(tmpdir(), "openrig script # "));
+  try {
+    const script = join(temp, "portability report.mjs");
+    symlinkSync(fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), script);
+    const result = spawnSync(process.execPath, [script, "--unknown-option"], { encoding: "utf8" });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /Unknown argument: --unknown-option/);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+
+test("the CLI executes with preserve-symlinks-main and imports without argv remain inert", async () => {
+  const { mkdtempSync, symlinkSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { spawnSync } = await import("node:child_process");
+  const temp = mkdtempSync(join(tmpdir(), "openrig preserved # "));
+  const source = new URL("./portability-report.mjs", import.meta.url);
+  try {
+    const script = join(temp, "report.mjs");
+    symlinkSync(fileURLToPath(source), script);
+    const run = spawnSync(process.execPath, ["--preserve-symlinks-main", script, "--unknown-option"], { encoding: "utf8" });
+    assert.equal(run.status, 2, run.stderr);
+    assert.match(run.stderr, /Unknown argument/);
+    const imported = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(source.href)})`], { encoding: "utf8" });
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.equal(imported.stdout, "");
+    assert.equal(imported.stderr, "");
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+
+test("keeps added header-shaped text as source content inside a hunk", () => {
+  const text = ["+++ b/file.md", "@@ -0,0 +1,2 @@", "+++ b/literal.md", "+see /Users/alice/work"].join("\n");
+  assert.deepEqual(addedLines(text), [
+    { file: "file.md", line: 1, text: "++ b/literal.md" },
+    { file: "file.md", line: 2, text: "see /Users/alice/work" },
+  ]);
+});
+
+
+test("native Git reports UTF-8 and spaced names independently of quotePath configuration", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { execFileSync } = await import("node:child_process");
+  const repo = mkdtempSync(join(tmpdir(), "openrig-portability-paths-"));
+  const names = ["café.md", "ordinary name.md"];
+  try {
+    execFileSync("git", ["init", "--quiet", repo]);
+    for (const name of names) writeFileSync(join(repo, name), "see /Users/alice/project\n");
+    execFileSync("git", ["-C", repo, "add", "--", ...names]);
+    for (const quotePath of ["true", "false"]) {
+      execFileSync("git", ["-C", repo, "config", "core.quotePath", quotePath]);
+      const report = execFileSync(process.execPath, [fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), "--repo", repo, "--staged", "--locations-only"], { encoding: "utf8" });
+      for (const name of names) assert.ok(report.includes(`\`${name}:1\``), report);
+      assert.ok(!report.includes("\t"), report);
+    }
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("strips Git's separator tab and leaves C-quoted filenames quoted", () => {
+  for (const header of ['"b/quote\\\"name.md"', '"b/back\\\\slash.md"', '"b/tab\\tname.md"']) {
+    const diff = `+++ ${header}\n@@ -0,0 +1 @@\n+see /Users/alice/project\n`;
+    assert.deepEqual(addedLines(diff), [{ file: header, line: 1, text: "see /Users/alice/project" }]);
+  }
+  assert.deepEqual(addedLines("+++ b/ordinary name.md\t\n@@ -0,0 +1 @@\n+see /Users/alice/project\n"), [{ file: "ordinary name.md", line: 1, text: "see /Users/alice/project" }]);
+});

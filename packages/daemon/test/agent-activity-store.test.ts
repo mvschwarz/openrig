@@ -4,7 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { AgentActivityStore, hookEventState, hookMeansNeedsInput, latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "../src/domain/agent-activity-store.js";
 
 const NOW = new Date("2026-04-24T12:00:00.000Z");
 
@@ -34,6 +34,35 @@ describe("AgentActivityStore", () => {
     sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName, attachmentType: "tmux" });
     return { rig, node, session, sessionName };
   }
+
+  it.each([
+    ["codex", "PermissionRequest", null, "unknown"],
+    ["claude-code", "PermissionRequest", null, "needs_input"],
+    ["codex", "PermissionPromptConfirmed", null, "needs_input"],
+    ["codex", "PermissionPromptCleared", null, "unknown"],
+    ["codex", "Notification", "permission_prompt", "needs_input"],
+    ["codex", "at_limit", null, "unknown"],
+  ] as const)("shared hook mapping retains %s/%s with fresh and clock-stale evidence", (runtime, hookEvent, subtype, state) => {
+    const { node, sessionName } = seedSession(runtime);
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime, sessionName, hookEvent, subtype });
+    expect(hookEventState(hookEvent, subtype, runtime)).toBe(state);
+    expect(hookMeansNeedsInput(hookEvent, subtype, runtime)).toBe(state === "needs_input");
+    for (const referenceTime of [NOW, new Date(NOW.getTime() + 600_000)]) {
+      const latest = store.getLatestForNode({ nodeId: node.id, sessionName, now: referenceTime });
+      expect(latestHookWaitsOnPerson(latest, runtime)).toBe(state === "needs_input");
+      expect(latestHookPermissionPending(latest, runtime)).toBe(runtime === "codex" && hookEvent === "PermissionRequest");
+      expect(latestHookMovedOn(latest, "2026-04-24T11:59:00.000Z", runtime)).toBe(false);
+    }
+  });
+
+  it.each(["generation_mismatch", "generation_unresolvable", "generation_unverifiable", "generation_resolver_error"])("a pending permission with %s does not hold the current occupant", reason => {
+    const { sessionName } = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "PermissionRequest" });
+    const latest = store.getLatestForNode({ sessionName, now: NOW })!;
+    expect(latestHookPermissionPending({ ...latest, state: "unknown", reason, stale: true }, "codex")).toBe(false);
+  });
 
   it("normalizes Claude prompt/tool hooks to running", () => {
     const { node, sessionName } = seedSession("claude-code");
@@ -168,7 +197,7 @@ describe("AgentActivityStore", () => {
     });
   });
 
-  it("normalizes a Codex PermissionRequest hook to needs_input (OPR.0.4.1.10 hook-primary producer)", () => {
+  it("records a Codex PermissionRequest as pending", () => {
     const { node, sessionName } = seedSession("codex");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
 
@@ -184,8 +213,8 @@ describe("AgentActivityStore", () => {
 
     const latest = store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW });
     expect(latest).toMatchObject({
-      state: "needs_input",
-      reason: "permission_request",
+      state: "unknown",
+      reason: "permission_request_pending",
       evidenceSource: "runtime_hook",
       rawEvent: "PermissionRequest",
       evidence: "Bash", // names the tool being approved

@@ -154,10 +154,38 @@ function codexConversationToken(args: string[], subcommand: "resume" | "fork"): 
   return null;
 }
 
-// Managed fresh/resume launches name the current Claude identity explicitly.
-// A fork's --resume names its parent, so it cannot prove the new occupant.
+/** A `ps` command line split the way identity proof splits it. */
+export function processArgv(command: string): string[] {
+  return tokens(command);
+}
+
+/** The conversation a Claude command line names (--resume, --session-id, or a fork's own --session-id);
+ *  null when it names none or can't be parsed as one. */
+export function claudeCommandSessionToken(command: string): string | null {
+  return claudeSessionToken(tokens(command).slice(1));
+}
+
+/** The conversation a Codex command line resumes: its token, null for a resume naming none, undefined
+ *  when the command is not a resume at all (a fresh `codex -C …`). */
+export function codexCommandResumeToken(command: string): string | null | undefined {
+  return codexConversationToken(tokens(command).slice(1), "resume");
+}
+
+type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
+
+/** The conversation a parsed Claude argv names. A fork's --resume names its parent, so with
+ *  --fork-session only the fork's own --session-id names it, and both must be present. Without
+ *  --fork-session one identity names it and two prove nothing. undefined: no positive proof. */
+function claudeArgvIdentity(ids: ClaudeArgvIds, fork: boolean): string | null | undefined {
+  if (fork) return ids.resume !== null && ids["session-id"] !== null ? ids["session-id"] : undefined;
+  if (ids.resume !== null && ids["session-id"] !== null) return undefined;
+  return ids.resume ?? ids["session-id"];
+}
+
+// Managed fresh/resume/fork launches name the current Claude identity explicitly.
 function claudeSessionToken(args: string[]): string | null {
-  let token: string | null = null;
+  const ids: ClaudeArgvIds = { resume: null, "session-id": null };
+  let fork = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
@@ -173,13 +201,15 @@ function claudeSessionToken(args: string[]): string | null {
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
-    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (arg === "--fork-session") { fork = true; continue; }
+    const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
-    const value = identity[1] ?? args[++index];
-    if (token !== null || !value || value.startsWith("-")) return null;
-    token = value;
+    const kind = identity[1] as keyof ClaudeArgvIds;
+    const value = identity[2] ?? args[++index];
+    if (ids[kind] !== null || !value || value.startsWith("-")) return null;
+    ids[kind] = value;
   }
-  return token;
+  return claudeArgvIdentity(ids, fork) ?? null;
 }
 
 // Delivery-only reading of a Claude argv. Like the strict selector, it accepts
@@ -187,7 +217,8 @@ function claudeSessionToken(args: string[]): string | null {
 // "unparsed": an argument was not recognised, so the argv proves nothing.
 function claudeSessionIdentity(args: string[]): string | null | { unparsed: true } {
   const unparsed = { unparsed: true } as const;
-  let token: string | null = null;
+  const ids: ClaudeArgvIds = { resume: null, "session-id": null };
+  let fork = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
@@ -202,13 +233,16 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
-    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (arg === "--fork-session") { fork = true; continue; }
+    const identity = arg.match(/^--(session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
-    const value = identity[1] ?? args[++index];
-    if (token !== null || !value || value.startsWith("-")) return unparsed;
-    token = value;
+    const kind = identity[1] as keyof ClaudeArgvIds;
+    const value = identity[2] ?? args[++index];
+    if (ids[kind] !== null || !value || value.startsWith("-")) return unparsed;
+    ids[kind] = value;
   }
-  return token;
+  const named = claudeArgvIdentity(ids, fork);
+  return named === undefined ? unparsed : named;
 }
 
 const DELETED_WITNESS = " (deleted)";
@@ -453,6 +487,68 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   return observation;
 }
 
+/** Whether any process in the pane's subtree (the pane's own process included) has a Claude executable anywhere in its
+ *  argv: the recognizer `findExactNativeResumeProcess` (via `commandUsesExpectedToken`) starts from. A Claude run as
+ *  `node …/bin/claude`, or in the background, counts. */
+export function subtreeNamesClaudeExecutable(rows: NativeProcessRow[], panePid: number): boolean {
+  const byParent = new Map<number, NativeProcessRow[]>();
+  for (const row of rows) byParent.set(row.ppid, [...(byParent.get(row.ppid) ?? []), row]);
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const queue = [panePid];
+  const seen = new Set<number>();
+  while (queue.length > 0) {
+    const pid = queue.shift()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const row = byPid.get(pid);
+    if (row && tokens(row.command).some((token) => claudeExecutable(token))) return true;
+    for (const child of byParent.get(pid) ?? []) queue.push(child.pid);
+  }
+  return false;
+}
+
+/** Why `selectNativeProcess` rejects a snapshot, in the same order it checks. Used only to word a failed check;
+ *  a test pins `kind: "passes"` to `selectNativeProcess` returning a process, so the two cannot drift apart. */
+export type NativeRejection =
+  | { kind: "passes" }
+  | { kind: "no_single_process" }
+  | { kind: "no_recorded_conversation" }
+  | { kind: "names_no_conversation" }
+  | { kind: "not_a_resume" }
+  | { kind: "other_conversation"; conversation: string }
+  | { kind: "conflicting_conversations" }
+  | { kind: "rotation_process_mismatch"; conversation: string };
+
+export function explainNativeRejection(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime,
+  expectedToken: string | null | undefined, requireResume: boolean, rotation?: ClaudeResumeRotation | null, selectedExecutable?: string): NativeRejection {
+  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
+  const chain = runtime === "codex" ? launcherChain(matches, rows) : matches;
+  if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return { kind: "no_single_process" };
+  const { process } = chain[0]!;
+  if (runtime === "claude-code") {
+    if (!expectedToken) return { kind: "no_recorded_conversation" };
+    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    if (launched === expectedToken) return { kind: "passes" };
+    if (launched === null) return { kind: "names_no_conversation" };
+    if (launched === rotation?.token) return rotationProcess(process, rotation) ? { kind: "passes" } : { kind: "rotation_process_mismatch", conversation: launched };
+    return { kind: "other_conversation", conversation: launched };
+  }
+  const identities = chain.map((link) => codexConversationToken(tokens(link.process.command).slice(1), "resume"));
+  if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return { kind: "conflicting_conversations" };
+  if (requireResume) {
+    if (!expectedToken) return { kind: "no_recorded_conversation" };
+    if (identities[0] === undefined) return { kind: "not_a_resume" };
+    if (identities[0] === null) return { kind: "names_no_conversation" };
+    if (identities[0] !== expectedToken) return { kind: "other_conversation", conversation: identities[0] };
+  }
+  if (expectedToken !== undefined) {
+    const named = identities.find((value) => value !== undefined && (!expectedToken || value !== expectedToken));
+    if (named === null) return { kind: "names_no_conversation" };
+    if (typeof named === "string") return { kind: "other_conversation", conversation: named };
+  }
+  return { kind: "passes" };
+}
+
 async function observeNativePaneProcess(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };
@@ -621,6 +717,38 @@ function launcherChain(candidates: NativeProcessObservation[], rows: NativeProce
   return [...candidates].sort((a, b) => depth.get(b)! - depth.get(a)!);
 }
 
+/** The pane's own shell when it owns the foreground with nothing else in its group, else null. A wrapper's label is
+ * not an idle shell: positive shell proof requires the pane shell itself to own the foreground, with no receiving
+ * child. A background child/helper in another group does not receive terminal input. Any runtime. */
+function idleShellRoot(rows: NativeProcessRow[], pid: number): NativeProcessRow | null {
+  const root = rows.find(row => row.pid === pid);
+  return new Set(rows.map(row => row.pid)).size === rows.length && root?.startedAt
+    && root.pgid === pid && root.tpgid === pid
+    && isShellForeground(executableName(root.executableName ?? ""))
+    && isShellForeground(executableName(tokens(root.command)[0]?.replace(/^-/, "") ?? ""))
+    && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid) ? root : null;
+}
+
+/** Whether the bound pane is a stable idle shell: in two samples the pane's own shell owns the foreground with
+ * nothing else in its group, and it is the same shell both times. A missing, failed or changing listing is not idle:
+ * a launch script still starting the runtime holds the foreground the same way a shell label would suggest. */
+export async function verifyPaneIdleShell(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+}): Promise<boolean> {
+  const sample = async (): Promise<string | null> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return null;
+      const root = idleShellRoot(await (input.listProcesses ?? listNativeProcesses)(), pid);
+      return root ? JSON.stringify(root) : null;
+    } catch { return null; }
+  };
+  const first = await sample();
+  return first !== null && await sample() === first;
+}
+
 export interface ClaudeDeliveryObservation {
   state: "verified" | "unknown" | "idle_shell" | "conflict";
   detail: string;
@@ -649,7 +777,15 @@ export async function observeClaudeDelivery(
         const fingerprint = native.fingerprint;
         const identities = chain.map((link) => claudeSessionIdentity(tokens(link.process.command).slice(1)));
         const named = new Set(identities.filter((value): value is string => typeof value === "string"));
-        if (named.size > 1) return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
+        if (named.size > 1) {
+          // A Claude can start a fork of its own conversation, and ancestry in one foreground group doesn't show which
+          // of them receives input. When only a --fork-session link names the second conversation, keep the warn-and-send
+          // that held before forks were read, without verifying either.
+          const unforked = new Set(identities.filter((value, index): value is string =>
+            typeof value === "string" && !tokens(chain[index]!.process.command).includes("--fork-session")));
+          if (unforked.size <= 1) return { state: "unknown", detail: "A Claude process and a fork of a conversation share the bound foreground; current conversation is unverified", fingerprint };
+          return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
+        }
         if (!input.expectedToken) return { ...unknown, fingerprint };
         // argv records launch identity, not the current conversation: /clear can
         // rotate the hook-persisted token without replacing this process. A sole
@@ -672,15 +808,8 @@ export async function observeClaudeDelivery(
       // A Codex launcher chain in a Claude seat keeps warn-and-send (#1088 review).
       const other = nativeProcessCandidates(rows, pid, "codex").length === 1 ? selectNativeProcess(rows, pid) : null;
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
-      const root = rows.find(row => row.pid === pid);
-      // A wrapper's label is not an idle shell. Positive shell proof requires
-      // the pane shell itself to own the foreground, with no receiving child.
-      // A background child/helper in another group does not receive terminal input.
-      if (new Set(rows.map(row => row.pid)).size === rows.length && root?.startedAt
-        && root.pgid === pid && root.tpgid === pid
-        && isShellForeground(executableName(root.executableName ?? ""))
-        && isShellForeground(executableName(tokens(root.command)[0]?.replace(/^-/, "") ?? ""))
-        && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid)) {
+      const root = idleShellRoot(rows, pid);
+      if (root) {
         return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
       }
       return unknown;

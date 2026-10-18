@@ -72,6 +72,8 @@ describe("stub-runner FULL determinism pin (PRD §5, R3)", () => {
         OPENRIG_ACTIVITY_HOOK_TOKEN: "det-token",
         OPENRIG_NODE_ID: "det-node",
         OPENRIG_TEST_CLOCK_NOW: INJECTED_ISO,
+        // Keep the packet out of the production default (/tmp/claude-compaction-restore).
+        OPENRIG_COMPACTION_OUT_ROOT: join(dir, "packets"),
       } as NodeJS.ProcessEnv });
     children.push(child);
     child.stdout?.on("data", (d) => { pane += String(d); });
@@ -81,6 +83,8 @@ describe("stub-runner FULL determinism pin (PRD §5, R3)", () => {
     await waitFor(() => sink.filter((c) => c.run === run).some((c) => c.body.hookEvent === "Stop"));
 
     const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    // The packet landed under this run's own packets root, not the production default.
+    expect(dirname(marker.outputDir)).toBe(join(dir, "packets"));
     // Normalize the per-run temp path so the clock-derived content compares byte-equal.
     const paneNorm = pane.split(dir).join("<DIR>");
     return {

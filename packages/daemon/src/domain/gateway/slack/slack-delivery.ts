@@ -345,6 +345,10 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         body: q.body,
         humanQuestions: q.humanQuestions,
         destinationSession: q.destinationSession ?? decision.entityBindingRef,
+        // #1013 — a gate parked on a human seat renders the question, not the agent packet.
+        state: q.state,
+        tags: q.tags,
+        evidenceRef: q.evidenceRef,
       },
       {
         sourceLabel: opts.sourceLabel,
@@ -562,7 +566,9 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   const note = body.length > 1 ? CONTINUES_NOTE : DETAIL_NOTE;
   const parts: DeliveryPart[] = [{ ...primary, body: body[0] ? `${body[0]}\n\n${note}` : note }];
   for (let k = 1; k < body.length; k++) parts.push({ ...reply(`Continued (${k + 1} of ${body.length})`), body: body[k] });
-  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece }));
+  // #1013 — a detail piece carries the human's own content, never the agent packet, so the
+  // parked-gate state must not ride it (the gate check would eat its body like the packet's).
+  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece, state: null }));
   if (parts.length > MAX_HUMAN_MESSAGE_PARTS) {
     throw new HumanMessageShapeError(`This brief needs ${parts.length} Slack messages (maximum ${MAX_HUMAN_MESSAGE_PARTS}). Shorten it, or put the long part in a file and link it.`);
   }
@@ -581,7 +587,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     let parts: DeliveryPart[] = q.humanDetail
       ? [
           { ...q, humanDetail: undefined, body: `${q.body ?? ""}\n\n${DETAIL_NOTE}` },
-          { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
+          // #1013 — the supplemental part carries the gate's own human detail; the parked-gate
+          // state must not ride it, or the gate check would eat this body the way it eats the packet.
+          { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null, state: null },
         ]
       : [q];
     // #897 — the first attempt decides the shape from the real render and records it; a retry renders

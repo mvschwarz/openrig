@@ -109,7 +109,13 @@ describe("config routes (User Settings v0)", () => {
     // + 1 ui.enabled (web UI and its terminal WebSocket; default off).
     // + 1 launch.non_interruptive (new-rig launch default; default off).
     // + 1 queue.wake_human_rung (#811; default "always").
-    expect(Object.keys(body.settings).length).toBe(73);
+    // + 1 output.compact (slice 15 compact command-output switch; default off).
+    // + 1 provider.usage_windows (slice 01 Codex usage windows; default off).
+    // + 1 output.whoami_peers (slice 15 P5 whoami peer bound; default 8).
+    // + 1 usage.pi_cost_facts (slice 02 Pi cost from persisted entries; default off).
+    // + 1 usage.pi_openrouter_charge (slice 02 K4 OpenRouter charge beside the Pi estimate; default off).
+    // + 1 transport.verify_input_box (input-box evidence for verified Claude Code and Codex sends; default off).
+    expect(Object.keys(body.settings).length).toBe(79);
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });
     expect(body.settings["runtime.readiness_timeout_seconds"]).toMatchObject({ value: 30, source: "default" });
     expect(body.settings["ui.enabled"]).toMatchObject({ value: false, source: "default" });

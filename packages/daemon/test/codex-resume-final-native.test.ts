@@ -89,11 +89,12 @@ describe.skipIf(process.platform === "win32")("native terminal final Codex resum
     expect(await finalObservation("OpenAI Codex (v0.0.0)\n› Ask Codex to do anything")).toMatchObject({ ok: true });
   }, 15_000);
 
-  it("preserves the shell fallback without claiming readiness or attention from unrelated output", async () => {
-    // The production launch stages this fixture via /bin/sh. Native tmux sees
-    // that foreground wrapper, so retain its existing shell fallback outcome.
+  it("keeps the launch for attention while the staging wrapper holds the foreground, never claiming readiness", async () => {
+    // The production launch stages this fixture via /bin/sh, so native tmux labels the pane with that wrapper while
+    // Codex runs under it. The wrapper isn't an idle shell, so the launch is kept rather than retried fresh.
     expect(await finalObservation("fixture output remains inconclusive")).toMatchObject({
-      ok: false, code: "retry_fresh", message: "Codex resume failed: pane returned to shell instead of entering Codex",
+      ok: false, code: "attention_required",
+      message: "Codex resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Codex.",
     });
   }, 15_000);
 });

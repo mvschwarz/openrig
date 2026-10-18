@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
@@ -12,6 +12,9 @@ import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import {
+  PiUsageEntriesStore, hasPiUsageChargesTable, hasPiUsageEntriesTable, validPiProviderCharge, validPiUsageFact,
+} from "../domain/pi-usage-entries-store.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -37,6 +40,9 @@ export function evidenceFromHookActivity(input: {
     seq: input.seq,
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
   };
+  if (input.activity.reason === "permission_request_pending") {
+    return { ...base, permissionRequest: { id: input.activity.turnId ?? "uncorrelated" } };
+  }
   switch (input.activity.state) {
     case "running":
       return { ...base, activity: "working", needsInput: { count: 0, reason: null } };
@@ -58,6 +64,80 @@ function nextHookSeq(key: string): number {
 }
 
 export const activityRoutes = new Hono();
+
+/** The shared front of the Pi usage routes: configuration, the local hook token, a JSON object body, and the
+ *  managed Pi seat it names. Returns the response to send on any failure. */
+async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegistry["db"]) => boolean):
+  Promise<{ error: Response } | { body: Record<string, unknown>; db: SessionRegistry["db"]; seat: { sessionName: string; nodeId: string }; piSessionId: string }> {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const expectedToken = c.get("activityHookToken" as never) as string | undefined;
+  const sessionRegistry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+  if (!store || !expectedToken || !sessionRegistry || !needs(sessionRegistry.db)) {
+    return { error: c.json({ ok: false, code: "pi_usage_unconfigured", error: `${what} aren't accepted by this daemon.` }, 503) };
+  }
+  const authHeader = c.req.header("authorization");
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
+  if (bearerToken !== expectedToken && (c.req.header("x-openrig-activity-token") ?? null) !== expectedToken) {
+    return { error: c.json({ ok: false, code: "activity_hook_unauthorized", error: `${what} require the configured local hook token.` }, 401) };
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json() as Record<string, unknown>;
+  } catch {
+    return { error: c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400) };
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require a JSON object` }, 400) };
+  }
+  const sessionName = stringOrNull(body.sessionName);
+  const piSessionId = stringOrNull(body.piSessionId);
+  if (!sessionName || !piSessionId) {
+    return { error: c.json({ ok: false, code: "invalid_pi_usage", error: `${what} require sessionName and piSessionId` }, 400) };
+  }
+  const resolved = store.resolveSession({ sessionName, nodeId: stringOrNull(body.nodeId), runtime: "pi" });
+  if (!resolved || resolved.runtime !== "pi") {
+    return { error: c.json({ ok: false, code: "session_not_found", error: `No managed Pi seat named ${sessionName}` }, 404) };
+  }
+  return { body, db: sessionRegistry.db, seat: resolved, piSessionId };
+}
+
+// OPR.0.7.0.2 (cost reporting, Pi atom): a Pi runner started with --usage-facts (usage.pi_cost_facts on) posts the
+// usage facts of entries Pi has persisted. Same local hook token as /hooks. Each (Pi session, entry) is stored
+// once; facts for a seat that isn't a managed Pi seat are refused, never stored under another name. The reply
+// also names the posted entries that already have an OpenRouter charge, so a restarted runner doesn't look
+// them up again.
+activityRoutes.post("/pi-usage", async (c) => {
+  const req = await piUsageRequest(c, "Pi usage facts", hasPiUsageEntriesTable);
+  if ("error" in req) return req.error;
+  if (!Array.isArray(req.body.facts)) {
+    return c.json({ ok: false, code: "invalid_pi_usage", error: "pi-usage requires sessionName, piSessionId and facts[]" }, 400);
+  }
+  const facts = (req.body.facts as unknown[]).map(validPiUsageFact);
+  const valid = facts.filter((fact): fact is NonNullable<typeof fact> => fact !== null);
+  const store = new PiUsageEntriesStore(req.db);
+  const result = store.record({
+    seatSession: req.seat.sessionName, nodeId: req.seat.nodeId, generation: stringOrNull(req.body.generation), piSessionId: req.piSessionId, facts: valid,
+  }, new Date().toISOString());
+  return c.json({ ok: true, ...result, rejected: facts.length - valid.length,
+    // Only for a runner that looks up charges; otherwise the reply is unchanged.
+    ...(req.body.wantCharged === true ? { charged: store.chargedEntryIds(req.piSessionId, valid.map((fact) => fact.entryId)) } : {}) });
+});
+
+// OPR.0.7.0.2 (cost reporting, K4): with usage.pi_openrouter_charge on, the runner posts OpenRouter's charge (or
+// why it is unavailable) for entries it already posted here. Same token and seat checks. A charge for an entry
+// not stored for this seat, or for a different generation than the entry recorded, is refused.
+activityRoutes.post("/pi-usage-charges", async (c) => {
+  const req = await piUsageRequest(c, "Pi provider charges", hasPiUsageChargesTable);
+  if ("error" in req) return req.error;
+  if (!Array.isArray(req.body.charges)) {
+    return c.json({ ok: false, code: "invalid_pi_usage", error: "pi-usage-charges requires sessionName, piSessionId and charges[]" }, 400);
+  }
+  const charges = (req.body.charges as unknown[]).map(validPiProviderCharge);
+  const valid = charges.filter((charge): charge is NonNullable<typeof charge> => charge !== null);
+  const result = new PiUsageEntriesStore(req.db).recordCharges(
+    { seatSession: req.seat.sessionName, piSessionId: req.piSessionId, charges: valid }, new Date().toISOString());
+  return c.json({ ok: true, ...result, rejected: charges.length - valid.length });
+});
 
 activityRoutes.post("/hooks", async (c) => {
   const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
@@ -299,6 +379,7 @@ activityRoutes.post("/hooks", async (c) => {
     // Legacy, excluded, or no-tenure emitting paths may omit it ⇒ stamped null ⇒ unresolved at read
     // (sound per-path absence; never false-fresh).
     generation: stringOrNull(body.generation),
+    turnId: stringOrNull(body.turnId),
   });
 
   if (!result.ok) {
@@ -401,6 +482,7 @@ activityRoutes.get("/parked", (c) => {
     | {
         list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }>;
         getParkWakeStatus: (qitemId: string) => import("../domain/queue-wake-repository.js").ParkWakeStatus | null;
+        parkWakeServedByOwnReminder?: (qitemId: string) => boolean;
       }
     | undefined;
   const rigRepo = c.get("rigRepo" as never) as { db: import("better-sqlite3").Database } | undefined;
@@ -422,6 +504,7 @@ activityRoutes.get("/parked", (c) => {
       limit,
     }),
     getParkWake: (qitemId: string) => queueRepo.getParkWakeStatus(qitemId),
+    servedByOwnReminder: (qitemId: string) => queueRepo.parkWakeServedByOwnReminder?.(qitemId) === true,
   };
 
   // WAVE-O B2 (R2 508e383d): the diagnosis is RIG-SCOPED, never fleet-wide. Resolve ONE

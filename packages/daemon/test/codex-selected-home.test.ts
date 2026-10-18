@@ -113,9 +113,12 @@ it("seatless startup, disable and projection preserve the other home's bytes; st
   const first = await start();
   try {
     expect(first.db.prepare('SELECT count(*) AS n FROM nodes').get()).toEqual({ n: 0 });
-    const config = path.join(f.selected, 'config.toml'); const text = fs.readFileSync(config, 'utf8');
-    expect(text).toContain('trusted_hash'); expect(text).toContain('hooks');
+    const config = path.join(f.selected, 'config.toml');
+    expect(fs.existsSync(config)).toBe(false);
     const a = first.deps.runtimeAdapters!.codex as CodexRuntimeAdapter;
+    await a.ensureManagedConfig();
+    const text = fs.readFileSync(config, 'utf8');
+    expect(text).toContain('trusted_hash'); expect(text).toContain('hooks');
     a.ensureCodexFeatureFlag(true, { codexVersion: '0.120.0' });
     expect(fs.readFileSync(config, 'utf8')).toContain('codex_hooks = true');
     a.ensureManagedBootstrap({ cwd: f.cwd });
@@ -144,7 +147,7 @@ it("seatless startup, disable and projection preserve the other home's bytes; st
 it.each([
   { name: 'unset', selection: undefined },
   { name: 'empty', selection: '' },
-])('$name home selection keeps seatless startup writes in the default home', async ({ selection }) => {
+])('$name home selection resolves the default home and seatless startup leaves it untouched', async ({ selection }) => {
   const f = fixture(), originalCwd = process.cwd();
   vi.resetModules();
   vi.spyOn(os, 'homedir').mockReturnValue(f.home);
@@ -161,6 +164,8 @@ it.each([
     try {
       expect(daemon.db.prepare('SELECT count(*) AS n FROM nodes').get()).toEqual({ n: 0 });
       expect(fs.existsSync(path.join(f.cwd, 'config.toml'))).toBe(false);
+      expect(fs.readFileSync(f.firstConfig, 'utf8')).toBe('# first-home sentinel\nmodel = "fixture"\n');
+      await (daemon.deps.runtimeAdapters!.codex as CodexRuntimeAdapter).ensureManagedConfig();
       expect(fs.readFileSync(f.firstConfig, 'utf8')).toContain('trusted_hash');
       expect(fs.readFileSync(f.firstConfig, 'utf8')).toContain('# BEGIN OPENRIG MANAGED ACTIVITY HOOKS');
       expect(daemon.deps.sessionEnv!.CODEX_HOME).toBe(path.join(f.home, '.codex'));

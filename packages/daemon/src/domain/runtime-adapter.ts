@@ -102,7 +102,10 @@ export type HarnessLaunchResult =
   // `evidence` carries the last-N pane lines for `attention_required` outcomes
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.
-  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string;
+  // `missingConversation` is set only when the runtime itself reported that the requested
+  // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
+  // leave it unset.
+  | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
@@ -138,6 +141,10 @@ export function resolveConcreteHint(
 export interface ForkSource {
   kind: "native_id" | "artifact_path" | "name" | "last";
   value?: string;
+  /** Set only by a seat handover: a launch whose new id isn't captured yet still succeeds, with the id
+   *  pending, so the handover can commit the ready successor. Every other fork caller keeps the
+   *  refusal on a missed capture. */
+  pendingIdAllowed?: boolean;
 }
 
 /**

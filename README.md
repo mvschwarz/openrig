@@ -144,6 +144,7 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 - **Questions:** [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a)
 - **Bugs and feature requests:** [open an issue](https://github.com/mvschwarz/openrig/issues/new/choose)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md) · [Getting help](.github/SUPPORT.md)
+- **Working on OpenRig with a coding agent?** Start with the `developing-openrig` skill in `.agents/skills/` (Claude Code: `.claude/skills/`) and [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Videos:** [youtube.com/@openrig](https://www.youtube.com/@openrig)
 - **Releases:** [GitHub Releases](https://github.com/mvschwarz/openrig/releases) and npm `@openrig/cli`
 
@@ -181,6 +182,8 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   selected MCP resources configure those external services. Built-in bootstrap
   no longer writes a command allowlist to `~/.claude/settings.json` or removes
   older allowances. `CLAUDE_CONFIG_DIR` does not relocate the project-local writes.
+  To keep your own status line alongside the collector, see
+  [Custom Claude status line](docs/reference/claude-status-line.md).
 - **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
   `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
   commands and pre-writes trust hashes for those commands. Seat startup adds

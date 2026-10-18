@@ -1,7 +1,10 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
-import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
-import { detectCodexLimitBanner, clearRecordedBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
+import { agentAppPaneActivity, classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
+import { agentAppOf } from "./built-in-runtimes.js";
+import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
+import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
+import { sessionAgentAppSelect } from "./session-registry.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -11,6 +14,9 @@ export interface StructuralObservation {
   reason: string;
   evidence: string | null;
   observedAt: string;
+  /** Set when a later sweep found the pane unchanged since observedAt without capturing it. Freshness counts from it;
+   *  observedAt stays the capture. */
+  checkedAt?: string;
 }
 
 export const DEFAULT_STRUCTURAL_POLL_INTERVAL_MS = 1000;
@@ -42,14 +48,16 @@ export const DEFAULT_STRUCTURAL_STALE_MS = 5000;
  */
 export class SeatStructuralActivityService {
   private readonly latestBySession = new Map<string, StructuralObservation>();
+  // window_activity (epoch seconds) when each cached verdict's capture was taken, with that sweep's start second.
+  private readonly capturedActivity = new Map<string, { activity: number; size?: string; startSec: number; fullAt: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false; // single-flight guard: one whole-fleet sweep at a time (MUST-FIX 2)
   private bannerEmitter:
-    | ((sessionName: string, banner: CodexLimitBanner, observedAt: Date) => void)
+    | ((sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void)
     | null = null;
 
   constructor(
-    private readonly tmuxAdapter: Pick<TmuxAdapter, "capturePaneContent"> & Partial<Pick<TmuxAdapter, "capturePanesContent">>,
+    private readonly tmuxAdapter: Pick<TmuxAdapter, "capturePaneContent"> & Partial<Pick<TmuxAdapter, "capturePanesContent" | "readAllSessionWindowActivity" | "readAllSessionWindows">>,
     private readonly now: () => Date = () => new Date(),
     private readonly captureLines: number = 20,
     private readonly staleAfterMs: number = DEFAULT_STRUCTURAL_STALE_MS,
@@ -61,7 +69,7 @@ export class SeatStructuralActivityService {
    * store is untouched: startup attaches it once the store exists.
    */
   attachCodexLimitBanner(
-    emitter: (sessionName: string, banner: CodexLimitBanner, observedAt: Date) => void,
+    emitter: (sessionName: string, banner: CodexLimitBanner | null, observedAt: Date) => void,
   ): void {
     this.bannerEmitter = emitter;
   }
@@ -72,7 +80,7 @@ export class SeatStructuralActivityService {
   getStructuralActivity(sessionName: string): StructuralObservation | null {
     const obs = this.latestBySession.get(sessionName);
     if (!obs) return null;
-    if (this.now().getTime() - Date.parse(obs.observedAt) >= this.staleAfterMs) {
+    if (this.now().getTime() - Date.parse(obs.checkedAt ?? obs.observedAt) >= this.staleAfterMs) {
       this.latestBySession.delete(sessionName);
       return null;
     }
@@ -83,7 +91,7 @@ export class SeatStructuralActivityService {
    *  null or failed capture INVALIDATES the prior row (never leaves a stale positive verdict) and
    *  returns null (MUST-FIX 1). `prefetched` (#308) is the sweep's batched capture: a session it holds (null = gone or
    *  empty) is used as is; one it lacks is captured here, per seat. */
-  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null): Promise<StructuralObservation | null> {
+  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, agentApp?: string | null): Promise<StructuralObservation | null> {
     let content: string | null;
     let observedAt: Date | null = null;
     if (prefetched?.has(sessionName)) {
@@ -102,7 +110,7 @@ export class SeatStructuralActivityService {
       this.latestBySession.delete(sessionName);
       return null;
     }
-    const c = classifyPaneActivity(content);
+    const c = agentAppPaneActivity(classifyPaneActivity(content), agentApp);
     const at = observedAt ?? this.now();
     const obs: StructuralObservation = {
       state: c.state,
@@ -114,12 +122,13 @@ export class SeatStructuralActivityService {
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
     // so the reactive tap never fires for it. Report what the seat shows, on
     // transition only (the recorder skips an already-reported banner). A poll
-    // with no current banner ends the episode: the memory is cleared so a
-    // banner that appears later counts as new even with identical text.
+    // ends the episode only with positive structural evidence and no banner.
+    // Null/failed, blank and unrecognized captures cannot establish recovery.
     if (runtime === "codex" && this.bannerEmitter) {
       const banner = detectCodexLimitBanner(content);
-      if (banner) this.bannerEmitter(sessionName, banner, at);
-      else clearRecordedBanner(sessionName);
+      if (banner || (content.trim().length > 0 && c.state !== "unknown")) {
+        this.bannerEmitter(sessionName, banner, at);
+      }
     }
     return obs;
   }
@@ -132,7 +141,7 @@ export class SeatStructuralActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name, n.runtime as runtime
+        SELECT s.session_name as session_name, n.runtime as runtime, ${sessionAgentAppSelect(db)} as agent_app
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -140,19 +149,47 @@ export class SeatStructuralActivityService {
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
           AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-      `).all() as Array<{ session_name: string; runtime: string | null }>;
+      `).all() as Array<{ session_name: string; runtime: string | null; agent_app: string | null }>;
       const live = new Set(rows.map((r) => r.session_name));
       const runtimeBySession = new Map(rows.map((r) => [r.session_name, r.runtime] as const));
+      const agentAppBySession = new Map(rows.map((r) => [r.session_name, agentAppOf(r.agent_app, r.runtime)] as const));
       for (const s of Array.from(this.latestBySession.keys())) {
         if (!live.has(s)) this.latestBySession.delete(s); // release memory + never serve a stale read
       }
+      for (const s of Array.from(this.capturedActivity.keys())) if (!live.has(s)) this.capturedActivity.delete(s);
+      const sweepAt = this.now();
+      const startSec = Math.floor(sweepAt.getTime() / 1000);
+      // A listing started by this sweep, so a write before the sweep moves its activity; rotation reuses it. A listing
+      // still running from earlier, or a stalled one, means no hint: every seat is captured, as before.
+      const activity = this.tmuxAdapter.readAllSessionWindows || this.tmuxAdapter.readAllSessionWindowActivity
+        ? await windowSnapshot(this.tmuxAdapter as TmuxAdapter, DEFAULT_STRUCTURAL_POLL_INTERVAL_MS, true) : null;
+      // tmux bumps window_activity on every pane write: a seat whose activity is unchanged and older than the sweep
+      // that captured it shows the same pane, so its cached verdict stays current (checkedAt) without a capture.
+      const due = rows.filter((r) => {
+        const seen = this.capturedActivity.get(r.session_name);
+        const now = activity?.get(r.session_name);
+        const obs = this.latestBySession.get(r.session_name);
+        // The Codex limit row is refreshed by the capture that sees the banner, and ages out without it.
+        if (runtimeBySession.get(r.session_name) === "codex" && this.bannerEmitter) return true;
+        if (seen && obs && now !== undefined && now.activity === seen.activity && now.size === seen.size && now.activity < seen.startSec
+          && sweepAt.getTime() - seen.fullAt < IDLE_FULL_CAPTURE_MS) {
+          this.latestBySession.set(r.session_name, { ...obs, checkedAt: sweepAt.toISOString() });
+          return false;
+        }
+        return true;
+      });
       // #308: one batched capture for the whole fleet (a few tmux calls) instead of a fork per seat; anything the batch
       // didn't cover (no listing, a failed chunk) is read per seat inside pollSeat, as before.
-      const prefetched = this.tmuxAdapter.capturePanesContent
-        ? await this.tmuxAdapter.capturePanesContent(rows.map((r) => r.session_name), this.captureLines, this.now).catch(() => null)
+      const prefetched = this.tmuxAdapter.capturePanesContent && due.length > 0
+        ? await this.tmuxAdapter.capturePanesContent(due.map((r) => r.session_name), this.captureLines, this.now).catch(() => null)
         : null;
-      await Promise.all(rows.map(async (r) => {
-        try { await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null); } catch { /* isolate: one seat's failure never crashes the sweep */ }
+      await Promise.all(due.map(async (r) => {
+        try {
+          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null, agentAppBySession.get(r.session_name));
+          const seen = activity?.get(r.session_name);
+          if (obs && seen !== undefined) this.capturedActivity.set(r.session_name, { activity: seen.activity, size: seen.size, startSec, fullAt: sweepAt.getTime() });
+          else this.capturedActivity.delete(r.session_name);
+        } catch { /* isolate: one seat's failure never crashes the sweep */ }
       }));
     } finally {
       this.sweeping = false;

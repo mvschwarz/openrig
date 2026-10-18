@@ -1,15 +1,14 @@
-// A resumed seat's working guidance (Root's amendment to the OPR.0.5.7.1 D6a zero-projection
-// ruling, qitem-20261009081619-d1537b0f).
+// A resumed seat's working guidance.
 //
-// D6a stopped an exact resume from replaying startup content, after managed CLAUDE.md blocks
-// were rewritten during a resume. Ordinary `rig down` still strips OpenRig's managed blocks from
-// each seat's guidance file, so an exact resume came back with no role, culture or SOP guidance
-// (and the rig reported fully_restored). The amendment is narrow: before the native harness
-// starts, put back only the managed guidance blocks that are MISSING, from the saved startup
-// selection (guidance projections and guidance_merge startup files). An existing block is never
-// refreshed or overwritten; nothing is sent to the conversation; no startup action, skill or
-// plugin runs; no profile is resolved again. The blocks are rebuilt from the saved source paths'
-// current bytes, not from a byte snapshot of the old file.
+// An exact resume replays no startup content (the replay containment in restore-orchestrator.ts),
+// because managed CLAUDE.md blocks were once rewritten during a resume. Ordinary `rig down` still
+// strips OpenRig's managed blocks from each seat's guidance file, so an exact resume came back with
+// no role, culture or SOP guidance (and the rig reported fully_restored). The exception is narrow:
+// before the native harness starts, put back only the managed guidance blocks that are MISSING,
+// from the saved startup selection (guidance projections and guidance_merge startup files). An
+// existing block is never refreshed or overwritten; nothing is sent to the conversation; no
+// startup action, skill or plugin runs; no profile is resolved again. The blocks are rebuilt from
+// the saved source paths' current bytes, not from a byte snapshot of the old file.
 //
 // Guidance problems never block the exact resume. What can't be put back is reported.
 

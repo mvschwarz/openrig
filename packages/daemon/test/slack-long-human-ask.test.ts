@@ -508,4 +508,24 @@ describe("long human asks (#897)", () => {
       db.close();
     }
   });
+
+  it("#1013 — a parked workflow gate's supplemental detail posts in full; only the agent packet is replaced", async () => {
+    const posts: Post[] = [];
+    const deliver = subsystemSlackDeliver({ ...stores("gate-detail"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) });
+    expect(await deliver(decision("gate-detail", {
+      summary: "Approve the plan at https://example.invalid/plan.md",
+      body: "### Workflow gate: mission@1 step plan_signoff\n\nWorkflow instance: 01M4EXAMPLE\nContinuation: rig workflow project --instance 01M4EXAMPLE",
+      state: "blocked",
+      tags: ["workflow", "gate"],
+      humanDetail: "Please sign off by Friday; the signed plan is retained at /srv/rig/plan.md.",
+    }))).toEqual({ ok: true });
+    const primary = posts[0]!;
+    const detail = posts.find((p) => p.text.includes("Supplemental detail"))!;
+    // The primary renders the gate's question (plus its local-path Evidence line), never the packet.
+    expect(primary.text).toContain("*Approve the plan at https://example.invalid/plan.md*");
+    expect(JSON.stringify(primary.blocks)).not.toContain("Workflow instance:");
+    // The supplemental thread reply keeps its full body — the gate check must not eat it.
+    expect(detail.thread_ts).toBeTruthy();
+    expect(unescape(detail.blocks[1]!.text!.text)).toContain("Please sign off by Friday");
+  });
 });

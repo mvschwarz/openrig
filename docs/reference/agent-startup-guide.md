@@ -257,6 +257,25 @@ post-launch files. If it needs them, first look at what that occupant has done; 
 `rig seat launch <seat> --fresh --reason <text>` starts a blank conversation for the seat. If the occupant is still
 live, the command refuses with `session_live` unless you also pass `--stop`, which replaces that occupant deliberately.
 
+**Preview before replacing a seat.** `rig seat launch <seat> --fresh --plan` inspects the selected
+seat without starting tmux, stopping or launching a process, projecting startup files, or changing
+lifecycle/queue records. Add `--json` for structured output. `--fresh` is still required;
+`--reason` is optional for the preview and required when executing. Pass `--stop` to preview the
+intended replacement of a live managed occupant. Adopted and unmanaged occupants remain blocked.
+
+The plan identifies the target, current occupant, stop requirements, blockers, startup counts,
+and each sibling seat's unchanged effect. Siblings stay attached and untouched. Launch composes
+a new command through the runtime adapter using current settings; it does not replay a stored
+wrapper command. The seat's launch environment and managed executable selection still apply.
+The plan does not construct or display the launch command.
+
+A preview is a snapshot, not a reservation or a native-readiness check. Unreadable tmux produces
+`complete: false` and `launchable: null` (unknown), unless a known blocker already proves
+`launchable: false`. A successful preview exits 0, including blocked or incomplete plans; scripts
+must inspect `launchable === true` before deciding to execute. Request failures still exit nonzero.
+Execution always resolves and checks the current state again. An older daemon without the preview
+endpoint refuses the request; the CLI never falls back to executing a launch.
+
 ### The `applies_on` Field
 
 Each startup file and action specifies when it applies:
@@ -276,7 +295,9 @@ The AgentSpec and RigSpec allow declaring deterministic environment configuratio
 ### What the Spec Supports
 
 **Hooks** ship inside plugins: declare the plugin under `resources.plugins[]`. AgentSpec validation refuses
-`resources.hooks`.
+`resources.hooks`. OpenRig loads one plugin's hooks into a seat itself: the shipped `openrig-core` plugin, for a Claude seat
+that selects it (see [the refocus channel](refocus-channel.md#the-mechanism)). The folder a declared plugin is projected into
+is not one Claude Code or Codex loads, so a plugin of your own does not get its hooks run by that projection.
 
 **Runtime resources** (in `resources.runtime_resources`):
 ```yaml
@@ -310,7 +331,7 @@ run after the harness is ready: `after_files` (the default) after the post-launc
 | Guidance file projection (`guidance_merge`) | **Supported** | Reliable. Primary delivery mechanism. |
 | Skill projection (`skill_install`) | **Supported** | Reliable. Skills are copied to workspace. |
 | `send_text` delivery after ready | **Supported** | Reliable. Requires harness to be ready. |
-| Hooks | **Through plugins** | Declare a plugin under `resources.plugins[]`; `resources.hooks` is refused. |
+| Hooks | **Through plugins, limited** | `resources.hooks` is refused. OpenRig loads the shipped `openrig-core` plugin's hooks into a Claude seat that selects it (Claude Code v2.1.280 or later); a plugin you declare under `resources.plugins[]` is projected, but its hooks are not loaded. |
 | Runtime resource projection | **Supported for recognized fragments** | `claude_settings_fragment`, `claude_mcp_fragment`, and `codex_config_fragment` are applied to provider config. Unknown types are copied to runtime extension directories. |
 | Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them; a seat with no policy, selection or named Codex profile also gets the per-launch [team default](rig-spec.md#team-launch-defaults), and the `kernel` rig's seats get a wider operational default ([rig spec, "At launch"](rig-spec.md)). Neither is written to a settings file. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
 | MCP installation | **Supported for Claude fragments** | A selected `claude_mcp_fragment` is merged into the project's `.mcp.json`. Claude asks to approve new servers found there; that prompt stops startup as `mcp_gate` until someone answers it and runs `rig seat continue`. Otherwise use `/mcp` or `claude mcp add`, or describe the servers in startup files for the agent to configure. |
@@ -427,6 +448,66 @@ remain shared.
   workspace folder
 
 **Terminal seats** (`builtin:terminal`) get no agent or profile layers and no startup proof.
+
+### Codex compaction and sizing
+
+OpenRig's managed compaction is for Claude Code seats only, by design. That covers `rig compact`, the
+`policies.claude_compaction.*` automatic policy, and the watchdog jobs that the `managed-compaction` and
+`apprentice-handover` strategies create. A Codex seat compacts with Codex's own automatic compaction, and OpenRig
+leaves that to Codex.
+
+- `rig compact <session>` refuses a Codex seat: "not a Claude (claude-code) seat".
+- `rig compact-plan` lists a Codex seat as skipped (`codex_not_managed_by_claude_compact_in_place`).
+- The automatic policy never acts on a Codex seat.
+- A Codex member with `compaction_strategy: managed-compaction` or `apprentice-handover` gets no watchdog jobs.
+
+**What Codex compacts at.** Codex describes `model_auto_compact_token_limit` as the "token threshold that triggers
+automatic history compaction (unset uses model defaults)". Its configuration reference does not say what those
+defaults are, and the model catalog's `auto_compact_token_limit` is null for the models we checked in Codex 0.162.1.
+Measure a seat's own compactions before relying on an unset limit.
+
+**What window the model has.** `codex debug models` prints the catalog. Each model carries `context_window`,
+`max_context_window` and `effective_context_window_percent`. In Codex 0.162.1, `gpt-5.6-sol` has a `context_window`
+of 272000 at 95%, which is 258400. That is the `model_context_window` its rollout `token_count` events report.
+A limit only matters when it is below that effective window. Leave `model_context_window` alone: don't raise it toward
+`max_context_window` to avoid compaction. Set the limit instead.
+
+**Setting the limit for seats only.** Put `model_auto_compact_token_limit` in a Codex profile file,
+`$CODEX_HOME/<name>.config.toml` (`~/.codex/<name>.config.toml` when `CODEX_HOME` is unset), and name it on each
+Codex member that should use it:
+
+```toml
+# ~/.codex/seat-compaction.config.toml
+model_auto_compact_token_limit = 150000   # choose your own value
+```
+
+```yaml
+codex_config_profile: seat-compaction
+```
+
+OpenRig passes `-p seat-compaction` on that seat's fresh, fork and resume launches. Codex layers the profile file on
+top of the base user config, so only seats that name the profile see the lower limit. A Codex session started without
+that profile keeps the base `config.toml` in the same Codex home (`$CODEX_HOME/config.toml`, or `~/.codex/config.toml`
+when `CODEX_HOME` is unset). The `150000` is an example, not a recommendation.
+
+With the normal launch mode, `codex_config_profile` replaces OpenRig's explicit workspace-write sandbox flag, so the
+profile must set the sandbox and approvals you want. See
+[permission precedence and limits](getting-started.md#custom-settings-and-precedence), which also gives Codex's order
+of precedence between a profile, project settings and CLI overrides.
+
+**The trade-off.** Every model call carries the whole context so far, so a smaller context makes each call cheaper. The
+cost is that Codex compacts sooner and more often, so more of the conversation is carried as a summary instead of
+verbatim. A higher limit keeps more detail and makes each call larger.
+
+**Related keys.** These also shape compaction. This guide doesn't recommend values for them. See Codex's
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference):
+
+| Key | What Codex says it does |
+|---|---|
+| `model_auto_compact_token_limit_scope` | `total` (the default) counts the full active context; `body_after_prefix` counts only growth after the carried compaction-window prefix. |
+| `compact_prompt` | Inline override for the history compaction prompt. |
+| `experimental_compact_prompt_file` | Loads the compaction prompt override from a file (experimental). |
+| `tool_output_token_limit` | Token budget for storing individual tool or function outputs in history. |
 
 When authoring startup content, note which instructions are runtime-specific. For example, an orchestrator that needs a monitoring loop should include instructions like: "If running Claude Code, use `/loop 3m` to periodically check rig health. If running Codex, check rig health at the start of each task cycle instead."
 

@@ -1,4 +1,5 @@
 import { SettingsStore } from "./user-settings/settings-store.js";
+import type { SeatEnv } from "./seat-env.js";
 import { nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
@@ -38,6 +39,8 @@ export interface BootstrapOptions {
   sourceRef: string;
   sourceKind?: string;
   cwdOverride?: string;
+  /** One-off launch env from `rig up --env`; used for this launch only and not saved. */
+  envOverride?: SeatEnv;
   autoApprove?: boolean;
   nonInterruptive?: boolean;
   approvedActionKeys?: string[];
@@ -398,6 +401,10 @@ export class BootstrapOrchestrator {
 
     const verifications = await this.deps.runtimeVerifier.verifyAll([...runtimes]);
     const runtimeBlocked: string[] = [];
+    // A runtime that isn't on PATH and one that is but failed its check (for example a probe that didn't answer
+    // within its bound) both block, and the summary says which.
+    const runtimeNotFound: string[] = [];
+    const runtimeFailed: string[] = [];
 
     for (const v of verifications) {
       if (mode === "apply") {
@@ -408,6 +415,8 @@ export class BootstrapOrchestrator {
 
       if (v.status === "not_found" || v.status === "error") {
         runtimeBlocked.push(v.runtime);
+        if (v.status === "not_found") runtimeNotFound.push(v.runtime);
+        else runtimeFailed.push(`Required runtime ${v.runtime} could not be verified: ${v.error ?? "unknown error"}`);
       }
       if (v.status === "degraded") {
         warnings.push(`${v.runtime} is degraded but not blocking`);
@@ -416,7 +425,8 @@ export class BootstrapOrchestrator {
 
     if (runtimeBlocked.length > 0 && mode === "apply") {
       stages.push({ stage: "verify_runtimes", status: "blocked", detail: { blocked: runtimeBlocked } });
-      errors.push(`Required runtimes not found: ${runtimeBlocked.join(", ")}`);
+      if (runtimeNotFound.length > 0) errors.push(`Required runtimes not found: ${runtimeNotFound.join(", ")}`);
+      errors.push(...runtimeFailed);
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
       return { runId: run.id, status: "failed", stages, errors, warnings };
     }
@@ -737,7 +747,7 @@ export class BootstrapOrchestrator {
       if (typeof raw?.["non_interruptive"] === "boolean") declaredNonInterruptive = raw["non_interruptive"];
     } catch { /* The instantiator returns the existing structured validation failure. */ }
     const nonInterruptive = opts.nonInterruptive ?? declaredNonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
-    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, prelaunchHook, installRoot });
+    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, env: opts.envOverride, prelaunchHook, installRoot });
     if ((outcome.ok || "rigId" in outcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
     const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
 

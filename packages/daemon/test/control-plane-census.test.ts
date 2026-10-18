@@ -84,7 +84,10 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     const scheduler = new PeriodicSnapshotScheduler({
       db,
       snapshotCapture: { captureSnapshot: () => {} } as never,
-      snapshotRepo: { pruneSnapshotsByKind: () => {} } as never,
+      snapshotRepo: {
+        findLatestRestoreUsable: () => null,
+        pruneSnapshotsByKind: () => {},
+      } as never,
       sessionRegistry,
       resumeMetadataRefresher: refresher,
       processCensus: census,

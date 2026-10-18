@@ -136,7 +136,7 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
         { sourcePath, index: i },
       );
     }
-    if (path.includes("..") || path.startsWith("/")) {
+    if (path.split(/[\\/]/).includes("..") || path.startsWith("/")) {
       throw new ContextPackError(
         "manifest_invalid",
         `manifest at ${sourcePath} files[${i}].path '${path}' must be a relative path inside the pack (no '..' segments, no leading '/')`,

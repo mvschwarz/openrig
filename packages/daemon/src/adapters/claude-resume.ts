@@ -6,7 +6,7 @@ import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { verifyClaudePaneProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -207,10 +207,21 @@ export class ClaudeResumeAdapter {
     }
 
     if (finalProbe.code === "returned_to_shell") {
+      // A shell label alone isn't a return to the shell: a launch script still starting Claude holds the pane the
+      // same way. Only a proven, stable idle shell ends the resume; anything else keeps the launch for attention.
+      if (await verifyPaneIdleShell({ target: tmuxSessionName, tmux: this.tmux,
+        ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}) })) {
+        return {
+          ok: false,
+          code: "retry_fresh",
+          message: "Claude resume failed: pane returned to shell instead of entering Claude",
+        };
+      }
       return {
         ok: false,
-        code: "retry_fresh",
-        message: "Claude resume failed: pane returned to shell instead of entering Claude",
+        code: "attention_required",
+        message: "Claude resume could not be verified; launch retained: the pane shows a shell that isn't a proven idle shell, so a launch script may still be starting Claude.",
+        evidence: finalContent.split("\n").slice(-12).join("\n"),
       };
     }
 

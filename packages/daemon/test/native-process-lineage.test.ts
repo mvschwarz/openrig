@@ -4,6 +4,7 @@ import { findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaude
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 
 const token = "00000000-0000-7000-8000-000000000001";
+const parent = "00000000-0000-7000-8000-0000000000fa";
 const startedAt = "Sat Jan  1 12:00:00 2000";
 function rows(): NativeProcessRow[] {
   return [
@@ -227,6 +228,26 @@ describe("Claude identity with inline settings in ps output", () => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
   });
+  it.each([
+    `--resume ${parent} --fork-session --session-id ${token}`,
+    `--fork-session --session-id=${token} --resume=${parent}`,
+  ])("a fork that names its own --session-id proves the fork, never its parent: %s", async args => {
+    const actual = input(args);
+    expect((await verifyClaudePaneProcess(actual))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actual)).state).toBe("verified");
+    expect(findExactNativeResumeProcess(await actual.listProcesses(), 20, "claude-code", token)?.pid).toBe(21);
+    expect(await verifyClaudePaneProcess({ ...actual, expectedToken: parent })).toBeNull();
+    expect((await observeClaudeDelivery({ ...actual, expectedToken: parent })).state).toBe("unknown");
+  });
+  it.each([
+    `--resume ${token} --fork-session`,
+    `--fork-session --session-id ${token}`,
+    `--resume ${parent} --session-id ${token}`,
+    `--resume ${parent} --fork-session --session-id ${token} --session-id other`,
+  ])("still refuses a fork without its own id or its parent, and two identities without --fork-session: %s", async args => {
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
   it.each(["before", "after"])("a literal quote %s settings never promotes settings text into identity", async order => {
     const settings = `--settings ${JSON.stringify({ env: { REVIEW_NOTE: `text --session-id ${token} --model trailing` } })}`;
     const name = '--name review"desk';
@@ -413,7 +434,26 @@ describe("Claude exact-resume finder behind a spawning launcher", () => {
     const rows = realRows(`claude --session-id ${other}`).map(r => r.pid === 11 ? { ...r, executableName: comm, command } : r);
     expect(find(rows)).toBeNull();
   });
-  it("leaves --fork-session children as on main (separate follow-up)", () => {
+  it("leaves a --fork-session child that names only its parent as on main", () => {
     expect(find(scriptRows(`claude --resume ${token} --fork-session`))).toBe(11);
+  });
+  const forkChild = `claude --resume ${token} --fork-session --session-id ${other} --name dev@rig`;
+  it("refuses a script launcher's token over its Claude fork child naming the fork's own id", () => {
+    expect(find(scriptRows(forkChild))).toBeNull();
+  });
+  it("keeps a real Claude's proof when it starts a fork of its conversation", () => {
+    expect(find(realRows(forkChild))).toBe(11);
+  });
+  const delivery = (rows: NativeProcessRow[], expectedToken: string) => observeClaudeDelivery({
+    target: "%1", tmux: { getPanePid: async () => 10 }, listProcesses: async () => rows, expectedToken,
+  });
+  it.each([["the parent's", token], ["the fork's", other]])(
+    "delivery to a Claude with its fork in the foreground warns and sends with %s token stored, verifying neither", async (_label, stored) => {
+      const observed = await delivery(realRows(forkChild), stored);
+      expect(observed.state).toBe("unknown");
+      expect(observed.detail).toContain("fork");
+    });
+  it("delivery still reports a conflict when two Claude processes name different conversations without a fork", async () => {
+    expect((await delivery(realRows(`claude --session-id ${other} --name dev@rig`), token)).state).toBe("conflict");
   });
 });

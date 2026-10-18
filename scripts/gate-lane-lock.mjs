@@ -34,7 +34,9 @@ export async function acquireGateLane({ port = GATE_LANE_PORT, holderInfoPath })
     return { ok: false, reason: "bind-error", message: "Gate lane port must be an integer from 1 to 65535." };
   }
   // P1 + P2: bind 127.0.0.1 explicitly; do NOT pass reusePort — exclusivity is the mutex.
-  const server = net.createServer();
+  // This port names a mutex, not a service. A local probe must not leave a
+  // connection open that keeps server.close() and gate release waiting.
+  const server = net.createServer((socket) => socket.destroy());
   const bound = await new Promise((resolve) => {
     server.once("error", (err) => resolve({ ok: false, err }));
     server.listen(port, "127.0.0.1", () => resolve({ ok: true }));

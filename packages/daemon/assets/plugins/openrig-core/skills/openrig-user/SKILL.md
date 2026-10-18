@@ -54,7 +54,8 @@ Use for any substantive work that must not fall through chat — slice handoffs,
 guard verdicts, QA results, full-tip reviews, multi-item batches. Survives agent
 restarts. Tracked in the daemon SQLite schema. Surfaces in Project / queue views
 + in the destination seat's inbox. Tag with mission / slice / gate / checkpoint
-so future-you (and any peer) can find it.
+so future-you (and any peer) can find it. Give the row a `--summary` (its subject, wherever the row is listed)
+and the `project:`, `mission:` and `slice:` tags when it is project work.
 
 Body discipline: substantive bodies go through **`--body-file <path>`** (or `-` for stdin) — the
 purpose-built, corruption-safe surface (it kills the backtick-shell-corruption class for multi-line
@@ -66,7 +67,8 @@ Example:
 ```bash
 rig queue create \
   --destination dev-reviewer@example-project \
-  --tags "mission:data-import,slice:import-report" \
+  --summary "Review the import report: it changes how rows are deduplicated" \
+  --tags "project:example-project,mission:data-import,slice:import-report" \
   --body-file /tmp/import-report-handoff.md
 ```
 
@@ -83,7 +85,8 @@ Example:
 ```bash
 rig queue handoff <qitem-id> \
   --to dev-reviewer@example-project \
-  --tags "mission:data-import,slice:import-report" \
+  --summary "Review the import report: it changes how rows are deduplicated" \
+  --tags "project:example-project,mission:data-import,slice:import-report" \
   --body-file /tmp/import-report-handoff.md
 ```
 
@@ -355,11 +358,15 @@ restore) into one call.
 
 ```bash
 rig start                    # interactive: daemon + kernel + pick-and-restore
-rig start --last             # headless: restore all rigs that were last running
+rig start --last             # headless: restore rigs that were last running; a rig stopped on purpose stays down
 rig start --all              # headless: restore all rigs with restore-usable snapshots
 rig start --rigs <name> [<name>...]   # headless: restore only the named rigs
 rig start --json             # JSON output for agents
 ```
+
+`rig start --last` keeps down a rig that was stopped on purpose (`rig down` or `rig seat stop`).
+Bring it back with `rig start --rigs <rig>`. A rig whose seat statuses can't be read is still
+attempted, with a warning (`seat_status_unreadable`).
 
 Framing: `rig start` is the RECOVERY entry point, not the getting-started
 hero. The fresh-user boot hero remains `rig up <team>` (typically
@@ -500,11 +507,12 @@ rig ps --active             # opt-in active-state filter (does NOT change the al
 ```bash
 rig whoami                  # compact: identity + peers names + edges + transcript path
 rig whoami --json           # compact JSON
+rig whoami --json --all-peers  # compact JSON with every peer, when output.compact bounds the list
 rig whoami --full           # complete payload (v0.3.4 default shape)
 rig whoami --verbose        # alias of --full
 ```
 
-The first command every agent runs on boot AND every compaction-restore. The compact default keeps identity-recovery essentials (`identity`, `peers` names + sessionNames, `edges` directional `kind` + `to.sessionName`, `transcriptPath`). `--full` adds `contextUsage`, `commands`, `peersNote`, `runtimeContext`. The compact-default is an ALLOWLIST projection — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
+The first command every agent runs on boot AND every compaction-restore. The compact default keeps identity-recovery essentials (`identity`, `peers` names + sessionNames, `peersNote`, `edges` directional `kind` + `to.sessionName`, the transcript path). `--full` adds `contextUsage`, `commands`, `runtimeContext` and `workspace`. With `output.compact` on, compact JSON lists at most `output.whoami_peers` peers (default 8): edge peers first, then your pod, then roster order. `peersNote` and `peersOmitted` then say how many were left out, and `--all-peers` lists every one; `edges` stays complete. The compact-default is an ALLOWLIST projection — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
 
 ### `rig queue list` — active-frontier + docker/kubectl grammar
 
@@ -519,7 +527,7 @@ rig queue list --mine                # just the caller's items
 rig queue list --destination <s>     # destined to <s>
 rig queue list --source <s>          # sourced by <s>
 rig queue show <qitemId>             # bounded single-item body preview
-rig queue show <qitemId> --full      # complete body and chain fields
+rig queue show <qitemId> --full      # complete body and chain fields; a closed row adds closingTransition (the close's state, reason, target, actor, time and note)
 ```
 
 Four orthogonal axes (scope × history × field-breadth × encoding), all composable. **STOP using bare `rig queue list` as the cross-rig firehose.** Default is now active + compact + current-rig. Cross-rig history with full bodies is opt-in via `-A -a --full`; request only the breadth and fields needed for the question.
@@ -984,7 +992,8 @@ Walk a seat *through* a pack: each piece is sent into the pane, spaced by `--pac
 - **The orchestrator habit — assign work *with* its context attached:**
   ```bash
   rig context compose --out packs/qitem-brief --from <brief-file> <proof-file>
-  rig queue create --destination dev-driver@build --body-context packs/qitem-brief --summary "…"
+  rig queue create --destination dev-driver@build --body-context packs/qitem-brief \
+    --summary "…" --tags "project:<id>,mission:<id>,slice:<id>"
   ```
   Replace `<brief-file>` and `<proof-file>` with your existing local files. The curated context rides the durable handoff, survives compaction, and is auditable.
 
@@ -1280,8 +1289,8 @@ This lets ordinary agents ask the manager for OpenRig help instead of every agen
 ```bash
 rig grow <rig-id> <member...> [--pod <pod> | --new-pod <pod>] [--runtime <runtime>] [--cwd <path>] [--json]
 rig expand <rig-id> <pod-fragment-path> [--rig-root <path>] [--json]
-rig launch <rigId> <nodeRef> [--json]
-rig launch <rigId> --seats <a,b,c> [--hold-reason <text>] [--json]
+rig launch <rig> <nodeRef> [--json]
+rig launch <rig> --seats <a,b,c> [--hold-reason <text>] [--json]
 rig remove <rigId> <nodeRef> [--json]
 rig shrink <rigId> <podRef> [--json]
 rig unclaim <sessionRef> [--json]
@@ -1294,8 +1303,9 @@ or `rig add` (one member) when a seat needs an explicit model, a permission poli
 different agent spec or role profile, per-seat runtime or cwd, or startup files.
 
 Node-granular managed partial restore (v0.3.4+):
-- `rig launch <rigId> <nodeRef>` relaunches a single seat by logical id or node id through orchestration.
-- `rig launch <rigId> --seats <a,b,c>` relaunches a comma-separated subset of seats.
+- `rig launch <rig> <nodeRef>` relaunches a single seat by logical id or node id through orchestration. `<rig>` is the
+  rig's name or ID; a name shared by more than one active rig stops with the candidate IDs.
+- `rig launch <rig> --seats <a,b,c>` relaunches a comma-separated subset of seats.
 - `--hold-reason <text>` records a reason for holding non-target seats during the partial launch.
 - This is a SUPPORTED managed path. The prior `pod_aware_launch_unsupported` dead-end is retired; pod-aware narrow launch now goes through this surface rather than ad-hoc rebuilds.
 

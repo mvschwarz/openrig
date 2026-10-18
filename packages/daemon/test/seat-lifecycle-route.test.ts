@@ -112,6 +112,33 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect((await probe.json() as { code: string }).code).toBe("tmux_probe_failed");
   });
 
+  it("keeps ps and the TUI rig summary consistent after an intentional stop and a sibling crash", async () => {
+    const stopped = seedSeat("dev.qa");
+    const crashed = seedSeat("dev.impl");
+    seedSeat("dev.lead");
+    tmux().hasSession.mockResolvedValue(true);
+    tmux().killSession.mockResolvedValue({ ok: true });
+    expect((await post("stop", stopped.sessionName, { reason: "on-demand review" })).status).toBe(200);
+
+    async function expectSurfaces(lifecycleState: string, runningCount: number) {
+      const ps = await setup.app.request("/api/ps");
+      expect(ps.status).toBe(200);
+      expect(await ps.json()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ rigId: stopped.rig.id, lifecycleState, nodeCount: 3, runningCount, status: "partial" }),
+      ]));
+      const summary = await setup.app.request("/api/rigs/summary");
+      expect(summary.status).toBe(200);
+      expect(await summary.json()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: stopped.rig.id, lifecycleState, restoreLifecycleState: "degraded", nodeCount: 3, hasLiveAgents: true }),
+      ]));
+    }
+
+    await expectSurfaces("running", 2);
+    setup.sessionRegistry.markDetached(crashed.session.id);
+    setup.sessionRegistry.clearBinding(crashed.node.id);
+    await expectSurfaces("degraded", 1);
+  });
+
   it("clean 409 session_live on a live seat; 200 on a dead one; 409 nothing_to_clean when repeated", async () => {
     const { sessionName } = seedSeat();
     tmux().hasSession.mockResolvedValue(true);
@@ -127,6 +154,23 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     const again = await post("clean", sessionName, { reason: "x" });
     expect(again.status).toBe(409);
     expect((await again.json() as { code: string }).code).toBe("nothing_to_clean");
+  });
+
+  it("routes --plan to read-only planning without requiring a reason or entering execution", async () => {
+    const result = { ok: true, planOnly: true, complete: false, launchable: null };
+    const plan = vi.spyOn(SeatLifecycleService.prototype, "planFresh").mockResolvedValue(result as never);
+    const launch = vi.spyOn(SeatLifecycleService.prototype, "launchFresh");
+    const res = await post("launch-plan", "dev@fixture", { fresh: true, stop: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(result);
+    expect(plan).toHaveBeenCalledExactlyOnceWith({ seatRef: "dev@fixture", fresh: true, stop: true });
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("still requires --fresh for a plan", async () => {
+    const res = await post("launch-plan", "dev@fixture", {});
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, planOnly: true, code: "fresh_required" });
   });
 
   it("launch requires explicit fresh=true", async () => {

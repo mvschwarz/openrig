@@ -184,7 +184,7 @@ defaults:
 | Field | Type | Default | Allowed Values |
 |-------|------|---------|----------------|
 | `execution_mode` | string | `interactive_resident` | `interactive_resident` (only value in v1; `wake_on_demand` is explicitly rejected) |
-| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1) |
+| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1). `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing) |
 | `restore_policy` | string | `resume_if_possible` | `resume_if_possible`, `relaunch_fresh`, `checkpoint_only` |
 | `mechanic` | string | — | A canonical `seat@rig` session address; needed by `apprentice-handover` |
 
@@ -228,7 +228,9 @@ This gives access to the shared pool: skills such as `systematic-debugging`, `ve
 `development-team` and `test-driven-development`; the `openrig-core` plugin, which carries `openrig-user` and OpenRig's
 other skills; and runtime resources such as `claude-default-settings`, `claude-default-mcp`, `codex-default-config` and
 `claude-activity-hooks`. Agents select the ones they need via profile `uses`, for example
-`plugins: [shared:openrig-core]`.
+`plugins: [shared:openrig-core]`. That selection projects the plugin's skills into the seat. For a Claude seat it also loads
+the plugin's hooks, through a `CLAUDE_CODE_PLUGIN_DIRS` the daemon sets for a seat that selected `openrig-core` (see
+`refocus-channel.md`); a seat that didn't select it gets neither.
 
 ---
 

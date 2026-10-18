@@ -124,18 +124,20 @@ describe("slice-04 ps/summary event-loop regression", () => {
 
       // fail-loud: a deterministic prepare throw at the ps boundary returns the EXISTING 500,
       // no partial/stale payload published; a subsequent call recovers fully.
-      const real = db.prepare.bind(db);
-      spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
-        if (String(sql).includes("running_count")) throw new Error("injected ps-boundary failure");
-        return real(sql);
-      }) as never);
+      const failPrepare = vi.fn(() => { throw new Error("injected ps-boundary failure"); });
+      spy = vi.spyOn(db, "prepare").mockImplementationOnce(failPrepare);
       const failRes = await app.request("/api/ps");
+      expect(failPrepare).toHaveBeenCalledOnce();
+      // Pin the boundary without depending on a computed column's SQL alias.
+      expect(failPrepare).toHaveBeenCalledWith(expect.stringMatching(/^\s*SELECT\s+r\.id\s+as\s+rig_id\b/i));
       expect(failRes.status).toBe(500);
       const body = await failRes.text();
       expect(body).not.toContain("runningCount"); // no partial ps payload
       spy.mockRestore();
       spy = null;
-      const rec = (await (await app.request("/api/ps")).json()) as unknown[];
+      const recRes = await app.request("/api/ps");
+      expect(recRes.status).toBe(200);
+      const rec = (await recRes.json()) as unknown[];
       expect(rec).toHaveLength(9); // no cached partial; full correct response
     } finally {
       if (spy) spy.mockRestore();
@@ -253,6 +255,13 @@ describe("slice-04 ps/summary event-loop regression", () => {
         if (watchdog) clearTimeout(watchdog);
         if (watchdogKill) clearTimeout(watchdogKill);
       }
+      // Report the measured worst on every run, pass or fail (and when an earlier step threw), so each CI log
+      // keeps the number. Reporting only: the assertions below are unchanged.
+      const measured = health.length > 0
+        ? `${Math.max(...health.map((h) => h.ms))} ms over ${health.length} probes`
+        : "no probes completed";
+      console.log(`[ps-summary D2] worst /healthz ${measured} (budget ${HEALTHZ_RESPONSIVENESS_BUDGET_MS} ms; `
+        + `ps 200s ${psStatuses.filter((st) => st === 200).length}/24, summary 200s ${sumStatuses.filter((st) => st === 200).length}/24)`);
     }
 
     // Teardown is guaranteed done above; now assert (the budget pin is the LAST assertion).

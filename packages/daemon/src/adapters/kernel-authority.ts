@@ -1,5 +1,7 @@
 import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
+import { isValidThresholdPercent } from "../domain/claude-compaction-enforcer.js";
+import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { shellQuote } from "./shell-quote.js";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -35,10 +37,35 @@ export const TEAM_CLAUDE_ASK = [
   "attach", "bind", "handover", "unclaim", "release", "reconcile-session", "env down",
   "policy apply", "config set", "config reset",
   "daemon start", "daemon stop", "bundle install", "seat launch", "seat continue", "seat stop",
-  "seat clean", "seat handover", "seat switch-client", "seat set-permissions", "seat set-model",
+  "seat clean", "seat handover", "seat switch-client", "seat set-permissions", "seat set-model", "seat set-effort",
 ].map(command => `Bash(rig ${command}:*)`);
 
-type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode">;
+type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode"> & {
+  /** Whether OpenRig's managed compaction acts on this Claude launch; read from the policy when absent. */
+  managedCompaction?: boolean;
+};
+
+/** OpenRig's managed compaction acts on Claude seats while its policy is on with a threshold the enforcer accepts (it
+ *  treats any other threshold as off). Read fresh at each launch; an unreadable policy reads as off. */
+export function managedCompactionActive(store: Pick<SettingsStore, "resolveClaudeCompactionPolicy"> = new SettingsStore()): boolean {
+  try {
+    const policy = store.resolveClaudeCompactionPolicy();
+    return policy.enabled === true && isValidThresholdPercent(policy.thresholdPercent);
+  } catch {
+    return false;
+  }
+}
+
+/** While managed compaction acts on a Claude session, Claude's own idle compaction is turned off in the session's one
+ *  --settings value (merged into it, or as the only one), so the session compacts through OpenRig's sequence. Claude
+ *  Code before 2.1.290 ignores the key. Higher-precedence managed settings still win. */
+function withIdleCompactionOff(args: string[], on: boolean): string[] {
+  if (!on) return args;
+  const at = args.indexOf("--settings");
+  if (at === -1) return [...args, "--settings", JSON.stringify({ idleCompaction: false })];
+  const settings = JSON.parse(args[at + 1]!) as Record<string, unknown>;
+  return [...args.slice(0, at + 1), JSON.stringify({ ...settings, idleCompaction: false }), ...args.slice(at + 2)];
+}
 
 function claudeCommandSettings(allow: string[], ask: string[] = []): string[] {
   const permissions = { allow, ...(ask.length ? { ask } : {}) };
@@ -60,17 +87,16 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
     return ["-c", "check_for_update_on_startup=false", ...nonInterruptiveArgs(runtime,
       choice.kernelAuthority ? { launchPosture: "full_bypass", nonInterruptive: true } : choice)];
   }
-  if (!choice.kernelAuthority) {
-    if (runtime === "claude-code" && choice.teamPermissionDefault && !choice.permissionMode
-      && (!choice.launchPosture || choice.launchPosture === "floor")) {
-      return claudeCommandSettings(TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK);
-    }
-    return nonInterruptiveArgs(runtime, choice);
+  if (runtime === "claude-code") return withIdleCompactionOff(claudeOperationalArgs(choice), choice.managedCompaction ?? managedCompactionActive());
+  return choice.kernelAuthority ? [] : nonInterruptiveArgs(runtime, choice);
+}
+
+function claudeOperationalArgs(choice: LaunchChoice): string[] {
+  if (choice.kernelAuthority) return claudeCommandSettings(KERNEL_CLAUDE_ALLOW);
+  if (choice.teamPermissionDefault && !choice.permissionMode && (!choice.launchPosture || choice.launchPosture === "floor")) {
+    return claudeCommandSettings(TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK);
   }
-  if (runtime === "claude-code") {
-    return claudeCommandSettings(KERNEL_CLAUDE_ALLOW);
-  }
-  return [];
+  return nonInterruptiveArgs("claude-code", choice);
 }
 
 export function operationalLaunchArg(runtime: string, choice: LaunchChoice): string {

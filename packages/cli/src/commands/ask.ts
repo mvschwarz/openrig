@@ -85,7 +85,7 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .option("--seat <session-name>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
     .option("--session <token>", "Search ONE specific session's JSONL by its session token (read-only)")
-    .option("--wake <seat[@gen]|token>", "EXECUTES: wake a session (by seat[@generation] or raw resume token) — ask one question, get a snapshot answer, back to cold (runtime cost; explicit, never an implicit escalation from a search)")
+    .option("--wake <target>", "EXECUTES: wake member@rig[@N], or pass a session ID or title to the runtime — ask one question, get a snapshot answer, back to cold (runtime cost; explicit, never an implicit escalation from a search)")
     .option("--runtime <runtime>", "runtime for --wake: claude (default) or codex")
     .option("--wake-timeout <seconds>", "bounded wake timeout in seconds (default 180)")
     .addHelpText("after", `
@@ -95,10 +95,14 @@ rig ask is one verb for information about the PAST, three ways to reach it:
                                             generation that sat in it (L1, read-only)
   3. rig ask <rig> "<q>" --session <token>  search ONE session's JSONL by
                                             token — "I have the token, find it" (L2, read-only)
-  4. rig ask <rig> "<q>" --wake <seat[@gen]|token>
-                                            WAKE that session (by seat[@generation]
-                                            or raw token), ask, get a snapshot
+  4. rig ask <rig> "<q>" --wake <target>
+                                            WAKE that session (by member@rig[@N]
+                                            or runtime ID/title), ask, get a snapshot
                                             answer, back to cold (L3, EXECUTES)
+
+Wake seat targets must include the rig: member@rig or member@rig@N (1 = newest tenure).
+Values without @ go unchanged to the runtime as a session ID or title; a bare member
+name is not resolved within <rig>.
 
 Levels 1-2 are read-only archaeology (cheap, safe). Level 3 (--wake) EXECUTES an
 agent — the only level with runtime cost. The answer is snapshot testimony:
@@ -108,11 +112,13 @@ Examples:
   rig ask my-rig "what decisions were made about deployment?"
   rig ask my-rig "what did we decide" --seat dev-planner@my-rig
   rig ask my-rig "SECRET_MARKER" --session 3f2a-...-9c1
+  rig ask my-rig "summarize the gateway plan" --wake dev-planner@my-rig
+  rig ask my-rig "summarize the previous plan" --wake dev-planner@my-rig@2
   rig ask my-rig "summarize the gateway plan" --wake 3f2a-...-9c1
 
 Exit codes:
   0  Success
-  1  Daemon not running
+  1  Daemon not running, or the rig is unknown or ambiguous
   2  Failed to fetch data from daemon (or wake timed out)`);
 
   const getDeps = (): AskCommandDeps => (depsOverride as AskCommandDeps | undefined) ?? {
@@ -215,6 +221,10 @@ Exit codes:
     }
 
     const result = res.data;
+    // The daemon answers rig: null only when the rig name matched no rig or
+    // more than one. Exit 1 like rig send/transcript/release do for a missing
+    // target, so a script or agent can tell a mistyped rig from "no matches".
+    if (!result.rig) process.exitCode = 1;
 
     if (opts.json) {
       console.log(JSON.stringify(result));

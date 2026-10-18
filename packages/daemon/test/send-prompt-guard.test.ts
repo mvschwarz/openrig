@@ -198,21 +198,38 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
+  it("a current Codex usage limit allows an ordinary send without a prompt override", async () => {
+    const seat = seedCodexSeat();
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "at_limit" });
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({
+      capturePaneContent: async () => "■ You've hit your usage limit.\n› ",
+      sendText, sendKeys,
+    }));
+    expect((await transport.send(seat, "continue when ready")).ok).toBe(true);
+    expect(sendText).toHaveBeenCalledWith(seat, "continue when ready");
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(overrideEvents()).toEqual([]);
+  });
+
   // K-5 HOOK-PRIMARY (founder expansion): a fresh Codex PermissionRequest hook is the PRIMARY signal —
   // it blocks default/raw/force even when the pane looks idle (a high-stakes guard must not depend on
   // screen-scraping). Only --dangerously-interact --reason drives it (+ audit).
-  it("K-5(hook): a Codex PermissionRequest hook is HOOK-PRIMARY — default/raw/force refused, only --dangerously-interact drives + audits", async () => {
+  it.each([0, 15_000])("K-5(hook): a send-fresh pending Codex permission (%sms old) may hide a prompt — refuse sends, allow only an audited answer", async ageMs => {
     const seat = seedCodexSeat();
-    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash" });
+    const now = new Date();
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "PermissionRequest", subtype: "Bash",
+      occurredAt: new Date(now.getTime() - ageMs).toISOString() });
     const { sendText, sendKeys } = spies();
     // Pane looks idle, but the fresh hook is authoritative.
-    const t = makeTransport(mockTmux({ capturePaneContent: async () => "› ready\n\n  gpt-5.5 xhigh fast · Context [████ ] · ~/code", sendText, sendKeys }));
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "› ready\n\n  gpt-5.5 xhigh fast · Context [████ ] · ~/code", sendText, sendKeys }), { now: () => now });
 
     const def = await t.send(seat, "hi");
     expect(def.ok).toBe(false);
     expect(def.reason).toBe("target_needs_input");
     expect(def.activity?.evidenceSource).toBe("runtime_hook"); // HOOK-PRIMARY, not screen-scrape
-    expect(def.activity?.reason).toBe("permission_request");
+    expect(def.activity?.reason).toBe("permission_request_pending");
+    expect(agentActivityStore.getLatestForNode({ sessionName: seat })).toMatchObject({ state: "unknown", reason: "permission_request_pending" });
 
     const raw = await t.send(seat, "/compact", {});
     expect(raw.ok).toBe(false);
@@ -229,7 +246,86 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalledWith(seat, "1", undefined, { bracketed: false });
     const ev = overrideEvents();
     expect(ev.length).toBe(1);
-    expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request", overrideReason: "approve the blocked command" });
+    expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request_pending", overrideReason: "approve the blocked command" });
+    agentActivityStore.recordHookEvent({ runtime: "codex", sessionName: seat, hookEvent: "Stop" });
+    expect((await t.send(seat, "hi")).ok).toBe(true);
+  });
+
+  it.each([15_001, 90_000, 300_000, 300_001, 600_000])("a pending Codex permission %sms old allows a send into a readable empty composer", async ageMs => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", ageMs, seat);
+    const { sendText, sendKeys } = spies();
+    const capture = vi.fn(async () => CODEX_PLACEHOLDER_PANE);
+    const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
+    const result = await transport.send(seat, "follow up");
+    expect(result.ok).toBe(true);
+    expect(capture).toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith(seat, "follow up");
+    expect(sendKeys).toHaveBeenCalledWith(seat, ["Enter"]);
+    expect(overrideEvents()).toEqual([]);
+  });
+
+  it.each([{}, { waitForIdleMs: 1_000 }, { readinessFromPaneOnly: true }])("a send-stale pending permission allows readable empty-composer sends with %j", async options => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "› \n\n  test-model · ~/code", sendText }), { now: () => fixedNow });
+    expect((await transport.send(seat, "follow up", options)).ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it.each([15_001, 90_000, 600_000])("a pending Codex permission %sms old still refuses a visible approval", async ageMs => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", ageMs, seat);
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_APPROVAL, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(["null", "empty", "unrecognized", "failure"])("a send-stale pending Codex permission fails safe on %s capture", async captureKind => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText, sendKeys } = spies();
+    const capture = async () => {
+      if (captureKind === "failure") throw new Error("capture failed");
+      if (captureKind === "null") return null;
+      return captureKind === "empty" ? "" : "unrecognized provider content";
+    };
+    const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({
+      ok: false, reason: "target_needs_input", activity: { reason: "permission_request_unverified" },
+    });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a clock-stale pending permission still fails safe on an unreadable pane", async () => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 600_000, seat);
+    const { sendText, sendKeys } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => null, sendText, sendKeys }), { now: () => fixedNow });
+    expect(await transport.send(seat, "follow up", { waitForIdleMs: 1_000 })).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a pending permission over readable live work sends with the existing busy advisory", async () => {
+    const fixedNow = new Date("2026-10-11T05:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "PermissionRequest", 90_000, seat);
+    const { sendText } = spies();
+    const transport = makeTransport(mockTmux({ capturePaneContent: async () => "• Working (3s • esc to interrupt)", sendText }), { now: () => fixedNow });
+    const result = await transport.send(seat, "follow up");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("busy");
+    expect(sendText).toHaveBeenCalled();
   });
 
   // BOTH PATHS: when the hook is ABSENT (or stale), the capture-pane fallback still catches a Codex

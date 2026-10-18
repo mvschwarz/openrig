@@ -57,6 +57,7 @@ import { workflowResumeSchema } from "./migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "./migrations/052_workflow_instance_bound_rig.js";
 import { sessionsNodeIdIndexSchema } from "./migrations/053_sessions_node_id_index.js";
 import { queueTransitionsArchiveSchema } from "./migrations/054_queue_transitions_archive.js";
+import { seatEnvSchema } from "./migrations/111_seat_env.js";
 import { nodePermissionPolicySchema } from "./migrations/055_node_permission_policy.js";
 import { rigPermissionPolicySchema } from "./migrations/056_rig_permission_policy.js";
 import { nodePolicyProvenanceSchema } from "./migrations/057_node_policy_provenance.js";
@@ -95,6 +96,7 @@ import { classificationIdentityProvenanceSchema } from "./migrations/089_classif
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
 import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
 import { nodeEffortSchema } from "./migrations/092_node_effort.js";
+import { nodeEffortChoiceSchema } from "./migrations/104_node_effort_choice.js";
 import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_latest_indexes.js";
 import type { Migration } from "./migrate.js";
 
@@ -104,6 +106,15 @@ import { threadPartMapSchema } from "./migrations/097_thread_part_map.js";
 import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_transitions_qitem_id_order.js";
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
+import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
+import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
+import { piUsageEntriesSchema } from "./migrations/107_pi_usage_entries.js";
+import { piUsageChargesSchema } from "./migrations/108_pi_usage_charges.js";
+import { modePostureCoexistSchema } from "./migrations/109_mode_posture_coexist.js";
+import { workflowInstanceScopeSchema } from "./migrations/110_workflow_instance_scope.js";
+import { queueTransitionsTsQitemSchema } from "./migrations/112_queue_transitions_ts_qitem.js";
+import { appliedLaunchDaemonOptOutSchema } from "./migrations/113_applied_launch_daemon_opt_out.js";
+import { sessionAgentAppSchema } from "./migrations/114_session_agent_app.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -207,4 +218,15 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueTransitionsQitemIdOrderSchema,
   queueItemsRecoveryTagsSchema,
   resumeRotationSchema,
+  sessionStopIntentSchema,
+  nodeEffortChoiceSchema,
+  usageSamplesClientCostSchema,
+  piUsageEntriesSchema,
+  piUsageChargesSchema,
+  modePostureCoexistSchema,
+  workflowInstanceScopeSchema,
+  seatEnvSchema,
+  queueTransitionsTsQitemSchema,
+  appliedLaunchDaemonOptOutSchema,
+  sessionAgentAppSchema,
 ];

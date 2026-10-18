@@ -179,6 +179,7 @@ edges:
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
 | `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
+| `env` | map | no | — | Launch environment for every seat in the rig: `NAME: value` pairs. A member's own `env` overrides it name by name. Names match `^[A-Z_][A-Z0-9_]*$`, names starting `OPENRIG_` are reserved, and values must be non-empty strings (quote numbers and booleans). Values are not secret. See "Launch environment" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
 | `workspace` | object | no | — | The rig's workspace: `workspace_root` (required), `repos[]` of `{name, path, kind}` with `kind` one of `user`, `project`, `knowledge`, `lab` or `delivery` and unique names, an optional `default_repo` naming one of them, and an optional `knowledge_root`. Relative repo paths resolve against `workspace_root`. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
@@ -334,6 +335,44 @@ context for `rig seat continue`; `rig up --non-interruptive` or `rig bundle inst
 except inside a recognized sandbox. See Claude Code's
 [Choose a permission mode](https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode).
 
+### Launch environment
+
+`env:` sets environment variables for the seats of a rig, so a team can share a setting such as a feature flag, a region or a log level without every member hand-editing a shell profile. Declare it on the rig, on a member, or both:
+
+```yaml
+env:
+  LOG_LEVEL: info
+  REGION: eu
+pods:
+  - id: dev
+    members:
+      - id: impl
+        runtime: claude-code
+        env:
+          LOG_LEVEL: debug   # overrides the rig's value for this seat only
+```
+
+- A seat gets the rig's `env` with its own `env` laid over it, name by name.
+- The same environment is applied on first launch, on `rig up <rig-name>` restore, and to the successor of a seat handover.
+- `rig up <spec> --env KEY=VALUE` (repeatable) adds or overrides a value for one launch. A one-off value belongs to the terminal that launch creates: it stays in that terminal's environment for as long as the terminal lives, and OpenRig removes it from the tmux session's environment as soon as the terminal has started, so a terminal started later in that session does not get it. A restore, a handover successor or any later launch starts from the spec's `env:` alone, so the value is not saved and does not carry forward. To keep a value, put it in `env:`. One exception to "does not carry forward", for a managed Claude seat (see below): a one-off name that the seat's spec does not declare stays on the session's list of names, `OPENRIG_SEAT_ENV_KEYS` (names only, no values), because the first launch and an in-place restart of the same terminal read that list. So if a later pane in that session gets a value for that name from the tmux server's own environment, its managed Claude launch can forward that value, where a launch without `--env` would leave it out. The first launch's one-off value itself is not passed on to that pane. This comes from reading the code and has not been measured. `--env` does not apply to `rig up <rig-name>` (a restore) or to a topology (several rigs from their own specs); the CLI refuses both. For a topology, put `env:` in each rig's spec.
+- Names starting `OPENRIG_` are reserved for OpenRig and refused. Empty values are refused, because the launch omits empty variables.
+- `rig export` writes the rig and member `env:` back out.
+
+**Where the declared names reach, by runtime.** Declared values are handed to the seat's terminal as tmux environment, so most seats take them as given:
+
+- Plain Claude Code (no permission mode selected), Codex and terminal seats take a spec `HOME`, `PATH` or `CLAUDE_CONFIG_DIR` as given.
+- The cleared environment (`env -i`) belongs only to a managed Claude launch, which is the one used when a permission mode is selected for the seat (for example `permission_policy: builtin:auto`). It forwards the declared names through the cleared environment, except `PATH`, `HOME` and `CLAUDE_CONFIG_DIR`, which OpenRig sets for that launch itself, and `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`, for which it sets its own renderer setting. A spec value for any of those four is not forwarded. A seat that selected the shipped `openrig-core` plugin also has `CLAUDE_CODE_PLUGIN_DIRS` (the vendored plugin, added after a list the seat declares itself) among its declared names, so it is forwarded like the others and the plugin's hooks load in a seat with a permission mode as in one without; a seat that didn't select the plugin has no such name added.
+- Codex seats run OpenRig's own Codex executable whatever a spec `PATH` says, and use the daemon's `CODEX_HOME` when the daemon has one.
+- On Pi and OMP seats the values reach the terminal. The agent process gets only what the runner passes on, so a spec or one-off value reaches it only for the names the runner always passes: `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL` and `TMPDIR`. Pi's agent process receives the runner's `HOME`, so a spec or one-off `HOME` value that reaches the runner is passed to Pi; OMP's agent process gets its seat state directory (`$OPENRIG_HOME/state/omp/<seat>`, see Oh My Pi below) as `HOME`, so a `HOME` value does not reach it. The selected provider's variables are passed separately, as described under each runtime.
+
+**Do not put secrets in `env:` or `--env`.** The values are not secret, and nothing here encrypts or hides them (see #306):
+
+- Spec values are stored in OpenRig's database and in rig snapshots, and `rig export` and bundles copy them, so a secret put there by mistake travels with the rig.
+- While a seat launches, the values are passed to tmux as command arguments, so other users and processes on the same machine can see them for that time. They then sit in the seat's process environment. Only the managed Claude launch command is value-free: it forwards names, and the terminal supplies the values.
+- A one-off `--env` value is not stored in the database or in snapshots, but it reaches tmux the same way, so it is visible in the same ways while that launch runs.
+
+Use `env:` for settings only. Credentials belong in the provider's own login or a secret store the seat reads at run time.
+
 ### Choosing the Claude instruction file
 
 OpenRig writes its instructions for Claude Code members into managed blocks in
@@ -397,16 +436,17 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
 | `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
-| `cwd` | string | yes | — | Working directory for the agent. A relative path resolves against the rig root (the directory containing the rig spec); an absolute path is used as is. Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. A cwd inside the OpenRig installation fails preflight unless `--cwd` is given. |
+| `cwd` | string | yes | — | Working directory for the agent. A relative path resolves against the rig root (the directory containing the rig spec). If that path exists as written, it is used. Otherwise a leading `~` or `~/` expands to the home directory (`~user` does not) and `$VAR` / `${VAR}` expand from the daemon host's environment; a relative result still resolves against the rig root. A reference to an unset variable stays as written, so the cwd is that literal path and works only if it exists. Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. A cwd inside the OpenRig installation fails preflight unless `--cwd` is given. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
 | `effort` | string | no | — | Reasoning effort override, trimmed. A non-string value is ignored with an advisory. |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
+| `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `role` | string | no | — | The seat's role, letters, digits, `_`, `.` and `-`. Not valid on terminal members. |
 | `restore_policy` | string | no | the AgentSpec's | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. The default comes from the AgentSpec's `defaults.lifecycle` (else `resume_if_possible`) as narrowed by its profile; a member value may only narrow it further, in that order. |
-| `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. |
+| `compaction_strategy` | string | no | — | `default-compaction`, `managed-compaction`, `handover` or `apprentice-handover`; `harness_native` and `pod_continuity` are accepted as deprecated aliases, and `custom_prompt` is refused. `managed-compaction` and `apprentice-handover` create their jobs only for `claude-code` seats; see [Codex compaction and sizing](agent-startup-guide.md#codex-compaction-and-sizing). |
 | `mechanic` | string | no | — | A canonical `seat@rig` session address, for `apprentice-handover`. |
-| `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. Not valid on terminal members. |
+| `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
 
@@ -439,6 +479,8 @@ profile: none
 ```
 
 All three must be present together. Any partial combination is a validation error.
+
+A terminal seat no longer waits for a `--fresh` decision just because it has no resume token: on restore it relaunches fresh and re-runs its startup actions. The runtime, identity and replay prerequisites still apply. A runtime mismatch still waits for a decision, an ambiguous occupant still fails, and a missing required replay file still blocks.
 
 ### agent_ref Rules
 
@@ -588,8 +630,26 @@ The harness readiness window defaults to 30 seconds. On a loaded machine, set
 `rig config set runtime.readiness_timeout_seconds 60` to give new seats and
 handover successors longer to become interactive. The setting accepts 1–600
 seconds, applies to the next launch without a daemon restart, and can also be
-set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It does not change the
-time spent by the runtime adapter before readiness polling starts.
+set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It also bounds how long a
+restore keeps watching a Claude seat whose resume is still starting, so raising
+it for slow fresh launches lengthens that wait too. The wait is about the
+setting in total per seat, counting the usual 3.2-second check: the adapter polls
+for the rest of it (nominally: it counts polls, and each poll's tmux and process
+reads add a little). A restore
+starts seats one after another, so each seat that never starts Claude adds up to
+about this much, minus the 3.2 seconds, to the restore; the time adds up seat by
+seat, and a longer setting means a longer wait before a stuck seat is reported.
+A seat that is still not interactive then ends `attention_required` with its
+launch and resume token kept, and the later readiness wait is skipped for it.
+That holds at every setting: at 1–3 seconds there are no extra polls, but an
+unresolved boot is still kept rather than failed. A pane that shows a Codex or
+another conversation's Claude is not waited for. `rig up` and
+`rig launch` wait 120 seconds for the daemon, so a restore of several stuck
+seats can pass that (in one measurement, about 31 seconds a seat at the
+default, 95 for three). A client timeout and exit code 1 do not mean the
+restore was rolled back or that it should be run again; check the real state
+first with `rig ps`. Apart from this, the setting does not change the time
+spent by the runtime adapter before readiness polling starts.
 
 ---
 
