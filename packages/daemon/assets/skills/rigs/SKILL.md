@@ -24,6 +24,9 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Check first:** `rig --version`. If it prints a version, go to step 2.
 - **What it needs:** macOS or Linux, Node.js 22 or 24, tmux, and Claude Code or Codex signed in. Check only what's
   missing: `node --version`, `tmux -V`, `claude auth status` or `codex login status`.
+- **A check that needs the network** (`gh auth status`, a registry or other fetch) can fail falsely in a sandbox without
+  network access, such as Codex's default one. Re-run that one command with network access before you tell the person
+  to sign in again or fix anything.
 - **Install:** `npm install -g @openrig/cli`, then `rig preflight` (Node, tmux, the daemon port and state folders)
   and `rig doctor`.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
