@@ -36,7 +36,22 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       await waitForFile(ready);
       const pane = (await adapter.listPanes(session))[0]!;
       const message = "first line\nsecond line; 中文";
-      expect(await adapter.sendText(pane.id, message)).toEqual({ ok: true });
+      const phases: string[] = [];
+      // Exercise the console-input branch with the same policy callbacks that
+      // sendText supplies for a draft-aware delivery.
+      const native = adapter as unknown as { sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed: boolean,
+        policy: { beforePaste: () => Promise<void>; afterPaste: () => Promise<void> }): Promise<unknown> };
+      expect(await native.sendTextUnchecked(pane.id, "blocked", () => { phases.push("write"); }, true, {
+        beforePaste: async () => { phases.push("before"); throw new Error("draft changed"); },
+        afterPaste: async () => { phases.push("after"); },
+      })).toMatchObject({ ok: false });
+      expect(phases).toEqual(["before"]);
+      phases.length = 0;
+      expect(await native.sendTextUnchecked(pane.id, message, () => { phases.push("write"); }, true, {
+        beforePaste: async () => { phases.push("before"); },
+        afterPaste: async () => { phases.push("after"); },
+      })).toEqual({ ok: true });
+      expect(phases).toEqual(["before", "write", "after"]);
       expect(await adapter.sendKeys(pane.id, ["Enter"])).toEqual({ ok: true });
       expect(JSON.parse(await waitForFile(output))).toBe(message);
     } finally {
