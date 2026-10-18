@@ -1,8 +1,9 @@
 // The record of each subscription move an agent makes or attempts: which Codex home and seats moved,
 // from which subscription to which, why, on which readings, and how each seat came out. The agent decides and moves
-// (with `rig auth switch` and `rig seat restart --keep-conversation --verify`); this only keeps what it reports, in the
-// daemon's append-only event log, for the agent and the observatory to read. It holds labels and references, never
-// credentials, and decides nothing.
+// (`rig auth switch`, then `rig seat restart --keep-conversation`, then a `--verify` check after a real turn); this
+// only keeps what it reports, in the daemon's append-only event log, for the agent and the observatory to read. It
+// holds labels and references, never credentials, and decides nothing. Its routes are off unless
+// provider.subscription_moves is on.
 
 import { randomBytes } from "node:crypto";
 import type { EventBus } from "../event-bus.js";

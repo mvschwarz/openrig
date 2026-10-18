@@ -37,8 +37,10 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   // A 4xx (e.g. 404 unknown provider / 400 invalid target) is an ERROR, never a success.
   function handleHttpError(res: { status: number; data: unknown }, label: string): boolean {
     if (res.status < 400) return false;
-    const p = (res.data ?? {}) as { error?: unknown; errors?: unknown };
-    console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
+    const p = (res.data ?? {}) as { error?: unknown; errors?: unknown; message?: unknown };
+    // Slice 18 — the move record's switch is off: say so, and how to turn it on, rather than the bare code.
+    if (p.error === "subscription_moves_disabled" && typeof p.message === "string") console.error(p.message);
+    else console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
     process.exitCode = res.status >= 500 ? 2 : 1;
     return true;
   }
@@ -470,10 +472,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     });
 
   // OPR.0.7.0.18 — the subscription move record. The agent that moves seats records each move it makes or attempts;
-  // it and the observatory read them back. Labels and references only, never credentials.
+  // it and the observatory read them back. Labels and references only, never credentials. Off unless the daemon's
+  // provider.subscription_moves is on.
   const moves = cmd
     .command("moves")
-    .description("Recorded subscription moves, newest first")
+    .description("Recorded subscription moves, newest first (needs provider.subscription_moves on)")
     .option("--home <home>", "Only moves of this Codex home")
     .option("--seat <seat>", "Only moves that restarted or listed this seat")
     .option("--limit <n>", "At most this many (default 50)")
@@ -488,7 +491,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     });
   moves
     .command("show <id>")
-    .description("One recorded move: seats and results, from and to, the reason, the readings and their age, peers")
+    .description("One recorded move: seats and results, from and to, the reason, the readings and their age, peers (needs provider.subscription_moves on)")
     .option("--json", "Output as parseable JSON")
     .action(async (id: string, opts: { json?: boolean }, command: Command) => {
       // `moves` has its own --json, which commander may take for the parent.
@@ -496,7 +499,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     });
   moves
     .command("record")
-    .description("Record a move you made or attempted (JSON: home, host, from, to, reason, readings, seats, peers, supersedes)")
+    .description("Record a move you made or attempted (JSON: home, host, from, to, reason, readings, seats, peers, supersedes; needs provider.subscription_moves on)")
     .requiredOption("--file <path>", "The move as JSON, or - for stdin")
     .option("--operator <name>", "Who is recording, when this shell has no seat identity (a seat identity wins)")
     .option("--json", "Output as parseable JSON")
@@ -508,7 +511,8 @@ The JSON shape:
     "seats": [{ "seat": "<seat>", "result": "moved|unconfirmed|unknown", "missing": "<what's missing>", "evidence": "<verify outcome>" }],
     "peers": [{ "seat": "<seat>", "note": "not restarted; account unverified" }],
     "supersedes": "<an earlier move id>" }
-Record unconfirmed and partial moves too. Labels only: never put credentials in a record.`)
+Record unconfirmed and partial moves too. Labels only: never put credentials in a record.
+The record is off by default. Turn it on with: rig config set provider.subscription_moves true`)
     .action(async (opts: { file: string; operator?: string; json?: boolean }, command: Command) => {
       const json = opts.json || command.parent?.opts().json;
       let body: unknown;

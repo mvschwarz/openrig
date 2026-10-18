@@ -13,6 +13,7 @@ import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { createDb } from "../../daemon/src/db/connection.js";
 import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
+import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 
 // Run from source (tsx), so the test needs no prior build.
 const CLI = fileURLToPath(new URL("../src/index.ts", import.meta.url));
@@ -23,12 +24,17 @@ describe("rig provider moves", () => {
   let server: ServerType;
   let url: string;
   let root: string;
+  let settingsFile: string;
 
   beforeEach(async () => {
+    delete process.env["OPENRIG_PROVIDER_SUBSCRIPTION_MOVES"];
     root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-moves-"));
+    // The daemon's provider.subscription_moves switch, on unless a test turns it off.
+    settingsFile = path.join(root, "daemon-config.json");
+    fs.writeFileSync(settingsFile, JSON.stringify({ provider: { subscriptionMoves: true } }));
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
-    const { app } = createTestApp(db);
+    const { app } = createTestApp(db, { appDeps: { settingsStore: new SettingsStore(settingsFile) } });
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
@@ -91,4 +97,27 @@ describe("rig provider moves", () => {
     expect(result.stdout + result.stderr).toContain("seats or peers must name at least one seat");
     expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'subscription.move_recorded'").get()).toEqual({ n: 0 });
   }, 30_000);
+
+  it("with the daemon's switch off, says how to turn it on, exits 1 and records nothing", async () => {
+    fs.writeFileSync(settingsFile, JSON.stringify({ provider: { subscriptionMoves: false } }));
+    const file = path.join(root, "move.json");
+    fs.writeFileSync(file, JSON.stringify({
+      home: "/home/dev/.codex-team-a", host: "box-2", from: "codex-sub-A", to: "codex-sub-B", reason: "room on B",
+      readings: [{ subject: "codex-sub-A weekly", observedAt: "2026-10-18T09:56:00Z", summary: "92% used" }],
+      seats: [{ seat: "dev-impl@team", result: "moved", evidence: "verify: moved" }], peers: [],
+    }));
+    const off = "The subscription move record is off on this daemon. Turn it on with: rig config set provider.subscription_moves true";
+    for (const args of [["record", "--file", file], ["--json"], ["show", "move-20261018100000-0123abcd"]]) {
+      const got = await rig(["provider", "moves", ...args]);
+      expect([got.code, got.stderr.trim(), got.stdout]).toEqual([1, off, ""]);
+    }
+    expect((db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'subscription.move_recorded'").get() as { n: number }).n).toBe(0);
+  });
+
+  it("names the switch in its help", async () => {
+    const help = await rig(["provider", "moves", "record", "--help"]);
+    expect(help.stdout).toContain("rig config set provider.subscription_moves true");
+    const list = await rig(["provider", "--help"]);
+    expect(list.stdout.replace(/\s+/g, " ")).toContain("needs provider.subscription_moves on");
+  });
 });

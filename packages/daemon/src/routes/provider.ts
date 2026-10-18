@@ -3,6 +3,7 @@ import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { ProviderService } from "../domain/provider/provider-service.js";
 import type { EventBus } from "../domain/event-bus.js";
+import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { parseSubscriptionMove, SubscriptionMoveInputError, SubscriptionMoves } from "../domain/provider/subscription-moves.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
@@ -230,12 +231,27 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
 
   // OPR.0.7.0.18 — the subscription move record: what an agent reports after it moves (or tries to move)
   // a Codex home's seats. Stored in the event log; it holds labels and references only, and decides nothing.
+  // Off unless provider.subscription_moves is on (read per call): while it's off these routes answer 409 and write
+  // nothing. The other provider routes don't depend on it.
+  const movesEnabled = (c: Context): boolean => {
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    try {
+      return store?.resolveOne("provider.subscription_moves").value === true;
+    } catch {
+      return false;
+    }
+  };
+  const movesOff = {
+    error: "subscription_moves_disabled",
+    message: "The subscription move record is off on this daemon. Turn it on with: rig config set provider.subscription_moves true",
+  };
   const movesOf = (c: Context): SubscriptionMoves | null => {
     const bus = c.get("eventBus" as never) as EventBus | undefined;
     return bus ? new SubscriptionMoves(bus) : null;
   };
 
   router.get("/moves", (c) => {
+    if (!movesEnabled(c)) return c.json(movesOff, 409);
     const moves = movesOf(c);
     if (!moves) return c.json({ error: "event_log_unavailable" }, unavailable);
     const limitRaw = c.req.query("limit");
@@ -245,6 +261,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   });
 
   router.get("/moves/:id", (c) => {
+    if (!movesEnabled(c)) return c.json(movesOff, 409);
     const moves = movesOf(c);
     if (!moves) return c.json({ error: "event_log_unavailable" }, unavailable);
     const move = moves.show(c.req.param("id"));
@@ -252,6 +269,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   });
 
   router.post("/moves", async (c) => {
+    if (!movesEnabled(c)) return c.json(movesOff, 409);
     const moves = movesOf(c);
     if (!moves) return c.json({ error: "event_log_unavailable" }, unavailable);
     let raw: unknown;

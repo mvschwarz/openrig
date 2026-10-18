@@ -1,6 +1,10 @@
 // OPR.0.7.0.18: the subscription move record, through the daemon's real provider routes and event log.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type Database from "better-sqlite3";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { SUBSCRIPTION_MOVE_LIST_SQL, SUBSCRIPTION_MOVE_SHOW_SQL, SubscriptionMoves } from "../src/domain/provider/subscription-moves.js";
 import type { EventBus } from "../src/domain/event-bus.js";
@@ -9,6 +13,14 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const AGENT = "fleet@ops-rig";
+const SWITCH_ENV = "OPENRIG_PROVIDER_SUBSCRIPTION_MOVES";
+
+// A settings store on its own file, with provider.subscription_moves on when asked.
+function settings(dir: string, on: boolean | null): SettingsStore {
+  const file = path.join(dir, "config.json");
+  if (on !== null) fs.writeFileSync(file, JSON.stringify({ provider: { subscriptionMoves: on } }));
+  return new SettingsStore(file);
+}
 
 function move(overrides: Record<string, unknown> = {}) {
   return {
@@ -32,12 +44,18 @@ function move(overrides: Record<string, unknown> = {}) {
 describe("subscription move record", () => {
   let db: Database.Database;
   let app: ReturnType<typeof createTestApp>["app"];
+  let dir: string;
 
   beforeEach(() => {
+    delete process.env[SWITCH_ENV];
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "subscription-moves-"));
     db = createFullTestDb();
-    ({ app } = createTestApp(db));
+    ({ app } = createTestApp(db, { appDeps: { settingsStore: settings(dir, true) } }));
   });
-  afterEach(() => { db.close(); });
+  afterEach(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 
   const post = (body: unknown, seat: string | null = AGENT) => app.request("/api/provider/moves", {
     method: "POST",
@@ -159,5 +177,79 @@ describe("subscription move record", () => {
   it("answers 404 for an unknown move and 400 for a bad limit", async () => {
     expect((await get("/api/provider/moves/move-nope")).status).toBe(404);
     expect((await get("/api/provider/moves?limit=0")).status).toBe(400);
+  });
+});
+
+describe("the provider.subscription_moves switch", () => {
+  let db: Database.Database;
+  let dir: string;
+
+  beforeEach(() => {
+    delete process.env[SWITCH_ENV];
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "subscription-moves-switch-"));
+    db = createFullTestDb();
+  });
+  afterEach(() => {
+    delete process.env[SWITCH_ENV];
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const appWith = (store: SettingsStore | undefined) =>
+    createTestApp(db, store ? { appDeps: { settingsStore: store } } : undefined).app;
+  const headers = { "Content-Type": "application/json", Host: "127.0.0.1:7433", "X-OpenRig-Session": AGENT };
+  const post = (app: ReturnType<typeof appWith>) =>
+    app.request("/api/provider/moves", { method: "POST", headers, body: JSON.stringify(move()) });
+  const written = () => (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'subscription.move_recorded'").get() as { n: number }).n;
+  const OFF = {
+    error: "subscription_moves_disabled",
+    message: "The subscription move record is off on this daemon. Turn it on with: rig config set provider.subscription_moves true",
+  };
+
+  it("is off by default: a setting nobody set resolves to false", () => {
+    expect(settings(dir, null).resolveOne("provider.subscription_moves")).toMatchObject({ value: false, source: "default" });
+  });
+
+  it("while off, record, list and show answer 409 with how to turn it on, and nothing is written", async () => {
+    for (const store of [settings(dir, null), settings(dir, false), undefined]) {
+      const app = appWith(store);
+      const res = await post(app);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(OFF);
+      for (const p of ["/api/provider/moves", "/api/provider/moves/move-20261018100000-0123abcd"]) {
+        const read = await app.request(p, { headers });
+        expect([read.status, await read.json()]).toEqual([409, OFF]);
+      }
+    }
+    expect(written()).toBe(0);
+  });
+
+  it("explicitly on, through the setting or the daemon's environment, record, list and show work", async () => {
+    for (const [store, env] of [[settings(dir, true), undefined], [settings(dir, null), "true"]] as const) {
+      if (env) process.env[SWITCH_ENV] = env;
+      const app = appWith(store);
+      const res = await post(app);
+      expect(res.status).toBe(201);
+      const { move: recorded } = await res.json() as { move: { id: string } };
+      expect((await app.request(`/api/provider/moves/${recorded.id}`, { headers })).status).toBe(200);
+      const listed = await (await app.request("/api/provider/moves", { headers })).json() as { moves: Array<{ id: string }> };
+      expect(listed.moves[0]!.id).toBe(recorded.id);
+      delete process.env[SWITCH_ENV];
+    }
+    expect(written()).toBe(2);
+  });
+
+  it("leaves the other provider routes exactly as they were, on or off", async () => {
+    const probes: Array<[string, RequestInit]> = [
+      ["/api/provider/status", { headers }],
+      ["/api/provider/accounts", { headers }],
+      ["/api/provider/signals", { headers }],
+      ["/api/provider/precheck?seat=dev-impl@team&toAccount=codex-sub-B", { headers }],
+      ["/api/provider/switch", { method: "POST", headers, body: JSON.stringify({ seat: "dev-impl@team", toAccount: "codex-sub-B" }) }],
+      ["/api/provider/usage/refresh", { method: "POST", headers, body: JSON.stringify({ provider: "codex" }) }],
+    ];
+    const answers = async (app: ReturnType<typeof appWith>) =>
+      Promise.all(probes.map(async ([p, init]) => { const r = await app.request(p, init); return [p, r.status, await r.text()]; }));
+    expect(await answers(appWith(settings(dir, true)))).toEqual(await answers(appWith(settings(dir, false))));
   });
 });
