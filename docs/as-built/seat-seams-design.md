@@ -1,7 +1,7 @@
 ---
 kind: as-built
 title: Seat seams — where the daemon reaches tmux, and the interfaces to put in front of it
-status: draft
+status: active
 topics: [launch-and-resume, message-delivery, activity]
 applies-when: |
   You are putting launch, delivery or activity behind an interface so that a seat can run
@@ -14,7 +14,8 @@ last-updated: 2026-10-18
 
 # Seat seams
 
-Source snapshot: `7e6a60a9`. Read from code only; nothing here was run.
+Source snapshot: `7e6a60a9` for the map in §1-§2. §3-§4 describe the interfaces as built on the
+`seat-seams` branch, and §5 records what a daemon booted without tmux actually did.
 
 Goal: one PR that adds interfaces in front of tmux, with today's tmux code as the only
 implementation that does anything, so that a seat whose agent runs elsewhere (an ACP host, for
@@ -104,179 +105,116 @@ gated on `attachment_type`), `routes/startup.ts:75-104` (kernel probe, `POST /te
 
 These describe or show a pane. A non-tmux seat has none, so they need to skip it, not abstract it.
 
-## 3. Proposed interfaces
+## 3. The interfaces
 
-One registry, keyed by `bindings.attachment_type`. `"tmux"` gets today's code; `"external_cli"`
-gets today's refusals; anything else is registered by an embedder (the abyme fork, later) before
-the daemon starts. Nothing in PR 1 registers a third kind.
+`packages/daemon/src/domain/seat-kinds.ts`. One registry, keyed by `bindings.attachment_type`.
+tmux and external_cli are built in and keep their code where it is; a kind registered through
+`createDaemon({ seatKinds })` replaces the tmux calls for its own seats. Nothing in this
+repository registers one.
 
 ```ts
-// packages/daemon/src/domain/seat-kinds.ts
 export type AttachmentKind = "tmux" | "external_cli" | (string & {});
 
-/** What every seat interface receives: the registry row, frozen at entry. */
-export interface SeatRef {
-  nodeId: string;
-  sessionName: string;          // canonical name; tmux session, or external_session_name
-  runtime: string | null;
-  kind: AttachmentKind;
-  pane: string | null;          // tmux only
-  occupant: string | null;      // occupant generation
+export interface SeatRef {          // the registry row a seat interface acts on, read at entry
+  nodeId: string | null; sessionName: string; runtime: string | null;
+  kind: AttachmentKind; pane: string | null; occupant: string | null;
 }
 
-export interface SeatKind {
-  readonly kind: AttachmentKind;
-  readonly host?: SeatHost;         // absent = OpenRig cannot launch this kind (external_cli)
-  readonly inbound: SeatInbound;    // required; external_cli's refuses
-  readonly activity: SeatActivityProbe;
-}
-
-export class SeatKindRegistry {
-  constructor(kinds: SeatKind[]);
-  get(kind: AttachmentKind | null | undefined): SeatKind;   // null → "tmux", unknown → throws
-  register(kind: SeatKind): void;                           // embedders; refuses re-registering "tmux"
-}
-```
-
-### SeatHost — launch, ready, stop, resume
-
-Sits where `NodeLauncher` calls `createSession` and where `StartupOrchestrator` calls
-`adapter.launchHarness`/`checkReady`. The tmux host is a thin wrapper that calls exactly what is
-called today, so runtime adapters do not change.
-
-```ts
 export interface SeatHost {
-  /** Make the container and return what goes in the binding row. tmux: createSession,
-   *  one-off env drop, observeSolePane, option defaults, transcript rotation. */
-  create(req: {
-    nodeId: string; rigName: string; sessionName: string; cwd?: string;
-    env: Record<string, string>; oneOffEnvNames: string[]; baselineEnv: Record<string, string>;
-  }): Promise<
-    | { ok: true; binding: { tmuxSession?: string; tmuxPane?: string; externalSessionName?: string };
-        paneVerdict?: PaneObservation; warnings: string[] }
-    | { ok: false; code: string; message: string }>;
-
-  /** Start the agent. tmux: adapter.launchHarness(binding, opts). */
+  create(req: SeatCreateRequest): Promise<SeatCreateResult>;   // before any DB write
   launch(binding: NodeBinding, adapter: RuntimeAdapter,
          opts: { name: string; resumeToken?: string; forkSource?: ForkSource }): Promise<HarnessLaunchResult>;
-
-  /** tmux: adapter.checkReady(binding). */
   checkReady(binding: NodeBinding, adapter: RuntimeAdapter): Promise<ReadinessResult>;
-
-  /** Restore's resume step. tmux: the Claude/Codex/Pi resume adapters as today. */
-  resume(binding: NodeBinding, runtime: string, token: string): Promise<HarnessLaunchResult>;
-
-  /** Positive absence only, as probeSession today. */
-  probe(ref: SeatRef): Promise<SessionProbe>;
-
-  /** tmux: killSession. */
-  stop(ref: SeatRef): Promise<{ ok: true } | { ok: false; code: string; message: string }>;
+  probe(ref: SeatRef): Promise<SessionProbe>;                  // positive absence only
+  stop(ref: SeatRef): Promise<TmuxResult>;                     // session_not_found when already gone
 }
-```
 
-### SeatInbound — send, capture, read
-
-Sits inside `SessionTransport`, below target resolution, the delivery guard, the outbox and the
-lease, and above the pane. The tmux implementation is today's private methods moved, not rewritten.
-
-```ts
-export interface SeatInbound {
-  /** One write inside the lease SessionTransport already holds. tmux: probe, leave copy mode,
-   *  runtime-foreground check, pre-paste input-box read, paste, Enter, render verification. */
-  deliver(ref: SeatRef, text: string, opts: SendOpts & { beforeWrite?: () => void }): Promise<SendResult>;
-  /** Enter-only (submitOnly). */
-  submit(ref: SeatRef, opts: SendOpts): Promise<SendResult>;
+export interface SeatInbound {      // called after target resolution, inside the guard's lease
+  deliver(ref: SeatRef, text: string, opts: SendOpts): Promise<SendResult>;
   capture(ref: SeatRef, lines: number): Promise<CaptureResult>;
-  /** For --wait-for-idle and the guarded pre-paste read. */
-  readSeat(ref: SeatRef): Promise<SeatReading>;
+}
+
+export interface SeatActivityProbe { probe(ref: SeatRef, now: Date): Promise<AgentActivity>; }
+
+export interface SeatKind { kind; host: SeatHost; inbound: SeatInbound; activity: SeatActivityProbe; }
+
+export class SeatKindRegistry {
+  constructor(kinds?: readonly SeatKind[]);   // refuses "tmux", "external_cli" and duplicates
+  hasCustom(): boolean;                       // call sites check this first: no extra reads by default
+  custom(kind): SeatKind | null;              // null for the built-ins and unknown kinds
+  forNode(sessionRegistry, nodeId, sessionName, runtime?): { kind; ref } | null;
 }
 ```
 
-`StartupOrchestrator.sendInteractiveText` (`:941-1044`) and the runtime adapters' `send_text`
-startup files keep calling tmux directly in PR 1; a non-tmux host owns its own startup delivery
-(it gets the resolved files through `SeatHost.launch`'s binding). See §4.
+`TmuxSeatHost` (`tmux-seat-host.ts`) is the tmux host: `create` is NodeLauncher's session setup
+moved verbatim (createSession, one-off env drop, sole-pane observation, option defaults, transcript
+rotation); `launch`/`checkReady` call the runtime adapter; `probe`/`stop` call `probeSession` and
+`killSession`. NodeLauncher and StartupOrchestrator always go through a host.
 
-### SeatActivityProbe
+Where it is wired:
 
-```ts
-export interface SeatActivityProbe {
-  /** One-shot reading for inventory, `rig ps`, waitUntilIdle. tmux: probeSessionActivity body;
-   *  external_cli: { state: "unknown", reason: "unsupported_attachment" }. */
-  probe(ref: SeatRef, opts: { now?: Date; captureObserver?: CaptureObserverSink;
-                              timerlessStatusIsLive?: boolean; agentApp?: string | null }): Promise<AgentActivity>;
-}
-```
+| Call site | tmux (unchanged) | A registered kind's seat |
+|---|---|---|
+| `NodeLauncher.launchNode` | `TmuxSeatHost.create`, binding `tmux_session`/`tmux_pane` | `LaunchOpts.kind` picks the host; binding `attachment_type=<kind>`, `external_session_name=<session>`; unregistered kind refuses `seat_kind_unknown` |
+| `StartupOrchestrator` launch, readiness, startup text | runtime adapter via `TmuxSeatHost`; text typed into the pane | `host.launch`, `host.checkReady`; startup text through `inbound.deliver` |
+| `SessionTransport.send` / `capture`, rig-wide targets | inline tmux code | `inbound.deliver` / `inbound.capture`; running seats join rig targets |
+| `resolveGuardTarget` | same SQL result | resolves by `external_session_name` for a registered kind only |
+| `probeSessionActivity` (inventory, idle waits) | pane reading | `activity.probe` |
+| Boot reconcile, `rig down`, `rig seat stop`, node removal | `probeSession` / `killSession` | `host.probe` / `host.stop` |
 
-Continuous activity for a non-tmux seat uses the route that exists: the host posts hook or
-self-report evidence to `routes/activity.ts`. The pollers stay tmux-only (they already are).
+Continuous activity for a seat without a pane arrives over the existing hook and self-report
+routes (`routes/activity.ts`). The pollers already skip non-tmux rows.
 
-### Delivery guard
+## 4. What did not move
 
-Move the reference, not the behaviour: `SeatKindRegistry` owns `deliveryGuard`, and
-`tmuxAdapter.deliveryGuard` stays assigned to the same instance (`startup.ts:507`) so
-`TmuxAdapter.guardedInput` and the ~25 readers of `tmuxAdapter.deliveryGuard` are untouched. A
-non-tmux inbound is called inside `guard.operation` by `SessionTransport` exactly as tmux is.
+Departures from the design note this doc first proposed, and why:
 
-## 4. What cannot move without behaviour change
+1. The tmux send, capture and activity code stays inline in `SessionTransport`, behind a
+   dispatch for registered kinds, rather than moving to a `TmuxSeatInbound` class. Those are ~800
+   lines of an artery, and a test replaces `transport.tmuxAdapter` after construction; moving them
+   is a separate refactor with no behaviour to gain for PR 1.
+2. No `SeatHost.resume`: a resume is `launch` with `resumeToken`. Restore keeps its tmux resume
+   adapters and cannot yet bring back a registered kind's seat, because the kind is not persisted
+   once a seat is stopped and its binding cleared. Restore of such seats belongs to the embedder
+   for now.
+3. No `submit`/`readSeat` on `SeatInbound`: a registered kind's seat takes the leased path, and its
+   `deliver` owns submit-only and any wait it supports.
 
-1. The `RuntimeAdapter` contract is tmux-shaped (launch types a command into a pane; readiness and
-   startup files read and write the pane). Changing it means changing six adapters and their tests.
-   PR 1 leaves it alone; `SeatHost.launch` wraps it for tmux and a non-tmux host does not call it.
-   `project()` and `listInstalled()` are not tmux and stay usable by any host.
-2. `StartupOrchestrator`'s own first send and submission check (`:941-1044`) has tmux-specific
-   retry and staged-paste logic. Routing it through `SeatInbound` changes the order of probes;
-   leave it, and skip it when `host.launch` reports the startup text was delivered.
-3. Pane lineage (`native-process-lineage`, `getPanePid` proofs in claim, restore, transport,
-   activity route) proves the agent is the one OpenRig launched. A non-tmux seat has no pane pid;
-   its host must attest identity. No change for tmux seats.
-4. Handover, restart-in-place, pane cutover, claim, discovery, views, cmux, transcripts and the
-   resume-metadata probe session replace or show a pane. They stay tmux-only. For a new kind they
-   must refuse; most already branch on `attachment_type` or `tmuxSession`, the rest need a guard.
-   For existing kinds that is no change.
-5. Error strings say "tmux" (`session-transport.ts:2098` etc.). Tests assert them; keep them in the
-   tmux implementation.
-6. A missing `tmux` binary is not classified as transport-absent: `isTmuxTransportAbsentError`
-   (`tmux.ts:196-214`) does not match the shell's 127 "not found", so `probeSession` throws instead
-   of returning `transport_unavailable`. Fixing that is a behaviour change; separate PR.
+What cannot move without behaviour change:
 
-### Smallest PR 1 that lets an external seat exist
-
-1. `seat-kinds.ts`: `SeatKind`, `SeatHost`, `SeatInbound`, `SeatActivityProbe`, `SeatKindRegistry`.
-2. `tmux-seat-kind.ts`: tmux implementations that call today's code. `external-cli-seat-kind.ts`:
-   today's refusals, moved verbatim.
-3. `SessionTransport`: new optional dep `seatKinds?: SeatKindRegistry`; when absent it builds the
-   default from `tmuxAdapter`, so every existing test constructs it unchanged. `send`, `capture`,
-   `preWaitForIdle`, `waitUntilIdle` and `probeSessionActivity` callers dispatch on
-   `getSessionMeta().attachmentType` instead of `if (external_cli)`.
-4. `NodeLauncher` and `StartupOrchestrator`: optional `seatKinds`; launch picks `host` by a new
-   optional `LaunchOpts.kind` (default `"tmux"`), and writes `attachment_type` +
-   `external_session_name` for a non-tmux kind. Restore, teardown and the reconciler call
-   `registry.get(binding.attachmentType).host.probe/stop` in place of `probeSession`/`killSession`.
-5. Widen `Binding.attachmentType` and the other three unions (`types.ts:79, 662, 837`,
-   `session-registry.ts:33`) to `AttachmentKind`. No migration: the column has no CHECK.
-6. `createDaemon` accepts `seatKinds?: SeatKind[]` and registers them. That is the one extension
-   point; nothing in this repo passes it.
-
-Not in PR 1: a CLI or rig-spec field to choose a kind (the fork sets it), anything about ACP, the
-missing-binary classification, `rig setup`/preflight changes.
-
-Risk: this touches two arteries (message delivery; launch and resume). The tmux paths must be
-moved, not edited. Verification: full `npm test`, `npm run lint`, and the stub-agent scenarios,
-plus one new unit test per interface that registers a fake kind and checks dispatch (the only new
-behaviour, and only reachable through `createDaemon({ seatKinds })`).
+1. The `RuntimeAdapter` contract is tmux-shaped (launch types into a pane; readiness and `send_text`
+   startup files read and write it). It is untouched; a registered host does not call it, and a
+   non-Claude adapter's `send_text` files still go to tmux.
+2. Pane lineage (`native-process-lineage`, `getPanePid` proofs) proves the agent is the one OpenRig
+   launched. A seat without a pane has none; its host attests identity.
+3. Handover, restart-in-place, pane cutover, claim, discovery, views, cmux, transcripts, the
+   startup-proof challenge prompt, the resume-metadata probe and failed-startup recovery replace or
+   read a pane. They stay tmux-only; failed-startup recovery skips a registered kind's seat.
+4. Refusal text says "tmux" (also on the stop path a registered host now uses). Tests assert it.
+5. A missing `tmux` binary is not classified as transport-absent: `isTmuxTransportAbsentError`
+   (`tmux.ts:196-214`) does not match the shell's 127 "not found", so `probeSession` throws. See §5.
 
 ## 5. Can the daemon and `rig setup` run without tmux?
 
-| Path | Without `tmux` on PATH | Source |
-|---|---|---|
-| Daemon process boot (`createDaemon`) | Starts. No `tmux -V`, no `startServer` at boot. The boot reconcile's `probeSession` throws per existing session (not classified, §4.6), errors are counted and boot continues. Fresh DB: nothing to probe. Pollers query tmux rows only. | `startup.ts:501, 701-736`, `reconciler.ts:62-69` |
-| `rig daemon start` / `rig start` | Refuses: `SystemPreflight` fails "tmux was not found in PATH." and exits 1 before starting. | `cli/src/commands/daemon.ts:187-232`, `system-preflight.ts:146-168`, `start.ts:209-231` |
-| `rig setup` | Tries `brew install tmux`; without brew the step is `skipped`, but the doctor verification has a `tmux` check with status `fail`, so `ready=false` and exit 1. | `setup.ts:355-396, 556-559, 704, 750`, `doctor.ts:118-126` |
-| `rig doctor` | `fail` on tmux. | `doctor.ts:118-126` |
+Run on 2026-10-18 against the built `7e6a60a9` (`dist/`), Node 26.12, with `PATH` holding only
+`node`, `/usr/bin` and `/bin` (`command -v tmux` → none), `HOME` and `OPENRIG_HOME` under
+`/private/tmp`, `OPENRIG_NO_KERNEL=1`, port 47901. Script: two boots of `node dist/index.js`, the
+second with one running session seeded in the DB, then the CLI.
 
-So the daemon itself can run without tmux; the CLI refuses to start it and `rig setup` reports not
-ready. An embedder that starts the daemon itself (calling `createDaemon` or the daemon entry
-directly) avoids the CLI preflight. Making `rig daemon start`/`setup` accept a tmux-less install is
-a behaviour change (a preflight that knows no tmux seat is configured), so it belongs in the fork
-or a later upstream proposal, not PR 1. Not verified by running: the absent-tmux boot trace and
-the pollers' behaviour with no tmux rows.
+| Path | Observed without `tmux` on PATH |
+|---|---|
+| Daemon boot, fresh DB | Starts; `/healthz` 200, `/api/rigs` 200. `startup reconcile: rigs=0 checked=0 detached=0 errors=0`. Two `tmux list-sessions … exec: tmux: not found` stack traces in the log from a poller. `/api/adapters/tmux/sessions` → 500. |
+| Daemon boot, one running session | Starts; same endpoints. `startup reconcile: rigs=1 checked=0 detached=0 errors=1` with `tmux has-session … not found`: the row is neither checked nor detached (§4.5). |
+| `rig daemon start --no-kernel --port 47902` | Refuses before starting: `✗ tmux: tmux was not found in PATH.`, exit 1. |
+| `rig doctor` | `[FAIL] tmux: tmux not found.`, exit 1. |
+| `rig setup` | Not run. From code: tries `brew install tmux` (no brew on this PATH → `skipped`), then the doctor verification's `tmux` check fails, so `ready=false` and exit 1 (`setup.ts:355-396, 556-559`, `doctor.ts:118-126`). |
+
+So the daemon runs without tmux, with log noise and a stuck reconcile row for any old tmux
+session; the CLI refuses to start it and `rig setup` ends not ready. An embedder that starts the
+daemon itself (`createDaemon`, or the daemon entry) avoids the CLI preflight. Accepting a tmux-less
+install in `rig daemon start`/`setup` is a behaviour change for the fork or a later upstream
+proposal.
+
+Found while running it: with no `OPENRIG_BIND_HOST`, the daemon also bound the machine's
+Tailscale address (`listening on http://100.x.x.x:47901`) next to loopback. That is its documented
+auto-bind, but a scratch daemon should set `OPENRIG_BIND_HOST=127.0.0.1`.
