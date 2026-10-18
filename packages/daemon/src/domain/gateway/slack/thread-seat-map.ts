@@ -116,14 +116,21 @@ export class ThreadSeatMap {
   }
 
   /** #96: the root a conversation opened, open OR closed (the caller decides whether a
-   *  closed root may be reused), newest first; null = the conversation never posted a root.
-   *  With `threadTs`, only a root with that ts (in any channel). */
-  resolveByConversation(conversationId: string, threadTs?: string): ThreadMapping | null {
-    const row = (threadTs === undefined
-      ? this.db.prepare(`SELECT * FROM thread_seat_map WHERE conversation_id = ? ORDER BY ${NEWEST_ROOT_FIRST} LIMIT 1`).get(conversationId)
-      : this.db.prepare(`SELECT * FROM thread_seat_map WHERE conversation_id = ? AND thread_ts = ? ORDER BY ${NEWEST_ROOT_FIRST} LIMIT 1`)
-        .get(conversationId, threadTs)) as Record<string, unknown> | undefined;
+   *  closed root may be reused), newest first; null = the conversation never posted a root. */
+  resolveByConversation(conversationId: string): ThreadMapping | null {
+    const row = this.db
+      .prepare(`SELECT * FROM thread_seat_map WHERE conversation_id = ? ORDER BY ${NEWEST_ROOT_FIRST} LIMIT 1`)
+      .get(conversationId) as Record<string, unknown> | undefined;
     return row ? project(row) : null;
+  }
+
+  /** #96: the channels where this conversation posted into a thread with this ts (its recorded parts),
+   *  i.e. which root of that ts its post actually took. Empty when no such post is recorded. */
+  partChannels(conversationId: string, threadTs: string): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT channel FROM thread_part_map WHERE conversation_id = ? AND thread_ts = ?`)
+      .all(conversationId, threadTs) as Array<{ channel: string }>;
+    return rows.map((r) => r.channel);
   }
 
   /** #899 — record a message OpenRig posted into a thread for an ask, with that ask and its seat (idempotent). */
