@@ -3,10 +3,11 @@
 // A registry token is continuity metadata, not live identity, and transcript recency is never an
 // identity tie-breaker: a deliberately retained predecessor may keep writing forever.
 
-import { dirname, join, relative, isAbsolute, sep } from "node:path";
+import { basename, dirname, join, relative, isAbsolute, sep } from "node:path";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
 import { readPiEffectiveModel } from "./effective-model-readers.js";
 import { canonicalModelPin } from "./model-divergence-monitor.js";
+import { isShellForeground } from "../shell-classifier.js";
 
 export interface ProcessRow {
   pid: number;
@@ -265,16 +266,17 @@ function flagValue(tokens: string[], flag: string): string | null {
 /**
  * Resolve a Pi seat's session file only when the registered pane runs exactly one runner for this
  * seat, in the supported managed-launch shape, and that runner wrote the sidecar. Every managed
- * launch and resume types `node <runnerEntryPath> --session-name ... --state-root ... --launch-id
- * ...` into the pane's shell, directly or through a staged script or `/usr/bin/env` that execs it,
- * so the runner is a direct child of the pane's shell whose command starts with `node` and the
- * adapter's own entry path. A runner nested in another program, a copy at another path or state
- * root, or any second process naming this seat with a launch id leaves the seat unknown. This
- * matches the managed-launch shape; it does not prove the daemon started the runner (one typed by
- * hand at the pane's prompt has the same shape). The runner's `--launch-id` must equal the
- * sidecar's, so a sidecar left by an earlier runner never answers. The sidecar must say ready and
- * not exited, and its session file must sit under the seat's own sessions folder. `notBeforeMs` scopes the records to this runner's tenure: the later
- * of the occupant's boot and the runner process start, both second-resolution stamps, so the whole
+ * launch and resume types `node <runnerEntryPath> --session-name ... --state-root ... --cwd ...
+ * --launch-id ...` into the pane's shell, directly or through a staged script or `/usr/bin/env` that
+ * execs it, so the runner is a direct child of a pane process that is a shell, and its command
+ * starts with exactly those arguments. A runner nested in another program, a copy at another path
+ * or state root, a repeated identity flag, or any second process naming this seat with a launch id
+ * leaves the seat unknown. This matches the managed-launch shape; it does not prove the daemon
+ * started the runner (one typed by hand at the pane's prompt has the same shape). The runner's
+ * `--launch-id` must equal the sidecar's, so a sidecar left by an earlier runner never answers. The
+ * sidecar must say ready and not exited, and its session file must sit under the seat's own
+ * sessions folder. `notBeforeMs` scopes the records to this runner's tenure: the later of the
+ * occupant's boot and the runner process start, both second-resolution stamps, so the whole
  * starting second is excluded (a record in it could be the predecessor's). A resume keeps the same
  * session file, so this is what separates the previous occupant's records from this one's.
  */
@@ -304,6 +306,12 @@ export async function resolveIdentityVerifiedPiRecord(
   const panePid = await deps.getPanePid(binding.tmuxPane);
   if (!panePid) return { ok: false, reason: `registered pane ${binding.tmuxPane} has no live pid` };
   const processes = await deps.listProcesses();
+  // The managed runner is typed into the pane's shell. A program that replaced that shell keeps
+  // its pid, so the pane's own process must still read as a shell.
+  const paneCommand = processes.find((process) => process.pid === panePid)?.command.trim().split(/\s+/)[0] ?? "";
+  if (!isShellForeground(basename(paneCommand.replace(/^-/, "")))) {
+    return { ok: false, reason: `the process of registered pane ${binding.tmuxPane} is not a shell` };
+  }
   // Candidates: every process under the pane naming this seat with a launch id, whatever its shape.
   const candidates = findDescendants(processes, panePid, (command) => {
     const tokens = command.trim().split(/\s+/);
@@ -319,18 +327,22 @@ export async function resolveIdentityVerifiedPiRecord(
   if (runner.ppid !== panePid) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} is not a direct child of the pane's shell` };
   }
-  // The entry path may contain spaces (it is the install location), and ps joins argv with spaces,
-  // so the path is matched as a prefix rather than as one whitespace token.
+  // ps joins argv with spaces, and the entry path and state root may contain spaces. Matching the
+  // exact order buildPiRunnerCommand writes pins where each value ends: the next fixed flag must
+  // follow it, so an extra word after the entry path or the state root does not match.
   const command = runner.command.trim();
-  const prefix = `node ${input.runner.entryPath} `;
-  if (!command.startsWith(prefix)) {
-    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not run node with the adapter's runner entry path` };
+  const head = `node ${input.runner.entryPath} --session-name ${input.sessionName} --state-root ${input.runner.stateRoot} --cwd `;
+  if (!command.startsWith(head)) {
+    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not start with the managed runner arguments` };
   }
-  const args = ` ${command.slice(prefix.length)} `;
-  if (!args.includes(` --state-root ${input.runner.stateRoot} `)) {
-    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not use the adapter's state root` };
+  // The runner's parser keeps the last of a repeated flag, and a Pi launch never passes --runtime,
+  // so either one leaves the runner's identity ambiguous.
+  const words = command.split(/\s+/);
+  const repeated = ["--session-name", "--state-root", "--cwd", "--launch-id"].filter((flag) => words.filter((word) => word === flag).length !== 1);
+  if (repeated.length > 0 || words.includes("--runtime")) {
+    return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} has ambiguous identity arguments` };
   }
-  const paneLaunchId = flagValue(args.trim().split(/\s+/), "--launch-id")!;
+  const paneLaunchId = flagValue(words, "--launch-id")!;
   if (paneLaunchId !== launchId) {
     return { ok: false, reason: `Pi runner sidecar launch ${launchId} is not the pane's live runner launch ${paneLaunchId}` };
   }

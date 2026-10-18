@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ModelDivergenceMonitor, type PinnedSeat } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { readCurrentPiOccupantModel, type ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
+import { buildPiRunnerCommand } from "../src/adapters/pi-runner-protocol.js";
 
 const SESSION = "dev-impl@r";
 const PANE = "%7";
@@ -66,6 +67,8 @@ interface Fixture {
   stateRoot: string;
   /** Replaces the pane's processes under its shell (default: the managed runner and its Pi child). */
   paneChildren?: ProcessRow[];
+  /** The pane's own process (default: a login bash). */
+  paneRoot?: string;
 }
 
 function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir" | "sessionFile">> = {}): Fixture {
@@ -89,13 +92,19 @@ function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir"
   };
 }
 
-/** The managed runner command as ps shows it: argv joined by spaces, no shell quoting. */
+/** The managed runner command as ps shows it, built by the launch builder itself so the reader's
+ *  expected argument order cannot drift from it: argv joined by spaces, shell quoting removed. */
 function runnerCommand(f: Pick<Fixture, "entryPath" | "stateRoot">, launchId: string, opts: { node?: string; entryPath?: string; stateRoot?: string } = {}): string {
-  return `${opts.node ?? "node"} ${opts.entryPath ?? f.entryPath} --session-name ${SESSION} --state-root ${opts.stateRoot ?? f.stateRoot} --cwd /p --launch-id ${launchId} --approve --model ${PIN}`;
+  const built = buildPiRunnerCommand({
+    runtime: "pi", runnerEntryPath: opts.entryPath ?? f.entryPath, sessionName: SESSION, stateRoot: opts.stateRoot ?? f.stateRoot,
+    cwd: "/p", trust: "approve", model: PIN, launchId,
+  });
+  const ps = built.replace(/'([^']*)'/g, "$1");
+  return opts.node ? ps.replace(/^node /, `${opts.node} `) : ps;
 }
 
 function processes(f: Fixture): ProcessRow[] {
-  const rows: ProcessRow[] = [{ pid: PANE_PID, ppid: 1, command: "-bash", startedAt: lstart(f.bootAt) }];
+  const rows: ProcessRow[] = [{ pid: PANE_PID, ppid: 1, command: f.paneRoot ?? "-bash", startedAt: lstart(f.bootAt) }];
   if (f.paneChildren) return [...rows, ...f.paneChildren];
   if (f.paneLaunchId) {
     rows.push({ pid: PANE_PID + 1, ppid: PANE_PID, command: runnerCommand(f, f.paneLaunchId), startedAt: lstart(f.runnerStart) });
@@ -318,14 +327,14 @@ describe("Pi runner must match the supported managed-launch shape", () => {
 
   it("a non-runner process whose arguments carry the flags stays pending", async () => {
     const f = fixture(mismatching, { paneChildren: [child(PANE_PID + 1, PANE_PID, `grep -- --session-name ${SESSION} --launch-id L2`)] });
-    expect(await pendingReason(f)).toMatch(/does not run node with the adapter's runner entry path/);
+    expect(await pendingReason(f)).toMatch(/does not start with the managed runner arguments/);
   });
 
   it("a runner from another path, through another node spelling, or with another state root stays pending", async () => {
     const shapes: Array<[Parameters<typeof runnerCommand>[2], RegExp]> = [
-      [{ entryPath: "/tmp/copy/pi-runner.js" }, /runner entry path/],
-      [{ node: "/usr/bin/node" }, /runner entry path/],
-      [{ stateRoot: "/elsewhere" }, /state root/],
+      [{ entryPath: "/tmp/copy/pi-runner.js" }, /managed runner arguments/],
+      [{ node: "/usr/bin/node" }, /managed runner arguments/],
+      [{ stateRoot: "/elsewhere" }, /managed runner arguments/],
     ];
     for (const [opts, reason] of shapes) {
       const f = fixture(mismatching, { paneChildren: [child(PANE_PID + 1, PANE_PID, runnerCommand({ entryPath: ENTRY, stateRoot: STATE_ROOT }, "L2", opts))] });
@@ -353,6 +362,41 @@ describe("Pi runner must match the supported managed-launch shape", () => {
     expect(other.fired).toHaveLength(1);
     // The whole spaced path must match, not its first word.
     const sibling = fixture(mismatching, { ...spaced, paneChildren: [child(PANE_PID + 1, PANE_PID, runnerCommand({ ...spaced, entryPath: "/opt/Open Other/pi-runner.js" }, "L2"))] });
-    expect(await pendingReason(sibling)).toMatch(/runner entry path/);
+    expect(await pendingReason(sibling)).toMatch(/managed runner arguments/);
+  });
+});
+
+describe("Pi runner arguments and pane process must be unambiguous", () => {
+  const at = lstart(RUNNER_START);
+  const managed = { entryPath: ENTRY, stateRoot: STATE_ROOT };
+  const mismatching = [header(T0), assistant(RUNNER_START + 5_000, OTHER)];
+  const withRunner = (command: string, overrides: Partial<Fixture> = {}) =>
+    fixture(mismatching, { paneChildren: [{ pid: PANE_PID + 1, ppid: PANE_PID, command, startedAt: at }], ...overrides });
+
+  async function pendingReason(f: Fixture): Promise<string | undefined> {
+    const r = await pass(monitorFor(f));
+    expect(r.fired).toEqual([]);
+    return r.pending[0]?.reason;
+  }
+
+  it("a state root or entry path that only starts with the expected one stays pending", async () => {
+    expect(await pendingReason(withRunner(runnerCommand(managed, "L2", { stateRoot: `${STATE_ROOT} backup` })))).toMatch(/managed runner arguments/);
+    expect(await pendingReason(withRunner(runnerCommand(managed, "L2", { entryPath: `${ENTRY} backup/runner.js` })))).toMatch(/managed runner arguments/);
+  });
+
+  it("a repeated identity flag, or --runtime, stays pending", async () => {
+    for (const extra of [" --launch-id L9", ` --session-name ${SESSION}`, " --state-root /s", " --cwd /q", " --runtime omp"]) {
+      expect(await pendingReason(withRunner(`${runnerCommand(managed, "L2")}${extra}`))).toMatch(/ambiguous identity arguments/);
+    }
+  });
+
+  it("a pane whose own process is not a shell stays pending, with the exact runner under it", async () => {
+    expect(await pendingReason(withRunner(runnerCommand(managed, "L2"), { paneRoot: "vim notes.md" }))).toMatch(/is not a shell/);
+  });
+
+  it("login and path spellings of a shell as the pane's process still match", async () => {
+    for (const paneRoot of ["-zsh", "/usr/bin/fish", "bash"]) {
+      expect((await pass(monitorFor(withRunner(runnerCommand(managed, "L2"), { paneRoot })))).fired).toHaveLength(1);
+    }
   });
 });
