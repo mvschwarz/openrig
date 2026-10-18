@@ -554,7 +554,7 @@ export function findSlice(
         continue;
       }
       const mission = buildMissionInfo(missionsRoot, owningMissionPath);
-      const sliceRoot = path.dirname(candidate);
+      const sliceRoot = path.dirname(path.resolve(candidate));
       return buildSliceInfo(mission, sliceRoot, path.basename(candidate));
     }
   }

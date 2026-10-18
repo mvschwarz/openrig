@@ -367,7 +367,9 @@ describe("findSlice + resolution variants", () => {
     const prev = process.cwd();
     process.chdir(root);
     try {
-      expect(findSlice("missions", "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
+      const hinted = findSlice("missions", "07-target", "release-0.3.2");
+      expect(hinted.missionName).toBe("release-0.3.2");
+      expect(hinted.absPath).toBe(path.join(fs.realpathSync(root), "missions", "release-0.3.2", "slices", "07-target"));
       expect(findSlice("missions/", "07-target", "release-0.3.2").missionName).toBe("release-0.3.2");
       expect(findSlice("missions", "release-0.3.2/slices/07-target").missionName).toBe("release-0.3.2");
     } finally {
