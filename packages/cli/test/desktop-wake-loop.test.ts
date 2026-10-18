@@ -119,7 +119,8 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(CLI))("the skill'
     expect(result.code).toBe(0);
     expect(result.stdout).not.toContain("NEW WORK");
     expect(result.stdout).toContain("No new work before the deadline");
-    expect(result.seconds).toBeGreaterThanOrEqual(4);
+    // `date +%s` counts whole seconds, so the deadline lands up to a second early.
+    expect(result.seconds).toBeGreaterThanOrEqual(3);
     expect(result.seconds).toBeLessThan(15);
   }, 40_000);
 });
