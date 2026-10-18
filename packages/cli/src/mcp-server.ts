@@ -517,7 +517,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
     "rig_queue_list",
     "List queue items. owned: assigned to this seat. mine: this seat is the source or the destination. Without a scope, this seat's rig. Open items only unless all is set.",
     {
-      owned: z.boolean().optional().describe("Only items assigned to this seat"),
+      owned: z.boolean().optional().describe("Only items assigned to this seat (overrides destination)"),
       mine: z.boolean().optional().describe("Items this seat sent or owns"),
       destination: z.string().optional().describe("Filter by destination seat"),
       source: z.string().optional().describe("Filter by source seat"),
@@ -537,7 +537,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
         else if (!destination && !source && sessionName?.includes("@")) params.set("rig", sessionName.split("@")[1]!);
         if (!all) params.set("activeOnly", "1");
         params.set("compact", "1");
-        if (destination) params.set("destinationSession", destination);
+        // owned means assigned to this seat; another destination can't widen it to someone else's items.
+        if (destination && !owned) params.set("destinationSession", destination);
         if (source) params.set("sourceSession", source);
         if (state) params.set("state", state);
         params.set("limit", String(limit ?? 100));

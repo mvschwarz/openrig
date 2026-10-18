@@ -648,7 +648,9 @@ describe("MCP Server", () => {
         await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true } });
         await mcpClient.callTool({ name: "rig_queue_list", arguments: { mine: true, all: true } });
         await mcpClient.callTool({ name: "rig_queue_list", arguments: {} });
+        await mcpClient.callTool({ name: "rig_queue_list", arguments: { owned: true, destination: "other@team" } });
         const queries = getFn.mock.calls.map(c => new URLSearchParams(String(c[0]).split("?")[1]));
+        expect(queries[3]!.getAll("destinationSession")).toEqual(["desk@team"]);
         expect(queries[0]!.get("destinationSession")).toBe("desk@team");
         expect(queries[0]!.get("activeOnly")).toBe("1");
         expect(queries[1]!.get("as")).toBe("desk@team");
