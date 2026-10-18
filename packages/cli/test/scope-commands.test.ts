@@ -767,6 +767,46 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     );
   });
 
+  it("creates the first mission under the workspace's nested project.yaml missions.root", async () => {
+    const workspace = path.join(env.root, "declared-workspace");
+    writeFile(path.join(workspace, "project.yaml"), "missions:\n  root: work/plans/missions\n");
+
+    const r = await run(["mission", "create", "first-declared-mission", "--json"], path.join(workspace, "missions"));
+
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.mission.path).toBe(path.join(workspace, "work", "plans", "missions", "first-declared-mission"));
+    expect(parsed.mission.advisories).toEqual([]);
+    expect(fs.existsSync(path.join(workspace, "missions"))).toBe(false);
+  });
+
+  it("uses the declared missions.root even when a conventional missions folder exists", async () => {
+    const workspace = path.join(env.root, "declared-over-conventional");
+    fs.mkdirSync(path.join(workspace, "missions"), { recursive: true });
+    writeFile(path.join(workspace, "project.yaml"), "missions:\n  root: planning\n");
+
+    const r = await run(["mission", "create", "declared-wins", "--json"], path.join(workspace, "missions"));
+
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout).mission.path).toBe(path.join(workspace, "planning", "declared-wins"));
+    expect(fs.existsSync(path.join(workspace, "missions", "declared-wins"))).toBe(false);
+  });
+
+  it("keeps the conventional missions root, with an advisory, when missions.root leaves the workspace", async () => {
+    const workspace = path.join(env.root, "escaping-workspace");
+    writeFile(path.join(workspace, "project.yaml"), "missions:\n  root: ../elsewhere\n");
+
+    const r = await run(["mission", "create", "kept-inside", "--json"], path.join(workspace, "missions"));
+
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.mission.path).toBe(path.join(workspace, "missions", "kept-inside"));
+    expect(parsed.mission.advisories).toEqual([
+      "project.yaml: optional missions.root must be a relative path inside the project; kept the conventional missions root",
+    ]);
+    expect(fs.existsSync(path.join(env.root, "elsewhere"))).toBe(false);
+  });
+
   it("HG-15: created mission frontmatter has a conformant dot-ID per §1", async () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);

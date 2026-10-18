@@ -53,6 +53,7 @@ import {
   pad2,
   readFrontmatter,
   resolveNotesFile,
+  readProjectMissionsRoot,
   resolveMissionsRoot,
   splitFrontmatter,
   todayDateISO,
@@ -785,7 +786,7 @@ function buildMissionShowCommand(): Command {
     });
 }
 
-function resolveMissionCreateRoot(override?: string | null): string {
+function resolveMissionCreateRoot(override: string | null | undefined, advisories: string[]): string {
   const selected = override ?? process.env.OPENRIG_WORK_ROOT;
   if (!selected) return resolveMissionsRoot();
 
@@ -803,7 +804,15 @@ function resolveMissionCreateRoot(override?: string | null): string {
     });
   }
 
-  const missionsRoot = directMissionsRoot ? candidate : childMissionsRoot;
+  // A named workspace uses its project.yaml missions.root, as work positions do; a named missions folder is used as is.
+  const missionsRoot = directMissionsRoot ? candidate : readProjectMissionsRoot(workspaceRoot, advisories);
+  if (!missionsRoot) {
+    throw new ScopeCliError({
+      fact: `project.yaml missions.root in ${workspaceRoot} resolves outside the workspace.`,
+      consequence: "Mission not created.",
+      action: "Set missions.root to a relative path inside the workspace.",
+    });
+  }
   if (fs.existsSync(missionsRoot) && !fs.statSync(missionsRoot).isDirectory()) {
     throw new ScopeCliError({
       fact: `Mission root is not a directory: ${missionsRoot}.`,
@@ -838,7 +847,8 @@ function buildMissionCreateCommand(): Command {
             action: "Pick a name with no whitespace or path separators.",
           });
         }
-        const missionsRoot = resolveMissionCreateRoot(getOpts(command).workspace);
+        const rootAdvisories: string[] = [];
+        const missionsRoot = resolveMissionCreateRoot(getOpts(command).workspace, rootAdvisories);
         const absPath = path.join(missionsRoot, name);
         if (fs.existsSync(absPath)) {
           throw new ScopeCliError({
@@ -966,9 +976,13 @@ function buildMissionCreateCommand(): Command {
           humanLines.push(`  notes: ${notesPath} (template: ${notesRendered?.resolvedFrom})`);
         }
         if (capabilityDeltaPath) humanLines.push(`  capability delta: ${capabilityDeltaPath}`);
-        if (notesRendered?.resolvedFrom === "legacy-env") {
-          humanLines.push("  advisory: OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH");
-        }
+        const advisories = [
+          ...rootAdvisories,
+          ...(notesRendered?.resolvedFrom === "legacy-env"
+            ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
+            : []),
+        ];
+        for (const advisory of advisories) humanLines.push(`  advisory: ${advisory}`);
         emit(out, {
           ok: true,
           mission: {
@@ -980,9 +994,7 @@ function buildMissionCreateCommand(): Command {
             notesPath,
             capabilityDeltaPath,
             notesResolvedFrom: notesRendered?.resolvedFrom ?? null,
-            advisories: notesRendered?.resolvedFrom === "legacy-env"
-              ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
-              : [],
+            advisories,
           },
         }, json, humanLines);
       } catch (err) {
