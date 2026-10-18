@@ -1455,6 +1455,11 @@ export interface SendResult {
   sent?: boolean;
   /** Present only when transport.verify_input_box applied to this send. */
   inputBox?: InputBoxEvidence;
+  /** How far the send got toward the seat's input, where that is positively known:
+   *  `not_reached` — an idle wait refused the send before any write was attempted;
+   *  `attempted` — the text write was issued and reported a failure (it may still have landed);
+   *  `written` — the text was written and the send stopped before or at Enter (it may sit in the input box). */
+  inputPhase?: "not_reached" | "attempted" | "written";
 }
 
 /** One reading of a Claude Code or Codex input box: `exact` (the sent text, word boundaries kept), `ambiguous`
@@ -2002,6 +2007,11 @@ export class SessionTransport {
       }
       return result;
     } catch (error) {
+      // A refusal thrown after the text was written (for example a guard check before Enter) is not "nothing sent".
+      if ((error as { inputWritten?: boolean }).inputWritten === true) {
+        return { ok: false, sessionName, sent: true, outcome: "failed", inputPhase: "written", reason: (error as { code?: string }).code ?? "submit_refused",
+          error: `Text was written to '${sessionName}' but Enter was not sent: ${(error as Error).message}` };
+      }
       return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
     }
   }
@@ -2130,6 +2140,7 @@ export class SessionTransport {
         reason: preWait.reason,
         error: preWait.error,
         sent: false,
+        inputPhase: "not_reached",
         activity: preWait.activity,
         waitedMs: preWait.waitedMs,
         attempts: preWait.attempts,
@@ -2362,6 +2373,7 @@ export class SessionTransport {
           reason: waitResult.reason,
           error: waitResult.error,
           sent: false,
+          inputPhase: "not_reached",
           ...waitEvidence,
         };
       }
@@ -2418,6 +2430,7 @@ export class SessionTransport {
             reason: rewait.reason,
             error: rewait.error,
             sent: false,
+            inputPhase: "not_reached",
             ...waitEvidence,
           };
         }
@@ -2449,6 +2462,7 @@ export class SessionTransport {
             ok: false,
             sessionName,
             sent: false,
+            inputPhase: "not_reached",
             reason: late.reason,
             error: late.error,
             activity: recheck,
@@ -2596,6 +2610,7 @@ export class SessionTransport {
         sessionName,
         reason: "send_failed",
         outcome: "failed",
+        inputPhase: "attempted",
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
         ...(waitMode ? { sent: false, ...waitEvidence } : {}),
       });
@@ -2632,17 +2647,25 @@ export class SessionTransport {
     }
 
     // 5. Submit (Enter)
-    const submitResult = await this.runStage(
-      "session_transport.submit",
-      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
-      (result) => result.ok ? "ok" : "failed",
-    );
+    let submitResult;
+    try {
+      submitResult = await this.runStage(
+        "session_transport.submit",
+        () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
+        (result) => result.ok ? "ok" : "failed",
+      );
+    } catch (error) {
+      // The text is already in the seat's input; whoever catches this must not report it as unsent.
+      if (error && typeof error === "object") (error as { inputWritten?: boolean }).inputWritten = true;
+      throw error;
+    }
     if (!submitResult.ok) {
       return observe({
         ok: false,
         sessionName,
         reason: "submit_failed",
         outcome: "failed",
+        inputPhase: "written",
         error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
         ...(waitMode ? { sent: true, ...waitEvidence } : {}),
       });

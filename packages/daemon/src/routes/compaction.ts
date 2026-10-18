@@ -161,7 +161,7 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
 export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" | "uncertain"): string {
   switch (compact) {
     case "submitted_unconfirmed": return "submitted, unconfirmed: OpenRig sent /compact and Enter to the seat; it does not check whether Claude Code then started compacting.";
-    case "uncertain": return "uncertain: the /compact send's outcome was lost, so it may have reached the seat; it was not retried.";
+    case "uncertain": return "uncertain: /compact may have reached the seat, possibly as text left in its input box without Enter; it was not retried.";
     default: return "not sent: OpenRig has not sent /compact for this attempt.";
   }
 }

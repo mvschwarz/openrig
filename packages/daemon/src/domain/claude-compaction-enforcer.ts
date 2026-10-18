@@ -1,5 +1,5 @@
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
-import type { SessionTransport } from "./session-transport.js";
+import type { SessionTransport, SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -140,13 +140,16 @@ export function isValidThresholdPercent(value: unknown): boolean {
 }
 
 /**
- * The most characters a managed `/compact` command may have, `/compact ` included.
+ * The most characters a managed `/compact` command may have, `/compact ` included, counted as JavaScript
+ * string length: UTF-16 code units, not bytes or terminal cells. Pieces are included whole or left out, so
+ * a multi-byte character is never split.
  *
- * Evidence (2026-10-18, native, Claude Code 2.1.282, an idle seat, OpenRig's normal bracketed-paste
- * transport): the 0.6.6 managed command, 792 characters, ran as a slash command; the 0.6.10 one, 850
- * characters, arrived as pasted text and did not run. So Claude Code stops treating a long paste as a
- * command somewhere between 792 and 850 characters. The budget stays well under that, so a long map path
- * or policy instruction can't push the command over.
+ * Evidence (2026-10-18, native, an idle seat, OpenRig's normal bracketed-paste transport):
+ * - Claude Code 2.1.282: the 0.6.6 managed command, 792 characters, ran as a slash command; the 0.6.10
+ *   one, 850 characters, arrived as pasted text and did not run.
+ * - Claude Code 2.1.302: a 624-character managed command ran. Its margin over this budget is only 24.
+ * Neither establishes Claude Code's own counting unit or a universal threshold. The budget stays under
+ * every observed success, so a long map path or policy instruction can't push the command over.
  */
 export const MANAGED_COMPACT_COMMAND_MAX_CHARS = 600;
 /** Must start the /compact arguments: the precompact and refocus hooks recognise a managed compaction by it (#928). */
@@ -312,6 +315,8 @@ export function buildPostCompactRestorePrompt(input: {
   attemptMapPath?: string | null;
   /** The compaction instruction, when it was too long for the /compact command. */
   overflowCompactInstruction?: string | null;
+  /** True for a --skip-map compaction with no completed map at the attempt path. */
+  noMapRequired?: boolean;
   transcriptPath?: string | null;
   sessionId?: string | null;
   postCompactInstruction?: string | null;
@@ -332,6 +337,7 @@ export function buildPostCompactRestorePrompt(input: {
     `First, look for the pending restore marker at ${markerPath}.`,
   ];
   if (input.attemptMapPath) pieces.push(`This attempt's restore map is ${input.attemptMapPath}; read it.`);
+  else if (input.noMapRequired) pieces.push("No restore map was required for this compaction (--skip-map); restore from the marker or transcript below.");
   const overflow = input.overflowCompactInstruction?.trim().replace(/\s+/g, " ");
   if (overflow) pieces.push(`Operator compaction instruction (too long for the /compact command, so it travels here): ${overflow}`);
   if (input.transcriptPath) {
@@ -410,8 +416,9 @@ interface PreparationAttempt extends PreparationState {
   compactInstruction: string;
 }
 
-/** What the restore request must carry because the /compact command could not. */
-interface RestoreCarry { mapPath: string | null; compactInstruction: string | null }
+/** What the restore request must carry because the /compact command could not. With --skip-map the attempt
+ *  path and marker are kept so the restore can name a map the seat completed anyway, or say none was required. */
+interface RestoreCarry { mapPath: string | null; compactInstruction: string | null; skipMap?: { mapPath: string; marker: string } }
 
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
@@ -603,7 +610,7 @@ export class ClaudeCompactionEnforcer {
         buildPostCompactRestorePrompt({
           sessionName: input.sessionName,
           openrigHome: this.openrigHome,
-          attemptMapPath: this.restoreCarry.get(input.sessionName)?.mapPath ?? null,
+          ...this.restoreMapFields(input.sessionName),
           overflowCompactInstruction: this.restoreCarry.get(input.sessionName)?.compactInstruction ?? null,
           transcriptPath: input.transcriptPath,
           sessionId: input.sessionId,
@@ -944,23 +951,27 @@ export class ClaudeCompactionEnforcer {
       return this.sessionTransport.send(input.sessionName, composed.command,
         { beforeWrite: check, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
     };
-    let result;
+    let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
     try {
       const guard = this.sessionTransport.deliveryGuard;
       result = guard ? await guard.lifecycle([guard.target(input.sessionName).nodeId], send) : await send();
     } catch (error) {
-      guardRefused = error instanceof DeliveryGuardError; // refused before any input
-      result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain" };
+      // A guard refusal is "nothing sent" only when the transport did not mark the text as already written.
+      const written = (error as { inputWritten?: boolean } | null)?.inputWritten === true;
+      guardRefused = error instanceof DeliveryGuardError && !written;
+      result = { ok: false, reason: error instanceof DeliveryGuardError ? error.code : "delivery_uncertain", ...(written ? { sent: true, inputPhase: "written" as const } : {}) };
     }
     if (!result.ok || result.outcome === "retained") {
-      // Nothing sent: a guard refusal before input, a retained send, or an explicit sent:false.
-      // Anything else may have reached the seat.
-      const notSent = guardRefused || result.outcome === "retained" || ("sent" in result && result.sent === false);
-      // The idle wait ran and nothing was sent (the transport reports the wait with waitedMs), whatever the
-      // reason string: keep the automatic attempt armed for a later poll. reconcilePreparations still ends
-      // it at the existing deadline, or on an occupant change.
-      if (attempt.mode === "automatic" && "sent" in result && result.sent === false && "waitedMs" in result && result.waitedMs !== undefined) {
+      const phase = result.inputPhase;
+      // A write that was issued, or text already in the input, is never "nothing sent".
+      const writeAttempted = phase === "attempted" || phase === "written" || result.sent === true;
+      // Nothing sent: a guard refusal before input, a retained send, or the transport's explicit sent:false
+      // for a send that never reached its write.
+      const notSent = !writeAttempted && (guardRefused || result.outcome === "retained" || result.sent === false);
+      // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
+      // marks those `not_reached`. reconcilePreparations still ends it at the deadline or on an occupant change.
+      if (attempt.mode === "automatic" && notSent && phase === "not_reached") {
         return { ok: false, reason: "waiting_for_idle" };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
@@ -971,10 +982,11 @@ export class ClaudeCompactionEnforcer {
     }
     attempt.compact = "submitted_unconfirmed";
     // Whatever the command could not carry, the restore request carries instead.
-    if ((!skipMap && !composed.mapPathInCommand) || !composed.instructionInCommand) {
+    if (skipMap || !composed.mapPathInCommand || !composed.instructionInCommand) {
       this.restoreCarry.set(input.sessionName, {
         mapPath: !skipMap && !composed.mapPathInCommand ? attempt.mapPath : null,
         compactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
+        ...(skipMap ? { skipMap: { mapPath: attempt.mapPath, marker: attempt.marker } } : {}),
       });
     } else this.restoreCarry.delete(input.sessionName);
     if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
@@ -984,6 +996,16 @@ export class ClaudeCompactionEnforcer {
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     this.pendingStageGeneration.set(input.sessionName, attempt.occupantGeneration);
     return { ok: true };
+  }
+
+  /** The map the restore request names. With --skip-map: a map the seat completed at the attempt path
+   *  anyway (final file ending with its marker), or a plain statement that none was required. */
+  private restoreMapFields(sessionName: string): { attemptMapPath: string | null; noMapRequired: boolean } {
+    const carry = this.restoreCarry.get(sessionName);
+    if (!carry?.skipMap) return { attemptMapPath: carry?.mapPath ?? null, noMapRequired: false };
+    let completed = false;
+    try { completed = fs.readFileSync(carry.skipMap.mapPath, "utf8").trimEnd().endsWith(carry.skipMap.marker); } catch { /* none written */ }
+    return completed ? { attemptMapPath: carry.skipMap.mapPath, noMapRequired: false } : { attemptMapPath: null, noMapRequired: true };
   }
 
   /** Existing monitor polls and manual waits call this even when context usage is stale. */

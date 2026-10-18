@@ -23,6 +23,8 @@ function fixture(compactInstruction = '') {
   // What a runtime hook says, when it differs from the pane (null: the hook agrees with the pane).
   let hookActivity: string | null = null;
   let onSleep: (() => void) | undefined;
+  // Runs on each text write after it is recorded; may return a receipt to use instead of ok.
+  let onText: ((text: string) => {ok: boolean; message?: string} | void) | undefined;
   const generation = 'generation-one';
   const db = {prepare: () => ({get: () => undefined, all: () => []})} as any;
   // Every input event in order: a text write with its options, or a key.
@@ -30,7 +32,7 @@ function fixture(compactInstruction = '') {
   const policy = {enabled: true, thresholdPercent: 80, preCompactInstruction: 'Write a restore map.', get compactInstruction() { return policyRef.compactInstruction; }, messageInline: '', messageFilePath: '', postRestoreAuditInstruction: ''};
   const tmux = {
     probeSession: vi.fn(async () => ({state: 'present'})),
-    sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return {ok: true}; }),
+    sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return onText?.(text) ?? {ok: true}; }),
     sendKeys: vi.fn(async (_: string, keys: string[]) => { events.push({kind: 'keys', keys}); return {ok: true}; }),
   };
   Object.assign(tmux, {deliveryGuard: new SeatDeliveryGuard(db, () => ({nodeId: 'node-one', session: seat, pane: '%1', occupant: generation}))});
@@ -50,7 +52,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; message?: string} | void) => { onText = fn; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -112,7 +114,7 @@ it('automatic: a map that is ready while the seat is mid-turn waits for idle ins
   const busy = await f.e.maybeAutoCompact(input);
   // The real transport's answer for a busy seat, as the enforcer classified it.
   console.log('transport result for /compact at a busy seat:', JSON.stringify(results[0]));
-  expect(results[0]).toMatchObject({ok: false, sent: false, waitedMs: expect.any(Number)});
+  expect(results[0]).toMatchObject({ok: false, sent: false, inputPhase: 'not_reached', waitedMs: expect.any(Number)});
   expect(busy).toEqual({triggered: false, reason: 'waiting_for_idle'});
   expect(f.compactIndex()).toBe(-1);
   // Still armed: not stopped, nothing sent.
@@ -167,12 +169,12 @@ it('route: --state says "submitted, unconfirmed" for the command and never that 
   expect(body.compact).not.toMatch(/\bran\b|compacted|delivered/);
 });
 
-it('automatic: any send that reports nothing sent after an idle wait keeps the attempt armed, whatever its reason string', async () => {
+it('automatic: a known pre-input idle deferral (inputPhase not_reached) keeps the attempt armed, whatever its reason string', async () => {
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
   const real = f.transport.send.bind(f.transport);
-  const notIdle = {ok: false, sessionName: seat, sent: false, reason: 'a_future_not_idle_reason', error: 'busy', activity: {state: 'running', reason: 'fixture', evidenceSource: 'fixture'}, waitedMs: 20, attempts: 3};
+  const notIdle = {ok: false, sessionName: seat, sent: false, inputPhase: 'not_reached', reason: 'a_future_not_idle_reason', error: 'busy', activity: {state: 'running', reason: 'fixture', evidenceSource: 'fixture'}, waitedMs: 20, attempts: 3};
   const spy = vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => text.startsWith('/compact') ? notIdle as any : real(s, text, opts));
   expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'waiting_for_idle'});
   console.log('not-idle send result as classified:', JSON.stringify(notIdle));
@@ -271,4 +273,94 @@ it('manual: a fresh idle hook while the pane shows work does not let /compact th
   const outcome = await f.e.triggerManualCompact({...input, usedPercentage: 40}, {operatorInitiated: true});
   expect(outcome).toMatchObject({triggered: false});
   expect(f.compactIndex()).toBe(-1);
+});
+
+// --- a failed or interrupted write is never retried and never reported as not sent -------------------------
+
+const compactWrites = (f: ReturnType<typeof fixture>) => f.texts().filter((t) => t.startsWith('/compact')).length;
+const entersAfterCompact = (f: ReturnType<typeof fixture>) => { const i = f.compactIndex(); return i < 0 ? 0 : f.events.slice(i + 1).filter((ev) => ev.kind === 'keys').length; };
+function stateRoute(f: ReturnType<typeof fixture>) {
+  const app = new Hono();
+  app.use('*', async (c, next) => { c.set('compactionEnforcer' as never, f.e); await next(); });
+  app.route('/api/compaction', compactionRoutes());
+  return async () => (await app.request(`/api/compaction/state?session=${encodeURIComponent(seat)}`)).json();
+}
+
+it('automatic: a failed paste after a successful idle wait disarms as uncertain and is never written again', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  f.stageMap();
+  f.onText((text) => (text.startsWith('/compact') ? {ok: false, message: 'paste-buffer: lost reply'} : undefined));
+  const outcome = await f.e.maybeAutoCompact(input);
+  expect(outcome).not.toEqual({triggered: false, reason: 'waiting_for_idle'});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
+  f.onText(() => undefined);
+  for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
+  expect(compactWrites(f)).toBe(1);
+});
+
+for (const end of ['deadline', 'cancel'] as const) {
+  it(`${end} in the gap between paste and Enter: one write, no Enter, and the state never says not sent`, async () => {
+    const f = fixture();
+    await f.e.maybeAutoCompact(input);
+    f.stageMap();
+    f.onText((text) => {
+      if (!text.startsWith('/compact')) return;
+      if (end === 'deadline') f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1); else f.e.cancelPreparation(seat);
+    });
+    await f.e.maybeAutoCompact(input);
+    expect(compactWrites(f)).toBe(1);
+    expect(entersAfterCompact(f)).toBe(0);
+    const state = f.e.getPreparationState(seat)!;
+    expect(state.status).toBe('stopped');
+    expect(state.compact).toBe('uncertain');
+    const body = await stateRoute(f)();
+    expect(body.compact).not.toMatch(/^not sent/);
+    expect(body.compact).toMatch(/input box/);
+    for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
+    expect(compactWrites(f)).toBe(1);
+  });
+}
+
+it('deadline before the first paste: zero writes and not sent', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  f.stageMap();
+  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  await f.e.maybeAutoCompact(input);
+  expect(compactWrites(f)).toBe(0);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
+  expect((await stateRoute(f)()).compact).toMatch(/^not sent/);
+});
+
+it('--skip-map: the restore request carries the overflow instruction and says no map is required when none was completed', async () => {
+  const f = fixture(LONG_INSTRUCTION);
+  expect(await f.e.triggerManualCompact({...input, usedPercentage: 40}, {operatorInitiated: true, skipMap: true})).toEqual({triggered: true, stage: 'compact-sent'});
+  const restore = (await drainToRestore(f))!;
+  expect(restore).toContain('Operator compaction instruction (too long for the /compact command');
+  expect(restore).toContain('No restore map was required for this compaction (--skip-map)');
+  expect(restore).not.toContain("This attempt's restore map is");
+});
+
+it('--skip-map with a completed map at the attempt path: the restore request names it', async () => {
+  const f = fixture();
+  f.onSleep(() => f.stageMap()); // the seat still writes its map
+  f.onText((text) => { if (text.startsWith('/compact')) { const a = f.e.getPreparationState(seat)!; writeFileSync(a.mapPath, `# map\n${a.marker}\n`); } });
+  expect(await f.e.triggerManualCompact({...input, usedPercentage: 40}, {operatorInitiated: true, skipMap: true})).toEqual({triggered: true, stage: 'compact-sent'});
+  const mapPath = f.e.getPreparationState(seat)?.mapPath ?? (f.e as any).restoreCarry.get(seat)?.mapPath;
+  const restore = (await drainToRestore(f))!;
+  expect(restore).toContain(`This attempt's restore map is ${mapPath}`);
+});
+
+it('non-ASCII instruction and path stay within the budget, counted in UTF-16 code units', () => {
+  const path = '/srv/работа/团队/チーム/seat-🚀/' + 'карта-地图-'.repeat(20) + '/RESTORE-MAP.md';
+  const instruction = 'Сохрани текущую задачу и следующий шаг. 保留当前任务。 🚀 '.repeat(30);
+  for (const mapPath of [null, path]) for (const compactInstruction of ['', 'Сохрани задачу 🚀', instruction]) {
+    const {command} = composeManagedCompactCommand({compactInstruction, mapPath});
+    expect(command.length).toBeLessThanOrEqual(MANAGED_COMPACT_COMMAND_MAX_CHARS);
+    expect(command.startsWith(`/compact ${MANAGED_COMPACT_PREFIX}`)).toBe(true);
+    // never splits a surrogate pair: whole pieces are included or left out
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(command)).toBe(false);
+  }
+  expect(composeManagedCompactCommand({compactInstruction: 'Сохрани задачу 🚀', mapPath: null}).command).toContain('Сохрани задачу 🚀');
 });
