@@ -198,7 +198,7 @@ export class DaemonClient {
     } else {
       const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
       if (envUrl) {
-        this.baseUrl = envUrl;
+        this.baseUrl = envUrl.replace(/\/+$/, "");
       } else {
         // --port/--host can differ from configured startup defaults. Match the
         // lifecycle-aware commands by preferring this home's recorded endpoint.

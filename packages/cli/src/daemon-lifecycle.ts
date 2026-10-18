@@ -986,7 +986,7 @@ export async function getDaemonStatus(
   options: GetDaemonStatusOptions = {},
 ): Promise<DaemonStatus> {
   // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
-  const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")?.replace(/\/+$/, "");
   if (openrigUrl) {
     try {
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);
