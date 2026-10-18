@@ -10,7 +10,7 @@ import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host
 import { emitCrossHostError, emitCrossHostFailure, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
 import { resolveCrossHostTarget } from "../cross-host-target.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
-import { readOpenRigEnv } from "../openrig-compat.js";
+import { readOpenRigUrl } from "../openrig-compat.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
@@ -187,7 +187,7 @@ export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", jso
  *  keeps the single-seat and fan-out callers from having to sequence it
  *  identically in two places. */
 async function resolveLocalDaemonUrl(deps: SendDeps): Promise<string> {
-  const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  const envUrl = readOpenRigUrl();
   if (envUrl) return envUrl;
   const status = await getDaemonStatus(deps.lifecycleDeps);
   if (status.state === "running" && status.port !== undefined) return getDaemonUrl(status);

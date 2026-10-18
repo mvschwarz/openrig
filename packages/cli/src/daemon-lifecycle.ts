@@ -6,7 +6,7 @@ import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-rea
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
-import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
+import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 // Types only: the module itself (with the daemon's yaml-reading system world) is imported where an
 // instance is initialized, so a command that only talks to the daemon never loads it.
 import type {
@@ -68,6 +68,17 @@ export type ProcessLiveness = "alive" | "dead" | "unknown";
 export interface GetDaemonStatusOptions {
   /** Observers may disable cleanup; only a matching clean shutdown permits removal. */
   cleanupStaleState?: boolean;
+}
+
+/** True for `http://host[:port]` with no path, query or fragment: the only OPENRIG_URL shape
+ *  getDaemonUrl's host-and-port rebuild reaches unchanged. */
+function isPlainHttpOrigin(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" && u.pathname === "/" && !u.search && !u.hash && !url.endsWith("/");
+  } catch {
+    return false;
+  }
 }
 
 /** Build the daemon HTTP URL from status. Uses persisted host or defaults to 127.0.0.1. */
@@ -865,9 +876,9 @@ function removeMatchingState(deps: LifecycleDeps, stateFile: string, state: Daem
 export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-target"> {
   const state = readState(deps);
   const configured = resolveConfiguredDaemonTarget();
-  const explicitUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  const explicitUrl = readOpenRigUrl();
   const stateUrl = state ? `http://${formatDaemonHostForUrl(state.host ?? DEFAULT_HOST)}:${state.port}` : undefined;
-  const target = stateUrl ?? explicitUrl?.replace(/\/+$/, "") ?? `http://${formatDaemonHostForUrl(configured.host)}:${configured.port}`;
+  const target = stateUrl ?? explicitUrl ?? `http://${formatDaemonHostForUrl(configured.host)}:${configured.port}`;
   if (stateUrl && explicitUrl && new URL(explicitUrl).origin !== new URL(stateUrl).origin) {
     throw new Error(`Cannot stop safely: addressed ${explicitUrl}/healthz does not match local PID ${state!.pid} at ${stateUrl}/healthz; no signal sent.`);
   }
@@ -985,8 +996,14 @@ export async function getDaemonStatus(
   deps: LifecycleDeps,
   options: GetDaemonStatusOptions = {},
 ): Promise<DaemonStatus> {
-  // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
-  const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")?.replace(/\/+$/, "");
+  // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly. Commands reach
+  // it through getDaemonUrl's http://host:port rebuild, so only a plain http origin uses
+  // the normalized form; any other URL is probed as written, exactly as before.
+  const rawOpenrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  const normalizedOpenrigUrl = readOpenRigUrl();
+  const openrigUrl = normalizedOpenrigUrl !== undefined && isPlainHttpOrigin(normalizedOpenrigUrl)
+    ? normalizedOpenrigUrl
+    : rawOpenrigUrl;
   if (openrigUrl) {
     try {
       const res = await probeHealthzWithSettle(deps, `${openrigUrl}/healthz`);

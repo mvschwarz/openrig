@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { formatDaemonHostForUrl } from "../client.js";
+import { normalizeOpenRigUrl } from "../openrig-compat.js";
 
 export interface StartupProofDeps {
   env?: NodeJS.ProcessEnv;
@@ -33,7 +34,8 @@ export function resolveStartupProofEndpoint(deps: StartupProofDeps = {}): Endpoi
   const env = deps.env ?? process.env;
   const readFile = deps.readFile ?? ((p: string) => fs.readFileSync(p, "utf8"));
   const home = first(env["OPENRIG_HOME"], env["RIGGED_HOME"]) ?? path.join(os.homedir(), ".openrig");
-  let baseUrl = first(env["OPENRIG_URL"], env["RIGGED_URL"]);
+  const envUrl = first(env["OPENRIG_URL"], env["RIGGED_URL"]);
+  let baseUrl = envUrl === null ? null : normalizeOpenRigUrl(envUrl);
   let token = first(env["OPENRIG_ACTIVITY_HOOK_TOKEN"], env["RIGGED_ACTIVITY_HOOK_TOKEN"]);
 
   if (!baseUrl || !token) {

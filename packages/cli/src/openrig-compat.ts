@@ -70,6 +70,24 @@ export function readOpenRigEnv(primary: string, legacy?: string): string | undef
   return undefined;
 }
 
+/** An explicit daemon URL with trailing slashes removed from its path only, so
+ *  `http://h:7433/` addresses the same daemon as `http://h:7433`. A query or fragment is
+ *  kept exactly as written, and a value that would strip down to no host (such as `/`)
+ *  is returned unchanged, so it stays an explicit (if invalid) target. */
+export function normalizeOpenRigUrl(raw: string): string {
+  const split = raw.search(/[?#]/);
+  const head = split < 0 ? raw : raw.slice(0, split);
+  const stripped = head.replace(/\/+$/, "");
+  if (!/:\/\/[^/]/.test(stripped)) return raw;
+  return stripped + (split < 0 ? "" : raw.slice(split));
+}
+
+/** OPENRIG_URL (legacy RIGGED_URL), normalized by normalizeOpenRigUrl. */
+export function readOpenRigUrl(): string | undefined {
+  const raw = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  return raw === undefined ? undefined : normalizeOpenRigUrl(raw);
+}
+
 export function getPreferredOpenRigHome(): string {
   const openrigHome = getOpenRigHome();
   const legacyRiggedHome = getLegacyRiggedHome();

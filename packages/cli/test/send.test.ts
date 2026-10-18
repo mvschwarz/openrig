@@ -1129,6 +1129,19 @@ describe("Send CLI", () => {
       expect(String(lastSendBody?.text)).toContain("To: dev-impl@my-rig");
     });
 
+    it("single-seat send with a trailing-slash OPENRIG_URL reaches <url>/api/..., not <url>//api/...", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}/`);
+      vi.stubEnv("RIGGED_URL", "");
+      lastSendBody = null;
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+      expect(String(lastSendBody?.text)).toContain("To: dev-impl@my-rig");
+    });
+
     it("R2 RED: fan-out --to + OPENRIG_URL + probe-stopped -> actual /broadcast lands with per-recipient results", async () => {
       vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
       vi.stubEnv("RIGGED_URL", "");
