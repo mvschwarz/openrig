@@ -93,6 +93,61 @@ const STATUS = {
   restore_outcome: "n-a",
 };
 
+describe("seat typing guard commands", () => {
+  it("keeps the legacy on prefix when status reports hold", async () => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", pending: false, heldCount: 0 } } }, paths);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: on (hold)");
+  });
+
+  it("sends draft-aware mode through the existing control", async () => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: { effectiveMode: "draft-aware", pending: false } }, paths, bodies);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "draft-aware", "--reason", "keep my draft", "--json"]).then(() => undefined));
+    expect(result.exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/set-typing-guard/worker%40test"]);
+    expect(bodies).toEqual([{ mode: "draft-aware", reason: "keep my draft" }]);
+    expect(JSON.parse(result.logs.join(""))).toMatchObject({ effectiveMode: "draft-aware" });
+  });
+
+  it.each([["--mode", "typo"]])("rejects invalid %s %s before requesting a change", async (flag, value) => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: {} }, paths);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--mode", "draft-aware", "--reason", "draft", flag, value]).then(() => undefined));
+    expect(result.exitCode).toBe(1); expect(paths).toEqual([]);
+  });
+
+  it.each(["true", "false"])("keeps --enabled %s compatible with the existing endpoint", async enabled => {
+    const paths: string[] = [], bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: {} }, paths, bodies);
+    await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--enabled", enabled, "--reason", "existing workflow"]).then(() => undefined));
+    expect(paths).toEqual(["/api/seat/set-typing-guard/worker%40test"]);
+    expect(bodies).toEqual([{ enabled: enabled === "true", reason: "existing workflow" }]);
+  });
+
+  it.each([{ selectors: [] }, { selectors: ["--mode", "hold", "--enabled", "true"] }])("requires exactly one selector: $selectors", async ({ selectors }) => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: {} }, paths);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
+      "--reason", "draft", ...selectors]).then(() => undefined));
+    expect(result.exitCode).toBe(1); expect(paths).toEqual([]);
+  });
+
+  it("prints requested/effective activation and immediate send behavior in seat status", async () => {
+    const paths: string[] = [];
+    const typingGuard = { desired: true, effective: false, desiredMode: "hold", effectiveMode: "draft-aware", pending: true, heldCount: 1 };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard } }, paths);
+    const status = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(status.logs.join("\n")).toContain("Typing guard: draft-aware (activation pending; requested hold)");
+    expect(status.logs.join("\n")).toContain("Draft-aware sends return immediately");
+    expect(paths.at(-1)).toBe("/api/seat/status/worker%40test");
+  });
+});
+
 const HANDOVER_PLAN = {
   ok: true,
   dryRun: true,

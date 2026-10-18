@@ -175,7 +175,11 @@ export interface RiggedConfig {
   // off). Read by the daemon; the CLI key is the lockstep twin.
   provider: {
     usageWindows: boolean;
+    // Slice 18 (OPR.0.7.0.18) — the subscription move record and its reads (default off). Read by the daemon;
+    // the CLI key is the lockstep twin.
+    subscriptionMoves: boolean;
   };
+  bundle: { servicesEnabled: boolean };
   // Slice 02 (OPR.0.7.0.2) — Pi seats report model-priced cost from persisted session entries
   // (default off). Read by the daemon at Pi launch; the CLI key is the lockstep twin.
   usage: {
@@ -344,7 +348,10 @@ const DEFAULTS = {
   // Slice 01 — Codex usage windows OFF until the switch is on.
   provider: {
     usageWindows: false,
+    // Slice 18 — the subscription move record OFF until the switch is on.
+    subscriptionMoves: false,
   },
+  bundle: { servicesEnabled: false },
   // Slice 02 — Pi cost facts OFF until the switch is on.
   usage: {
     piCostFacts: false,
@@ -472,6 +479,10 @@ export const VALID_KEYS = [
   "output.whoami_peers",
   // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
   "provider.usage_windows",
+  // Service-backed archives, including packing, preview and durable-target admission; default off.
+  "bundle.services_enabled",
+  // Slice 18 — the subscription move record and its reads; lockstep with the daemon twin.
+  "provider.subscription_moves",
   "usage.pi_cost_facts",
   "usage.pi_openrouter_charge",
   "transport.verify_input_box",
@@ -574,6 +585,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
+  "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
+  "provider.subscription_moves": { primary: "OPENRIG_PROVIDER_SUBSCRIPTION_MOVES" },
   "usage.pi_cost_facts": { primary: "OPENRIG_USAGE_PI_COST_FACTS" },
   "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
   "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
@@ -659,6 +672,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
+  "bundle.services_enabled": ["bundle", "servicesEnabled"],
+  "provider.subscription_moves": ["provider", "subscriptionMoves"],
   "usage.pi_cost_facts": ["usage", "piCostFacts"],
   "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
   "transport.verify_input_box": ["transport", "verifyInputBox"],
@@ -1203,7 +1218,9 @@ export class ConfigStore {
       },
       provider: {
         usageWindows: v("provider.usage_windows") as boolean,
+        subscriptionMoves: v("provider.subscription_moves") as boolean,
       },
+      bundle: { servicesEnabled: v("bundle.services_enabled") as boolean },
       usage: {
         piCostFacts: v("usage.pi_cost_facts") as boolean,
         piOpenRouterCharge: v("usage.pi_openrouter_charge") as boolean,

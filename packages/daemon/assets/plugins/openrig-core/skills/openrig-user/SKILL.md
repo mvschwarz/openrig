@@ -946,6 +946,88 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 
 **Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
 
+### Manage subscriptions across a fleet (when the person asks you to)
+
+**This applies only when both hold:**
+- the daemon's `provider.subscription_moves` setting is on. It's off by default; the person turns it on with
+  `rig config set provider.subscription_moves true`;
+- the person has asked you to manage their subscriptions.
+
+Otherwise, don't take this job on. Installing or upgrading OpenRig appoints no agent, launches no bundle and starts no
+rotation.
+
+When a person runs several Claude and Codex subscriptions across machines, the fleet studio bundle's one agent is meant
+to keep work running, through the Fleet app. Until that bundle is available, the agent the person asks to manage their
+subscriptions can use this section. If that's you, you decide which subscription or home moves, and when. You decide
+from:
+- the usage and assignment readings, and their freshness;
+- the move record;
+- the person's standing preferences.
+
+You say why, and you see the outcome through. OpenRig gives you the facts and the tools; it never decides for you,
+and there's no threshold to obey.
+
+**Who decides:**
+- **The person's operator agent** can ask you for a move, or look at the record. It doesn't make competing moves of
+  its own.
+- **One agent manages subscriptions:** the one the person asked, or the fleet studio's agent once that bundle is
+  available. There's no other fleet-manager role and no automatic manager. Use the commands below directly; no extra
+  hand-off is needed.
+- **The Observatory is optional:** it can show your moves and readings, but you don't need it to rotate.
+
+**The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
+moving Claude seats, aren't supported moves yet: say so instead of improvising.
+
+1. **Know the subscriptions.**
+   - Each subscription is reached through a saved profile on a home (`rig auth list` and `rig auth save`) on each
+     machine. Which seats use which profile is `rig auth seats`, and that's metadata: not proof of a live account.
+   - Check you can read each subscription's usage, and name any you can't.
+2. **Read before deciding.**
+   - Use `rig provider status --all-hosts --json` (add `--refresh` for fresh native readings). Each allowance has
+     its windows, reset times and when it was observed.
+   - **One allowance seen on two machines is one allowance:** never add its headroom twice.
+   - **A stale reading** is usable only with its age recorded, or after a refresh.
+   - **An unknown or unavailable reading is never room.**
+   - **Equal reset times don't mean the same account.**
+   - **A seat's link to a subscription is observed, configured or unknown.** Only an observed link shows the seat
+     actually uses it; a configured one (a profile, a registry row) is a claim.
+3. **Decide, and leave seats alone for a reason.**
+   - `rig seat restart <seat> --keep-conversation --plan` shows what a restart keeps, and every peer on the same
+     home. Moving the home moves them all.
+   - Skip a seat that's mid-turn, running a service, or about to finish, and record why.
+   - The person's standing preferences ("never move the reviewers") are yours to follow and record.
+4. **Move the home.**
+   - On that machine, `CODEX_HOME=<that home> rig auth switch <profile> --runtime codex`. `rig auth` acts on
+     `CODEX_HOME`, or on the default home, and `rig auth status` prints which home it means: check it before
+     switching.
+   - Then restart each chosen seat: `rig seat restart <seat> --keep-conversation --reason "<why>"`.
+   - After it completes a real tool-using turn, check it: `rig seat restart <seat> --keep-conversation --verify
+     --expect-account <the target's Account line>`. `--verify` only checks; it never restarts. Only that check
+     reports `moved`, and anything less is unconfirmed.
+   - **A slow reply isn't a failure:** never restart a seat a second time. Follow up at your next look.
+5. **Record every move, partial or unconfirmed included,** with `rig provider moves record --file <move.json>`
+   (`--help` shows the shape):
+   - the home and machine;
+   - from and to, as labels;
+   - your reason;
+   - each reading you acted on, with its observation time;
+   - each seat's result (`moved`, `unconfirmed` or `unknown`) with its evidence or what's missing;
+   - the peers, for example "not restarted; account unverified".
+
+   A seat marked `moved` needs its `evidence`, and an `unconfirmed` or `unknown` one needs what's `missing`. A home
+   switched with every seat left as a peer is still a move to record, with `seats: []`. A follow-up that confirms an
+   earlier unconfirmed seat records a new move with `supersedes`. Asked "why did this
+   seat move?", answer from `rig provider moves --seat <seat>`. Never put credentials in a record.
+6. **When a sign-in is needed:**
+   - Ask the person once, durably: a queue item to their seat, naming the machine and the subscription.
+   - Move nothing onto that subscription until it's done.
+   - On later wakes, check that item instead of asking again. Carry on with everything else.
+7. **When nothing has room:** say so, with the reset times. Never fall back to an API key, buy anything, or create an
+   account.
+
+**What wakes you:** a watchdog, a usage-limit park on the queue, or the person asking. How often you look is your
+judgment within those.
+
 ## Context packs and paced delivery (0.5.0)
 
 **Compose context once, hand it to a seat cleanly.** A library primitive plus a set of delivery flags. The rule that keeps the grammar coherent — internalize this one: **the noun stores and composes; the verbs deliver.** `rig context` never sends anything; delivery is only ever `rig send` / `rig broadcast` / `rig walk` / `rig queue`.

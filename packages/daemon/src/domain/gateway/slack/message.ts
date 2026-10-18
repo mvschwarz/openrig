@@ -66,6 +66,9 @@ export interface OutboundMessageOpts {
    *  one sender context line in ONE honest bot identity. Authorship lives in OUR record;
    *  Slack's transport actor stays the app. NEVER a per-message username/icon override. */
   attribution?: SeatAttribution;
+  /** The machine this post comes from, shown after the sender ("from lead@my-rig on vps04") when
+   *  the sender's session doesn't already name a host. Absent: the sender line is unchanged. */
+  machine?: string;
   /** S10 interim loudness rule: an escalation MENTIONS its human (`<@Uxxx>`); everything else
    *  stays quiet-threaded. The value is the Slack USER ID (mention semantics require the id,
    *  never a display name). */
@@ -371,7 +374,8 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     : bounded(inert(String(q.body || "")), SLACK_SECTION_CAP, "body");
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
-  const attr = bounded(`from ${inert(opts.attribution?.session || opts.sourceLabel)}`, 2000, "sender");
+  const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
+  const attr = bounded(`from ${inert(opts.attribution?.session || opts.sourceLabel)}${machine}`, 2000, "sender");
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);

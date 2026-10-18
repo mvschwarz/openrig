@@ -20,7 +20,7 @@ import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gat
 import type { WsLike } from "../src/domain/gateway/slack/socket-inbound.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
-import { ThreadSeatMap } from "../src/domain/gateway/slack/thread-seat-map.js";
+import { ThreadSeatMap, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
@@ -182,7 +182,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     // Rebuild the wire with inbound Socket Mode on a fake socket; returns a human-reply sender.
-    async function connectInbound(): Promise<(threadTs: string | undefined, ts: string) => Promise<void>> {
+    async function connectInbound(): Promise<(threadTs: string | undefined, ts: string, channel?: string) => Promise<void>> {
       const secrets = join(home, "fake.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       const sockets: WsLike[] = [];
@@ -202,8 +202,8 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await vi.waitFor(() => expect(sockets).toHaveLength(1));
       inboundSocket = sockets[0]!;
       inboundSocket.onopen?.();
-      const humanReply = async (threadTs: string | undefined, ts: string) => {
-        sockets[0]!.onmessage?.({ data: JSON.stringify({ envelope_id: `e-${ts}`, type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "thanks", ts, thread_ts: threadTs, channel: "C-TEST" } } }) });
+      const humanReply = async (threadTs: string | undefined, ts: string, channel = "C-TEST") => {
+        sockets[0]!.onmessage?.({ data: JSON.stringify({ envelope_id: `e-${ts}`, type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "thanks", ts, thread_ts: threadTs, channel } } }) });
         await new Promise((r) => setTimeout(r, 50));
       };
       return humanReply;
@@ -260,8 +260,8 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     // The row a person's Slack message lands as (inbound.ts names it by channel and ts).
-    const inboundRow = (ts: string) =>
-      repo.getById(`qitem-slack-inbound-${createHash("sha256").update(`C-TEST:${ts}`).digest("hex").slice(0, 20)}`);
+    const inboundRow = (ts: string, channel = "C-TEST") =>
+      repo.getById(`qitem-slack-inbound-${createHash("sha256").update(`${channel}:${ts}`).digest("hex").slice(0, 20)}`);
 
     it("#822: an answer to a reply the person typed in an OpenRig thread posts in that thread", async () => {
       const humanReply = await connectInbound();
@@ -350,15 +350,81 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(repo.getById(decision.qitemId)?.state).toBe("pending");
     });
 
-    it("#822: a top-level message records no thread, so its answer still posts top-level", async () => {
+    it("a top-level message is its own answer's root: the seat it reached answers under it", async () => {
       const humanReply = await connectInbound();
       await humanReply(undefined, "904.1");
       const inbound = inboundRow("904.1")!;
       expect(inbound.replyTo).toBeNull();
-      const answer = await repo.create({ ...request, humanIntent: "update", body: "On it.", replyTo: inbound.qitemId });
+      expect(inbound.destinationSession).toBe("operator-agent@kernel");
+      const answer = await repo.create({ ...request, sourceSession: "operator-agent@kernel", humanIntent: "update", body: "On it.", replyTo: inbound.qitemId });
       await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("904.1");
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+      // Another seat's answer isn't that root's: it posts top-level and says why, as before.
+      const other = await repo.create({ ...request, humanIntent: "update", body: "Me too.", replyTo: inbound.qitemId });
+      await deliver(other.qitemId);
       expect(posts.at(-1)?.thread_ts).toBeUndefined();
-      expect(repo.getById(answer.qitemId)?.replyToFallback).toBe(`root-missing (qitem ${inbound.qitemId})`);
+      expect(repo.getById(other.qitemId)?.replyToFallback).toMatch(/root-other-seat/);
+    });
+
+    it("#899: a reaction on the person's own top-level message isn't a reaction to an ask, though the message is its answer's root", async () => {
+      const humanReply = await connectInbound();
+      await humanReply(undefined, "906.1");
+      expect(new ThreadSeatMap(db).resolveByThread("906.1")).not.toBeNull();
+      const eventId = "reaction:C-TEST:906.1:UFOUNDER:eyes:906.2";
+      const qitemId = `qitem-slack-reaction-${createHash("sha256").update(eventId).digest("hex").slice(0, 20)}`;
+      inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: "own-message-reaction", type: "events_api", payload: { event: {
+          type: "reaction_added", user: "UFOUNDER", reaction: "eyes", event_ts: "906.2",
+          item: { type: "message", channel: "C-TEST", ts: "906.1" },
+        } },
+      }) });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(repo.getById(qitemId)).toBeNull();
+    });
+
+    it("a person's minted root is stamped on their row, as theirs, so a rebuild can restore it", async () => {
+      const humanReply = await connectInbound();
+      await humanReply(undefined, "908.1");
+      const inbound = inboundRow("908.1")!;
+      const notes = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(inbound.qitemId) as Array<{ transition_note: string | null }>)
+        .map((r) => r.transition_note ?? "");
+      const stamp = notes.map((n) => parsePostedStamp(n)).find(Boolean);
+      expect(stamp).toMatchObject({ threadTs: "908.1", messageTs: "908.1", channel: "C-TEST", seat: "operator-agent@kernel", conversationId: inbound.qitemId, origin: "person" });
+    });
+
+    it("two people's messages with the same ts in different channels are two roots: each reply and answer stays in its own channel", async () => {
+      const humanReply = await connectInbound();
+      await humanReply(undefined, "907.1", "C-TEST");
+      await humanReply(undefined, "907.1", "C-OTHER");
+      const here = inboundRow("907.1", "C-TEST")!;
+      const there = inboundRow("907.1", "C-OTHER")!;
+      expect(here.qitemId).not.toBe(there.qitemId);
+      // The person's reply in the other channel's thread belongs to that channel's root.
+      await humanReply("907.1", "907.2", "C-OTHER");
+      expect(inboundRow("907.2", "C-OTHER")?.replyTo).toBe(there.qitemId);
+      // The seat's answer to each root posts in that root's own channel and thread.
+      for (const [row, channel] of [[there, "C-OTHER"], [here, "C-TEST"]] as const) {
+        const answer = await repo.create({ ...request, sourceSession: "operator-agent@kernel", humanIntent: "update", body: "On it.", replyTo: row.qitemId });
+        await deliver(answer.qitemId);
+        expect(posts.at(-1)).toMatchObject({ channel, thread_ts: "907.1" });
+        expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+      }
+    });
+
+    it("a person's message in another channel: its seat answers there, and another seat's fallback posts in that seat's own channel", async () => {
+      const humanReply = await connectInbound();
+      await humanReply(undefined, "905.1", "C-OTHER");
+      const inbound = inboundRow("905.1", "C-OTHER")!;
+      const own = await repo.create({ ...request, sourceSession: "operator-agent@kernel", humanIntent: "update", body: "On it.", replyTo: inbound.qitemId });
+      await deliver(own.qitemId);
+      expect(posts.at(-1)).toMatchObject({ channel: "C-OTHER", thread_ts: "905.1" });
+      // A reference that fails its checks gives no thread, so the post keeps the replying seat's own channel.
+      const other = await repo.create({ ...request, humanIntent: "update", body: "Me too.", replyTo: inbound.qitemId });
+      await deliver(other.qitemId);
+      expect(posts.at(-1)).toMatchObject({ channel: "C-TEST" });
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(other.qitemId)?.replyToFallback).toMatch(/^root-other-seat/);
     });
 
     it("#822: a reply's seat parking it on the person still asks in a fresh root, and the answer there resolves the park", async () => {

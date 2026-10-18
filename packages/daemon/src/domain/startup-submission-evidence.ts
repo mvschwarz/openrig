@@ -15,7 +15,7 @@ const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
 const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
 // The suffix is a circle glyph and an effort level, e.g. `◐ medium` or `● high`; arbitrary text is not one.
 const PASTE_HINT = /^paste again to expand(?:\s{2,}[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort)?$/;
-const isComposerFooter = (line: string): boolean => {
+export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");
   return (bar === "" && line !== "") || /(?:shift\+tab to cycle|\? for shortcuts)/i.test(bar) || MODE_BAR_START.test(bar)
     || PASTE_HINT.test(bar);

@@ -18,3 +18,13 @@ describe("file heading anchors inside fenced examples", () => {
     expect(shownFrom(content, "target")).toContain("Showing from #target · source line 5");
   });
 });
+
+describe("file heading anchors with combining marks", () => {
+  it.each([
+    ["हिन्दी", "हिन्दी"],
+    ["Cafe\u0301 notes", "cafe\u0301-notes"],
+  ])("resolves heading %s by its slug %s", (heading, anchor) => {
+    const content = ["intro", `## ${heading}`, "body"].join("\n");
+    expect(shownFrom(content, anchor)).toContain(`Showing from #${anchor} · source line 2`);
+  });
+});

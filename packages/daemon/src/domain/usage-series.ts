@@ -16,6 +16,7 @@ import type { Database } from "better-sqlite3";
 import { hasClientCostColumns } from "./usage-samples-store.js";
 import { hasPiUsageChargesTable, hasPiUsageEntriesTable } from "./pi-usage-entries-store.js";
 import { openRouterChargeTarget } from "./openrouter-charge.js";
+import { sameReset } from "./provider/usage-windows.js";
 
 export interface UsageSeriesQuery {
   seatSession?: string;
@@ -117,9 +118,11 @@ export interface TopBurnQuery {
 
 export interface WindowVelocity {
   window: string;
+  /** the burn span's first reading, which may belong to an earlier window than the rate */
   usedPercentFirst: number | null;
   usedPercentLast: number | null;
-  /** percent-points per hour over the actual sample span; null when unmeasurable */
+  /** percent-points per hour within the latest reading's window (readings sharing its resets_at);
+   *  null when that window has fewer than two readings or is otherwise unmeasurable */
   percentPerHour: number | null;
   resetsAt: string | null;
 }
@@ -219,14 +222,20 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
       if (rows.length === 0) continue;
       const first = rows[0]!;
       const last = rows[rows.length - 1]!;
-      const wSpan = hoursBetween(first.capturedAt, last.capturedAt);
+      // Rate only the window the latest reading belongs to: readings across a reset describe
+      // different windows. Within it, a falling percentage still means an unseen reset (or
+      // readings without resets_at), so like a token reset it yields no velocity, never a negative one.
+      const current = rows.filter((r) => sameReset(r.resetsAt, last.resetsAt));
+      const windowFirst = current[0]!;
+      const wSpan = hoursBetween(windowFirst.capturedAt, last.capturedAt);
       const measurable =
-        rows.length >= 2 && wSpan > 0 && first.windowUsedPercent !== null && last.windowUsedPercent !== null;
+        current.length >= 2 && wSpan > 0 && windowFirst.windowUsedPercent !== null && last.windowUsedPercent !== null
+        && last.windowUsedPercent >= windowFirst.windowUsedPercent;
       windows.push({
         window: w,
         usedPercentFirst: first.windowUsedPercent,
         usedPercentLast: last.windowUsedPercent,
-        percentPerHour: measurable ? (last.windowUsedPercent! - first.windowUsedPercent!) / wSpan : null,
+        percentPerHour: measurable ? (last.windowUsedPercent! - windowFirst.windowUsedPercent!) / wSpan : null,
         resetsAt: last.resetsAt,
       });
     }

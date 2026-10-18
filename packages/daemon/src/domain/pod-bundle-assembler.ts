@@ -24,6 +24,8 @@ export interface PodAssembleOptions {
   outputDir: string;
   bundleName: string;
   bundleVersion: string;
+  /** Opt-in from bundle.services_enabled; omitted preserves the existing archive. */
+  servicesEnabled?: boolean;
   /**
    * Optional Item-1 provenance input. Caller fills the fields it knows
    * (sourceHost, authorSession, daemonVersion, cliVersion, sourceRigId,
@@ -104,6 +106,11 @@ export class PodBundleAssembler {
         }
         this.collectRigFile(doc.path, opts.rigRoot, opts.outputDir, collectedFiles);
       }
+    }
+
+    if (opts.servicesEnabled && rigSpec.services) {
+      const composeFile = rigSpec.services.composeFile;
+      this.collectRigFile(composeFile, opts.rigRoot, opts.outputDir, collectedFiles);
     }
 
     // 2c. Rig startup files

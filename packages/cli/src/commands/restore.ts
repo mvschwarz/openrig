@@ -68,7 +68,7 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
       );
 
       if (res.status === 404) {
-        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list --rig ${rigId}`);
+        console.error(`Snapshot "${snapshotId}" or rig "${rigId}" not found. List snapshots with: rig snapshot list ${rigId}`);
         process.exitCode = 1;
       } else if (res.status === 409) {
         if ((res.data as { code?: string }).code === "pre_restore_validation_failed") {

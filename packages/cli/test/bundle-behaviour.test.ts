@@ -15,6 +15,29 @@ const view = {
 };
 
 describe("before-action bundle view", () => {
+  it("renders the opt-in service declarations and host-dependent fields before an action", () => {
+    const files = new Map([
+      ["rig.yaml", "name: demo\nversion: '0.2'\nservices: {kind: compose, compose_file: compose.yaml, down_policy: down}\npods:\n- id: demo\n  members:\n  - {id: shell, agent_ref: 'builtin:terminal', profile: none, runtime: terminal, cwd: .}\n"],
+      ["compose.yaml", "services:\n  vault:\n    image: hashicorp/vault:1.15\n    cap_add: [IPC_LOCK]\n    ports: ['8200:8200']\n    environment: {VAULT_DEV_ROOT_TOKEN_ID: openrig-dev-token, VAULT_DEV_LISTEN_ADDRESS: '0.0.0.0:8200'}\n  worker:\n    network_mode: host\n    image: '${IMAGE}'\n    volumes: ['${DATA_DIR}:/data']\n"],
+    ]);
+    const described = describeBundleBehaviour({ files, manifest: { schema_version: 2, rig_spec: "rig.yaml" }, generator: { openrigVersion: "test" }, digestValid: true, filesVerified: true, servicesEnabled: true });
+    const output = formatBundleBehaviour(described).join("\n");
+    expect(output).toContain("image hashicorp/vault:1.15");
+    expect(output).toContain("Published ports: 8200:8200");
+    expect(output).toContain("cap_add=IPC_LOCK");
+    expect(output).toContain("public dev token openrig-dev-token");
+    expect(output).toContain("all interfaces at port 8200");
+    expect(output).toContain("rig down policy: down");
+    expect(output).toContain("Unresolved on the installing host: image, mounts");
+    expect(output).toContain("not effective host configuration");
+    expect(output).toContain("Also declared, not summarized: network_mode");
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    for (const name of ["bundle-common.v1.schema.json", "bundle-behaviour.v1.schema.json"]) {
+      ajv.addSchema(JSON.parse(fs.readFileSync(new URL(`../../../docs/reference/schemas/${name}`, import.meta.url), "utf8")));
+    }
+    const validate = ajv.getSchema("https://openrig.dev/schemas/bundle-behaviour.v1.json")!;
+    expect(validate(described), JSON.stringify(validate.errors)).toBe(true);
+  });
   it("prints before the caller's action without writing stdout or a new exit code", async () => {
     const events: string[] = [];
     const before = process.exitCode;

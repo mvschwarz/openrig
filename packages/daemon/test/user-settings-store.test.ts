@@ -159,6 +159,9 @@ describe("SettingsStore (User Settings v0)", () => {
       "output.whoami_peers",
       // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
       "provider.usage_windows",
+      "bundle.services_enabled",
+      // Slice 18 (OPR.0.7.0.18) — the subscription move record switch.
+      "provider.subscription_moves",
       "usage.pi_cost_facts",
       "usage.pi_openrouter_charge",
       "transport.verify_input_box",
@@ -359,6 +362,19 @@ describe("SettingsStore (User Settings v0)", () => {
     process.env.OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED = "true";
     expect(store.resolveOne("onboarding.default_pack.enabled"))
       .toMatchObject({ value: true, source: "env", defaultValue: true });
+  });
+
+  it("bundle.services_enabled is typed, default-off and read again after a file or env change", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("bundle.services_enabled")).toMatchObject({ value: false, source: "default" });
+    store.set("bundle.services_enabled", "true");
+    expect(store.resolveOne("bundle.services_enabled")).toMatchObject({ value: true, source: "file" });
+    expect(JSON.parse(readFileSync(configPath, "utf8")).bundle).toEqual({ servicesEnabled: true });
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "false");
+    expect(store.resolveOne("bundle.services_enabled")).toMatchObject({ value: false, source: "env" });
+    vi.unstubAllEnvs();
+    store.reset("bundle.services_enabled");
+    expect(store.resolveOne("bundle.services_enabled")).toMatchObject({ value: false, source: "default" });
   });
 
   it("transport.verify_input_box is off by default and resolves file, then env", () => {
