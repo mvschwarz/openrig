@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { readSeatEnvOverride } from "../domain/seat-env.js";
 import os from "node:os";
 import nodePath from "node:path";
@@ -814,7 +815,7 @@ bundleRoutes.post("/create", async (c) => {
       const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "pod-bundle-create-"));
       try {
         const assembler = new PodBundleAssembler({ fsOps: podAssemblerFsOps() });
-        const result = assembler.assemble({ rigRoot: effectiveRigRoot, rigSpecPath: nodePath.resolve(specPath), outputDir: tmpStaging, bundleName, bundleVersion, provenance, compatibility });
+        const result = assembler.assemble({ servicesEnabled: new SettingsStore().resolveOne("bundle.services_enabled").value === true, rigRoot: effectiveRigRoot, rigSpecPath: nodePath.resolve(specPath), outputDir: tmpStaging, bundleName, bundleVersion, provenance, compatibility });
 
         // Item 6 / Checkpoint 7.5 (QA-20260601 A2 repair): auto-detect
         // author bundle.yaml at the rig source root; vendor declared
@@ -991,7 +992,7 @@ bundleRoutes.post("/inspect", async (c) => {
       const generator = { openrigVersion: getDaemonVersion() };
       const source = identity.source ? { ...identity.source } : null;
       try {
-        return inspectBundleBehaviour(tmpDir, { manifest: rawParsed, ...identity, source, generator, digestValid, filesVerified });
+        return inspectBundleBehaviour(tmpDir, { manifest: rawParsed, ...identity, source, generator, digestValid, filesVerified, servicesEnabled: new SettingsStore().resolveOne("bundle.services_enabled").value === true });
       } catch {
         return {
           schema: "openrig.bundle-behaviour/v1", state: "not_generated",

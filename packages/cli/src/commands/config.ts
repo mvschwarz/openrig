@@ -103,6 +103,7 @@ Keys:
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   output.compact         short default output for queue writes, queue show, queue transitions and whoami peers; --full restores today's output (default off)
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
+  bundle.services_enabled Service-backed bundle packing, preview and target installs (default off)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
   usage.pi_cost_facts    Pi seats report model-priced cost from their persisted session entries to rig usage cost (default off)
   usage.pi_openrouter_charge  with usage.pi_cost_facts on, Pi seats look up OpenRouter's actual charge for their requests, shown beside the estimate (default off; off stops new lookups and posts, outcomes recorded while it was on stay visible)

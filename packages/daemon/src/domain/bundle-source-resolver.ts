@@ -212,6 +212,8 @@ export function materializePodBundle(
   extractedDir: string,
   targetRoot: string,
   preserveConflicts = false,
+  /** Run the same target checks for a plan, without copying or backing up anything. */
+  dryRun = false,
 ): { ok: true; backupPath?: string } | { ok: false; conflicts: string[] } {
   const files: string[] = [];
   (function walk(dir: string, prefix: string) {
@@ -256,6 +258,7 @@ export function materializePodBundle(
     }
   }
   if (conflicts.size > 0 && !preserveConflicts) return { ok: false, conflicts: [...conflicts] };
+  if (dryRun) return { ok: true };
 
   let backupPath: string | undefined;
   let roots: string[] = [];

@@ -27,6 +27,9 @@ import { PodBundleSourceResolver, LegacyBundleSourceResolver } from "../src/doma
 import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
 import { resolveLaunchCwd } from "../src/domain/cwd-resolution.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import * as preflight from "../src/domain/rigspec-preflight.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
 
@@ -69,10 +72,11 @@ function realFsOps(): FsOps {
   } as FsOps;
 }
 
-async function buildV2Bundle(workDir: string): Promise<string> {
+async function buildV2Bundle(workDir: string, services = false): Promise<string> {
   const staging = path.join(workDir, "staging");
   fs.mkdirSync(path.join(staging, "agents", "impl"), { recursive: true });
-  fs.writeFileSync(path.join(staging, "rig.yaml"), RIG_YAML);
+  fs.writeFileSync(path.join(staging, "rig.yaml"), RIG_YAML + (services ? "\nservices:\n  kind: compose\n  compose_file: compose.yaml\n  down_policy: down\n" : ""));
+  if (services) fs.writeFileSync(path.join(staging, "compose.yaml"), "services:\n  demo:\n    image: example/demo:1\n");
   fs.writeFileSync(path.join(staging, "agents", "impl", "agent.yaml"), AGENT_YAML);
   const integrity = computeIntegrity(staging, {
     readFile: (p: string) => fs.readFileSync(p, "utf-8"),
@@ -134,11 +138,13 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     db.close();
     fs.rmSync(workDir, { recursive: true, force: true });
   });
 
-  function orchestrator(): BootstrapOrchestrator {
+  function orchestrator(extra: Partial<ConstructorParameters<typeof BootstrapOrchestrator>[0]> = {}): BootstrapOrchestrator {
     return new BootstrapOrchestrator({
       db,
       bootstrapRepo: new BootstrapRepository(db),
@@ -166,6 +172,7 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
       bundleSourceResolver: new LegacyBundleSourceResolver({ fsOps: realFsOps() }),
       podBundleSourceResolver: new PodBundleSourceResolver(),
       podInstantiator: podInstantiator as never,
+      ...extra,
     });
   }
 
@@ -227,5 +234,79 @@ describe("v2 bundle apply: launch root lifetime and --target", () => {
     expect(result.status).toBe("completed");
     expect(launches[0]!.cwd).toBe(explicit);
     expect(fs.existsSync(launches[0]!.cwd)).toBe(true);
+  });
+
+  it.each(["plan", "apply"] as const)("keeps services_unsupported with the switch off in %s", async mode => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "false");
+    const result = await orchestrator().bootstrap({ mode, sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: path.join(workDir, "target") });
+    expect(result.stages).toContainEqual(expect.objectContaining({ detail: expect.objectContaining({ code: "services_unsupported" }) }));
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+  });
+
+  it.each(["plan", "apply"] as const)("keeps services_unsupported without a lasting target in %s", async mode => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    const result = await orchestrator().bootstrap({ mode, sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true) });
+    expect(result.stages).toContainEqual(expect.objectContaining({ detail: expect.objectContaining({ code: "services_unsupported" }) }));
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+  });
+
+  it("boots the services using the materialised target before the first seat", async () => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    const target = path.join(workDir, "target"), repo = new RigRepository(db);
+    const order: string[] = [];
+    const boot = vi.fn(async (rigId: string) => {
+      const record = repo.getServicesRecord(rigId)!;
+      expect(fs.realpathSync(record.rigRoot)).toBe(fs.realpathSync(target));
+      expect(record.composeFile).toBe(path.join(target, "compose.yaml"));
+      expect(fs.existsSync(record.composeFile)).toBe(true);
+      order.push("boot");
+      return { ok: true, health: "healthy", receipt: {} };
+    });
+    const route = vi.fn(async () => { order.push("route"); return {}; });
+    podInstantiator.instantiate.mockImplementation(async (_yaml: string, rigRoot: string, opts: { prelaunchHook: (rigId: string) => Promise<{ ok: boolean }> }) => {
+      const rig = repo.createRig("lifetime-rig");
+      expect((await opts.prelaunchHook(rig.id)).ok).toBe(true);
+      order.push("seat");
+      return { ok: true, result: { rigId: rig.id, specName: "lifetime-rig", nodes: [{ logicalId: "dev.impl", status: "launched" }] } };
+    });
+    const result = await orchestrator({ rigRepo: repo, serviceOrchestrator: { boot } as never, routeBundleContents: route }).bootstrap({
+      mode: "apply", sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target,
+    });
+    expect(result.status, JSON.stringify(result)).toBe("completed");
+    expect(order).toEqual(["boot", "route", "seat"]);
+    expect(fs.existsSync(path.join(target, "compose.yaml"))).toBe(true);
+  });
+
+  it("plans the target services and view without materialising or launching", async () => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    const target = path.join(workDir, "planned-target");
+    Object.assign(podInstantiator, { deps: { fsOps: realFsOps() } });
+    vi.spyOn(preflight, "rigPreflight").mockResolvedValue({ ready: true, errors: [], warnings: [] } as never);
+    const result = await orchestrator().bootstrap({ mode: "plan", sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target });
+    expect(result.status).toBe("planned");
+    expect(result.stages).toContainEqual(expect.objectContaining({ stage: "services_plan", detail: expect.objectContaining({ targetRoot: target, materialised: false, services: [expect.objectContaining({ name: "demo", image: "example/demo:1" })] }) }));
+    expect(fs.existsSync(target)).toBe(false);
+    expect(podInstantiator.instantiate).not.toHaveBeenCalled();
+  });
+
+  it("checks target conflicts in a service plan without writing", async () => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    const target = path.join(workDir, "target"); fs.mkdirSync(target); fs.writeFileSync(path.join(target, "rig.yaml"), "my content");
+    const result = await orchestrator().bootstrap({ mode: "plan", sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target });
+    expect(result.stages).toContainEqual(expect.objectContaining({ detail: expect.objectContaining({ code: "target_conflict" }) }));
+    expect(fs.readdirSync(target)).toEqual(["rig.yaml"]);
+    expect(fs.readFileSync(path.join(target, "rig.yaml"), "utf8")).toBe("my content");
+  });
+
+  it("does not plan a service install over a running team", async () => {
+    vi.stubEnv("OPENRIG_BUNDLE_SERVICES_ENABLED", "true");
+    const repo = new RigRepository(db), rig = repo.createRig("lifetime-rig");
+    const node = repo.addNode(rig.id, "dev.old", { runtime: "terminal", cwd: workDir });
+    const registry = new SessionRegistry(db), session = registry.registerSession(node.id, "dev-old@lifetime-rig");
+    registry.updateStatus(session.id, "running");
+    const target = path.join(workDir, "target");
+    const result = await orchestrator().bootstrap({ mode: "plan", sourceKind: "rig_bundle", sourceRef: await buildV2Bundle(workDir, true), targetRoot: target });
+    expect(result.stages).toContainEqual(expect.objectContaining({ detail: expect.objectContaining({ code: "rig_name_running" }) }));
+    expect(fs.existsSync(target)).toBe(false);
   });
 });
