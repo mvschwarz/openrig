@@ -110,9 +110,6 @@ export class PodBundleAssembler {
 
     if (opts.servicesEnabled && rigSpec.services) {
       const composeFile = rigSpec.services.composeFile;
-      if (!this.fs.exists(nodePath.resolve(opts.rigRoot, composeFile))) {
-        throw new Error(`Declared compose file not found: ${composeFile}`);
-      }
       this.collectRigFile(composeFile, opts.rigRoot, opts.outputDir, collectedFiles);
     }
 

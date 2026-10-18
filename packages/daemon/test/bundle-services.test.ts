@@ -132,9 +132,11 @@ describe("opt-in service bundles", () => {
     expect(filesUnder(path.join(root, "staging")).sort()).toEqual(["bundle.yaml", "rig.yaml"]);
   });
 
-  it("does not produce a services-enabled archive with a missing declared compose file", () => {
+  it("preserves creation with a missing compose declaration and shows it as unresolved", () => {
     const { source, assemble } = fixture(); fs.unlinkSync(path.join(source, "services/compose.yaml"));
-    expect(() => assemble(true)).toThrow(/compose/i);
+    expect(assemble(true).collectedFiles).not.toContain("services/compose.yaml");
+    const view = describeBundleBehaviour({ files: new Map([["rig.yaml", rig]]), manifest: { schema_version: 2, rig_spec: "rig.yaml" }, generator: { openrigVersion: "test" }, digestValid: true, filesVerified: true, servicesEnabled: true });
+    expect(view.state === "generated" && view.alsoRuns).toEqual(expect.arrayContaining([expect.objectContaining({ pathOrRef: "services/compose.yaml", resolution: "unresolved" })]));
   });
 
   const inspect = (servicesEnabled: boolean, composeText = compose) => describeBundleBehaviour({
