@@ -792,6 +792,21 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(fs.existsSync(path.join(workspace, "missions", "declared-wins"))).toBe(false);
   });
 
+  it("reads a mission back from the declared missions.root of the same workspace", async () => {
+    const workspace = path.join(env.root, "declared-read-back");
+    writeFile(path.join(workspace, "project.yaml"), "missions:\n  root: work/missions\n");
+    const named = path.join(workspace, "missions");
+
+    expect((await run(["mission", "create", "read-back", "--json"], named)).exitCode).toBe(0);
+
+    const shown = await run(["mission", "show", "read-back", "--json"], named);
+    expect(shown.exitCode).toBe(0);
+    expect(JSON.parse(shown.stdout).mission.path).toBe(path.join(workspace, "work", "missions", "read-back"));
+    const listed = await run(["mission", "ls", "--json"], named);
+    expect(listed.exitCode).toBe(0);
+    expect(listed.stdout).toContain("read-back");
+  });
+
   it("keeps the conventional missions root, with an advisory, when missions.root leaves the workspace", async () => {
     const workspace = path.join(env.root, "escaping-workspace");
     writeFile(path.join(workspace, "project.yaml"), "missions:\n  root: ../elsewhere\n");

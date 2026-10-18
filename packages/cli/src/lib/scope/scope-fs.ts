@@ -271,7 +271,14 @@ export function resolveMissionsRoot(opts: {
   if (fromOverride) {
     const candidate = path.isAbsolute(fromOverride) ? fromOverride : path.resolve(cwd, fromOverride);
     const missions = path.join(candidate, "missions");
-    if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
+    const hasMissionsChild = fs.existsSync(missions) && fs.statSync(missions).isDirectory();
+    // A named workspace reads the missions.root its project.yaml declares, where mission creation writes;
+    // a named missions folder is read as is.
+    if (hasMissionsChild || path.basename(candidate) !== "missions") {
+      const declared = readProjectMissionsRoot(candidate, []);
+      if (declared && fs.existsSync(declared) && fs.statSync(declared).isDirectory()) return declared;
+    }
+    if (hasMissionsChild) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
     if (opts.strictOverride) {
       const source = fromFlag === null ? "OPENRIG_WORK_ROOT" : "--workspace";
