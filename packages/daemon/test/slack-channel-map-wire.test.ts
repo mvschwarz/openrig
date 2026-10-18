@@ -269,6 +269,52 @@ describe("#192 channel map through the real Slack wire", () => {
     expect(again.thread_ts).toBeUndefined(); // U shared A's root, so A's next decision opens a fresh one
   });
 
+  it("an unnamed choice marks the root its update posted in, by channel and ts, across a retained replay and a same-ts root", async () => {
+    rewire(undefined, false, "C0OLD");
+    const a = await ask("s1@my-rig");
+    expect((await deliver(a.qitemId)).thread_ts).toBeUndefined(); // A's root 1.1 in C0OLD
+    repo.update({ qitemId: a.qitemId, actorSession: human, state: "done", closureReason: "no-follow-on", transitionNote: "human approved" });
+    rewire([{ match: "s2@my-rig", channel: "C0NEW" }], false, "C0OLD");
+    const b = await ask("s2@my-rig", { humanIntent: "update", summary: "B", body: "B", replyTo: a.qitemId });
+    const bAlert = (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({})).find((q) => q.qitemId === b.qitemId);
+    let before = posts.length;
+    nextPost = "failed"; // B records its top-level choice in C0NEW, then its post is refused and kept for replay
+    expect(wire.dispatcher.dispatch("post_message", human, bAlert)).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+    expect(posts.at(-1)).toMatchObject({ channel: "C0NEW" });
+    let release!: () => void;
+    holdNext = new Promise<void>((resolve) => { release = resolve; });
+    nextTs = "1.1"; // B's replayed post will open its own root with A's ts, in C0NEW
+    before = posts.length;
+    rewire(undefined, false, "C0OLD"); // the map is removed; B's replay keeps its recorded C0NEW, and its response waits
+    await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+    expect(posts.at(-1)).toMatchObject({ channel: "C0NEW" });
+    expect(posts.at(-1)!.thread_ts).toBeUndefined();
+    const u = await ask("s1@my-rig", { humanIntent: "update", summary: "U", body: "U", replyTo: b.qitemId });
+    expect(await deliver(u.qitemId)).toMatchObject({ channel: "C0OLD", thread_ts: "1.1" }); // B has no root yet: U takes A's
+    release();
+    await vi.waitFor(() => expect(repo.getById(b.qitemId)?.deliveryOutcome).toBe("posted")); // B's root (C0NEW, 1.1)
+    const again = await deliverEpisode(a.qitemId, "re-park");
+    expect(again.channel).toBe("C0OLD");
+    expect(again.thread_ts).toBeUndefined(); // U posted in A's root, so A's next decision opens a fresh one, as on main
+  });
+
+  it("an unnamed choice whose post hasn't landed counts its ts as shared, as on main", async () => {
+    rewire(undefined);
+    const a = await ask("s1@my-rig");
+    expect((await deliver(a.qitemId)).thread_ts).toBeUndefined(); // A's root 1.1
+    repo.update({ qitemId: a.qitemId, actorSession: human, state: "done", closureReason: "no-follow-on", transitionNote: "human approved" });
+    const u = await ask("s1@my-rig", { humanIntent: "update", summary: "U", body: "U", replyTo: a.qitemId });
+    const uAlert = (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({})).find((q) => q.qitemId === u.qitemId);
+    const before = posts.length;
+    nextPost = "failed"; // U records its unnamed choice of 1.1; its post is refused, so where it lands isn't recorded yet
+    expect(wire.dispatcher.dispatch("post_message", human, uAlert)).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+    expect(posts.at(-1)).toMatchObject({ thread_ts: "1.1" });
+    const again = await deliverEpisode(a.qitemId, "re-park");
+    expect(again.thread_ts).toBeUndefined();
+  });
+
   it("isReplyToThread finds a thread choice recorded with or without the channel suffix, and only that exact thread", async () => {
     const item = await ask("pr@my-rig", { humanIntent: "update" });
     const note = (text: string, actorSession = "daemon@kernel") => repo.update({ qitemId: item.qitemId, actorSession, transitionNote: text });
