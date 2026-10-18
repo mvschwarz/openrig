@@ -589,7 +589,7 @@ export class InboundRouter {
    *  the bot's app, and its limit, which counts each post once by its `channel:ts` identity. A post the
    *  limiter already admitted and still owed (`botAdmitted` on any retained copy of it) skips the limit.
    *  `admitted` on a failed result says the limit admitted it, so its retained copy is marked. `owed` is the
-   *  retry pass's set of admitted identities; a live post uses the router's, read from the retained file once. When
+   *  retry pass's set of admitted identities; a live post uses the router's, read again only after the retained file was written. When
    *  that file can't be read, a live post is kept for retry rather than charged or refused. */
   private async attemptBot(ev: SlackEvent, owed?: ReadonlySet<string>): Promise<{ status: InboundDisposition; reason?: string; admitted?: boolean }> {
     const inbox = this.deps.botInbox;

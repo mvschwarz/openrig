@@ -3410,7 +3410,7 @@ export class QueueRepository {
 
   /** #96 — the rows whose recorded choice threads into this ts without naming a channel. Such a choice
    *  was made for the default channel of its day, which may have changed since, so the note alone
-   *  can't say which root it took; the caller follows each row's reply-to walk as the writer did. */
+   *  can't say which root it took; the caller checks where each row's post landed (its recorded parts). */
   unnamedReplyToChoiceRows(threadTs: string): string[] {
     if (!this.hasQueueTransitionsTable) return [];
     const provenance = this.hasTransitionProvenanceColumn ? " AND identity_provenance IS NULL" : "";
