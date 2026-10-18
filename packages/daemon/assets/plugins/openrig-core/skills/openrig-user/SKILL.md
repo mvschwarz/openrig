@@ -1406,7 +1406,8 @@ use the `rig` CLI instead, the same way.
 
 Limits today:
 - **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to
-  it is unroutable. It sees new work when it checks `rig_queue_list`, or with the opt-in wait below.
+  it is unroutable. It sees new work when it checks `rig_queue_list`, or, if its app can run background shell
+  commands, with the opt-in wait below.
 - **Proven surfaces:** treat each app, and each mode inside one, as unproven until it has been run there.
 
 #### Wake on new work (opt-in; off unless the person turns it on)
@@ -1416,25 +1417,33 @@ wait for its own work. Claude Code, including Claude Desktop's Code tab, does th
 
 - **Only if the person has said they want teammates to be able to wake this session.** Never turn it on yourself, and
   never change their settings for it.
-- The shell needs this seat's identity: run the `rig attach --self … --print-env` exports first.
+- The shell needs this seat's identity: export the `OPENRIG_SESSION_NAME` that the one-time attach printed.
 - Start this as a background command, then end your turn. Don't poll it yourself.
 
 ```sh
-# Waits until a task is assigned to this seat, prints it and exits; ends quietly after MAX seconds.
-max=${MAX:-3300}; every=${EVERY:-5}; end=$(( $(date +%s) + max ))
+# Waits until a task is assigned to this seat, prints it and exits; ends after MAX seconds.
+max=${MAX:-3300}; every=${EVERY:-5}; end=$(( $(date +%s) + max )); checked=0
 while [ "$(date +%s)" -lt "$end" ]; do
   if out=$(rig queue list --owned --state pending --json 2>/dev/null); then
+    checked=1
     case "$out" in *'"qitemId"'*) printf 'NEW WORK: %s\n' "$out"; exit 0 ;; esac
   fi
   sleep "$every"
 done
-echo "No new work before the deadline. Start the wait again."
+if [ "$checked" = 1 ]; then
+  echo "No new work before the deadline. Start the wait again."
+else
+  echo "Couldn't check for work: every poll failed. Run rig queue list --owned to see why (this seat's identity, the daemon) before starting the wait again."
+  exit 1
+fi
 ```
 
 - **When it wakes you with `NEW WORK`:** `rig queue claim` each item, do it, and close it with the answer. Then start
   the wait again and end your turn.
 - **Don't leave an item you've seen pending:** it wakes you again at once. Claim it, block it or hand it off.
 - **A failed poll doesn't end the wait;** only new work or the deadline does.
+- **If every poll failed, it says so and exits non-zero** instead of reporting no work. Find out why with
+  `rig queue list --owned` (usually this seat's identity, or the daemon) before starting the wait again.
 - **If your app stops the background command, or you start a new session,** start the wait again.
 
 ## Troubleshooting and Weird States

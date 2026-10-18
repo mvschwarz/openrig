@@ -83,11 +83,12 @@ describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", ()
   });
 
   /** Run the shipped loop as a background command would: its own process, this seat's identity, short timings. */
-  function runLoop(max: number) {
-    const env = {
+  function runLoop(max: number, seat: string | null = DESK) {
+    const env: Record<string, string> = {
       PATH: `${path.join(root, "bin")}:/usr/bin:/bin`, HOME: root, OPENRIG_HOME: path.join(root, "openrig"),
-      OPENRIG_URL: url, OPENRIG_SESSION_NAME: DESK, MAX: String(max), EVERY: "1",
+      OPENRIG_URL: url, MAX: String(max), EVERY: "1",
     };
+    if (seat) env.OPENRIG_SESSION_NAME = seat;
     const started = Date.now();
     return new Promise<{ code: number | null; stdout: string; seconds: number }>((resolve) => {
       const child = spawn("sh", ["-c", shippedLoop()], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -126,6 +127,15 @@ describe.skipIf(process.platform === "win32")("the skill's opt-in wake loop", ()
     expect(result.code).toBe(0);
     expect(result.stdout).not.toContain("NEW WORK");
     expect(result.stdout).toContain("No new work before the deadline");
+  }, 40_000);
+
+  it("says it couldn't check, and exits non-zero, when every poll failed", async () => {
+    assign(DESK);
+    const result = await runLoop(3, null); // no seat identity: every `rig queue list --owned` fails
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).not.toContain("NEW WORK");
+    expect(result.stdout).not.toContain("No new work");
+    expect(result.stdout).toContain("Couldn't check for work: every poll failed.");
   }, 40_000);
 
   it("ignores work assigned to another seat and ends at its deadline", async () => {
