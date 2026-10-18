@@ -57,11 +57,22 @@ that request asks the seat to read the refocusing skill and consume the delivere
 traces rather than rerun them, and the read-depth audit accounts for them. Otherwise the hook
 is a no-op (it writes a stderr advisory when the transcript shrinks or the
 session has no identity), and it degrades to silence on unrelated hook errors.
-Both runtimes stop the hook after 5 seconds, and the content REF lookup gets 2;
-a slow REF shows as `REFOCUS CONTENT REF FAILED`. A
-configured REF resolution failure instead degrades
-loudly in the delivered payload while still completing the hook — a refocus
-must never break a seat's turn.
+**Time budget.** The hook's own budget is 4.5 seconds, and each lookup (the trace, the content REF, `rig queue
+whoami`, `rig config`) gets at most 2 of them. Every lookup is also cut to what is left of the budget, so slow lookups
+end as a reported gap (`TRACE GAP`, `REFOCUS CONTENT REF FAILED`, or a role marked unknown) and the attempt still
+delivers what it has and counts as failed. They never run into the harness's kill. Set `OPENRIG_REFOCUS_BUDGET_MS` in a
+seat's environment to give a slow trace more time, up to 55000 (55 s). Each lookup's cap grows in proportion: at 45000
+the trace may take 20 seconds. Both registrations allow `refocus.cjs` 60 seconds, so the selected budget always ends
+before the harness stops the hook. The other OpenRig hooks keep their 5 seconds. A hook that hangs outside its lookups
+can hold a prompt for up to those 60 seconds.
+
+A configured REF resolution failure degrades loudly in the delivered payload while still completing the hook — a
+refocus must never break a seat's turn.
+
+**Overlapping events.** Two hook runs for the same seat and occupant take turns on its state, using a lock file beside
+the state file that is held for milliseconds. A prompt that is delivering a refocus marks it as claimed, so an
+overlapping prompt leaves it alone. A `PostCompact` that lands during a delivery stays due for the next prompt. A claim
+left by a killed hook lapses after the budget plus 2 seconds.
 
 Failed trace or configured-content resolution keeps refocus due. After three
 consecutive failed attempts for the same seat and occupant, the hook emits one

@@ -15,10 +15,32 @@ const { recordRefocusResult } = require("./refocus-health.cjs");
 
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
-const CONTENT_LOOKUP_TIMEOUT_MS = 2_000;
+// The hook's whole time budget. Both registrations allow this hook 60 s (hooks/claude.json, hooks/codex.json); the
+// default keeps today's 4.5 s, and OPENRIG_REFOCUS_BUDGET_MS selects a longer one, up to 55 s so the hook always ends
+// before that outer bound. Each lookup's own cap scales with the budget (2 s at the default), and every lookup is also
+// clipped to what's left of it, so a slow lookup leaves an honest gap instead of the harness's kill.
+const DEFAULT_BUDGET_MS = 4_500;
+const MAX_BUDGET_MS = 55_000;
+const BUDGET_MS = (() => {
+  const value = Number(process.env.OPENRIG_REFOCUS_BUDGET_MS);
+  return Number.isFinite(value) && value > DEFAULT_BUDGET_MS ? Math.min(value, MAX_BUDGET_MS) : DEFAULT_BUDGET_MS;
+})();
+const LOOKUP_CAP_MS = Math.round(2_000 * BUDGET_MS / DEFAULT_BUDGET_MS);
+const CONTENT_LOOKUP_TIMEOUT_MS = LOOKUP_CAP_MS;
+// A lookup with less than this left is skipped and reported as a gap rather than started.
+const MIN_LOOKUP_MS = 250;
+const budgetLeftMs = () => Math.floor(BUDGET_MS - process.uptime() * 1_000);
+const contentReserveMs = () => (process.env.OPENRIG_REFOCUS_CONTENT_REF ? CONTENT_LOOKUP_TIMEOUT_MS : 0);
+// A lookup's timeout: its cap, or what's left of the budget after the later lookups' reserve, whichever is less.
+const lookupTimeout = (reserve = 0) => Math.min(LOOKUP_CAP_MS, budgetLeftMs() - reserve);
 // Normal managed restore advances on ~30 s polls with a 10 s idle wait.
 // A lost daemon stage must not suppress this occupant's refocus indefinitely.
 const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
+// The per-occupant state lock: how long to wait for it, and when one left by a killed process is stale.
+const LOCK_WAIT_MS = 1_000;
+const LOCK_STALE_MS = 5_000;
+// A delivery claim lasts for the budget plus this margin, so a claim left by a killed hook can't hold refocus back.
+const CLAIM_MARGIN_MS = 2_000;
 
 function runtime() {
   const index = process.argv.indexOf("--runtime");
@@ -46,10 +68,12 @@ const readStdin = () => new Promise((resolve) => {
 function readConfiguredContent(home) {
   const contentRef = process.env.OPENRIG_REFOCUS_CONTENT_REF || "";
   if (contentRef) {
+    const timeout = lookupTimeout();
+    if (timeout <= MIN_LOOKUP_MS) return { content: null, contentRef, failure: "no time left in the refocus budget" };
     const result = spawnSync("rig", ["context", "get", contentRef], {
       encoding: "utf8",
       env: process.env,
-      timeout: CONTENT_LOOKUP_TIMEOUT_MS,
+      timeout,
       maxBuffer: 16 * 1024 * 1024,
     });
     if (!result.error && result.status === 0 && result.stdout.trim()) {
@@ -109,7 +133,8 @@ function workPacketEnabled() {
   return enabled(process.env.OPENRIG_REFOCUS_WORK_PACKET, false);
 }
 
-function readQueueWhoami(timeout = 2_000) {
+function readQueueWhoami(timeout = lookupTimeout()) {
+  if (timeout <= MIN_LOOKUP_MS) return { unknown: "no time left in the refocus budget" };
   const args = ["queue", "whoami", "--json", ...(workPacketEnabled() ? ["--work-candidates"] : [])];
   let result = spawnSync("rig", args, {
     encoding: "utf8", env: process.env, timeout, maxBuffer: 16 * 1024 * 1024,
@@ -147,7 +172,7 @@ function deriveWorkStart(lookup) {
 // retrying here would spend the same budget twice and cannot make absence trustworthy.
 function remainingLookupBudget() {
   const contentReserve = process.env.OPENRIG_REFOCUS_CONTENT_REF ? CONTENT_LOOKUP_TIMEOUT_MS : 0;
-  return Math.floor(Math.min(2_000, 4_500 - 2_000 - contentReserve - process.uptime() * 1_000));
+  return Math.floor(Math.min(LOOKUP_CAP_MS, BUDGET_MS - LOOKUP_CAP_MS - contentReserve - process.uptime() * 1_000));
 }
 
 function renderRole(result) {
@@ -175,10 +200,10 @@ function renderRole(result) {
 // read; a failed, malformed or skipped read sets nothing, so the script's own lookup runs
 // exactly as before. Only the two root fields are consumed and nothing from the config is logged.
 //
-// Both harnesses kill this hook at 5 s (hooks/claude.json, hooks/codex.json). The read gets only
-// what is left of a 4.5 s budget, counted from process start, after reserving python's 2 s and,
-// when a content ref is configured, the content lookup that runs after python; with 250 ms or
-// less left it is skipped, so the read never pushes a fire main would deliver past the kill.
+// The read gets only what is left of the hook's budget (4.5 s by default), counted from process
+// start, after reserving python's cap and, when a content ref is configured, the content lookup
+// that runs after python; with 250 ms or less left it is skipped, so the read never pushes a fire
+// past the budget.
 function traceEnv(trees) {
   const env = { ...process.env };
   const missing = [
@@ -249,13 +274,17 @@ function renderTrace() {
   else if (work.unknown) args.push("--work-unknown", work.unknown);
   // With an explicit start, the evidence supplies only held and next work.
   if (explicitStart && evidence) args.push("--work-candidates", "-");
-  const result = spawnSync(process.env.PYTHON || "python3", args, {
-    encoding: "utf8",
-    ...(evidence ? { input: evidence } : {}),
-    env: traceEnv(trees),
-    timeout: 2_000,
-    maxBuffer: 16 * 1024 * 1024,
-  });
+  const env = traceEnv(trees);
+  const timeout = lookupTimeout(contentReserveMs());
+  const result = timeout <= MIN_LOOKUP_MS
+    ? { error: new Error("no time left in the refocus budget"), status: null, stdout: "", stderr: "" }
+    : spawnSync(process.env.PYTHON || "python3", args, {
+      encoding: "utf8",
+      ...(evidence ? { input: evidence } : {}),
+      env,
+      timeout,
+      maxBuffer: 16 * 1024 * 1024,
+    });
   const reason = result.error?.message || result.stderr?.trim() || `trace exited ${result.status ?? "without a status"}`;
   const failed = Boolean(result.error) || result.status !== 0 || !result.stdout?.trim();
   const trace = [
@@ -377,14 +406,55 @@ function runsForThisSeatsProject(env = process.env) {
   } catch {}
 
   const stateFile = path.join(stateDir, `${seatKey}__${keyFor(identity)}.json`);
-  let state = null;
-  try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || null; } catch {}
+  const readState = () => {
+    try { return JSON.parse(fs.readFileSync(stateFile, "utf8")) || null; } catch { return null; }
+  };
   const persist = () => {
     try {
       fs.mkdirSync(stateDir, { recursive: true });
       fs.writeFileSync(stateFile, JSON.stringify(state));
     } catch {}
   };
+
+  // Two hook processes for one occupant can overlap (two prompts, or a prompt still delivering when a PostCompact
+  // lands). Each read-modify-write of this occupant's state runs under an exclusive lock file beside it; the lock is
+  // held for milliseconds, never across the trace. A lock left by a killed process goes stale after a few seconds, and
+  // a hook that can't take it in time goes on without it rather than hold up the turn.
+  const lockFile = `${stateFile}.lock`;
+  let lockHeld = false;
+  const lock = () => {
+    const until = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.closeSync(fs.openSync(lockFile, "wx"));
+        lockHeld = true;
+        return;
+      } catch (error) {
+        if (error?.code !== "EEXIST") return;
+      }
+      try {
+        if (Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lockFile);
+          continue;
+        }
+      } catch { continue; }
+      if (Date.now() >= until) return;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  };
+  const unlock = () => {
+    if (!lockHeld) return;
+    lockHeld = false;
+    try { fs.unlinkSync(lockFile); } catch {}
+  };
+  const finish = () => {
+    unlock();
+    process.exit(0);
+  };
+
+  lock();
+  let state = readState();
 
   if (state === null) {
     // First observation for this occupant: the baseline is its OWN current size —
@@ -414,7 +484,7 @@ function runsForThisSeatsProject(env = process.env) {
     || event === "PostCompact"
     || Boolean(state.pendingOn)
     || thresholdDue;
-  if (!due) process.exit(0);
+  if (!due) finish();
 
   if (event !== "UserPromptSubmit") {
     if (event === "PostCompact" && harness === "claude") {
@@ -435,8 +505,11 @@ function runsForThisSeatsProject(env = process.env) {
     }
     if (event === "PostCompact" || !state.pendingOn) state.pendingOn = event;
     state.pendingAt ||= new Date().toISOString();
+    // Every retained event advances this count, so a delivery that started earlier can tell it apart from the pending
+    // it claimed and leave it due.
+    state.pendingSeq = Number(state.pendingSeq || 0) + 1;
     persist();
-    process.exit(0);
+    finish();
   }
 
   if (harness === "claude" && state.managedRestorePending) {
@@ -444,11 +517,20 @@ function runsForThisSeatsProject(env = process.env) {
     // Missing/invalid timestamps from older state, or a clock moving backwards,
     // cannot establish a live hold. No timer or extra turn is created here.
     if (heldFor >= 0 && heldFor < MANAGED_RESTORE_HOLD_MS
-      && !prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) process.exit(0);
+      && !prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) finish();
     delete state.managedRestorePending;
     delete state.managedRestorePendingAt;
     persist();
   }
+
+  // One delivery at a time per occupant: a prompt claims the delivery, and an overlapping prompt that finds a live
+  // claim leaves the refocus to it. A claim outlives its process only until the budget (plus a margin) has passed.
+  const claimed = state.delivering;
+  if (claimed && Date.now() - Date.parse(claimed.at) >= 0 && Date.now() - Date.parse(claimed.at) < BUDGET_MS + CLAIM_MARGIN_MS) finish();
+  const claim = { token: crypto.randomUUID(), at: new Date().toISOString(), pendingSeq: Number(state.pendingSeq || 0) };
+  state.delivering = claim;
+  persist();
+  unlock();
 
   // Run the public trace before resolving a context ref. Besides keeping the
   // content ladder untouched, this makes `rig context get` the last resolver
@@ -505,17 +587,26 @@ function runsForThisSeatsProject(env = process.env) {
   });
   process.stdout.write(output, (error) => {
     recordRefocusResult({ home, seat, identity, failed: failed || Boolean(error) });
+    // Re-read under the lock: an event retained while this delivery ran (a PostCompact) must survive it.
+    lock();
+    state = readState() || state;
+    if (state.delivering?.token === claim.token) delete state.delivering;
     if (failed || error) {
       state.pendingOn ||= event;
       state.pendingAt ||= new Date().toISOString();
       persist();
+      unlock();
       return;
     }
     if (size > 0) state.lastBytes = size;
     state.firedAt = new Date().toISOString();
     state.firedOn = event;
-    delete state.pendingOn;
-    delete state.pendingAt;
+    // Clear only the pending this delivery claimed; a newer one stays due for the next prompt.
+    if (Number(state.pendingSeq || 0) === claim.pendingSeq) {
+      delete state.pendingOn;
+      delete state.pendingAt;
+    }
     persist();
+    unlock();
   });
 })();
