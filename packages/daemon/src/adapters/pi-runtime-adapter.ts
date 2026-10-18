@@ -108,6 +108,18 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return { ok: true, sessionFile: state.sessionFile };
   }
 
+  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
+   *  runner entry path and state root this adapter launches with, for a reader that must tie the
+   *  sidecar to the pane's live runner before trusting it. */
+  readRunnerSidecar(sessionName: string): { state: PiRunnerState | null; sessionsDir: string; entryPath: string; stateRoot: string } {
+    return {
+      state: this.readRunnerState(sessionName),
+      sessionsDir: piSeatPaths(this.stateRoot, sessionName).sessionsDir,
+      entryPath: this.runnerEntryPath,
+      stateRoot: this.stateRoot,
+    };
+  }
+
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
     const results: InstalledResource[] = [];
     const sessionName = binding.tmuxSession;

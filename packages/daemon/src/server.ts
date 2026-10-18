@@ -833,7 +833,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/attention", attentionRoutes());
   app.route("/api/health-diagnosis", healthDiagnosisRoutes());
   // S10 — gateway subsystem admin (slack enable/disable with the seeding rule preserved).
-  app.route("/api/gateway", gatewayRoutes());
+  // A shared Slack app's relay carries the token `rig host pair` issued: this daemon's auth bearer.
+  app.route("/api/gateway", gatewayRoutes({ relayBearerToken: deps.missionControlBearerToken ?? null }));
   app.route("/api/rigs/:rigId/env", envRoutes());
   app.route("/api/restore-check", restoreCheckRoutes);
   // Slice 09 (OPR.0.3.2.9) — rig-policy bindings (operator context mode).

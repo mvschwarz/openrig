@@ -49,7 +49,11 @@ export function classifyPaneRuntimeMatch(
 ): "match" | "mismatch" {
   if (!command) return "match"; // no signal — never false-mismatch a present pane
   const cmd = command.trim().toLowerCase();
-  const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex";
+  // Pi and OMP run their agent behind the OpenRig runner (`node`). Their supported launch shapes normally reach `node`
+  // by the time readiness succeeds, but any check can still see a shell: before the launch, or after the agent exits.
+  // Terminal seats deliberately run a shell and are not included.
+  const expectsAgent = expectedRuntime === "claude-code" || expectedRuntime === "codex"
+    || expectedRuntime === "pi" || expectedRuntime === "omp";
 
   // Positive same-runtime signal.
   if (expectedRuntime === "claude-code" && cmd.includes("claude")) return "match";

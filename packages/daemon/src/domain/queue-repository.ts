@@ -3386,19 +3386,38 @@ export class QueueRepository {
 
   /** #96 — whether some update recorded this Slack root as the thread it posts into. Such a
    *  root is shared: its owner's next decision must not reuse it (see slack-subsystem). */
-  isReplyToThread(threadTs: string): boolean {
+  isReplyToThread(threadTs: string, where?: { channel: string }): boolean {
     if (!this.hasQueueTransitionsTable) return false;
     // Same trust rule as replyToChoiceFor: a pre-provenance schema reads every row as null.
     const provenance = this.hasTransitionProvenanceColumn ? " AND identity_provenance IS NULL" : "";
+    const note = formatReplyToChoice({ kind: "thread", threadTs });
+    // A root is its channel's: with `where`, only a choice naming that channel counts. One naming no
+    // channel is judged by the caller from the rows that made it (unnamedReplyToChoiceRows).
+    if (where) {
+      return this.db.prepare(
+        `SELECT 1 FROM queue_transitions WHERE transition_note = ? AND actor_session = ?${provenance} LIMIT 1`,
+      ).get(`${note} channel=${where.channel}`, REPLY_TO_CHOICE_ACTOR) !== undefined;
+    }
     // #192: with a channel map the note carries a ` channel=<id>` suffix. Match the exact note, or
     // the exact note followed by that suffix; a prefix compare, not LIKE (the note itself contains
     // `_`), and the trailing space keeps thread 1.1 from matching 1.10.
-    const note = formatReplyToChoice({ kind: "thread", threadTs });
     const withChannel = `${note} channel=`;
     return this.db.prepare(
       `SELECT 1 FROM queue_transitions
         WHERE (transition_note = ? OR substr(transition_note, 1, ?) = ?) AND actor_session = ?${provenance} LIMIT 1`,
     ).get(note, withChannel.length, withChannel, REPLY_TO_CHOICE_ACTOR) !== undefined;
+  }
+
+  /** #96 — the rows whose recorded choice threads into this ts without naming a channel. Such a choice
+   *  was made for the default channel of its day, which may have changed since, so the note alone
+   *  can't say which root it took; the caller follows each row's reply-to walk as the writer did. */
+  unnamedReplyToChoiceRows(threadTs: string): string[] {
+    if (!this.hasQueueTransitionsTable) return [];
+    const provenance = this.hasTransitionProvenanceColumn ? " AND identity_provenance IS NULL" : "";
+    const rows = this.db.prepare(
+      `SELECT DISTINCT qitem_id FROM queue_transitions WHERE transition_note = ? AND actor_session = ?${provenance}`,
+    ).all(formatReplyToChoice({ kind: "thread", threadTs }), REPLY_TO_CHOICE_ACTOR) as Array<{ qitem_id: string }>;
+    return rows.map((r) => r.qitem_id);
   }
 
   private replyToFallbackFor(qitemId: string): string | null {

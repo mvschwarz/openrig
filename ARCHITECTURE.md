@@ -211,17 +211,16 @@ Skills ship from three copies in this repository (the "edges"), listed in
 Each skill in the layout file lists which edges carry it. At this commit, 33 skills are in `spec`
 and `canonical`, 17 only in `plugin`, and 2 in all three.
 
+- Each skill has one editable home: its `spec` copy when it has a `spec` edge, otherwise its
+  `plugin` copy. Its other edges are generated from that home.
 - `npm run mirror-skills:check` (part of `npm test`) hashes every file in each edge and compares the
   hashes with `scripts/skill-edge-digests.generated.json`. It also fails on a `SKILL.md` the layout
-  does not list.
-- The full apply, `npm run mirror-skills`, regenerates all three edges from the maintainers' skill
-  source, which lives outside this repository. It needs `OPENRIG_SKILL_CANON_ROOT` and three
-  authority-file environment variables, so an outside contributor cannot run it.
-- **To fix a skill:** edit the file in every edge that carries it (same bytes), run
-  `node scripts/regen-edge-digests.mjs` to refresh the hashes from disk, then run
-  `npm run mirror-skills:check`. Say in the pull request that you edited mirrored skill files: the
-  next full apply regenerates these copies from the maintainers' source, so the change has to land
-  there too.
+  does not list, on a generated copy that differs from its home, and on a home holding text the
+  public copies would drop.
+- The full apply, `npm run mirror-skills`, regenerates every generated copy from its home and
+  refreshes the digests. It reads nothing outside the repository and never writes to a home.
+- **To fix a skill:** edit its home, run `npm run mirror-skills`, then run
+  `npm run mirror-skills:check`.
 - **To add a skill:** open an issue first. Its layout entry is generated from files that are not
   in this repository.
 - Every shipped skill also becomes a context pack at package time (next recipe).
@@ -303,8 +302,8 @@ packages.
   machine-specific values: credentials, home and temporary paths, network addresses, email
   addresses. It never fails the job; you read it and decide.
 - **Generated files.** Do not hand-edit `scripts/*.generated.json` or anything under
-  `packages/daemon/context-packs/`. The skill-edge digests are the one generated file a contributor
-  refreshes, with `node scripts/regen-edge-digests.mjs` (see "A shipped skill").
+  `packages/daemon/context-packs/`. The skill-edge digests are refreshed by
+  `npm run mirror-skills` (see "A shipped skill").
   The internal-token rules support optional `allowed_context_lines` for reviewed generic
   examples: the complete line must match exactly, including indentation and case. Unlike
   `allowed_context_substrings`, this does not exempt a line with added or substituted text;

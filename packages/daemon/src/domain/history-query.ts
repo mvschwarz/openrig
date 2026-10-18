@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { sliceWhole } from "./text-cut.js";
 
 export type ExecDep = (cmd: string, args: string[]) => Promise<{ stdout: string; exitCode: number }>;
 
@@ -88,7 +89,7 @@ function escapeRegex(s: string): string {
 
 /** A JSONL event line can be huge; cap what we echo so a hit stays readable. */
 function truncateExcerpt(line: string, max = 240): string {
-  return line.length > max ? `${line.slice(0, max)}…` : line;
+  return line.length > max ? `${sliceWhole(line, max)}…` : line;
 }
 
 function extractLiteralKeywords(question: string): string[] {

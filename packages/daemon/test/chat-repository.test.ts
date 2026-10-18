@@ -42,6 +42,18 @@ describe("ChatRepository", () => {
     expect(history.searchChat(rigId, `unrelated ${keyword}`).length).toBe(2);
   });
 
+  it("searchChat matches _ and % in keywords literally, not as LIKE wildcards", () => {
+    chatRepo.send(rigId, "alice", "rate_limit hit");
+    chatRepo.send(rigId, "alice", "rate limit hit");
+    chatRepo.send(rigId, "bob", "1000 tokens");
+    chatRepo.send(rigId, "bob", "quota 100% used");
+    chatRepo.send(rigId, "bob", "path C:\\tmp");
+    expect(chatRepo.searchChat(rigId, "rate_limit").map((m) => m.body)).toEqual(["rate_limit hit"]);
+    expect(chatRepo.searchChat(rigId, "100%").map((m) => m.body)).toEqual(["quota 100% used"]);
+    expect(chatRepo.searchChat(rigId, "C:\\tmp").map((m) => m.body)).toEqual(["path C:\\tmp"]);
+    expect(chatRepo.searchChat(rigId, "rate_limit|100%").map((m) => m.body)).toEqual(["rate_limit hit", "quota 100% used"]);
+  });
+
   it("same-day ISO since uses UTC chronology including offsets and fractions", () => {
     const early = chatRepo.send(rigId, "alice", "before cutoff");
     const boundary = chatRepo.send(rigId, "alice", "at cutoff");

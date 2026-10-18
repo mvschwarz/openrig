@@ -176,10 +176,10 @@ describe("StartupOrchestrator", () => {
     const result = await orch.startNode(makeInput(seed, { adapter, startupActions: [action] }));
     expect(result.startupStatus).toBe("attention_required");
     expect(JSON.parse((db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as {startup_actions_json:string}).startup_actions_json)).toEqual([action]);
-    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(true);
-    expect(orch.canContinueFresh(seed.nodeId, "other-occupant")).toBe(false);
+    expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(true);
+    expect(orch.canContinueStartup(seed.nodeId, "other-occupant")).toBe(false);
     eventBus.emit({ type: "node.startup_pending", rigId: seed.rigId, nodeId: seed.nodeId });
-    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
   });
 
   it("records a role binding before launch succeeds and preserves it on exact resume", async () => {
@@ -248,7 +248,7 @@ describe("StartupOrchestrator", () => {
     expect(adapter.launchHarness).toHaveBeenCalledOnce();
     expect(tmux.killSession).not.toHaveBeenCalled();
     expect(tmux.sendText).not.toHaveBeenCalled();
-    if (!compatible) expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    if (!compatible) expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
   });
 
   it.each(["missing", "late-hook"])("managed Claude resume checks final row agreement: %s", async (mode) => {
@@ -269,7 +269,7 @@ describe("StartupOrchestrator", () => {
     expect(db.prepare("SELECT status, startup_status, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
       .toEqual({ status: "running", startup_status: "attention_required",
         resume_token: mode === "late-hook" ? "other-native" : null, resume_provenance: mode === "late-hook" ? "hook" : null });
-    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
     expect(adapter.launchHarness).toHaveBeenCalledOnce();
     expect(t.killSession).not.toHaveBeenCalled();
     expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
@@ -288,8 +288,8 @@ describe("StartupOrchestrator", () => {
     const input = makeInput(seed, { adapter, isRestore: false, resumeToken: "native-original",
       resumeType: "claude_id", preserveStartupContext: true, allowFreshFallback: false });
     expect((await orch.startNode(input)).startupStatus).toBe("attention_required");
-    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
-    expect(createOrchestrator().canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(orch.canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(createOrchestrator().canContinueStartup(seed.nodeId, seed.sessionId)).toBe(false);
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId)).toEqual(before);
     expect(tmux.sendText).not.toHaveBeenCalled();
     const retry = await createOrchestrator().startNode({ ...input, adapter: mockAdapter() });

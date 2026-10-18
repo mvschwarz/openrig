@@ -2,7 +2,7 @@ import type { Context } from "hono";
 
 // SQLite converts a bound real to an integer LIMIT only strictly inside
 // (-2^63, 2^63); anything else is "datatype mismatch".
-const SQL_LIMIT_BOUND = 2 ** 63;
+export const SQL_LIMIT_BOUND = 2 ** 63;
 
 /** Parse an optional `?limit=` exactly as these routes always have
  * (`Number.parseInt(limit, 10)`, so `-1`, `0` and `10abc` keep working), and

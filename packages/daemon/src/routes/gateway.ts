@@ -24,18 +24,36 @@ import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../d
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
+import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 
 interface SubsystemHandle {
   restart: () => void;
   status: () => Record<string, unknown>;
   connectorStatus?: () => Record<string, unknown>;
+  acceptForwarded?: (env: unknown) => Promise<{ status: string; reason?: string } | null>;
 }
 
 export function gatewayRoutes(opts: {
   home?: string;
   readiness?: (entityId: string, gatewayState: string) => Promise<HumanDeliveryReadiness | null>;
+  /** The daemon's auth bearer (OPENRIG_AUTH_BEARER_TOKEN, the one `rig host pair` issues); a relay from a
+   *  shared app's hub must carry it. Null: no bearer configured, so the route trusts the bind (loopback or tailnet). */
+  relayBearerToken?: string | null;
 } = {}): Hono {
   const app = new Hono();
+
+  // A shared Slack app across machines: the hub relays an event or click for a channel this machine
+  // owns, and it runs through this machine's own inbound router. 503 keeps it in the hub's retry.
+  // Registered before /slack/:operation, which would otherwise answer it with 404.
+  app.post("/slack/forwarded", authBearerTokenMiddleware({ expectedToken: opts.relayBearerToken ?? null }), async (c) => {
+    const body = await c.req.json<{ envelope?: unknown }>().catch(() => null);
+    const envelope = body?.envelope;
+    if (!envelope || typeof envelope !== "object") return c.json({ error: "envelope_required" }, 400);
+    const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+    const result = await subsystem?.acceptForwarded?.(envelope);
+    if (!result) return c.json({ error: "slack_inbound_unavailable", message: "This machine's Slack connector isn't enabled with a token, so it can't take relayed events yet." }, 503);
+    return c.json({ ok: true, ...result });
+  });
   let adminTail: Promise<unknown> = Promise.resolve();
 
   app.get("/connections", (c) => {

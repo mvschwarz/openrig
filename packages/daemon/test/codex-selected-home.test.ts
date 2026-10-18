@@ -45,6 +45,7 @@ it.each(["fresh", "resume", "fork", "legacy"])("explicit home wins over pane rc 
     const adapter = new CodexRuntimeAdapter({ tmux: f.tmux as any, fsOps: f.fsOps, codexHome: f.selected, launchPath: f.env.PATH, seatLaunchEnvironment: launch, resolveGitAddDirs: async () => [] });
     vi.spyOn(adapter as any, 'dismissSkippableCodexUpdatePrompt').mockResolvedValue(undefined);
     vi.spyOn(adapter as any, 'captureFreshThreadId').mockResolvedValue('fresh');
+    vi.spyOn(adapter as any, 'captureVerifiedForkId').mockResolvedValue('fresh');
     vi.spyOn(adapter as any, 'verifyResumeLaunch').mockResolvedValue({ ok: true });
     expect((await adapter.launchHarness({ nodeId: 'node', tmuxSession: 'seat@rig', cwd: f.cwd } as any,
       { name: 'seat', ...(kind === 'resume' ? { resumeToken: 'old' } : kind === 'fork' ? { forkSource: { kind: 'native_id' as const, value: 'parent' } } : {}) })).ok).toBe(true);

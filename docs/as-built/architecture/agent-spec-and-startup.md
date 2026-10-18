@@ -192,16 +192,22 @@ proof selected, or a terminal runtime) record `node.startup_proof_skipped`
 (`startup-orchestrator.ts:374`); resume, fork and rebuild keep the existing proof
 history.
 
-**Fresh context pending and `rig seat continue`.** When a fresh launch stops at
-a native prompt before its context is delivered, `fail()` (`:592`) marks the
-failure `freshContextPending` and adds "run: rig seat continue <session>".
-`canContinueFresh` (`:554`, using `hasPendingFreshStartup`, `:35`) allows
+**Pending startup context and `rig seat continue`.** When a fresh launch stops at
+a native prompt before its context is delivered, `fail()` (`:806`) marks the
+failure `freshContextPending` and adds "run: rig seat continue <session>". A
+Codex fork whose own id isn't verified at launch, or whose readiness times out,
+ends `attention_required` with `forkContextPending` (its parent token) instead:
+the role waits, and nothing is saved for an unverified child.
+`canContinueStartup` (`:764`, using `readPendingStartupContext`, `:46`) allows
 continuation only while that failure is the occupant's latest startup event.
-`continueFreshStartup` (`seat-lifecycle-service.ts:395`) re-checks the binding,
+`continueStartup` (`seat-lifecycle-service.ts:723`) re-checks the binding,
 pane and runtime, then runs startup again on the same conversation without
-relaunching the harness. It is reached by `rig seat continue`,
+relaunching the harness. A fork continuation first re-verifies the child with
+`captureForkIdentity` (`codex-runtime-adapter.ts:668`; `startup-orchestrator.ts:559`)
+and needs the exact pending event it started from; a fresh continuation keeps
+the plain "still pending" check. It is reached by `rig seat continue`,
 `POST /api/seat/continue/:seatRef` and the per-seat startup route's `continue`
-action (`routes/startup.ts:148`).
+action (`routes/startup.ts:159`).
 
 **Startup layering is additive and ordered** (`resolveStartup`,
 `startup-resolver.ts:15`–`22`): (1) agent base, (2) profile, (3) rig culture

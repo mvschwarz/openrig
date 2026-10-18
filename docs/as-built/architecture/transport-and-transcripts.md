@@ -33,11 +33,12 @@ blanket-replaced: `rigged` → `rig` is a per-occurrence question, not a global
 substitution.
 
 **Axis 1 — MCP tool names are `rig_*`.** `packages/cli/src/mcp-server.ts`
-registers **18** tools, all named `rig_*`
+registers **23** tools, all named `rig_*`
 (`grep -c 'server.tool(' packages/cli/src/mcp-server.ts`), including
-`rig_rig_nodes` (`mcp-server.ts:288`), `rig_send` (`:305`),
-`rig_capture` (`:339`), `rig_chatroom_send` (`:364`) and `rig_chatroom_watch`
-(`:400`). No `rigged_*` name other than the tmux keys below remains in product
+`rig_rig_nodes` (`mcp-server.ts:290`), `rig_send` (`:307`),
+`rig_capture` (`:341`), `rig_chatroom_send` (`:366`) and `rig_chatroom_watch`
+(`:402`), and the five queue tools `rig_queue_create`, `_show`, `_list`, `_claim`
+and `_update`. No `rigged_*` name other than the tmux keys below remains in product
 source: **0** hits
 (`git grep -n 'rigged_' -- ':(glob)packages/*/src/**' | grep -v -c '@rigged_'`).
 
@@ -453,8 +454,8 @@ Claude or Codex session (`claude -p --resume` / `codex exec resume`,
    (`packages/ui/src/components/RigChatPanel.tsx`), but no UI view mounts it:
    **1** file under `packages/ui/src` names it, its own
    (`git grep -l 'RigChatPanel' -- packages/ui/src | wc -l`).
-5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:364`,
-   `:400`).
+5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:366`,
+   `:402`).
 6. Source of truth: daemon-backed SQLite (`chat_messages` table), NOT tmux
    scrollback.
 

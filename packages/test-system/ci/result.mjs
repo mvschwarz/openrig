@@ -11,6 +11,7 @@ export const CASES = {
 export const PASSING_CASES = {
   transcript: { file: 'library/transcript-reads-addressed-seat.yaml', scenario: 'transcript-reads-addressed-seat' },
   capture: { file: 'library/capture-returns-addressed-seat.yaml', scenario: 'capture-returns-addressed-seat' },
+  'daemon-restart': { file: 'library/daemon-restart-preserves-team-identity.yaml', scenario: 'daemon-restart-preserves-team-identity' },
 };
 
 // Only a clean PASS of the named scenario counts: no error, no seed, no fault.

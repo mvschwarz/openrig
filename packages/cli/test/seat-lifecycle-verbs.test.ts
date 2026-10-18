@@ -94,7 +94,7 @@ describe("#729 startup warnings", () => {
 
 describe("default-path rig seat continue", () => {
   it.each([false, true])("names CLI inspection for an ambiguous continuation refusal (json=%s)", async json => {
-    const data = { ok: false, code: "continuation_unavailable", message: "No verified pending fresh-context delivery exists for this occupant. Refresh to inspect its actual state." };
+    const data = { ok: false, code: "continuation_unavailable", message: "No verified pending startup-context delivery exists for this occupant. Refresh to inspect its actual state." };
     const original = structuredClone(data);
     const calls: Array<{ path: string; body: unknown }> = [];
     const { logs, errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, calls)).parseAsync([
@@ -108,7 +108,7 @@ describe("default-path rig seat continue", () => {
       expect(JSON.parse(logs[0]!)).toEqual(original);
       expect(errors).toEqual([]);
     } else {
-      expect(errors.join("\n")).toContain("No verified pending fresh-context delivery exists");
+      expect(errors.join("\n")).toContain("No verified pending startup-context delivery exists");
       expect(errors.join("\n")).toContain("unknown whether context was already delivered or was never pending");
       expect(errors.join("\n")).toContain("rig seat status 'dev@fixture'");
       expect(errors.join("\n")).not.toContain("Refresh");

@@ -53,30 +53,33 @@ frontmatter says when to reach for the skill.
 
 ## Authoring
 
-Skills live in two places during their lifecycle:
+Each shipped skill has **one editable home** in this repository:
 
-1. **Substrate factory** at `substrate/shared-docs/openrig-work/skills/`
-   — where new skills are authored, audited, and refined through curation
-   cycles. Includes `feedback.md` per skill (curation bookkeeping) and
-   `evals/` per skill (eval-pilot infrastructure). This is the source of
-   truth for the skill team's ongoing work.
+- `packages/daemon/specs/agents/shared/skills/<category>/<skill>/` for a
+  skill that daemon seats load from specs;
+- `packages/daemon/assets/plugins/openrig-core/skills/<skill>/` for a skill
+  that ships only in the `openrig-core` plugin.
 
-2. **Product source** at `packages/daemon/specs/agents/shared/skills/`
-   — the subset of skills that ship with the daemon. Once a skill graduates
-   to product source, that's what gets bundled into the npm package.
+`scripts/skill-edge-layout.generated.json` says which copies each skill has.
+`npm run mirror-skills` regenerates every other copy from the home: this
+folder's `_canonical/`, and the plugin copy of a spec skill that the plugin
+also carries. It reads nothing outside the repository. Never edit a
+generated copy; edit the home and re-run the script before commit.
 
-`<repo-root>/skills/_canonical/` (this folder's `_canonical/`) is mirrored
-**from** product source via `npm run mirror-skills`. The mirror is
-strictly a copy — never edit `_canonical/` directly; edits in product
-source must be propagated by re-running the mirror script before commit.
+A home must already be publishable: the script refuses to regenerate when a
+home holds text or files that the public copies would drop, such as an
+internal fence, a frontmatter key listed in
+`scripts/internal-tokens.generated.json`, a `feedback.md`, or an `evals/`
+folder. A skill change from anywhere else comes in as a normal pull request
+that edits its home.
 
 ## Drift detection
 
-`npm run test:repo` runs `mirror-skills --check` to detect drift between
-product source and `_canonical/`. If you edit a skill in product source
-without re-running the mirror, the test fails with a clear message naming
-the script to run. CI may also enforce this gate when GitHub Actions
-arrives.
+`npm run test:repo` runs `mirror-skills --check`. It fails when a generated
+copy differs from its home, when a home isn't publishable, when a file
+doesn't match `scripts/skill-edge-digests.generated.json`, or when a
+`SKILL.md` isn't in the layout. Fix the home, then run
+`npm run mirror-skills` and commit the result.
 
 ## Future-state
 

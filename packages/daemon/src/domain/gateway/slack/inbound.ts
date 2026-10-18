@@ -19,6 +19,7 @@ import { ADMITTED_EVENT_TYPES } from "./capabilities.js";
 import { escapeSlackText, parseQuestionAction, redactSecrets } from "./message.js";
 import { formatHumanAnswers, unansweredQuestions, type RecordHumanAnswerResult } from "../../human-questions.js";
 import { BotLimiter, DEFAULT_MAX_PER_HOUR, DEFAULT_COOLDOWN_MINUTES, type BotLookup, type NamedBot } from "./bot-inbox.js";
+import { envelopeChannel, type EnvelopeForwarder } from "./forwarding.js";
 
 export interface SlackEvent {
   type?: string;
@@ -89,6 +90,10 @@ export function clickedRootTs(payload: SlackBlockActions): string | undefined {
 }
 
 export type InboundDisposition = "accepted" | "ignored" | "refused" | "dead-lettered" | "handler-failed";
+
+/** Tags a row whose Slack root is the person's own message: an update replying to it posts in
+ *  that message's channel and thread (slack-subsystem.ts). */
+export const SLACK_THREAD_ROOT_TAG = "slack-thread-root";
 
 /**
  * Loop-safety + non-ingestible ignore. Ingest genuine human messages — text,
@@ -162,7 +167,10 @@ export interface InboundDeps {
   /** S10 thread routing (deterministic, zero inference): resolve the destination + tags for an
    *  admitted event. Absent → every event lands on the static `destination` (the pre-routing
    *  shape, and the fallback the tests pin). */
-  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string };
+  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string; routeClass?: string };
+  /** Open a thread root for a person's top-level message (its own ts), so the seat's
+   *  `--reply-to` reply and later updates land under it. Absent: nothing is minted. */
+  mintThread?: (m: { threadTs: string; channel: string; human: string; seat: string; conversationId: string }) => void;
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
   resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
   /** #193 — record a clicked answer on the decision the clicked message belongs to. */
@@ -181,6 +189,11 @@ export interface InboundDeps {
   botInbox?: { channel: string; destination: string; bots: NamedBot[]; lookupBot: BotLookup };
   /** The clock the per-bot limits read. */
   now?: () => number;
+  /** The shared app across machines (forwarding.ts): an envelope for a channel another machine owns
+   *  goes to that machine's daemon untouched. Absent: every envelope is handled here. */
+  forward?: { hostFor: (channel: string | undefined) => string | null; send: EnvelopeForwarder };
+  /** Envelopes whose forward failed, with the host they were for; retried with the dead-letters. */
+  forwardDeadLetter?: DeadLetterStore<{ host: string; envelope: SocketEnvelope }>;
   log?: (msg: string) => void;
 }
 
@@ -302,6 +315,8 @@ export class InboundRouter {
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
       const { summary, body } = this.summaryOf(ev, transfer, route.correlationQitemId);
+      // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
+      const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       let qitemId: string;
       try {
         qitemId = await this.deps.queue.createQitem({
@@ -309,7 +324,7 @@ export class InboundRouter {
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: route.destination,
           priority: "routine",
-          tags: route.tags ?? ["founder-slack", "inbound"],
+          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : [])],
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
@@ -329,6 +344,14 @@ export class InboundRouter {
         } catch (e) {
           this.deps.log?.(`human reply continuation failed qitem=${route.correlationQitemId} ts=${ts}: ${(e as Error).message}`);
           return { landed: false, qitemId, reason: "resolve_failed", correlationQitemId: route.correlationQitemId };
+        }
+      }
+      if (mintsRoot) {
+        try {
+          this.deps.mintThread!({ threadTs: ts, channel: ev.channel!, human: who.source, seat: route.destination, conversationId: qitemId });
+        } catch (e) {
+          // The row is delivered; only threading its answer is lost, so say so and carry on.
+          this.deps.log?.(`thread root not recorded for ${qitemId} (ts=${ts}): ${(e as Error).message}; its reply will post top-level`);
         }
       }
       this.deps.seen.mark(eventId, "landed"); // durable qitem exists → safe to mark
@@ -388,6 +411,9 @@ export class InboundRouter {
     const picked = parseQuestionAction(action?.block_id, action?.action_id);
     if (!picked) return { status: "ignored", reason: "not-a-question-button" };
     const rootTs = clickedRootTs(payload);
+    // A root is its channel's, so a click finds its decision by channel too, read the way the hub reads it to
+    // relay the click (Slack can name it in the payload or only in the container).
+    const channel = envelopeChannel({ type: "interactive", payload });
     // A thread reply about this click: once per live click; the dead-letter retry (live false) only confirms success.
     // A posted reply is recorded in the durable seen store, so a redelivery or a restart doesn't repeat it; one being
     // posted is held in memory, so a redelivery arriving meanwhile is skipped. A reply that failed to post isn't
@@ -398,7 +424,7 @@ export class InboundRouter {
       if (key && (this.replyingTo.has(key) || this.deps.seen.load().has(key))) return;
       if (key) this.replyingTo.add(key);
       try {
-        const posted = await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
+        const posted = await this.deps.acknowledgeAnswer?.({ channel, threadTs: rootTs, text });
         if (key && posted !== false) this.deps.seen.mark(key, "click-reply");
       } catch (e) {
         this.deps.log?.(`click reply failed thread=${rootTs}: ${(e as Error).message}`);
@@ -412,7 +438,7 @@ export class InboundRouter {
       if (live) await acknowledge(CLICK_REPLIES.unregistered);
       return { status: "refused", reason: "unregistered" };
     }
-    const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel: payload.channel?.id }) : undefined;
+    const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel }) : undefined;
     const qitemId = route?.correlationQitemId;
     if (!rootTs || !route || !qitemId) {
       if (live) await acknowledge(CLICK_REPLIES.unmapped);
@@ -722,6 +748,51 @@ export class InboundRouter {
     }
   }
 
+  /** The machine that owns this envelope's channel, or null to handle it here. */
+  forwardHostFor(env: SocketEnvelope): string | null {
+    if (env.type !== "events_api" && env.type !== "interactive") return null;
+    return this.deps.forward?.hostFor(envelopeChannel(env)) ?? null;
+  }
+
+  /** Relay an envelope to the machine that owns its channel. The hub has already acknowledged it to
+   *  Slack, so a failed relay is kept with its host and retried, never dropped. */
+  async forwardEnvelope(host: string, env: SocketEnvelope): Promise<{ status: InboundDisposition; reason?: string }> {
+    const r = await this.deps.forward!.send(host, env);
+    const channel = envelopeChannel(env) ?? "-";
+    if (r.ok) {
+      this.deps.log?.(`forwarded ${env.type} channel=${channel} -> ${host}`);
+      return { status: "accepted", reason: "forwarded" };
+    }
+    this.deps.log?.(`forward to ${host} FAILED channel=${channel}: ${r.error}; kept for retry`);
+    this.deps.forwardDeadLetter?.append({ host, envelope: env }, 1);
+    return { status: this.deps.forwardDeadLetter ? "dead-lettered" : "handler-failed", reason: "forward_failed" };
+  }
+
+  /** Retry relays that failed, to the host each was for. Same interruption-safe shape as the
+   *  event retry: read, attempt each, then atomically keep only the ones still failing. After one
+   *  failed send to a host, that host's other relays are kept unsent for this pass (their attempts
+   *  unchanged), so a machine that is down costs one timeout a pass, not one per relay. A relay the
+   *  host keeps refusing is kept and retried every pass; nothing drops a person's message. */
+  private async retryForwardDeadLetters(): Promise<{ retried: number; landed: number }> {
+    const store = this.deps.forwardDeadLetter;
+    const entries = store?.readAll() ?? [];
+    if (!store || !this.deps.forward || entries.length === 0) return { retried: 0, landed: 0 };
+    const stillFailing: DeadLetterEntry<{ host: string; envelope: SocketEnvelope }>[] = [];
+    const failedHosts = new Set<string>();
+    let landed = 0;
+    let sent = 0;
+    for (const e of entries) {
+      if (failedHosts.has(e.ev.host)) { stillFailing.push(e); continue; }
+      sent++;
+      const r = await this.deps.forward.send(e.ev.host, e.ev.envelope);
+      if (r.ok) landed++;
+      else { failedHosts.add(e.ev.host); stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 }); }
+    }
+    if (sent < entries.length) this.deps.log?.(`relay retry: ${entries.length - sent} kept unsent for unreachable host(s) ${[...failedHosts].join(", ")}`);
+    store.replaceBatch(entries, stillFailing);
+    return { retried: sent, landed };
+  }
+
   /**
    * INTERRUPTION-SAFE retry (item 8): read the durable set NON-destructively,
    * attempt each, then ATOMICALLY replace the file with only the still-failing
@@ -742,7 +813,15 @@ export class InboundRouter {
     }
   }
 
+  // This machine's own events and clicks go first, then relays for other machines, so a machine
+  // that is down never delays this one's recovery.
   private async retryDeadLetterPass(): Promise<{ retried: number; landed: number }> {
+    const own = await this.retryOwnDeadLetters();
+    const forwarded = await this.retryForwardDeadLetters();
+    return { retried: own.retried + forwarded.retried, landed: own.landed + forwarded.landed };
+  }
+
+  private async retryOwnDeadLetters(): Promise<{ retried: number; landed: number }> {
     const entries = this.deps.deadLetter.readAll();
     if (entries.length === 0) return this.retryActionDeadLetters();
     this.deps.log?.(`retrying ${entries.length} dead-letter(s)`);
@@ -825,10 +904,15 @@ export async function handleEnvelope(
   router: InboundRouter,
   log?: (m: string) => void,
   onReceived?: () => void,
+  /** `relayed`: the hub already relayed this envelope here; handle it, never relay it again. */
+  opts: { relayed?: boolean } = {},
 ): Promise<{ status: InboundDisposition; reason?: string }> {
   if (env.envelope_id) ack(); // fast-ack, unconditional, first
   onReceived?.(); // diagnostic receipt follows ACK but precedes every handler filter
   if (env.type === "disconnect") return { status: "ignored", reason: "disconnect" };
+  // The shared app: an event or click for a channel another machine owns goes there untouched.
+  const forwardHost = opts.relayed ? null : router.forwardHostFor(env);
+  if (forwardHost) return router.forwardEnvelope(forwardHost, env);
   if (env.type === "interactive") {
     // #193 — a button click. Other interactive payloads (shortcuts, modals) are not ours.
     if (env.payload?.type !== "block_actions") return { status: "ignored", reason: "interactive-type" };
