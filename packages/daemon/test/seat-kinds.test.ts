@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { SeatKindRegistry, type SeatKind } from "../src/domain/seat-kinds.js";
+import { SeatKindRegistry, type SeatKind, type SeatRef } from "../src/domain/seat-kinds.js";
+import { probeSessionActivity } from "../src/domain/session-transport.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 function fakeKind(kind: string): SeatKind {
   const refuse = async () => { throw new Error("not called"); };
@@ -43,5 +45,32 @@ describe("SeatKindRegistry", () => {
     expect(reads).toBe(1);
     expect(found?.ref).toEqual({ nodeId: "n1", sessionName: "s1", runtime: "claude-code", kind: "acp", pane: null, occupant: null });
     expect(new SeatKindRegistry([fakeKind("acp")]).forNode(sessions, "n1", "an-older-session")).toBeNull();
+  });
+});
+
+describe("probeSessionActivity with a registered seat kind", () => {
+  const tmuxCalls: string[] = [];
+  const tmux = new Proxy({}, { get: (_t, prop) => async () => { tmuxCalls.push(String(prop)); return null; } }) as TmuxAdapter;
+
+  it("reads a registered kind's seat through its own probe, with no tmux call", async () => {
+    const seen: SeatRef[] = [];
+    const kind = fakeKind("acp");
+    const seatKinds = new SeatKindRegistry([{ ...kind, activity: { probe: async (ref, now) => {
+      seen.push(ref);
+      return { state: "running", reason: "turn_open", evidenceSource: "external_cli", sampledAt: now.toISOString(), evidence: null };
+    } } }]);
+    const now = new Date("2026-10-18T00:00:00Z");
+    const activity = await probeSessionActivity({ sessionName: "dev1-impl@r01", runtime: "claude-code", attachmentType: "acp",
+      tmuxAdapter: tmux, now, seatKinds, binding: { nodeId: "n1", occupant: "g1", pane: null } });
+    expect(activity).toMatchObject({ state: "running", reason: "turn_open", sampledAt: now.toISOString() });
+    expect(seen).toEqual([{ nodeId: "n1", sessionName: "dev1-impl@r01", runtime: "claude-code", kind: "acp", pane: null, occupant: "g1" }]);
+    expect(tmuxCalls).toEqual([]);
+  });
+
+  it("keeps external_cli's answer when a custom kind is registered", async () => {
+    const activity = await probeSessionActivity({ sessionName: "ext", runtime: "claude-code", attachmentType: "external_cli",
+      tmuxAdapter: tmux, seatKinds: new SeatKindRegistry([fakeKind("acp")]) });
+    expect(activity).toMatchObject({ state: "unknown", reason: "unsupported_attachment" });
+    expect(tmuxCalls).toEqual([]);
   });
 });

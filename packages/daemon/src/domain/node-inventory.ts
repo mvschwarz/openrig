@@ -1,4 +1,5 @@
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
+import type { SeatKindRegistry } from "./seat-kinds.js";
 import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
@@ -1258,6 +1259,8 @@ export async function attachAgentActivity(
   entries: NodeInventoryEntry[],
   deps: {
     tmuxAdapter: TmuxAdapter;
+    /** Seat kinds registered beyond tmux; a registered kind's seat is read by its own probe. */
+    seatKinds?: SeatKindRegistry | null;
     activityStore?: AgentActivityStore;
     /** 5b82324b — the cached STRUCTURAL pane observation (SeatStructuralActivityService). READ-only
      *  and capture-FREE: lifts structural motion into the ACTIVITY signal on the DEFAULT path so a
@@ -1482,6 +1485,7 @@ export async function attachAgentActivity(
       runtime: entry.runtime,
       attachmentType: entry.attachmentType,
       tmuxAdapter: deps.tmuxAdapter,
+      seatKinds: deps.seatKinds,
       now: sampledAt,
       captureObserver: deps.captureObserver,
       binding: deps.captureObserver ? deps.observationBinding?.(entry) : undefined,

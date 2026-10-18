@@ -482,6 +482,8 @@ export async function probeSessionActivity(input: {
   timerlessStatusIsLive?: boolean;
   /** The seat's community agent app (`agentAppOf`): its idle-looking screen reads unknown. */
   agentApp?: string | null;
+  /** Seat kinds registered beyond tmux; a registered kind's seat is read by its own probe. */
+  seatKinds?: SeatKindRegistry | null;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -509,6 +511,11 @@ export async function probeSessionActivity(input: {
       sampledAt,
       evidence: null,
     };
+  }
+  const kind = input.seatKinds?.custom(attachmentType) ?? null;
+  if (kind) {
+    return kind.activity.probe({ nodeId: binding?.nodeId ?? null, sessionName, runtime, kind: kind.kind,
+      pane: binding?.pane ?? null, occupant: binding?.occupant ?? null }, now ?? new Date());
   }
   if (attachmentType === "external_cli") {
     return {
@@ -2994,6 +3001,7 @@ export class SessionTransport {
           runtime: input.runtime,
           attachmentType: input.attachmentType,
           tmuxAdapter: this.tmuxAdapter,
+          seatKinds: this.seatKinds,
           now,
           captureObserver: this.captureObserver,
           binding: input.binding,
@@ -3010,6 +3018,7 @@ export class SessionTransport {
       runtime: input.runtime,
       attachmentType: input.attachmentType,
       tmuxAdapter: this.tmuxAdapter,
+      seatKinds: this.seatKinds,
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
