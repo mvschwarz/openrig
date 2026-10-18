@@ -10,6 +10,12 @@
 import type { Action } from "./types.js";
 import type { Token } from "./theme.js";
 
+/** First `end` UTF-16 units of `text`, one shorter when that would split a surrogate pair. */
+export function sliceWhole(text: string, end: number): string {
+  const last = text.charCodeAt(end - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? end - 1 : end);
+}
+
 export interface ContentLine {
   text: string;
   action?: Action;

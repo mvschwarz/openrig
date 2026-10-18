@@ -16,7 +16,7 @@ import { workflowOverview, workflowDetail } from "./workflow-model.js";
 // Every row opens a page built from the projections' own values; `esc` returns.
 import type { Action, SliceDetailSnap } from "../types.js";
 import type { Token } from "../theme.js";
-import { wrapDetailLines, detailPage, listItem, sectionRule, type ContentLine, type Section } from "../detail.js";
+import { sliceWhole, wrapDetailLines, detailPage, listItem, sectionRule, type ContentLine, type Section } from "../detail.js";
 import { scopeContractLines, scopeIdentityLines, proofProvenanceLines, type ReadinessSnap, type MissionScopesSnap, type SliceScopeSnap } from "../scopes/scopes-model.js";
 
 export interface ExecutionViewSnap {
@@ -57,7 +57,7 @@ function shortSha(value: unknown): string {
 }
 
 function clip(text: string, room: number): string {
-  return text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text;
+  return text.length > room ? `${sliceWhole(text, Math.max(room - 1, 0))}…` : text;
 }
 
 type SemanticSeg = NonNullable<ContentLine["segs"]>[number];
@@ -72,7 +72,7 @@ function fitSegs(parts: SemanticSeg[], width: number): SemanticSeg[] {
       room -= part.text.length;
       continue;
     }
-    out.push({ ...part, text: room === 1 ? "…" : `${part.text.slice(0, room - 1)}…` });
+    out.push({ ...part, text: room === 1 ? "…" : `${sliceWhole(part.text, room - 1)}…` });
     room = 0;
   }
   return out;
@@ -577,8 +577,9 @@ function wrapWords(text: string, width: number): string[] {
     let word = raw;
     while (word.length > room) {
       if (line) { out.push(line); line = ""; }
-      out.push(word.slice(0, room));
-      word = word.slice(room);
+      const head = sliceWhole(word, room) || word.slice(0, 2);
+      out.push(head);
+      word = word.slice(head.length);
     }
     if (!word) continue;
     if (!line) line = word;
