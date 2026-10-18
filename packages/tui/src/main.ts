@@ -24,6 +24,7 @@ import { createLiveRefresh } from "./live.js";
 import { resolvePendingAddress } from "./pending-address.js";
 import { subscribeActivityEvents } from "./live-events.js";
 import { execFile } from "node:child_process";
+import { helperCwd } from "./helper-cwd.js";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
 import { driveRestoreLifecycle, buildRestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
@@ -61,7 +62,7 @@ async function run(): Promise<void> {
   let snapshot: FleetSnapshot = demo ? demoSnapshot() : emptySnapshot();
   let timeReadWarning = false;
   const timeSetting = new Promise<unknown>((resolve) => {
-    execFile(cliExecutable, cliArgs(["config", "get", "ui.timezone", "--json"]), { timeout: 5000, maxBuffer: 8192 }, (err, stdout, stderr) => {
+    execFile(cliExecutable, cliArgs(["config", "get", "ui.timezone", "--json"]), { cwd: helperCwd(), timeout: 5000, maxBuffer: 8192 }, (err, stdout, stderr) => {
       timeReadWarning = !!err || stderr.includes("ui.timezone");
       if (err) return resolve(null);
       try { resolve(JSON.parse(stdout).value); } catch { resolve(null); }
@@ -194,7 +195,7 @@ async function run(): Promise<void> {
   // JSON is the truth even on a hint non-zero exit). Any failure → normal TUI (never a fabricated cockpit).
   const runCrashCartVerb = (): Promise<string> =>
     new Promise((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(["crash-cart", "--json"]), { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(["crash-cart", "--json"]), { cwd: helperCwd(), timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (stdout && stdout.trim()) resolve(stdout);
         else reject(new Error(stderr.trim() || err?.message || "crash-cart: no output"));
       });
@@ -202,7 +203,7 @@ async function run(): Promise<void> {
   if (client) startup = new StartupController({
     client, home: process.env["OPENRIG_HOME"] ?? "default local instance", probe: runCrashCartVerb,
     startDaemon: () => new Promise<void>((resolve, reject) => {
-      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { timeout: 30_000 }, (error, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(daemonStartArgs(client.baseUrl)), { cwd: helperCwd(), timeout: 30_000 }, (error, stdout, stderr) => {
         if (error) reject(new Error(`Daemon start did not confirm completion: ${stderr.trim() || stdout.trim() || error.message}`));
         else resolve();
       });
@@ -295,7 +296,7 @@ async function run(): Promise<void> {
     restoreCancelRequested = false;
     restoreScrollOffset = 0;
     new Promise<void>((resolve, reject) =>
-      execFile("rig", ["daemon", "start"], { timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
+      execFile("rig", ["daemon", "start"], { cwd: helperCwd(), timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
     )
       .then(() => pollRestore(daemonClient))
       .catch((e: unknown) => {
@@ -332,7 +333,7 @@ async function run(): Promise<void> {
       startingDaemon = true;
       crashCartOpts = { ...crashCartOpts, starting: client!.baseUrl };
       draw();
-      execFile(cliExecutable, cliArgs(startArgs), { timeout: 30_000 }, (error, stdout, stderr) => {
+      execFile(cliExecutable, cliArgs(startArgs), { cwd: helperCwd(), timeout: 30_000 }, (error, stdout, stderr) => {
         startingDaemon = false;
         if (error) {
           crashCartOpts = { unavailable: `Daemon start did not confirm completion. Retry reads actual state before another attempt. ${stderr.trim() || stdout.trim() || error.message}` };
