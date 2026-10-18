@@ -2,7 +2,7 @@ import { selectCatalogProject, inferCatalogProject, rigFromSession, ProjectReadE
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
+import { projectMissionsRoot, readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 import { readProjectSkillSelection } from "@openrig/daemon/skill-loadout";
 import {
   parseContextSelection,
@@ -298,17 +298,8 @@ export function resolveWorkPosition(opts: {
     projectId = opts.project ?? declaredProjectId;
   }
 
-  let missionsRel = "missions";
-  const missions = projectManifest?.["missions"];
-  if (isRecord(missions) && missions["root"] !== undefined) {
-    if (typeof missions["root"] === "string" && !isAbsolute(missions["root"]) && !missions["root"].split(/[\\/]/).includes("..")) {
-      missionsRel = missions["root"];
-    } else {
-      warnings.push("project.yaml: optional missions.root must be a relative path inside the project; kept the conventional missions root");
-    }
-  }
-  const missionsRoot = resolve(projectRoot, missionsRel);
-  if (!inside(projectRoot, missionsRoot)) {
+  const missionsRoot = projectMissionsRoot(projectRoot, projectManifest, warnings);
+  if (!missionsRoot) {
     return failure("missions_root_escape", "project.yaml missions.root resolves outside the selected project root");
   }
 
