@@ -136,6 +136,23 @@ describe("late Codex fork identity", () => {
     expect(registry.resumeTokenMatches(input.sessionId, "codex_id", PARENT)).toBe(false);
   });
 
+  it("ends a launch on time when an identity read answers after the readiness budget", async () => {
+    readinessSeconds = 1;
+    const hung = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: { readFile: () => ROLE, exists: file => file.endsWith("role.md"), writeFile: () => {}, mkdirp: () => {}, listFiles: () => [] },
+      listProcesses: async () => processRows,
+      // A slow home probe: the child's id arrives only after the 1 s budget has passed.
+      readThreadIdByPid: () => new Promise<string | undefined>((resolve) => setTimeout(() => resolve(CHILD), 3_000)),
+      readinessSettings: { resolveOne: () => ({ value: readinessSeconds }) } as unknown as Pick<SettingsStore, "resolveOne">,
+      sleep: async () => {},
+    });
+    const started = Date.now();
+    expect(await orch.startNode({ ...input, adapter: hung })).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  }, 15_000);
+
   it("uses the configured capture bound without sending the role after it expires", async () => {
     readinessSeconds = 2;
     threadId = CHILD;

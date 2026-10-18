@@ -321,8 +321,9 @@ function readCodexThreadIdFromLogs(
       }
     } catch { unreadable = true; }
   }
+  // An unreadable log database could hold an earlier row for a candidate or a second candidate: stay unresolved.
   const startedInSecond = [...sameSecond.keys()].filter((uuid) => !loggedBefore.has(uuid));
-  if (startedInSecond.length === 1) for (const id of sameSecond.get(startedInSecond[0]!)!) loggedIds.add(id);
+  if (!unreadable && startedInSecond.length === 1) for (const id of sameSecond.get(startedInSecond[0]!)!) loggedIds.add(id);
   if (!loggedIds.size) {
     report?.({ reason: unreadable ? "sqlite_unreadable" : "no_log_row" });
     return undefined;

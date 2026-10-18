@@ -49,6 +49,12 @@ describe("a fork child's start second", () => {
     expect(await resolver.resolveForkChild(60422, identity)).toBe("conversation");
   });
 
+  it("resolveForkChild stays unresolved when another log database can't be read", async () => {
+    const f = fixture(); f.thread("conversation"); f.log("conversation", start);
+    fs.writeFileSync(path.join(f.home, ".codex/logs_1.sqlite"), "not a database");
+    expect(await f.finish().resolveForkChild(60422, identity)).toBeUndefined();
+  });
+
   it("resolveForkChild refuses a start-second row from an instance that logged before the second", async () => {
     const f = fixture(); f.thread("conversation"); f.log("conversation", start - 5); f.log("conversation", start);
     expect(await f.finish().resolveForkChild(60422, identity)).toBeUndefined();

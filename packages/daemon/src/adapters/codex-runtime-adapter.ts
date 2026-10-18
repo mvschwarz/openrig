@@ -976,6 +976,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return undefined;
   }
 
+  /** `work`'s result, or null once `deadline` (epoch ms) passes first. The late result is ignored. */
+  private async withinDeadline<T>(work: Promise<T>, deadline: number): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now())); });
+    try {
+      return await Promise.race([work, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** A fork's own id at launch, from a verified child only (see {@link captureForkIdentity}). Polls for up
    *  to `timeoutMs`, because a fork's record can appear well after the process starts. */
   private async captureVerifiedForkId(binding: NodeBinding, updatePrompt: UpdatePromptAttempt, parentId: string,
@@ -984,7 +995,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0 && Date.now() >= deadline) break;
-      const identity = await this.captureForkIdentity(binding, parentId);
+      // Each attempt may wait on a home probe; bound it by the time left, so a stuck probe ends in attention on time.
+      const identity = await this.withinDeadline(this.captureForkIdentity(binding, parentId), deadline);
       if (identity) return identity.resumeToken;
       if (binding.tmuxSession) {
         await this.dismissSkippableCodexUpdatePrompt(binding.tmuxSession, updatePrompt, 1);
