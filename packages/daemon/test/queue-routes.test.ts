@@ -1551,6 +1551,16 @@ describe("queue routes", () => {
     await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
   });
 
+  it("GET /api/queue/overdue refuses a limit SQLite cannot bind instead of a 500", async () => {
+    for (const limit of ["9223372036854775296", "99999999999999999999"]) {
+      const res = await app.request(`/api/queue/overdue?limit=${limit}`);
+      expect({ limit, status: res.status, body: await res.json() }).toEqual({ limit, status: 400, body: { error: "limit must be an integer" } });
+    }
+    for (const limit of ["9223372036854775295", "5", "abc", "-1"]) {
+      expect({ limit, status: (await app.request(`/api/queue/overdue?limit=${limit}`)).status }).toEqual({ limit, status: 200 });
+    }
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",

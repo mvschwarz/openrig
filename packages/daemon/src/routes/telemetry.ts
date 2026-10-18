@@ -7,6 +7,7 @@ import type { Database } from "better-sqlite3";
 import { queryUsageSeries, computeTopBurn, computeCostView } from "../domain/usage-series.js";
 import { readTelemetryPage, TelemetryInputError, type TelemetrySource, type TelemetryStream } from "../domain/finite-telemetry.js";
 import { timeBoundAdvisory } from "../domain/time-bound-advisory.js";
+import { SQL_LIMIT_BOUND } from "./query-limit.js";
 
 export interface TelemetryRouteDeps {
   db: () => Database;
@@ -45,7 +46,7 @@ export function telemetryRoutes(deps: TelemetryRouteDeps): Hono {
     let limit: number | undefined;
     if (limitRaw !== undefined) {
       limit = Number(limitRaw);
-      if (!Number.isFinite(limit) || limit < 1) {
+      if (!Number.isFinite(limit) || limit < 1 || limit >= SQL_LIMIT_BOUND) {
         return c.json({ error: `invalid limit "${limitRaw}" — must be a positive number` }, 400);
       }
     }
