@@ -184,4 +184,15 @@ describe("seat kinds: review follow-ups", () => {
     expect(warnings).not.toContain("in null");
     expect(tmuxCalls).toEqual([]);
   });
+
+  it("lets the queue reach a registered-kind seat by its session name", async () => {
+    const rig = rigRepo.createRig("r01");
+    rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "claude-code" });
+    // rig up names a seat canonically, seat@rig; that shape is the one the queue checks bindings for.
+    const seat = await new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, seatKinds })
+      .launchNode(rig.id, "dev.impl", { kind: "acp", sessionName: "dev-impl@r01" });
+    if (!seat.ok) throw new Error(seat.message);
+    const queue = new QueueRepository(db, eventBus, { validateRig: () => true });
+    expect(queue.classifyDestinationOf("dev-impl@r01")).toEqual({ class: "pane-bound" });
+  });
 });

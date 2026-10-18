@@ -162,6 +162,8 @@ Where it is wired:
 | `probeSessionActivity` (inventory, idle waits) | pane reading | `activity.probe` |
 | Boot reconcile, `rig down`, `rig seat stop`, node removal | `probeSession` / `killSession` | `host.probe` / `host.stop`; refusal text names the seat host, codes unchanged |
 | Node removal's `fallbackDestination` liveness | `hasSession` | `host.probe` must answer `present` |
+| `rig up` (`PodRigInstantiator`) startup binding | tmux fields | also carries `attachmentType` and `externalSessionName`, so startup reaches the kind's host |
+| Queue destination classification (`hasTerminalTransport`) | tmux bindings only | a registered kind's `external_session_name` is reachable, so nudges route to its inbound |
 
 Continuous activity for a seat without a pane arrives over the existing hook and self-report
 routes (`routes/activity.ts`). The pollers already skip non-tmux rows.
@@ -184,8 +186,11 @@ Departures from the design note this doc first proposed, and why:
 What cannot move without behaviour change:
 
 1. The `RuntimeAdapter` contract is tmux-shaped (launch types into a pane; readiness and `send_text`
-   startup files read and write it). It is untouched; a registered host does not call it, and a
-   non-Claude adapter's `send_text` files still go to tmux.
+   startup files read and write it). It is untouched; a registered host does not call its launch or
+   readiness. Startup still runs the adapter's `project` and `deliverStartup` for a registered
+   kind's seat, so files land in the seat's cwd and home and a non-Claude adapter's `send_text`
+   files still go to tmux. Whether a host wants projection is the host's policy; an embedder that
+   does not can skip it in its own startup path.
 2. Pane lineage (`native-process-lineage`, `getPanePid` proofs) proves the agent is the one OpenRig
    launched. A seat without a pane has none; its host attests identity.
 3. Handover, restart-in-place, pane cutover, claim, discovery, views, cmux, transcripts, the

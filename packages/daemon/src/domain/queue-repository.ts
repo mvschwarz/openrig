@@ -3782,6 +3782,11 @@ export class QueueRepository {
             AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
             AND b.tmux_session IS NOT NULL LIMIT 1`,
       ).get(dest)) return true;
+      // A registered seat kind's seat (createDaemon({ seatKinds })) is reached by its inbound, by session name.
+      if (this.db.prepare(
+        `SELECT 1 FROM bindings WHERE external_session_name = ?
+          AND attachment_type IS NOT NULL AND attachment_type NOT IN ('tmux', 'external_cli') LIMIT 1`,
+      ).get(dest)) return true;
       const at = dest.lastIndexOf("@");
       if (at <= 0) return true; // non-canonical shapes stay on the legacy path
       const seat = dest.slice(0, at);
