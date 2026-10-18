@@ -28,9 +28,9 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   network access, such as Codex's default one. Re-run that one command with network access before you tell the person
   to sign in again or fix anything.
 - **Install:** `npm install -g @openrig/cli`, then `rig setup --providers codex` (or `claude`, or `both`: the harness
-  the person uses). Setup checks Node, tmux and the logins, installs Herdr for the OpenRig view unless they decline it
-  (`--no-herdr`), and adds an OpenRig block to `~/.tmux.conf`, so say that first. It doesn't start the daemon. Then
-  `rig doctor`.
+  the person uses). Setup checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen
+  harness (with npm) if either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`),
+  and adds an OpenRig block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
