@@ -31,41 +31,18 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   the person uses). Setup checks Node, tmux and the logins. It installs tmux (with Homebrew, when present) or the chosen
   harness (with npm) if either is missing, installs Herdr for the OpenRig view unless they decline it (`--no-herdr`),
   and adds an OpenRig block to `~/.tmux.conf`, so say all of that first. It doesn't start the daemon. Then `rig doctor`.
-- **If the person uses Codex:** make the one-time offer under "Codex: one offer, once, after OpenRig is installed" below.
 - **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
   "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
   run, use https://www.openrig.dev/help/agents. Getting started: https://openrig.dev/docs/getting-started
-
-### Codex: one offer, once, after OpenRig is installed
-
-First the agent resolves the person's real Codex folder (`CODEX_HOME`, or `~/.codex` when that isn't set) and puts the exact path in the
-offer, so the person sees the real file, not a placeholder:
-
-> Codex asks you to approve OpenRig commands. May I let six of them run without asking: `rig ps`, `rig capture`, `rig send`,
-> `rig queue`, `rig status` and `rig whoami`, each with whatever follows it? They would run outside Codex's sandbox, in every Codex
-> project and session you run on this computer, and `rig send` and `rig queue` can message your agents and change their task records, not
-> only read them. I'd add one file, `/home/you/.codex/rules/openrig.rules` (the resolved path). Codex reads it when it starts, so it
-> applies from your next Codex session. To undo, ask me to remove the OpenRig rules this added and keep your other rules.
-
-- **No, or no answer:** nothing is written, and Codex behaves as before.
-- **Yes:** the agent applies it the way OpenRig's existing permission steps already describe (`applying-a-permission-policy`, in the
-  installed OpenRig skills): read the existing rules first, keep any stricter rule, change no sandbox or approval setting, and record what
-  it added. The file is created only if it doesn't exist; if it does, the agent changes nothing and says what's there. A new file holds
-  exactly these two lines:
-  ```
-  # Added by OpenRig on the person's yes: these six rig command families run without a prompt. Ask to undo, or delete this file if it holds nothing else.
-  prefix_rule(pattern = ["rig", ["ps", "capture", "send", "queue", "status", "whoami"]], decision = "allow", justification = "OpenRig coordination commands the person approved once")
-  ```
-- **Undo** (the same skill's words: "Undo the OpenRig command allowances added by this setup; keep my other rules"): the agent removes
-  only the lines it recorded adding, keeps anything else in the file, and deletes the file only if it still holds nothing but those lines.
-  It applies from the next Codex session.
 
 ## 2. Open OpenRig and give its operator the goal
 
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
+- **If the person uses Codex:** now that OpenRig is running, make the one-time offer under "Codex: one offer, once,
+  after OpenRig starts" at the end of this step.
 - **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
   you're opening it, then run `rig terminal open saved:kernel --window` on the daemon's desktop. This is the next step
   after installing or starting OpenRig, and the way back whenever they want their agents or OpenRig again. Don't wait
@@ -134,6 +111,30 @@ offer, so the person sees the real file, not a placeholder:
 - **Replies:** other agents can't type into this session. Read work sent to you with
   `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
   `rig capture <seat>@<rig>`.
+
+### Codex: one offer, once, after OpenRig starts
+
+First the agent resolves the person's real Codex folder (`CODEX_HOME`, or `~/.codex` when that isn't set) and puts the exact path in the
+offer, so the person sees the real file, not a placeholder:
+
+> Codex asks you to approve OpenRig commands. May I let six of them run without asking: `rig ps`, `rig capture`, `rig send`,
+> `rig queue`, `rig status` and `rig whoami`, each with whatever follows it? They would run outside Codex's sandbox, in every Codex
+> project and session you run on this computer, and `rig send` and `rig queue` can message your agents and change their task records, not
+> only read them. I'd add one file, `/home/you/.codex/rules/openrig.rules` (the resolved path). Codex reads it when it starts, so it
+> applies from your next Codex session. To undo, ask me to remove the OpenRig rules this added and keep your other rules.
+
+- **No, or no answer:** nothing is written, and Codex behaves as before.
+- **Yes:** the agent applies it the way OpenRig's existing permission steps already describe (`applying-a-permission-policy`, in the
+  installed OpenRig skills): read the existing rules first, keep any stricter rule, change no sandbox or approval setting, and record what
+  it added. The file is created only if it doesn't exist; if it does, the agent changes nothing and says what's there. A new file holds
+  exactly these two lines:
+  ```
+  # Added by OpenRig on the person's yes: these six rig command families run without a prompt. Ask to undo, or delete this file if it holds nothing else.
+  prefix_rule(pattern = ["rig", ["ps", "capture", "send", "queue", "status", "whoami"]], decision = "allow", justification = "OpenRig coordination commands the person approved once")
+  ```
+- **Undo** (the same skill's words: "Undo the OpenRig command allowances added by this setup; keep my other rules"): the agent removes
+  only the lines it recorded adding, keeps anything else in the file, and deletes the file only if it still holds nothing but those lines.
+  It applies from the next Codex session.
 
 ## 3. Follow the work to its result
 
