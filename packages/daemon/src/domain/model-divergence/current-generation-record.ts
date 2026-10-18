@@ -5,9 +5,9 @@
 
 import { basename, dirname, join, relative, isAbsolute, sep } from "node:path";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
-import { piSeatPinReadings, readPiEffectiveModel } from "./effective-model-readers.js";
+import { piPinReadings, piSeatPinReadings, readPiEffectiveModel } from "./effective-model-readers.js";
 import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
-import { canonicalModelPin } from "./model-divergence-monitor.js";
+import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
 
 export interface ProcessRow {
@@ -380,5 +380,8 @@ export async function readCurrentPiOccupantModel(
   const read = readPiEffectiveModel(selection.path, { notBeforeMs: selection.notBeforeMs });
   if (!read.ok) return read;
   const pins = piSeatPinReadings(input.pinnedModel, piSeatPaths(input.runner.stateRoot, input.sessionName).agentDir);
-  return pins.ok ? { ...read, pinReadings: pins.readings } : pins;
+  if (pins.ok) return { ...read, pinReadings: pins.readings };
+  // An unreadable models.json only hides which reading Pi chose: a record that matches none of them diverges either way.
+  const readings = piPinReadings(input.pinnedModel);
+  return readings.some((pin) => modelsMatch(pin, read.model)) ? pins : { ...read, pinReadings: readings };
 }

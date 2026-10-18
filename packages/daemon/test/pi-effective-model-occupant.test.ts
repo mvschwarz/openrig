@@ -501,6 +501,18 @@ describe("Pi pin that is itself a model id in the seat's models.json", () => {
     }
   });
 
+  it("with a models.json that can't be read as Pi's config, a record matching no reading of the pin is a divergence", async () => {
+    const bad = ["{ not json", "[]", JSON.stringify({ providers: [] }), JSON.stringify({ providers: { lab: { models: {} } } }), JSON.stringify({ providers: { lab: { models: [{ name: "y" }] } } })];
+    for (const modelsJson of bad) {
+      const m = monitorFor(seat("z", "lab/y:high", modelsJson));
+      const r = await pass(m);
+      expect(r.pending).toEqual([]);
+      expect(r.fired).toHaveLength(1);
+      expect(r.fired[0]).toMatchObject({ sessionName: SESSION, runtime: "pi", pinnedModel: "lab/y:high", effectiveModel: "lab/z" });
+      expect(m.sent).toEqual(["orch-lead@r", "operator-admin@kernel", "watch-lead@oversight"]);
+    }
+  });
+
   it("a pin without a level suffix never reads models.json", async () => {
     const r = await pass(monitorFor(seat("y", "lab/y", "{ not json")));
     expect(r.fired).toEqual([]);
