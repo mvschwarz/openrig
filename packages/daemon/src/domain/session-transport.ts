@@ -1490,6 +1490,8 @@ export interface CaptureResult {
   lines?: number;
   error?: string;
   reason?: string;
+  /** Claude Code and Codex seats: what the live input box holds, and which part is likely a harness suggestion. */
+  inputBox?: InputBoxAnnotation;
 }
 
 export interface BroadcastResult {
@@ -3221,7 +3223,23 @@ export class SessionTransport {
 
     await this.reconcileStartupReadiness(sessionName).catch(() => {});
 
-    return { ok: true, sessionName, content, lines };
+    const runtime = sessionMeta.runtime;
+    const inputBox = runtime === "claude-code" || runtime === "codex" ? await this.captureInputBox(sessionName, runtime) : undefined;
+    return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
+  }
+
+  /** The input box as one styled read of the visible screen sees it, with the cursor read before and after that read:
+   *  a cursor that moved in between is reported as unavailable. Never fails the capture. */
+  private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
+    try {
+      const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
+      const screen = await this.tmuxAdapter.capturePaneContent(sessionName, 0, { escapeSequences: true });
+      const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
+      const steady = before && after && before.x === after.x && before.y === after.y ? after : null;
+      return annotateInputBox(screen, steady, runtime, { cursorMoved: before !== null && after !== null && steady === null });
+    } catch {
+      return annotateInputBox(null, null, runtime);
+    }
   }
 
   async broadcast(target: TargetSpec, text: string, opts?: BroadcastOpts): Promise<BroadcastResult> {
@@ -3431,4 +3449,168 @@ export class SessionTransport {
 
     return false;
   }
+}
+
+/** A region of the visible screen: zero-based rows and columns as tmux reports the cursor, end column exclusive. */
+export interface InputBoxSpan {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  /** The region's text, one line per screen row (a soft-wrapped line spans rows). */
+  text: string;
+}
+
+/**
+ * What a capture says about a Claude Code or Codex seat's live input box: its text, where it is, and which part is
+ * likely a harness suggestion (ghost text) rather than something the person typed. Read from one styled capture of
+ * the visible screen and the cursor, never from scrollback or the terminal output above the box. A heuristic: a
+ * person can move the cursor, text wraps, and harness versions differ, so conflicting or missing evidence reads
+ * `unknown` rather than a guess.
+ */
+export interface InputBoxAnnotation {
+  status: "empty" | "typed" | "likely-suggestion" | "typed-with-suggestion" | "unknown" | "no-input-box";
+  confidence: "high" | "medium" | "low" | "unknown";
+  /** tmux's cursor on the visible screen (zero-based), or null when it couldn't be read or moved during the read. */
+  cursor: { x: number; y: number; width: number; height: number } | null;
+  /** All the text in the input box. */
+  input: InputBoxSpan | null;
+  /** The part of `input` that is likely a harness suggestion. */
+  suggestion: InputBoxSpan | null;
+  evidence: string[];
+  /** One sentence for the reader: what the box holds and how much to trust it. */
+  hint: string;
+}
+
+const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's later rows by two cells
+const PLAIN_RULE = /^[─━═-]{10,}$/;
+
+/** Approximate terminal cells for one character: ASCII one, combining marks none, East Asian wide and emoji two. */
+function inputCellWidth(ch: string): number {
+  const c = ch.codePointAt(0) ?? 0;
+  if (c < 0x300) return 1;
+  if (c <= 0x36f || (c >= 0x200b && c <= 0x200f) || (c >= 0xfe00 && c <= 0xfe0f)) return 0;
+  if ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff)
+    || (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff)) return 2;
+  return 1;
+}
+
+/** The input box's rows on the screen: from the prompt row to the row before Claude Code's closing rule, or Codex's
+ *  box as codexInputBox reads it. Null when no input box is recognized (a selector, a menu instead of a box, busy
+ *  output with no box, another layout). */
+function inputBoxRows(lines: string[], runtime: "claude-code" | "codex"): { first: number; last: number; empty?: boolean } | null {
+  if (runtime === "codex") {
+    const box = codexInputBox(lines.join("\n"));
+    if (!box) return null;
+    return { first: box.inputAt, last: box.inputAt + Math.max(box.rows.length, 1) - 1, empty: box.text === "" };
+  }
+  const promptClass = composerPromptClassForRuntime("claude-code");
+  const first = findComposerInputLineIndex(lines, promptClass);
+  if (first < 0 || composerNumberedChoicePattern(promptClass).test(lines[first]!.trimStart())) return null;
+  let close = first + 1;
+  while (close < lines.length && !PLAIN_RULE.test(lines[close]!.trim())) close++;
+  return close < lines.length ? { first, last: close - 1 } : null;
+}
+
+export function annotateInputBox(
+  styledScreen: string | null,
+  cursor: { x: number; y: number; width: number; height: number } | null,
+  runtime: "claude-code" | "codex",
+  opts: { cursorMoved?: boolean } = {},
+): InputBoxAnnotation {
+  const harness = runtime === "codex" ? "Codex" : "Claude Code";
+  const result = (status: InputBoxAnnotation["status"], confidence: InputBoxAnnotation["confidence"], hint: string,
+    input: InputBoxSpan | null = null, suggestion: InputBoxSpan | null = null, evidence: string[] = []): InputBoxAnnotation =>
+    ({ status, confidence, cursor, input, suggestion, evidence, hint });
+  if (!styledScreen?.trim()) return result("unknown", "unknown", "The screen couldn't be read, so the input box wasn't checked.");
+  const cells = styledLines(styledScreen);
+  const lines = cells.map((row) => row.map((cell) => cell.ch).join(""));
+  const box = inputBoxRows(lines, runtime);
+  if (!box) return result("no-input-box", "unknown", `No ${harness} input box was recognized on the screen.`);
+
+  // Each box row's text cells with their screen columns. The first row's text starts after the prompt glyph and its
+  // space, a later row's after its two-cell indent.
+  const rows: Array<{ row: number; cells: Array<{ ch: string; faint: boolean; col: number }> }> = [];
+  for (let row = box.first; row <= box.last; row++) {
+    let col = 0;
+    const placed = (cells[row] ?? []).map((cell) => { const at = col; col += inputCellWidth(cell.ch); return { ...cell, col: at }; });
+    const glyphAt = row === box.first ? placed.findIndex((cell) => cell.ch === "❯" || cell.ch === "›") : -1;
+    const startCol = row === box.first ? (glyphAt >= 0 ? placed[glyphAt]!.col + 2 : INPUT_CONTINUATION_COLUMN) : INPUT_CONTINUATION_COLUMN;
+    let text = placed.filter((cell) => cell.col >= startCol);
+    while (text.length && !text[text.length - 1]!.ch.trim()) text = text.slice(0, -1);
+    rows.push({ row, cells: text });
+  }
+  const startCol = rows[0]!.cells[0]?.col ?? (lines[box.first]!.search(/[❯›]/) + 2);
+  const spanOf = (from: { row: number; col: number }, to: { row: number; col: number }): InputBoxSpan => ({
+    startRow: from.row, startCol: from.col, endRow: to.row, endCol: to.col,
+    text: rows.filter((r) => r.row >= from.row && r.row <= to.row)
+      .map((r) => r.cells.filter((cell) => (r.row > from.row || cell.col >= from.col) && (r.row < to.row || cell.col < to.col)).map((cell) => cell.ch).join(""))
+      .join("\n"),
+  });
+  const textRows = rows.filter((r) => r.cells.length > 0);
+  if (box.empty || textRows.length === 0) {
+    return result("empty", "high", "The input box is empty.", null, null, ["no text in the input box"]);
+  }
+  const lastRow = textRows[textRows.length - 1]!;
+  const lastCell = lastRow.cells[lastRow.cells.length - 1]!;
+  const end = { row: lastRow.row, col: lastCell.col + inputCellWidth(lastCell.ch) };
+  const input = spanOf({ row: box.first, col: startCol }, end);
+  const quote = (text: string) => {
+    const flat = text.replace(/\s*\n\s*/g, " ").trim();
+    return `"${flat.length > 60 ? `${flat.slice(0, 57)}...` : flat}"`;
+  };
+
+  const styled = /\x1b\[/.test(styledScreen);
+  const textCells = rows.flatMap((r) => r.cells.filter((cell) => cell.ch.trim()).map((cell) => ({ ...cell, row: r.row })));
+  const allFaint = styled && textCells.every((cell) => cell.faint);
+  const noneFaint = styled && textCells.every((cell) => !cell.faint);
+  const trySuggestion = runtime === "claude-code" && CLAUDE_TRY_SUGGESTION.test(input.text.replace(/\s+/g, ""));
+  const evidence: string[] = [];
+  if (trySuggestion) evidence.push("Claude Code's Try \"...\" suggestion");
+  evidence.push(!styled ? "no styling in the capture" : allFaint ? "text drawn faint" : noneFaint ? "text not faint" : "part of the text drawn faint");
+
+  const inBox = cursor !== null && cursor.y >= box.first && cursor.y <= box.last;
+  const atStart = inBox && cursor!.y === box.first && cursor!.x === startCol;
+  const atEnd = inBox && cursor!.y === end.row && cursor!.x === end.col;
+  if (cursor === null) evidence.unshift(opts.cursorMoved ? "cursor moved during the capture" : "cursor unavailable");
+  else evidence.unshift(!inBox ? "cursor outside the input box" : atStart ? "cursor at the input's start" : atEnd ? "cursor after the text" : "cursor inside the text");
+  const why = evidence.join("; ");
+
+  const likelySuggestion = (confidence: InputBoxAnnotation["confidence"]) => result("likely-suggestion", confidence,
+    `The input box shows ${quote(input.text)}, likely a ${harness} suggestion (${why}), not something the person typed: it isn't their intent, a draft or a staged command.`,
+    input, input, evidence);
+  const typed = (confidence: InputBoxAnnotation["confidence"]) => result("typed", confidence,
+    `The input box holds ${quote(input.text)}, likely typed by the person and not yet sent (${why}).`, input, null, evidence);
+  const unknown = () => result("unknown", "unknown",
+    `The input box shows ${quote(input.text)}; whether the person typed it or it's a ${harness} suggestion is unknown (${why}).`, input, null, evidence);
+
+  if (cursor === null || !inBox) {
+    if (trySuggestion || (cursor === null && allFaint)) return likelySuggestion("medium");
+    return unknown();
+  }
+  if (atStart) {
+    if (allFaint || trySuggestion) return likelySuggestion("high");
+    if (!styled) return likelySuggestion("medium");
+    // Claude Code draws its suggestion faint; unfaint text with the cursor at its start may be a draft the person moved
+    // the cursor back through. Codex's suggestion styling isn't established, so the cursor alone stays medium there.
+    return runtime === "codex" && noneFaint ? likelySuggestion("medium") : unknown();
+  }
+  if (atEnd) {
+    if (noneFaint) return typed("high");
+    if (!styled) return typed("medium");
+    return unknown();
+  }
+  // The cursor is inside the text: the person moved it, or typed a prefix and the harness suggests the rest after it.
+  const split = textCells.findIndex((cell) => cell.row > cursor.y || (cell.row === cursor.y && cell.col >= cursor.x));
+  const before = split < 0 ? textCells : textCells.slice(0, split);
+  const after = split < 0 ? [] : textCells.slice(split);
+  if (styled && before.length > 0 && after.length > 0 && before.every((cell) => !cell.faint) && after.every((cell) => cell.faint)) {
+    const suggestion = spanOf({ row: cursor.y, col: cursor.x }, end);
+    const typedPart = spanOf({ row: box.first, col: startCol }, { row: cursor.y, col: cursor.x });
+    return result("typed-with-suggestion", "high",
+      `The input box holds ${quote(typedPart.text)}, likely typed by the person, then ${quote(suggestion.text)}, likely a ${harness} suggestion after the cursor (${why}; the text after the cursor is faint): the suggestion isn't their intent.`,
+      input, suggestion, [...evidence, "the text after the cursor is faint"]);
+  }
+  if (noneFaint) return typed("medium");
+  return unknown();
 }
