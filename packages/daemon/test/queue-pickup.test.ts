@@ -5,6 +5,7 @@
 //   unclaimed            — no claim yet;
 //   working              — claimed AND (substantive motion since the claim OR still inside
 //                          the threshold — the anti-noise direction);
+//   needs-input          — claimed, with outstanding input reported by the owner oracle;
 //   stalled-after-claim  — claimed, past threshold, zero substantive motion; evidence named;
 //   parked               — state=blocked only. Wake health is a separate `rig parked`
 //                          diagnosis; a wakeless blocked row still projects as parked;
@@ -24,7 +25,7 @@ import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 const THRESHOLD_ENV = "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES";
 
 interface PickupShape {
-  state: "unclaimed" | "working" | "stalled-after-claim" | "parked" | "terminal";
+  state: "unclaimed" | "working" | "needs-input" | "stalled-after-claim" | "parked" | "terminal";
   evidence?: string;
 }
 const pickupOf = (item: QueueItem): PickupShape | undefined =>

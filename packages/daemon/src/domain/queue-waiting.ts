@@ -63,9 +63,9 @@ export interface WaitingView {
 }
 
 export function readWaitingView(db: Database.Database, id: string, readActivity?: WaitingActivityReader): WaitingView | null {
-  const row = db.prepare(`SELECT qitem_id, source_session, destination_session, state, blocked_on, closure_required_at
+  const row = db.prepare(`SELECT qitem_id, source_session, destination_session, state, claimed_at, blocked_on, closure_required_at
     FROM queue_items WHERE qitem_id = ?`).get(id) as {
-    qitem_id: string; source_session: string; destination_session: string; state: string; blocked_on: string | null; closure_required_at: string | null;
+    qitem_id: string; source_session: string; destination_session: string; state: string; claimed_at: string | null; blocked_on: string | null; closure_required_at: string | null;
   } | undefined;
   if (!row) return null;
   const blocker = row.blocked_on?.startsWith("qitem-") ? db.prepare(
@@ -92,6 +92,16 @@ export function readWaitingView(db: Database.Database, id: string, readActivity?
     view.nextBackstop.owner = recoveryOwner ?? row.destination_session;
     view.nextBackstop.dueAt = base ? new Date(Date.parse(base) + delay * 1000).toISOString() : null;
     view.nextBackstop.mechanism = row.state === "pending" ? "queue-stuck-sweep:unclaimed" : "queue-stuck-sweep:pickup (activity checked at detection)";
+  }
+  if (row.state === "in-progress" && row.claimed_at && (observed?.needsInput.count ?? 0) > 0) {
+    // Input waits suspend the pickup-age finding, never an explicit closure deadline.
+    view.nextBackstop = {
+      owner: row.destination_session,
+      mechanism: row.closure_required_at ? "queue-stuck-sweep:overdue" : "none (owner needs input)",
+      dueAt: row.closure_required_at,
+      intervalSeconds: row.closure_required_at ? sweepInterval : null,
+      note: observed?.needsInput.reason ?? "Waiting for owner input to clear.",
+    };
   }
   if (row.state === "blocked") {
     const hasTimers = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'queue_transition_wakes'").get();
