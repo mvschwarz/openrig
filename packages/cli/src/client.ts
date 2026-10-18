@@ -47,7 +47,7 @@ function resolveTerminalToken(): string | null {
   const env = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
   if (env) return env;
   try {
-    const homeDir = process.env.OPENRIG_HOME ?? path.join(process.env.HOME ?? "", ".openrig");
+    const homeDir = getOpenRigHome();
     const tokenPath = path.join(homeDir, "terminal-token");
     const token = fs.readFileSync(tokenPath, "utf-8").trim();
     return token || null;

@@ -1551,6 +1551,39 @@ describe("queue routes", () => {
     await expectLimitParsing(app, "/api/queue/outbox/list?senderSession=a@r");
   });
 
+  it("GET /api/queue/overdue refuses only a positive limit SQLite cannot bind; every limit main serves is still served", async () => {
+    for (const body of ["one", "two", "three"]) {
+      const res = await app.request("/api/queue/create", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+        body: JSON.stringify({ destinationSession: "b@r", body, nudge: false }),
+      });
+      expect(res.status).toBe(201);
+    }
+    const overdue = db.prepare("UPDATE queue_items SET state = 'in-progress', closure_required_at = ? WHERE body = ?");
+    overdue.run("2026-01-01T00:00:01.000Z", "one");
+    overdue.run("2026-01-01T00:00:02.000Z", "two");
+    overdue.run("2026-01-01T00:00:03.000Z", "three");
+    const bodies = async (query: string) => {
+      const res = await app.request(`/api/queue/overdue${query}`);
+      return { status: res.status, bodies: res.status === 200 ? ((await res.json()) as Array<{ body: string }>).map((q) => q.body) : await res.json() };
+    };
+    const all = { status: 200, bodies: ["one", "two", "three"] };
+    expect(await bodies("")).toEqual(all);
+    expect(await bodies("?limit=2")).toEqual({ status: 200, bodies: ["one", "two"] });
+
+    // A positive limit SQLite cannot bind was a 500; it is now a 400.
+    for (const limit of ["9223372036854775296", "99999999999999999999"]) {
+      expect({ limit, ...(await bodies(`?limit=${limit}`)) })
+        .toEqual({ limit, status: 400, bodies: { error: "limit must be an integer" } });
+    }
+    // Every limit main serves keeps its answer: the largest bindable value, and the values the
+    // route's normalization drops (non-numeric, non-positive, and magnitudes that parse to Infinity).
+    const nines = "9".repeat(400);
+    for (const limit of ["9223372036854775295", "abc", "-1", "0", "-99999999999999999999", nines, `-${nines}`]) {
+      expect({ limit, ...(await bodies(`?limit=${limit}`)) }).toEqual({ limit, ...all });
+    }
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
