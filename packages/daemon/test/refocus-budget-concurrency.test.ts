@@ -117,6 +117,17 @@ describe("refocus: the time budget", () => {
     expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
   }, 20_000);
 
+  it("limits a selected budget to 52 s, so reporting and recording the outcome still end inside the 60 s bound", async () => {
+    // At 52 s the trace's cap is 23.1 s: a 23.5 s trace ends as a gap (at 55 s its cap would have been 24.4 s).
+    const f = fixture();
+    await hook(f, "PostCompact", "s1");
+    const r = await hook(f, "UserPromptSubmit", "s1", { OPENRIG_REFOCUS_BUDGET_MS: "120000", STUB_TRACE_MS: "23500" });
+    expect(r.killed).toBe(false);
+    expect(context(r)).toMatch(/TRACE GAP — spawnSync .* ETIMEDOUT/);
+    expect(r.ms).toBeLessThan(23_500);
+    expect(stateOf(f, "s1")).toMatchObject({ pendingOn: "PostCompact" });
+  }, 40_000);
+
   it("keeps today's 2 s trace cap when no budget is selected", async () => {
     const f = fixture();
     await hook(f, "PostCompact", "s1");

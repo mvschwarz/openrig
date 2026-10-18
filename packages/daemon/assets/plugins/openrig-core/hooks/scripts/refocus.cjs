@@ -15,12 +15,20 @@ const { recordRefocusResult } = require("./refocus-health.cjs");
 
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
+// The per-occupant state lock: when one left by a killed process is stale, and how long to wait for it. A live holder
+// keeps it for milliseconds and a stale one is broken, so waiting past the stale age always ends holding the lock.
+const LOCK_STALE_MS = 5_000;
+const LOCK_WAIT_MS = LOCK_STALE_MS + 1_000;
+// The issue report after a failed attempt gets this long, after the budget and inside the outer bound.
+const REPORT_MS = 1_500;
 // The hook's whole time budget. Both registrations allow this hook 60 s (hooks/claude.json, hooks/codex.json); the
-// default keeps today's 4.5 s, and OPENRIG_REFOCUS_BUDGET_MS selects a longer one, up to 55 s so the hook always ends
-// before that outer bound. Each lookup's own cap scales with the budget (2 s at the default), and every lookup is also
-// clipped to what's left of it, so a slow lookup leaves an honest gap instead of the harness's kill.
+// default keeps today's 4.5 s, and OPENRIG_REFOCUS_BUDGET_MS selects a longer one. After the budget, a delivery still
+// reports a failure and takes the occupant's lock to record its outcome, so the longest budget leaves room for both
+// (and a margin) before the outer bound: 52 s. Each lookup's own cap scales with the budget (2 s at the default), and
+// every lookup is also clipped to what's left of it, so a slow lookup leaves an honest gap instead of the harness's kill.
+const OUTER_TIMEOUT_MS = 60_000;
 const DEFAULT_BUDGET_MS = 4_500;
-const MAX_BUDGET_MS = 55_000;
+const MAX_BUDGET_MS = OUTER_TIMEOUT_MS - REPORT_MS - LOCK_WAIT_MS - 500;
 const BUDGET_MS = (() => {
   const value = Number(process.env.OPENRIG_REFOCUS_BUDGET_MS);
   return Number.isFinite(value) && value > DEFAULT_BUDGET_MS ? Math.min(value, MAX_BUDGET_MS) : DEFAULT_BUDGET_MS;
@@ -36,12 +44,6 @@ const lookupTimeout = (reserve = 0) => Math.min(LOOKUP_CAP_MS, budgetLeftMs() - 
 // Normal managed restore advances on ~30 s polls with a 10 s idle wait.
 // A lost daemon stage must not suppress this occupant's refocus indefinitely.
 const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
-// The per-occupant state lock: when one left by a killed process is stale, and how long to wait for it. A live holder
-// keeps it for milliseconds and a stale one is broken, so waiting past the stale age always ends holding the lock.
-const LOCK_STALE_MS = 5_000;
-const LOCK_WAIT_MS = LOCK_STALE_MS + 1_000;
-// The issue report after a failed attempt gets this long, after the budget and still well inside the outer bound.
-const REPORT_MS = 1_500;
 // A delivery claim lasts for the budget plus this margin, so a claim left by a killed hook can't hold refocus back.
 const CLAIM_MARGIN_MS = 2_000;
 

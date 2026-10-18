@@ -61,8 +61,8 @@ session has no identity), and it degrades to silence on unrelated hook errors.
 whoami`, `rig config`) gets at most 2 of them. Every lookup is also cut to what is left of the budget, so slow lookups
 end as a reported gap (`TRACE GAP`, `REFOCUS CONTENT REF FAILED`, or a role marked unknown) and the attempt still
 delivers what it has and counts as failed. They never run into the harness's kill. Set `OPENRIG_REFOCUS_BUDGET_MS` in a
-seat's environment to give a slow trace more time, up to 55000 (55 s). Each lookup's cap grows in proportion: at 45000
-the trace may take 20 seconds. Both registrations allow `refocus.cjs` 60 seconds, so the selected budget always ends
+seat's environment to give a slow trace more time, up to 52000 (52 s), which leaves the hook time to record its outcome
+before the 60 seconds are up. Each lookup's cap grows in proportion: at 45000 the trace may take 20 seconds. Both registrations allow `refocus.cjs` 60 seconds, so the selected budget always ends
 before the harness stops the hook. The other OpenRig hooks keep their 5 seconds. A hook that hangs outside its lookups
 can hold a prompt for up to those 60 seconds.
 
