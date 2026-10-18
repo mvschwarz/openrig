@@ -1,3 +1,5 @@
+import stringWidth from "string-width";
+
 /**
  * One place for the composer/prompt glyphs and the shapes built from them.
  *
@@ -86,6 +88,17 @@ export function stripComposerPromptGlyph(line: string, promptClass: string = COM
   return line.replace(promptPattern(promptClass, ""), "");
 }
 
+/** Read the prompt once for both advisory draft recognition and cursor-bound
+ * input checks. Keep the one prompt-space separate from authored whitespace.
+ */
+export function readComposerPromptLine(line: string, promptClass: string = COMPOSER_PROMPT_CLASS) {
+  const trimmed = line.trimStart();
+  const body = stripComposerPromptGlyph(trimmed, promptClass);
+  if (body === trimmed || (body !== "" && !/^\s/.test(body))) return null;
+  const indent = line.slice(0, line.length - trimmed.length);
+  return { indent, glyph: trimmed[0]!, text: body.slice(1), prefix: indent.length + 2 };
+}
+
 /**
  * Distinct prompt glyphs in the capture up to and including `inputIndex`.
  * The walk does not stop at a blank line or a rule: a multi-line draft can
@@ -110,4 +123,62 @@ export function composerGlyphKindsInBlock(lines: string[], inputIndex: number): 
 export function composerPromptIsAmbiguous(lines: string[], inputIndex: number, promptClass: string = COMPOSER_PROMPT_CLASS): boolean {
   if (promptClass !== COMPOSER_PROMPT_CLASS) return false;
   return composerGlyphKindsInBlock(lines, inputIndex).size > 1;
+}
+
+export interface ComposerSnapshot {
+  screen: string;
+  cursor: { x: number; y: number; width: number; height: number };
+  inMode: boolean;
+}
+
+export interface ComposerOwnership { text: string; frame: string }
+
+export interface ComposerInput {
+  state: "empty" | "text" | "unknown";
+  rows: string[];
+  columns: number;
+  frame?: string;
+  pasteMatchesExpected?: boolean;
+  cursorAtEnd: boolean;
+  collapsedPaste: string | null;
+  /** A proven display-only suffix, so readiness can reuse the same input read. */
+  ghost?: { line: number; offset: number; continuationRows: number };
+}
+
+export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+ \+(\d+) lines\]$/;
+
+/** Preserve characters and spaces within rows. Only a real line break, a full
+ * terminal row, or a word that cannot fit may explain a rendered row boundary.
+ */
+export function composerContainsOwnedText(input: ComposerInput, expected: string): boolean {
+  if (input.state !== "text" || !input.cursorAtEnd || input.collapsedPaste || !input.rows.length) return false;
+  const text = expected.replace(/\r\n/g, "\n");
+  let offsets = new Set([0]);
+  for (let index = 0; index < input.rows.length; index++) {
+    const row = input.rows[index]!;
+    const next = new Set<number>();
+    for (const offset of offsets) {
+      if (!text.startsWith(row, offset)) continue;
+      const end = offset + row.length;
+      if (index === input.rows.length - 1) { if (end === text.length) return true; continue; }
+      if (text[end] === "\n") next.add(end + 1);
+      if (stringWidth(row) >= input.columns) next.add(end);
+      if (text[end] === " ") {
+        const word = /^\S+/.exec(text.slice(end + 1))?.[0] ?? "";
+        if (word && stringWidth(row + " " + word) > input.columns) next.add(end + 1);
+      }
+    }
+    offsets = next;
+    if (!offsets.size) return false;
+  }
+  return false;
+}
+
+/** An opaque label may be remembered only immediately after this lease pasted
+ * the text. Subsequent submission requires that same complete label and cursor.
+ */
+export function ownCollapsedPaste(input: ComposerInput, expected: string): string | null {
+  if (input.collapsedPaste && input.cursorAtEnd && input.pasteMatchesExpected) return input.collapsedPaste;
+  const match = input.collapsedPaste && input.cursorAtEnd ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(input.collapsedPaste) : null;
+  return match && Number(match[1]) === expected.split("\n").length - 1 ? input.collapsedPaste : null;
 }

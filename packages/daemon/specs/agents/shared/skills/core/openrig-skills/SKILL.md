@@ -53,7 +53,7 @@ These are auto-delivered to every rig; their name+description are already in you
 - **openrig-user** — you need a `rig` CLI command (send / queue / ps / whoami / scope / broadcast). The daily CLI surface.
 - **applying-a-permission-policy** — a rig or seat has a permission policy attached, or you're setting one up: translate it into the live harness configuration.
 - **claude-compaction-restore** — you just compacted (Claude). Restore from durable evidence before resuming real work.
-- **delegating-work** — deciding who should do a task: you, a spawned subagent, or a durable peer seat that already holds the context.
+- **delegating-work** — deciding who should do a task (you, a spawned subagent, or a durable peer seat that already holds the context), and how to brief the agent you hand it to, which depends on the model it runs.
 - **loading-addressable-markdown** — a task names Markdown as `path#h2-slug` or `path#h2-slug/h3-slug` outside the context-pack library.
 - **session-compaction-and-restore** — preparing for, or recovering from, compaction (any runtime). The write- and read-side protocol.
 - **queue-handoff** — you're passing durable work to another seat or ending your turn. The queue is the work ledger, not chat.
