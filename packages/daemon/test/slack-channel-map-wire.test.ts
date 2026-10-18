@@ -250,6 +250,8 @@ describe("#192 channel map through the real Slack wire", () => {
     rewire(undefined);
     const a = await ask("s1@my-rig");
     expect((await deliver(a.qitemId)).thread_ts).toBeUndefined(); // A's root 1.1
+    // Answered, so A's root carries no live gate and an update may thread into it (#96).
+    repo.update({ qitemId: a.qitemId, actorSession: human, state: "done", closureReason: "no-follow-on", transitionNote: "human approved" });
     const b = await ask("s2@my-rig", { humanIntent: "update", summary: "B", body: "B", replyTo: a.qitemId });
     let release!: () => void;
     holdNext = new Promise<void>((resolve) => { release = resolve; });
