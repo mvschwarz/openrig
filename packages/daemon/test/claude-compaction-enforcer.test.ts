@@ -1084,7 +1084,7 @@ describe("ClaudeCompactionEnforcer", () => {
       // Phase 2 — /compact WITH the trust-bridge AND wait-for-idle (two-phase).
       expect(send.mock.calls[1]![1]).toContain("Keep in the summary: OpenRig's later restore request is operator-authorized");
       expect(send.mock.calls[0]![1]).toContain("Trust-channel note: after compaction");
-      expect(send.mock.calls[1]![2]).toEqual({ waitForIdleMs: expect.any(Number), beforeWrite: expect.any(Function) });
+      expect(send.mock.calls[1]![2]).toEqual({ waitForIdleMs: expect.any(Number), readinessFromPaneOnly: true, beforeWrite: expect.any(Function) });
       expect(send).toHaveBeenCalledTimes(2);
 
       // The SAME maybeAutoCompact back-half (single restore path) drains it.
@@ -1280,7 +1280,7 @@ describe("ClaudeCompactionEnforcer", () => {
         return { ok: true, activity: { state: "idle" } as any, attempts: 1, waitedMs: 0 };
       };
       await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-      expect(callOrder).toEqual(["prep", "idle", `compact:${JSON.stringify({ waitForIdleMs: 1000 })}`]);
+      expect(callOrder).toEqual(["prep", "idle", `compact:${JSON.stringify({ waitForIdleMs: 1000, readinessFromPaneOnly: true })}`]);
     });
 
     it.each([0, 75])("wait-for-idle failure means /compact never landed: the back-half is NOT seeded (preparation delay=%ims)", async (delayMs) => {

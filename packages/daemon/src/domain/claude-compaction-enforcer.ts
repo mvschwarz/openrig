@@ -940,8 +940,9 @@ export class ClaudeCompactionEnforcer {
       check();
       // Both paths send only to an idle seat, with the same idle wait, bounded by the attempt's existing
       // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
+      // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { beforeWrite: check, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())) } : {}) });
+        { beforeWrite: check, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result;
     let guardRefused = false;

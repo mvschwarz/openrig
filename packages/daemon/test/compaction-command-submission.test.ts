@@ -20,6 +20,8 @@ function fixture(compactInstruction = '') {
   const policyRef = {compactInstruction};
   const home = mkdtempSync(join(tmpdir(), 'compaction-command-')); homes.push(home);
   let clock = 10_000, activity = 'idle';
+  // What a runtime hook says, when it differs from the pane (null: the hook agrees with the pane).
+  let hookActivity: string | null = null;
   let onSleep: (() => void) | undefined;
   const generation = 'generation-one';
   const db = {prepare: () => ({get: () => undefined, all: () => []})} as any;
@@ -37,7 +39,8 @@ function fixture(compactInstruction = '') {
   const transport = new SessionTransport({db, rigRepo: {} as any, sessionRegistry: {} as any, tmuxAdapter: tmux as any, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => new Date(clock), waitForIdlePollMs: 5});
   (transport as any).getSessionMeta = () => ({runtime: 'claude-code', attachmentType: 'tmux', nodeId: 'node-one', pane: '%1', occupant: generation, resumeToken: 'native-one'});
   (transport as any).claudeDeliveryObservation = async () => ({state: 'unknown', detail: 'injected process observation'});
-  (transport as any).classifySendReadiness = async () => ({state: activity, reason: 'fixture', evidenceSource: 'fixture'});
+  // A send that asks for pane-only readiness reads the pane; any other send may be decided by the hook.
+  (transport as any).classifySendReadiness = async (q: {readinessFromPaneOnly?: boolean}) => ({state: !q.readinessFromPaneOnly && hookActivity !== null ? hookActivity : activity, reason: 'fixture', evidenceSource: 'fixture'});
   (transport as any).diagnoseProducerLink = async () => 'fixture';
   const e = new ClaudeCompactionEnforcer({resolveClaudeCompactionPolicy: () => policy} as any, transport, {openrigHome: home, manualPrepWaitMs: 1000, compactSendIdleWaitMs: 20, now: () => clock, sleep: async (ms) => { clock += ms; onSleep?.(); }, resolveOccupantGeneration: () => generation});
   const stageMap = () => {
@@ -47,7 +50,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, activity: (s: string) => { activity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -244,4 +247,28 @@ it('a failed manual trigger reports the /compact result too', async () => {
   expect(body.ok).toBe(false);
   expect(body.preparation).toMatchObject({compact: 'uncertain'});
   expect(body.compact).toMatch(/^uncertain: /);
+});
+
+it('a fresh idle hook while the pane still shows the seat working sends nothing; the attempt stays armed', async () => {
+  const f = fixture();
+  await f.e.maybeAutoCompact(input);
+  f.stageMap();
+  f.hook('idle');       // the newest hook can predate the preparation turn's remaining work
+  f.activity('running'); // the live pane shows the seat still working
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'waiting_for_idle'});
+  expect(f.compactIndex()).toBe(-1);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'waiting', compact: 'not_sent'});
+  f.activity('idle');
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+});
+
+it('manual: a fresh idle hook while the pane shows work does not let /compact through either', async () => {
+  const f = fixture();
+  f.onSleep(() => f.stageMap());
+  f.hook('idle');
+  f.activity('running');
+  vi.spyOn(f.transport, 'waitUntilIdle').mockResolvedValue({ok: true} as any); // the long wait passed on the hook
+  const outcome = await f.e.triggerManualCompact({...input, usedPercentage: 40}, {operatorInitiated: true});
+  expect(outcome).toMatchObject({triggered: false});
+  expect(f.compactIndex()).toBe(-1);
 });
