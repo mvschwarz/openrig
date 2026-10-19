@@ -590,6 +590,36 @@ describe("native resume probe", () => {
     })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
   });
 
+  it.each([
+    ["earlier custom footer", "› Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n"],
+    ["no earlier readiness evidence", ""],
+  ])("retains a complete live trust panel before a trailing heading fragment: %s", (_label, before) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${before}${currentTrustPrompt}\n  Trust this folder?`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each([
+    ["default footer", "› Earlier conversation prompt\n  gpt-5.6-sol high · ~/work"],
+    ["Codex header", "OpenAI Codex (v0.156.1)\n› Earlier conversation prompt"],
+  ])("keeps a complete live trust panel ahead of earlier TUI evidence: %s", (_label, before) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${before}\n${currentTrustPrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each(["›", "»"])("keeps a stale panel dismissed after a %s composer, footer and trailing heading fragment", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n${prompt} Continue\n  Context 81% left · GPT-6-Astra high\n  Trust this folder?`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it("recognizes the live trust panel when Quit is selected", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: currentTrustPrompt.replace("› 1. Trust and continue", "  1. Trust and continue").replace("  2. Quit", "› 2. Quit"),
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
   it("preserves the legacy branch even with a later headerless composer and custom footer", () => {
     expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
       paneContent: "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No\n› Continue\n  Context 81% left · GPT-6-Astra high",

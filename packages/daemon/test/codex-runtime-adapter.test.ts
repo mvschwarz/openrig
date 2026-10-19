@@ -1206,11 +1206,16 @@ describe("Codex runtime adapter", () => {
     }
   });
 
-  it("classifies current folder trust consistently in readiness and resume without answering it", async () => {
+  it.each([
+    ["panel alone", currentTrustPrompt],
+    ["trailing heading fragment", `› Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}\n  Trust this folder?`],
+    ["earlier default footer", `› Earlier conversation prompt\n  gpt-5.6-sol high · ~/work\n${currentTrustPrompt}`],
+    ["earlier Codex header", `OpenAI Codex (v0.156.1)\n› Earlier conversation prompt\n${currentTrustPrompt}`],
+  ])("classifies current folder trust consistently in readiness and resume without answering it: %s", async (_label, paneContent) => {
     let pollCount = 0;
     const tmux = mockTmux({
       getPaneCommand: vi.fn(async () => { pollCount++; return "codex"; }),
-      capturePaneContent: vi.fn(async () => currentTrustPrompt),
+      capturePaneContent: vi.fn(async () => paneContent),
     });
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
 
