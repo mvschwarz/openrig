@@ -60,7 +60,7 @@ describe("#1347: per-seat effort with configured/observed provenance", () => {
     expect(screen.lines.find((line) => line.includes("┃ dev50") && line.includes("driver"))!.slice(at, at + 7).trim()).toBe("high*");
     expect(screen.lines.find((line) => line.includes("guard") && line.includes("gpt-5.6"))!.slice(at, at + 7).trim()).toBe("medium+");
     expect(screen.lines.find((line) => /\sqa\s/.test(line))!.slice(at, at + 7).trim()).toBe("—");
-    expect(screen.lines.join("\n")).toContain("CFG EFF = * seat choice · + authored · — none · ? unknown; observed on drill");
+    expect(screen.lines.join("\n")).toContain("EFFORT (configured): * seat choice · + authored · — none · ? unknown; observed on drill");
   });
 
   it("keeps the compact CFG column inside 120 columns and shows unknown separately from none", () => {

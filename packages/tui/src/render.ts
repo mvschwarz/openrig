@@ -225,7 +225,7 @@ function effortDetailText(
 }
 
 /** One line under the table naming what the column holds: configured, never observed. */
-const EFFORT_LEGEND = "CFG EFF = * seat choice · + authored · — none · ? unknown; observed on drill";
+const EFFORT_LEGEND = "EFFORT (configured): * seat choice · + authored · — none · ? unknown; observed on drill";
 
 function contextCompact(value: number | null, narrow: boolean): string {
   if (value == null) return "—";
