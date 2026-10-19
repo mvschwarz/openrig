@@ -106,6 +106,9 @@ export type HarnessLaunchResult =
   // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
   // leave it unset.
   | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
+    /** The native resume probe's code for the startup gate that stopped the launch (for example `hook_trust_gate`),
+     *  when one did. Reporting only: it changes no recovery decision. */
+    gate?: string;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };

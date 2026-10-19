@@ -459,6 +459,18 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
     peers: [{ logicalId: "dev.peer", effect: "Not restarted; account unverified." }], warnings: [],
   });
 
+  it("prints the --no-daemon launch evidence and a named startup gate's kind", async () => {
+    const data = { ...report("incomplete"), codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." },
+      account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: "Codex is waiting for hook trust approval.", startupGateKind: "hook_trust_gate" },
+      remainingStep: "Codex is waiting for a hook review decision in the pane (dev-codex@r, pane %1). That decision is for the person or an authorised operator; once it's made, run the recovery command." };
+    const output = await captureLogs(() => makeCommand(makeDeps({ status: 200, data }, [])).parseAsync([
+      "node", "rig", "seat", "restart", "dev@r", "--keep-conversation", "--reason", "x"]).then(() => undefined));
+    const text = output.logs.join("\n");
+    expect(text).toContain("Launch evidence: the running Codex was started with --no-daemon.");
+    expect(text).toContain("Codex startup gate (hook_trust_gate): Codex is waiting for hook trust approval.");
+    expect(text).toContain("Remaining step: Codex is waiting for a hook review decision");
+  });
+
   it("requires a reason before contacting the daemon, and refuses --plan with --verify", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const missing = await captureLogs(() => makeCommand(makeDeps({ status: 200, data: {} }, calls)).parseAsync([

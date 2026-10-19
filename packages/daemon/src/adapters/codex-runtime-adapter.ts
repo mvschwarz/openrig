@@ -712,6 +712,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const result = await this.tmux.sendKeys(tmuxSession, ["3"]);
         if (!result.ok) {
           updatePrompt.failure = {
+            gate: "update_gate",
             ok: false, recovery: "attention_required",
             error: `Could not skip the Codex update prompt: ${result.message}. Inspect the session before retrying.`,
             evidence: paneContent.split("\n").slice(-12).join("\n"),
@@ -1073,6 +1074,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           ok: false,
           error: probe.detail,
           recovery: "attention_required",
+          ...(probe.code ? { gate: probe.code } : {}),
           evidence: paneContent.split("\n").slice(-12).join("\n"),
         };
       }
@@ -1113,6 +1115,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       error: lastUnresolved?.detail
         ?? "Codex resume could not be confirmed: the process is alive but a restored conversation was never proven.",
       recovery: "attention_required",
+      // The gate that was still showing, if any. A boot still in progress names no gate.
+      ...(lastUnresolved?.code && lastUnresolved.code !== "awaiting_runtime" ? { gate: lastUnresolved.code } : {}),
       evidence: lastPaneContent.split("\n").slice(-12).join("\n"),
     };
   }

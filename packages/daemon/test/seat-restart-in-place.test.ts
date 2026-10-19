@@ -403,6 +403,54 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(w.launches).toHaveLength(1);
   });
 
+  it.each([
+    ["hook_trust_gate", "Codex is waiting for hook trust approval before the session can become interactive.", "Codex is waiting for a hook review decision in the pane"],
+    ["trust_gate", "Codex is waiting for the folder trust prompt to be answered.", "Codex is waiting for a folder trust decision in the pane"],
+    ["model_selection_gate", "Codex is waiting for model selection before the session can become interactive.", "Codex is waiting for a model choice in the pane"],
+    ["update_gate", "Codex is showing an update prompt.", "Codex is waiting for an update decision OpenRig could not skip in the pane"],
+  ])("incomplete names the %s startup gate and its native decision; nothing answered, nothing retried", async (gate, error, step) => {
+    const w = world({ launch: { ok: false, error, recovery: "attention_required", gate } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    const recovery = `codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`;
+    expect(result).toMatchObject({ ok: true, outcome: "incomplete", recoveryCommand: recovery,
+      account: { startupGate: error, startupGateKind: gate } });
+    const remaining = (result as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain(step);
+    expect(remaining).toContain(`(${SEAT}, pane %1)`);
+    expect(remaining).toContain(recovery);
+    expect(remaining).toContain("That decision is for the person or an authorised operator");
+    expect(remaining).toContain("Nothing was answered or retried.");
+    expect(remaining).not.toMatch(/\b(approve|trust all|choose|select|install)\b/i); // names the decision, never makes or prescribes it
+    expect(w.launches).toHaveLength(1); // the one resume; no second launch
+  });
+
+  it("the sign-in and generic steps are unchanged; an unnamed gate still says what kind it is", async () => {
+    const signIn = world({ launch: { ok: false, error: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.", recovery: "attention_required", gate: "codex_auth_refusal" } });
+    expect(await signIn.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({
+      remainingStep: `Whoever owns the sign-in signs in to Codex in ${HOME}, then the conversation resumes with the recovery command.`,
+      account: { startupGateKind: "codex_auth_refusal" } });
+    const generic = world({ launch: { ok: false, error: "Codex is waiting for an MCP server decision.", recovery: "attention_required", gate: "mcp_gate" } });
+    expect(await generic.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({
+      remainingStep: "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
+      account: { startupGateKind: "mcp_gate" } });
+    const unknown = world({ launch: { ok: false, error: "Codex resume could not be confirmed.", recovery: "attention_required" } });
+    expect(await unknown.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({
+      remainingStep: "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
+      account: { startupGateKind: null } });
+  });
+
+  it("--plan and the report show the --no-daemon launch flag as launch evidence only", async () => {
+    const daemon = world();
+    const absent = await daemon.service.restartInPlace({ seatRef: SEAT, plan: true }) as { codexNoDaemonFlag: { present: boolean; detail: string } };
+    expect(absent.codexNoDaemonFlag).toEqual({ present: false,
+      detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." });
+    const optOut = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}` });
+    expect(await optOut.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({
+      codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." } });
+    const restarted = await optOut.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(restarted).toMatchObject({ outcome: "restarted_account_unverified", codexNoDaemonFlag: { present: true } });
+  });
+
   it("incomplete, never fresh, when Codex has no saved session for the conversation", async () => {
     const w = world({ launch: { ok: false, error: "Codex resume failed: no saved session found", recovery: "retry_fresh" } });
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });

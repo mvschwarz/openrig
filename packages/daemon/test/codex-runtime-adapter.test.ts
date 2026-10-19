@@ -755,6 +755,16 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
 
+  it("a resume stopped at hook review reports the gate kind, and types nothing into it", async () => {
+    const review = "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting";
+    const tmux = mockTmux({ capturePaneContent: vi.fn(async () => review), capturePaneScreen: vi.fn(async () => review), getPaneCommand: vi.fn(async () => "codex") });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] });
+    const result = await adapter.verifyResumeInPane("impl", "tok");
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "hook_trust_gate" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
     const tmux = mockTmux({
       getPanePid: vi.fn(async () => 900),

@@ -131,6 +131,9 @@ export interface InPlaceRestartReport {
     effort: { running: string | null; relaunch: string | null; changes: boolean; source: "seat_choice" | "authored" | "runtime_default" };
   };
   codexHome: string;
+  /** Launch evidence only: whether the running Codex's command line carries `--no-daemon`. It doesn't show whether an
+   *  app-server process, its login or any lock is involved. */
+  codexNoDaemonFlag: { present: boolean; detail: string };
   billingRoute: { state: "unknown"; detail: string; apiKeyEnvNames: string[] };
   account: AccountEvidence;
   peers: PeerReport[];
@@ -154,6 +157,8 @@ export interface AccountEvidence {
   credentialStore: { value: string | null; state: "read" | "unset" | "unreadable"; detail: string };
   authFile: { changedBeforeRestart: boolean | null; detail: string };
   startupGate: string | null;
+  /** The native resume probe's code for that gate (for example `hook_trust_gate`), when the launch named one. */
+  startupGateKind: string | null;
   notVerified: string[];
 }
 
@@ -427,7 +432,8 @@ export class CodexInPlaceRestart {
     // The probed and prepared launch choices come from the running Codex, so the relaunch keeps them and no
     // Codex process is started to decide them again.
     const runningArgv = processArgv(process.command);
-    const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, { name: sessionName, resumeToken: token, running: runningLaunch(runningArgv) });
+    const running = runningLaunch(runningArgv);
+    const relaunch = await this.deps.codex.buildResumeCommand(relaunchBinding, { name: sessionName, resumeToken: token, running });
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")
       ?? (paneShape === "shell_backed"
@@ -478,6 +484,9 @@ export class CodexInPlaceRestart {
           ? `The restart keeps the settings the running Codex uses (effective), except effort: it sends the seat's saved effort choice ${effort.relaunch} in place of ${effort.running ?? "no flag"}. Other saved choices are shown, not applied.`
           : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied." },
       codexHome,
+      codexNoDaemonFlag: running.daemonOptOut
+        ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." }
+        : { present: false, detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
       billingRoute: { state: "unknown", apiKeyEnvNames: facts.apiKeyEnvNames,
         detail: "Which billing route Codex uses is not observable without reading credentials; API-key variable names alone don't establish it." },
       account: this.accountEvidence(codexHome, startedAt, null),
@@ -629,14 +638,18 @@ export class CodexInPlaceRestart {
     paneHeld?: InPlaceRestartReport["paneHeld"]): InPlaceRestartReport {
     const signIn = /sign in/i.test(launch.error);
     const missing = launch.recovery === "retry_fresh";
+    const attention = launch.recovery === "attention_required";
+    // The native decision a named startup gate is waiting for. Nothing answers it: the step names it.
+    const named = attention && launch.gate ? STARTUP_GATE_STEPS[launch.gate] : undefined;
     return {
       ...report, outcome: "incomplete", recoveryCommand, ...(paneHeld ? { paneHeld } : {}),
-      account: { ...report.account, startupGate: launch.recovery === "attention_required" ? launch.error : null },
+      account: { ...report.account, startupGate: attention ? launch.error : null, startupGateKind: attention ? launch.gate ?? null : null },
       remainingStep: signIn
         ? `Whoever owns the sign-in signs in to Codex in ${report.codexHome}, then the conversation resumes with the recovery command.`
         : missing
           ? `Codex in ${report.codexHome} has no saved session for this conversation; no fresh session was started. Find where it was saved before resuming.`
-          : "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
+          : (named ? `${named} in the pane (${report.sessionName}, pane ${report.pane}). That decision is for the person or an authorised operator; once it's made, run the recovery command${recoveryCommand ? `: ${recoveryCommand}` : ""}. Nothing was answered or retried.` : null)
+            ?? "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
       message: `The original Codex exited, but the resume was not proven: ${launch.error}`,
     };
   }
@@ -670,6 +683,7 @@ export class CodexInPlaceRestart {
               detail: "Whether auth.json changed after the running Codex started (stat only; never read). A change is not proof of which account." }
           : { changedBeforeRestart: auth.mtimeMs < newStart, detail: "auth.json was last modified before the replacement started (stat only; never read)." },
       startupGate: null,
+      startupGateKind: null,
       notVerified: NOT_VERIFIED,
     };
   }
@@ -794,6 +808,15 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
   }
   return chain;
 }
+
+/** The native decision each named Codex startup gate is waiting for, in plain words. OpenRig never makes it: the
+ *  step names it and leaves it to the person or an authorised operator. Gates not listed keep the generic step. */
+const STARTUP_GATE_STEPS: Record<string, string> = {
+  hook_trust_gate: "Codex is waiting for a hook review decision",
+  trust_gate: "Codex is waiting for a folder trust decision",
+  model_selection_gate: "Codex is waiting for a model choice",
+  update_gate: "Codex is waiting for an update decision OpenRig could not skip",
+};
 
 /** Processes under the Codex process, other than Codex itself. Reported, never refused. */
 function descendants(rows: NativeProcessRow[], codexPid: number, chain: NativeProcessRow[]): NativeProcessRow[] {

@@ -1146,9 +1146,11 @@ function printRestartReport(data: Record<string, unknown>): void {
   if (settings?.note) console.log(`Settings: ${settings.note}`);
   console.log(`Codex home: ${String(data["codexHome"])}.`);
   console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
-  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };
+  const noDaemon = data["codexNoDaemonFlag"] as { detail: string } | undefined;
+  if (noDaemon) console.log(noDaemon.detail);
+  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null; startupGateKind?: string | null };
   console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
-  if (account.startupGate) console.log(`Codex startup gate: ${account.startupGate}`);
+  if (account.startupGate) console.log(`Codex startup gate${account.startupGateKind ? ` (${account.startupGateKind})` : ""}: ${account.startupGate}`);
   const stale = data["staleRestart"] as { startedAt: string; detail: string } | undefined;
   if (stale) console.log(`Stale restart from ${stale.startedAt}: ${stale.detail}`);
   const last = data["lastRestart"] as { outcome: string; finishedAt: string } | undefined;
