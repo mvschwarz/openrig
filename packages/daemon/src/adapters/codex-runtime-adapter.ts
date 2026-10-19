@@ -725,7 +725,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           updatePrompt.failure = {
             gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_failed", screenBeforeInput: true,
             ok: false, recovery: "attention_required",
-            error: `Could not skip the Codex update prompt: ${result.message}. Inspect the session before retrying.`,
+            error: `Could not send the update prompt's skip key (3): ${result.message}; its effect is unknown. Inspect the session before retrying.`,
             evidence: (currentScreen ?? paneContent).split("\n").slice(-12).join("\n"),
           };
           return false;
@@ -1139,11 +1139,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     // Report the newest screen observed; a resumed or booting one names no gate. The loop's own decisions above used
-    // lastUnresolved.
+    // lastUnresolved. The text follows the newest screen too, so an older gate's text never stands for a newer screen.
     const shown = report && report.probe.status !== "resumed" && report.probe.code !== "awaiting_runtime" ? report : null;
+    const newestText = shown ? shown.probe.detail
+      : report?.probe.status === "resumed" ? "Codex resume could not be confirmed: the last screen observed looked ready, but the resume check ended before proving a restored conversation."
+        : report ? report.probe.detail
+          : lastUnresolved?.detail;
     return {
       ok: false,
-      error: shown?.probe.detail ?? lastUnresolved?.detail
+      error: newestText
         ?? "Codex resume could not be confirmed: the process is alive but a restored conversation was never proven.",
       recovery: "attention_required",
       // The gate on that screen, if any. A boot still in progress names no gate.

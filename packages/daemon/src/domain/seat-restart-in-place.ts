@@ -653,7 +653,10 @@ export class CodexInPlaceRestart {
         : missing
           ? `Codex in ${report.codexHome} has no saved session for this conversation; no fresh session was started. Find where it was saved before resuming.`
           : named
-            ?? "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
+            ?? (attention && keyTyped(launch)
+              // OpenRig's own key is part of what the person needs to know, even with no screen named.
+              ? `Resolve what Codex shows in the pane, then resume with the recovery command. ${typedSentence(launch)}`
+              : "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried."),
       message: `The original Codex exited, but the resume was not proven: ${launch.error}`,
     };
   }
@@ -815,7 +818,7 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
 
 /** The native decision each named Codex startup gate is waiting for, in plain words. OpenRig never makes it: the
  *  step names it and leaves it to the person or an authorised operator. Gates not listed keep the generic step. An
- *  update screen is a decision only when it offered a choice; otherwise it's an update in progress (see below). */
+ *  update screen is a decision only when it offered a choice; otherwise it's an update screen to check (see below). */
 const STARTUP_GATE_STEPS: Record<string, string> = {
   hook_trust_gate: "Codex is waiting for a hook review decision",
   trust_gate: "Codex is waiting for a folder trust decision",
@@ -825,19 +828,29 @@ const STARTUP_GATE_STEPS: Record<string, string> = {
 
 /** The remaining step for a named startup gate, or null for the generic step. It states only what the launch result
  *  carries: the gate, whether an update screen offered a choice, and what the resume verification typed. */
-function startupGateStep(launch: Extract<HarnessLaunchResult, { ok: false }>, session: string, pane: string,
-  recoveryCommand: string | undefined): string | null {
-  const gate = launch.gate;
-  if (!gate || STARTUP_GATE_STEPS[gate] === undefined) return null;
-  const where = `in the pane (${session}, pane ${pane}); see it with \`rig capture ${session}\``;
-  const run = `run the recovery command${recoveryCommand ? `: ${recoveryCommand}` : ""}`;
-  const typed = launch.verifierInput === "update_skip_key_sent"
+/** Whether the resume check itself typed the update prompt's skip key (sent, or tried and failed). */
+function keyTyped(launch: Extract<HarnessLaunchResult, { ok: false }>): boolean {
+  return launch.verifierInput === "update_skip_key_sent" || launch.verifierInput === "update_skip_key_failed";
+}
+
+/** What the resume check typed, exactly as the launch result says, and that nothing was retried. */
+function typedSentence(launch: Extract<HarnessLaunchResult, { ok: false }>): string {
+  return launch.verifierInput === "update_skip_key_sent"
     ? "OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched."
     : launch.verifierInput === "update_skip_key_failed"
       ? "OpenRig tried to send the update prompt's skip key (3) once and the send failed, so its effect is unknown; nothing was retried or relaunched."
       : launch.verifierInput === "none"
         ? "OpenRig typed nothing into this screen; nothing was retried or relaunched."
         : "Nothing was retried or relaunched.";
+}
+
+function startupGateStep(launch: Extract<HarnessLaunchResult, { ok: false }>, session: string, pane: string,
+  recoveryCommand: string | undefined): string | null {
+  const gate = launch.gate;
+  if (!gate || STARTUP_GATE_STEPS[gate] === undefined) return null;
+  const where = `in the pane (${session}, pane ${pane}); see it with \`rig capture ${session}\``;
+  const run = `run the recovery command${recoveryCommand ? `: ${recoveryCommand}` : ""}`;
+  const typed = typedSentence(launch);
   if (gate === "update_gate" && launch.screenBeforeInput && launch.verifierInput !== undefined && launch.verifierInput !== "none") {
     const before = launch.verifierInput === "update_skip_key_sent"
       ? "before it sent the update prompt's skip key (3), offered an update choice. What Codex showed after the key wasn't observed."

@@ -443,6 +443,64 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(remaining).not.toMatch(/typed nothing|answered/);
   });
 
+  // Round 4: the report's message, startupGate and step all describe the newest moment, through the real adapter.
+  const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n");
+  const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
+  const RESUMED = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const BOOTING = "Loading conversation...";
+  const CODEX_ROW = [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }];
+  function scriptedAdapter(screen: (n: number, keysSent: number) => string, sendResult: TmuxResult = { ok: true }) {
+    let n = 0; let keysSent = 0;
+    const tmux = { getPaneCommand: async () => "codex", getPanePid: async () => 901,
+      capturePaneScreen: async () => screen(++n, keysSent), capturePaneContent: async () => screen(++n, keysSent),
+      sendKeys: async () => { keysSent++; return sendResult; } } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: {} as never, sleep: async () => {}, listProcesses: () => CODEX_ROW });
+    return { adapter, captures: () => n, keys: () => keysSent };
+  }
+  async function updatingCaptures(): Promise<number> {
+    const a = scriptedAdapter(() => UPDATING); await a.adapter.verifyResumeInPane("impl", "tok"); return a.captures();
+  }
+  async function report(launch: HarnessLaunchResult) {
+    const w = world({ launch });
+    return await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { message: string; remainingStep: string; account: { startupGate: string | null; startupGateKind: string | null } };
+  }
+
+  it.each([["resumed", RESUMED], ["booting", BOOTING]] as const)(
+    "a final-poll recheck showing a %s screen leaves no older update text in the message, startupGate or step",
+    async (_label, last) => {
+      const total = await updatingCaptures() + 1;
+      const a = scriptedAdapter((n) => (n === total ? last : n === total - 1 ? SKIPPABLE : UPDATING));
+      const launch = await a.adapter.verifyResumeInPane("impl", "tok");
+      expect(a.captures()).toBe(total);
+      expect(launch).not.toHaveProperty("gate");
+      const r = await report(launch);
+      for (const text of [r.message, r.account.startupGate ?? "", r.remainingStep]) expect(text).not.toMatch(/update/i);
+      expect(r.account.startupGateKind).toBeNull();
+    });
+
+  it("a skip key sent with only booting screens after it: the generic step says the key was sent", async () => {
+    const a = scriptedAdapter((_n, keys) => (keys > 0 ? BOOTING : SKIPPABLE));
+    const launch = await a.adapter.verifyResumeInPane("impl", "tok");
+    expect(a.keys()).toBe(1);
+    expect(launch).toMatchObject({ ok: false, verifierInput: "update_skip_key_sent" });
+    expect(launch).not.toHaveProperty("gate");
+    const r = await report(launch);
+    expect(r.remainingStep).toContain("OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched.");
+    expect(r.message).not.toMatch(/update/i);
+    expect(r.account.startupGate ?? "").not.toMatch(/update/i);
+  });
+
+  it("a failed skip-key send, through the adapter: no 'could not skip'; the effect is unknown in the message, startupGate and step", async () => {
+    const total = await updatingCaptures() + 1;
+    const a = scriptedAdapter((n) => (n >= total - 2 ? SKIPPABLE : UPDATING), { ok: false, code: "unknown", message: "injected send failure" } as TmuxResult);
+    const launch = await a.adapter.verifyResumeInPane("impl", "tok");
+    const r = await report(launch);
+    expect(r.message).toContain("Could not send the update prompt's skip key (3): injected send failure; its effect is unknown.");
+    expect(r.account.startupGate).toContain("Could not send the update prompt's skip key (3)");
+    expect(r.remainingStep).toContain("The send failed, so the key's effect is unknown.");
+    for (const text of [r.message, r.account.startupGate ?? "", r.remainingStep]) expect(text).not.toMatch(/could not skip/i);
+  });
+
   it("an update screen without the recognised skip option is described neutrally: neither progress nor a waiting decision", async () => {
     const w = world({ launch: { ok: false, error: "Codex is showing an update prompt.", recovery: "attention_required", gate: "update_gate", gateChoice: false, verifierInput: "none" } });
     const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;

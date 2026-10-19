@@ -804,6 +804,8 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
     expect(tmux.sendKeys).toHaveBeenCalledWith("impl", ["3"]);
     expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_sent" });
+    // Captured again after the key, so the reported screen isn't the one before it.
+    expect(result).not.toHaveProperty("screenBeforeInput");
   });
 
   // Round 3: the newest observation wins in the order it was taken, including the helper's current-screen recheck, and
