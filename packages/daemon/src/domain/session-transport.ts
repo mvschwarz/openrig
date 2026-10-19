@@ -3381,9 +3381,10 @@ export class SessionTransport {
     }
   }
 
-  /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads, bounded). Only
-   *  callers that use it ask: the capture route, which the CLI and MCP read. */
-  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean }): Promise<CaptureResult> {
+  /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads), for callers that
+   *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
+   *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
+  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget }): Promise<CaptureResult> {
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -3440,21 +3441,27 @@ export class SessionTransport {
     await this.reconcileStartupReadiness(sessionName).catch(() => {});
 
     const runtime = sessionMeta.runtime;
-    const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex") ? await this.captureInputBox(sessionName, runtime) : undefined;
+    const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex")
+      ? await this.captureInputBox(sessionName, runtime, opts.inputBoxBudget ?? { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS })
+      : undefined;
     return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
   }
 
-  /** The input box, or unknown when its reads don't finish within CAPTURE_INPUT_BOX_DEADLINE_MS: the pane text is already
-   *  in hand, so a slow read never holds the capture. A read still pending then settles on its own, unused. */
-  private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
+  /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the
+   *  pane text is already in hand, so a slow read never holds the capture. The time spent comes off the budget. A read
+   *  still pending then settles on its own, unused. */
+  private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex", budget: InputBoxBudget): Promise<InputBoxAnnotation> {
+    if (budget.remainingMs <= 0) return annotateInputBox(null, null, runtime, { budgetSpent: true });
+    const started = this.now().getTime();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<InputBoxAnnotation>((resolve) => {
-      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), CAPTURE_INPUT_BOX_DEADLINE_MS);
+      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), budget.remainingMs);
     });
     try {
       return await Promise.race([this.readInputBoxAnnotation(sessionName, runtime), late]);
     } finally {
       clearTimeout(timer);
+      budget.remainingMs -= this.now().getTime() - started;
     }
   }
 
@@ -3714,9 +3721,14 @@ export interface InputBoxAnnotation {
 }
 
 const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's later rows by two cells
-// How long a capture waits for the input box's three reads together before reporting it unknown (the send path's
-// INPUT_BOX_READ_DEADLINE_MS bounds one read each).
-const CAPTURE_INPUT_BOX_DEADLINE_MS = 1_000;
+// How long a capture's input-box reads may take in all before the box reports unknown: one seat's three reads, or a
+// whole fan-out's (the send path's INPUT_BOX_READ_DEADLINE_MS bounds one read each).
+export const CAPTURE_INPUT_BOX_DEADLINE_MS = 1_000;
+
+/** The time a capture's input-box reads may still take; the capture route shares one across a fan-out. */
+export interface InputBoxBudget {
+  remainingMs: number;
+}
 // Claude Code's input frame rule, as findClaudeComposer and the composer-boundary reader match it (a label may sit in it).
 const CLAUDE_FRAME_RULE = /^─{3,}(?: .+ ─+)?$/;
 
@@ -3746,15 +3758,20 @@ export function annotateInputBox(
   styledScreen: string | null,
   cursor: { x: number; y: number; width: number; height: number } | null,
   runtime: "claude-code" | "codex",
-  opts: { cursorMoved?: boolean; timedOut?: boolean } = {},
+  opts: { cursorMoved?: boolean; timedOut?: boolean; budgetSpent?: boolean } = {},
 ): InputBoxAnnotation {
   const harness = runtime === "codex" ? "Codex" : "Claude Code";
   const result = (status: InputBoxAnnotation["status"], confidence: InputBoxAnnotation["confidence"], hint: string,
     input: InputBoxSpan | null = null, suggestion: InputBoxSpan | null = null, evidence: string[] = []): InputBoxAnnotation =>
     ({ status, confidence, cursor, input, suggestion, evidence, hint });
+  const budget = `${CAPTURE_INPUT_BOX_DEADLINE_MS / 1000} s`;
   if (opts.timedOut) {
-    return result("unknown", "unknown", `The input box's reads didn't finish within ${CAPTURE_INPUT_BOX_DEADLINE_MS / 1000} s, so it wasn't checked.`,
+    return result("unknown", "unknown", `The input box's reads didn't finish within this capture's ${budget} budget, so it wasn't checked.`,
       null, null, ["input box reads timed out"]);
+  }
+  if (opts.budgetSpent) {
+    return result("unknown", "unknown", `The input box wasn't read: this capture's ${budget} budget for input-box reads was spent on earlier seats.`,
+      null, null, ["input box budget spent"]);
   }
   if (!styledScreen?.trim()) return result("unknown", "unknown", "The screen couldn't be read, so the input box wasn't checked.");
   const cells = styledLines(styledScreen);
@@ -3783,6 +3800,16 @@ export function annotateInputBox(
   });
   const textRows = rows.filter((r) => r.cells.length > 0);
   if (box.empty || textRows.length === 0) {
+    // An empty frame drawn in output has the live cursor below it; a moved cursor means the box may have changed.
+    const outside = cursor !== null && (cursor.y < box.first || cursor.y > box.last);
+    if (outside) {
+      return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor is outside it, so it may not be the live box.`,
+        null, null, ["no text in the input box", "cursor outside the input box"]);
+    }
+    if (cursor === null && opts.cursorMoved) {
+      return result("unknown", "unknown", `The ${harness} input box read empty, but the cursor moved during the capture, so it may have changed.`,
+        null, null, ["no text in the input box", "cursor moved during the capture"]);
+    }
     return result("empty", "high", "The input box is empty.", null, null, ["no text in the input box"]);
   }
   const lastRow = textRows[textRows.length - 1]!;
@@ -3798,11 +3825,12 @@ export function annotateInputBox(
   const textCells = rows.flatMap((r) => r.cells.filter((cell) => cell.ch.trim()).map((cell) => ({ ...cell, row: r.row })));
   const allFaint = styled && textCells.every((cell) => cell.faint);
   const noneFaint = styled && textCells.every((cell) => !cell.faint);
-  // Claude Code's `Try "…"` suggestion counts unless the styling says otherwise: a person can type those words.
+  // Claude Code's `Try "…"` words are a person's possible words too, so they count only where there's no styling to go
+  // on, and at most as a possible (medium) suggestion. With styling, the faint text decides.
   const tryShape = runtime === "claude-code" && CLAUDE_TRY_SUGGESTION.test(input.text.replace(/\s+/g, ""));
-  const trySuggestion = tryShape && !noneFaint;
+  const trySuggestion = tryShape && !styled;
   const evidence: string[] = [];
-  if (tryShape) evidence.push(trySuggestion ? "Claude Code's Try \"...\" suggestion" : "Try \"...\" words drawn unfaint");
+  if (tryShape) evidence.push("Claude Code's Try \"...\" words");
   evidence.push(!styled ? "no styling in the capture" : allFaint ? "text drawn faint" : noneFaint ? "text not faint" : "part of the text drawn faint");
 
   const inBox = cursor !== null && cursor.y >= box.first && cursor.y <= box.last;
@@ -3828,7 +3856,7 @@ export function annotateInputBox(
     return unknown();
   }
   if (atStart) {
-    if (allFaint || trySuggestion) return likelySuggestion("high");
+    if (allFaint) return likelySuggestion("high");
     if (!styled) return likelySuggestion("medium");
     // Claude Code draws its suggestion faint (Codex draws its placeholder faint too); unfaint text with the cursor at its
     // start may be a draft the person moved the cursor back through, in either harness.

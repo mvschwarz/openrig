@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { SessionTransport, TargetSpec } from "../domain/session-transport.js";
+import { CAPTURE_INPUT_BOX_DEADLINE_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
@@ -193,7 +193,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       rig?: string;
       pod?: string;
       lines?: number;
+      inputBox?: boolean;
     }>();
+    // Read an agent seat's input box only when the request asks: `rig capture` and the MCP tool do; send --verify and
+    // walk read only the pane text.
+    const inputBox = body.inputBox === true;
 
     // Multi-target: rig or pod
     if (body.rig || body.pod) {
@@ -206,9 +210,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         return c.json({ ok: false, error: resolved.error }, 404);
       }
 
+      // One budget for the whole fan-out's input-box reads, so slow tmux adds at most that to the request.
+      const inputBoxBudget = { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS };
       const results = [];
       for (const session of resolved.sessions) {
-        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox: true });
+        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget });
         results.push(result);
       }
       return c.json({ results });
@@ -219,9 +225,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Provide session, rig, or pod to capture" }, 400);
     }
 
-    // The CLI and MCP read this route, so it also asks for an agent seat's input box (bounded; the preview and
-    // attention paths don't ask).
-    const result = await transport.capture(body.session, { lines: body.lines, inputBox: true });
+    const result = await transport.capture(body.session, { lines: body.lines, inputBox });
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         session_missing: 404,

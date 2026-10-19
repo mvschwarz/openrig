@@ -213,6 +213,7 @@ Supported notes:
       if (opts.rig) body.rig = opts.rig;
       if (opts.pod) body.pod = opts.pod;
       if (session) body.session = session;
+      body.inputBox = true; // the input box note; a daemon without it ignores the field
 
       const res = await client.post<Record<string, unknown>>("/api/transport/capture", body, { headers: terminalAuthHeaders() });
       if (res.status < 400) res.data = withExactLines(res.data, opts.exactLines);
@@ -317,6 +318,7 @@ async function runHttpHostCapture(
   if (opts.rig) body.rig = opts.rig;
   if (opts.pod) body.pod = opts.pod;
   if (session) body.session = session;
+  body.inputBox = true;
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/capture", body, deps, {});
   if (result.ok) result.data = withExactLines(result.data, opts.exactLines);
