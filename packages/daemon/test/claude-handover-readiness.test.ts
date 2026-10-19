@@ -178,10 +178,14 @@ describe("Claude fresh in-place handover readiness", () => {
       }
       const startedAt = "Mon Oct 19 21:30:00 2026";
       if (chevron) {
-        const rows = [{ pid: 100, ppid: 1, pgid: 100, tpgid: script ? 101 : 100,
+        const running = requested && elapsed >= nativeAt;
+        const foreground = script ? 101 : running ? 102 : 100;
+        const rows = [{ pid: 100, ppid: 1, pgid: 100, tpgid: foreground,
           command: "-zsh", executableName: "zsh", startedAt },
           ...(script ? [{ pid: 101, ppid: 100, pgid: 101, tpgid: 101,
-            command: "/bin/sh fixture-launch.txt", executableName: "sh", startedAt }] : [])];
+            command: "/bin/sh fixture-launch.txt", executableName: "sh", startedAt }] : []),
+          ...(running ? [{ pid: 102, ppid: script ? 101 : 100, pgid: foreground, tpgid: foreground,
+            command: `claude --session-id ${successorToken}`, executableName: "claude", startedAt }] : [])];
         trace.push({ kind: "process-read", elapsed, available: true, rows });
         return rows;
       }
