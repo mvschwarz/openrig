@@ -123,6 +123,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
     readFile: () => VALID_HOST_INFRA_DECLARATION,
     getStartupContext: () => startupContextProbe(),
     probeQueueStore: () => ({ available: true, evidence: "SQLite queue store is available" }),
+    getDesiredClaudeActivityHooks: () => ({ status: "known", selected: false }),
     getClaudeActivityHookEvents: () => ["SessionStart", "UserPromptSubmit"],
     ...overrides,
   };
@@ -1066,6 +1067,77 @@ describe("RestoreCheckService", () => {
     const hook = new RestoreCheckService(mockDeps()).check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
     expect(hook?.status).toBe("green");
     expect(hook?.evidence).toContain("not selected");
+  });
+
+  it.each(["selected", "unknown", "throws"])("keeps absent saved channels with %s desired metadata nonblocking", (kind) => {
+    const desired = () => {
+      if (kind === "throws") throw new Error("unreadable source");
+      return kind === "selected" ? { status: "known" as const, selected: true }
+        : { status: "unknown" as const, evidence: "unreadable source" };
+    };
+    const service = new RestoreCheckService(mockDeps({ getDesiredClaudeActivityHooks: desired }));
+    for (const opts of [{}, { compact: true, includeReady: true }]) {
+      const result = service.check(opts);
+      expect(result.verdict).toBe("restorable_with_caveats");
+      expect(result.readiness.status).toBe("ready_with_caveats");
+      expect(result.rigs[0]?.classCounts.ready_with_caveats).toBe(1);
+      const hook = result.checks.find(c => c.check.endsWith(".hooks"));
+      expect(hook).toMatchObject({ status: "yellow", remediation: "" });
+      expect(hook?.evidence).toContain(kind === "selected" ? "stale selection" : "unknown");
+      expect(result.repairPacket?.some(step => step.rationale === hook?.evidence) ?? false).toBe(false);
+      expect(result.recovery.actions).toEqual([]);
+    }
+  });
+
+  it("does not add desired-profile resolution to omitted ready detail or composed no-hooks polls", () => {
+    let reads = 0;
+    const service = new RestoreCheckService(mockDeps({ getDesiredClaudeActivityHooks: () => {
+      reads++; return { status: "known", selected: true };
+    } }));
+    expect(service.check({ compact: true }).checks.some(c => c.check.endsWith(".hooks"))).toBe(false);
+    service.check({ noHooks: true, recoveryOnly: true });
+    expect(reads).toBe(0);
+    service.check({ compact: true, includeReady: true });
+    expect(reads).toBe(1);
+  });
+
+  it("preserves independent red and unknown causes alongside a stale selection", () => {
+    const overrides = { getDesiredClaudeActivityHooks: () => ({ status: "known" as const, selected: true }) };
+    expect(new RestoreCheckService(mockDeps({ ...overrides, probeQueueStore: () => ({ available: false, evidence: "broken" }),
+      getNodeInventory: () => [claudeNode({ sessionStatus: "exited" })],
+    })).check({}).verdict).toBe("not_restorable");
+    expect(new RestoreCheckService(mockDeps({ ...overrides, getRestoreInputs: () => { throw new Error("unreadable snapshot"); },
+    })).check({}).verdict).toBe("unknown");
+  });
+
+  it.each(["available", "missing-manifest", "malformed-manifest", "unreadable-relay", "disabled", "malformed-settings", "missing-event"])("inspects saved core plugin %s without treating selection as delivery", (kind) => {
+    const dir = "/custom-instance/plugins/openrig-core", cwd = "/fixture-project";
+    const settingsPath = path.join(cwd, ".claude/settings.local.json");
+    const files = new Map([
+      [path.join(dir, ".claude-plugin/plugin.json"), JSON.stringify({ name: "openrig-core", hooks: "./hooks/claude.json" })],
+      [path.join(dir, "hooks/claude.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: "node activity-relay.cjs" }] }] } })],
+      [path.join(dir, "hooks/scripts/activity-relay.cjs"), "// fixture relay"],
+      [settingsPath, JSON.stringify({ disableAllHooks: kind === "disabled" })],
+    ]);
+    if (kind === "missing-manifest") files.delete(path.join(dir, ".claude-plugin/plugin.json"));
+    if (kind === "malformed-manifest") files.set(path.join(dir, ".claude-plugin/plugin.json"), "{");
+    if (kind === "malformed-settings") files.set(settingsPath, "{");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{ category: "plugin", absolutePath: dir }] }),
+      getClaudeActivityHookEvents: () => kind === "missing-event" ? ["Stop", "SessionStart"] : ["Stop"],
+      exists: f => files.has(f) || f.endsWith("host-infra.json"),
+      readFile: f => {
+        if (kind === "unreadable-relay" && f.endsWith("activity-relay.cjs")) throw new Error("unreadable");
+        if (files.has(f)) return files.get(f)!;
+        if (f.endsWith("host-infra.json")) return VALID_HOST_INFRA_DECLARATION;
+        throw new Error("missing");
+      },
+    }));
+    const hook = service.check({}).checks.find(c => c.check.endsWith(".hooks"));
+    expect(hook?.status).toBe(kind === "available" ? "green" : "yellow");
+    expect(hook?.evidence).toContain("Saved openrig-core plugin channel is selected");
+    expect(hook?.remediation).toBe("");
   });
 
   it("Codex and infrastructure hook checks are green not-applicable without hook repair steps", () => {

@@ -1,3 +1,5 @@
+import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.js";
+import { deriveRelayEvents } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
@@ -220,6 +222,10 @@ export interface RestoreCheckDeps {
   probeQueueStore?: () => QueueStoreProbeResult;
   /** Configured OpenRig instance root, matching the Claude adapter stateDir. */
   stateDir?: string;
+  /** Read-only current authored selection, invoked only where hook detail is inspected. */
+  getDesiredClaudeActivityHooks?: (nodeId: string) =>
+    | { status: "known"; selected: boolean }
+    | { status: "unknown"; evidence: string };
   /** Relay-backed Claude hook events derived from the shipped hook manifest. */
   getClaudeActivityHookEvents?: () => string[];
 }
@@ -1063,11 +1069,7 @@ export class RestoreCheckService {
     if (startup?.status === "ok" && !startup.projectionEntries.some((entry) => (
       entry.category === "runtime_resource" && entry.resourceType === "claude_activity_hooks"
     ))) {
-      return {
-        check: `seat.${session}.hooks`, status: "green",
-        evidence: "Claude activity hooks are not selected for this seat; hook inspection is not applicable",
-        remediation: "",
-      };
+      return this.checkOtherHookChannels(node, startup);
     }
     if (startup?.status === "ok") {
       if (!node.cwd) {
@@ -1118,9 +1120,10 @@ export class RestoreCheckService {
       }
       const missingEvents = events.filter((event) => !this.hasActivityRelayHook(settings, event, relayPath));
       if (missingEvents.length === 0) {
+        const plugin = this.inspectCorePlugin(startup.projectionEntries);
         return {
-          check: `seat.${session}.hooks`, status: "green",
-          evidence: `Selected Claude activity hooks are projected in ${settingsPath}, with relay present at ${relayPath}; hook execution is not verified`,
+          check: `seat.${session}.hooks`, status: plugin?.status ?? "green",
+          evidence: `Selected Claude activity hooks are projected in ${settingsPath}, with relay present at ${relayPath}; hook execution is not verified${plugin ? `; ${plugin.evidence}` : ""}`,
           remediation: "",
         };
       }
@@ -1140,6 +1143,62 @@ export class RestoreCheckService {
       remediation: "Restore the seat startup context before trusting hook readiness",
       remediationSafe: false,
     };
+  }
+
+  private inspectCorePlugin(entries: StartupContextProjectionEntry[]): { status: "green" | "yellow"; evidence: string } | null {
+    const dir = selectedCorePluginDir(pluginPathsOf(entries.map(entry => ({
+      category: entry.category ?? "", absolutePath: entry.absolutePath,
+    }))), this.deps.stateDir ? join(this.deps.stateDir, "plugins") : undefined);
+    if (!dir) return null;
+    try {
+      const manifest: unknown = JSON.parse(this.deps.readFile(join(dir, ".claude-plugin", "plugin.json")));
+      if (!isRecord(manifest) || manifest["name"] !== "openrig-core" || typeof manifest["hooks"] !== "string") {
+        throw new Error("plugin manifest does not declare the core hook manifest");
+      }
+      const events = deriveRelayEvents(this.deps, join(dir, manifest["hooks"]));
+      const expected = this.deps.getClaudeActivityHookEvents?.() ?? [];
+      if (!expected.length || expected.some(event => !events.some(actual => actual.event === event))
+        || !this.deps.exists(join(dir, "hooks", "scripts", "activity-relay.cjs"))) {
+        throw new Error("activity relay or manifest events are missing/uninspectable");
+      }
+      this.deps.readFile(join(dir, "hooks", "scripts", "activity-relay.cjs"));
+      return { status: "green", evidence: "Saved openrig-core plugin channel is selected and locally available; native plugin loading and hook execution are unverified; its relay suppresses duplicate events handled by the same settings relay" };
+    } catch (err) {
+      return { status: "yellow", evidence: `Saved openrig-core plugin channel is selected but its assets could not be trusted: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  private checkOtherHookChannels(node: NodeInventoryEntry, startup: Extract<StartupContextProbeResult, { status: "ok" }>): CheckEntry {
+    const check = `seat.${node.canonicalSessionName ?? node.logicalId}.hooks`;
+    const plugin = this.inspectCorePlugin(startup.projectionEntries);
+    if (plugin) {
+      if (!node.cwd) return { check, status: "yellow", evidence: `${plugin.evidence}; seat cwd unavailable for hook-disable inspection`, remediation: "" };
+      const settingsPath = join(node.cwd, ".claude", "settings.local.json");
+      try {
+        if (this.deps.exists(settingsPath)) {
+          const settings: unknown = JSON.parse(this.deps.readFile(settingsPath));
+          if (!isRecord(settings)) throw new Error("settings are not an object");
+          if (settings["disableAllHooks"] === true) return { check, status: "yellow", evidence: `${plugin.evidence}; hooks explicitly disabled in ${settingsPath}`, remediation: "" };
+        }
+      } catch {
+        return { check, status: "yellow", evidence: `${plugin.evidence}; hook-disable settings could not be inspected at ${settingsPath}`, remediation: "" };
+      }
+      return { check, ...plugin, remediation: "" };
+    }
+    let desired: ReturnType<NonNullable<RestoreCheckDeps["getDesiredClaudeActivityHooks"]>>;
+    try {
+      desired = node.nodeId && this.deps.getDesiredClaudeActivityHooks
+        ? this.deps.getDesiredClaudeActivityHooks(node.nodeId)
+        : { status: "unknown", evidence: "Current desired selection metadata is unavailable" };
+    } catch {
+      desired = { status: "unknown", evidence: "Current desired selection metadata could not be read" };
+    }
+    const evidence = desired.status === "unknown"
+      ? `No saved explicit activity resource or selected core-plugin channel; current desired activity-hook selection is unknown: ${desired.evidence}`
+      : desired.selected
+        ? "Current desired activity hooks are selected, but neither OpenRig channel is saved for this conversation (stale selection); restore preserves the saved selection and does not adopt the current profile"
+        : "No saved explicit activity resource or selected core-plugin channel, and current desired activity hooks are not selected; inspection is not applicable to these known OpenRig channels (other user hooks are not inspected)";
+    return { check, status: desired.status === "known" && !desired.selected ? "green" : "yellow", evidence, remediation: "" };
   }
 
   private hasActivityRelayHook(settings: unknown, eventName: string, relayPath: string): boolean {
