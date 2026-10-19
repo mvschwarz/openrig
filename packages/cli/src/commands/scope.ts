@@ -2141,7 +2141,7 @@ function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): {
 export function scopeCommand(): Command {
   const cmd = new Command("scope")
     .description("Scope tree primitive: missions, slices, sub-slices (per conventions/scope-and-versioning)")
-    .option("--workspace <path>", "Workspace root; its missions are in project.yaml's missions.root, else missions/ (otherwise $OPENRIG_WORK_ROOT, then workspace.slices_root)");
+    .option("--workspace <path>", "Workspace root; use its project.yaml missions.root, else missions/. If that tree is missing, fall back to configured workspace.slices_root, except approve, which refuses. Without this flag, OPENRIG_WORK_ROOT is tried first with the same fallback.");
 
   const slice = new Command("slice").description("Slice-tier commands");
   slice.addCommand(buildSliceLsCommand());

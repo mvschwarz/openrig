@@ -38,8 +38,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   function handleHttpError(res: { status: number; data: unknown }, label: string): boolean {
     if (res.status < 400) return false;
     const p = (res.data ?? {}) as { error?: unknown; errors?: unknown; message?: unknown };
-    // Slice 18 — the move record's switch is off: say so, and how to turn it on, rather than the bare code.
-    if (p.error === "subscription_moves_disabled" && typeof p.message === "string") console.error(p.message);
+    // Preserve the daemon's actionable explanation instead of showing only its error code.
+    if (typeof p.message === "string" && p.message.trim()) console.error(p.message);
     else console.error(p.errors ?? p.error ?? `${label} failed (HTTP ${res.status})`);
     process.exitCode = res.status >= 500 ? 2 : 1;
     return true;
@@ -209,7 +209,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
       }
     }
-    if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
+    if (r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
     if (r["limitEvidence"]) console.log(`${pad}  limit evidence: ${r["limitEvidence"]}`);
     const last = r["lastRefresh"] as Record<string, unknown> | null;
     if (last?.["outcome"] === "failed") {
@@ -338,9 +338,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .command("status")
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
-    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s; needs provider.usage_windows on)")
+    .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
     .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
-    .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (needs provider.usage_windows on)")
+    .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
     .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string }) => {
       if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
