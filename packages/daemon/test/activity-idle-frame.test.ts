@@ -55,6 +55,9 @@ describe("issue824 existing strict adapter idle frame (behavioral red-first)", (
   });
   it("a newer redraw after an old idle capture keeps D2 running", async () => {
     expect((await adapterFold(cframe, { age: 2000 })).activity.state).toBe("running");
+    // The window fact has only second precision: a later motion read still
+    // outranks an older capture within that same second.
+    expect((await adapterFold(cframe, { age: 500 })).activity.state).toBe("running");
   });
   it("expired, misbound and wrong-runtime samples do not suppress live motion", async () => {
     for (const opts of [{ age: 6000 }, { sourceName: "someone.else@sample-rig" }, { runtime: "codex" }]) {
