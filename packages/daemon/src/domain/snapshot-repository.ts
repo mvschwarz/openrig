@@ -79,7 +79,7 @@ export class SnapshotRepository {
     for (const row of rows) {
       let data: SnapshotData;
       try {
-        data = JSON.parse(row.data) as SnapshotData;
+        data = decodeStoredSnapshotData(row.data);
       } catch {
         continue;
       }
@@ -205,10 +205,27 @@ export class SnapshotRepository {
       rigId: row.rig_id,
       kind: row.kind,
       status: row.status,
-      data: JSON.parse(row.data) as SnapshotData,
+      data: decodeStoredSnapshotData(row.data),
       createdAt: row.created_at,
     };
   }
+}
+
+/** Read historical selection provenance without rewriting saved snapshots or
+ * exposing the old key. An explicit current key (including null) takes priority. */
+export function decodeStoredSnapshotData(json: string): SnapshotData {
+  const data = JSON.parse(json) as SnapshotData;
+  if (Array.isArray(data?.sessions)) {
+    for (const session of data.sessions) {
+      if (!session || typeof session !== "object") continue;
+      const stored = session as typeof session & { agentApp?: unknown };
+      if (!("communityHarness" in stored) && typeof stored.agentApp === "string" && stored.agentApp.length > 0) {
+        stored.communityHarness = stored.agentApp;
+      }
+      delete stored.agentApp;
+    }
+  }
+  return data;
 }
 
 export function summarizeSnapshot(snapshot: Snapshot, nowMs: number = Date.now()): RestoreSnapshotSummary {

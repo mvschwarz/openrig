@@ -96,6 +96,19 @@ export type ResolutionResult =
   | { ok: true; config: ResolvedNodeConfig }
   | { ok: false; errors: string[] };
 
+/** Inspect only the authored runtime-resource selection: no skill discovery, projection or startup resolution. */
+export function resolveProfileRuntimeResources(
+  base: ResolvedAgentSpec, imports: ResolvedAgentSpec[], profileName: string,
+): { ok: true; resources: QualifiedResource[] } | { ok: false; errors: string[] } {
+  const profile = base.spec.profiles[profileName];
+  if (!profile) return { ok: false, errors: [`Profile "${profileName}" not found in spec "${base.spec.name}"`] };
+  const errors: string[] = [];
+  const selected = resolveProfileUses({ ...profile, uses: {
+    skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: profile.uses.runtimeResources,
+  } }, buildResourcePool(base, imports), base.spec.name, errors);
+  return selected ? { ok: true, resources: selected.runtimeResources } : { ok: false, errors };
+}
+
 // -- Constants --
 
 const RESOURCE_CATEGORIES = ["skills", "guidance", "subagents", "plugins", "runtimeResources"] as const;

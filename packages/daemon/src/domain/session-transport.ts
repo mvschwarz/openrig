@@ -32,7 +32,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
-import type { GuardTarget, SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { DeliveryGuardError, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -476,12 +476,12 @@ function draftComposerLine(lines: string[], verdict: PaneActivityClassification)
   return lines[last]!.trim();
 }
 
-/** A community agent app's screen never proves it's idle: a quiet prompt can be an approval or a pause, so its idle
- *  reading becomes unknown. Positive work and attention are kept. `agentApp` is the seat's recorded selection
- *  (`agentAppOf`); without it the classification is returned as it is. */
-export function agentAppPaneActivity(classification: PaneActivityClassification, agentApp: string | null | undefined): PaneActivityClassification {
-  return agentApp && classification.state === "agent_idle"
-    ? { state: "unknown", reason: "agent_app_no_idle_signal", evidence: classification.evidence }
+/** A community harness's screen never proves it's idle: a quiet prompt can be an approval or a pause, so its idle
+ *  reading becomes unknown. Positive work and attention are kept. `communityHarness` is the seat's recorded selection
+ *  (`communityHarnessOf`); without it the classification is returned as it is. */
+export function communityHarnessPaneActivity(classification: PaneActivityClassification, communityHarness: string | null | undefined): PaneActivityClassification {
+  return communityHarness && classification.state === "agent_idle"
+    ? { state: "unknown", reason: "community_harness_no_idle_signal", evidence: classification.evidence }
     : classification;
 }
 
@@ -643,8 +643,8 @@ export async function probeSessionActivity(input: {
   timerlessStatusIsLive?: boolean;
   /** Supplied only by an active draft-aware send; ordinary observations stay unchanged. */
   composerSnapshot?: () => Promise<ComposerSnapshot | null>;
-  /** The seat's community agent app (`agentAppOf`): its idle-looking screen reads unknown. */
-  agentApp?: string | null;
+  /** The seat's community harness (`communityHarnessOf`): its idle-looking screen reads unknown. */
+  communityHarness?: string | null;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -759,8 +759,8 @@ export async function probeSessionActivity(input: {
     const paneContent = snapshot?.screen ?? await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
     const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
-    let classification = agentAppPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
-      composerSnapshot: snapshot ?? undefined, runtime }), input.agentApp);
+    let classification = communityHarnessPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
+      composerSnapshot: snapshot ?? undefined, runtime }), input.communityHarness);
     // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
     // as a draft, one capture with styling is classified on its own. Newer attention or work there is
     // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;
@@ -1528,6 +1528,10 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
+  /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
+   *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
+   *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
+  signal?: AbortSignal;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -1578,6 +1582,18 @@ export interface SendOpts {
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
   expectedStagedLineCount?: number;
+}
+
+const CALLER_CANCELLED = "caller_cancelled";
+
+/** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
+function callerSignal(opts?: SendOpts): AbortSignal | undefined {
+  return opts?.queueWake || opts?.committedOutboxIds ? undefined : opts?.signal;
+}
+
+function callerCancelled(sessionName: string): SendResult {
+  return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: CALLER_CANCELLED,
+    error: `The request was cancelled before any input started. Nothing was typed into '${sessionName}', and nothing will be.` };
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
@@ -2099,6 +2115,8 @@ export class SessionTransport {
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) {
+      // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
+      if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       const result = await this.sendUnguarded(sessionName, text, opts);
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
@@ -2133,6 +2151,9 @@ export class SessionTransport {
           if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
         }
       }
+      // A recorded delivery has answered with its own outcome above; with nothing recorded, a caller already gone
+      // ends the send here.
+      if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       // #1084 — the idle wait must not occupy the seat's serial lease: a long
       // --wait-for-idle inside guard.operation holds up other sends and queue
       // creates to this seat for the whole wait. The lease-free wait, main's
@@ -2170,7 +2191,14 @@ export class SessionTransport {
       }
       const result = await guard.operation(sessionName, async () => {
         if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
-          return this.guardedDelivery.send(sessionName, text, sendOpts ?? {}, ids);
+          // Up to its durable record a draft-aware send is still the caller's: one that went away while this send
+          // waited for the lease ends here, unless a record for this delivery already exists. DraftAwareDelivery.send
+          // commits that record synchronously before its first await, so no cancellation lands between this check
+          // and the commit; after the commit a caller going away doesn't cancel it.
+          if (callerSignal(sendOpts)?.aborted && !this.guardedDelivery.existing(sessionName, text, sendOpts ?? {}, ids)) {
+            return callerCancelled(sessionName);
+          }
+          return this.guardedDelivery.send(sessionName, text, { ...sendOpts, signal: undefined }, ids);
         }
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
         return prior ?? this.sendUnguarded(sessionName, text, sendOpts);
@@ -2178,6 +2206,8 @@ export class SessionTransport {
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
         if (prior) return prior;
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
+        // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
+        if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
@@ -2345,6 +2375,7 @@ export class SessionTransport {
       timeoutMs,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+      signal: callerSignal(opts), cancelledBy: "caller",
     });
     if (!preWait.ok) {
       return { ok: false, failure: {
@@ -2548,15 +2579,29 @@ export class SessionTransport {
         };
       }
       this.tmuxAdapter.deliveryGuard?.expectStagedInput(sessionName, expected);
+      // This Enter is the request's first input, so a caller that has gone ends it here, before any key, as for a paste.
+      const cancel = callerSignal(opts);
+      if (cancel?.aborted) return callerCancelled(sessionName);
       const targetFailure = await checkClaudeTarget();
       if (targetFailure) return targetFailure;
       const copyModeFailure = await leavePaneMode("Nothing was submitted.");
       if (copyModeFailure) return copyModeFailure;
-      const submitResult = await this.runStage(
-        "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
-        (result) => result.ok ? "ok" : "failed",
-      );
+      if (cancel?.aborted) return callerCancelled(sessionName);
+      // The last check runs in the adapter, immediately before the key (after its guard checks).
+      const beforeKey = cancel ? () => { if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the key"); } : undefined;
+      let submitResult;
+      try {
+        submitResult = await this.runStage(
+          "session_transport.submit",
+          () => beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+          (result) => result.ok ? "ok" : "failed",
+        );
+      } catch (error) {
+        // Unguarded, the adapter's pre-key check throws instead of returning a result; no key was sent.
+        if (error instanceof DeliveryGuardError && error.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
+        throw error;
+      }
+      if (!submitResult.ok && submitResult.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
       if (!submitResult.ok) {
         return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
@@ -2575,6 +2620,7 @@ export class SessionTransport {
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
+        signal: callerSignal(opts), cancelledBy: "caller",
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -2632,6 +2678,7 @@ export class SessionTransport {
           timeoutLabelMs: waitForIdleMs,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+          signal: callerSignal(opts), cancelledBy: "caller",
         });
         waitEvidence = {
           activity: rewait.activity,
@@ -2802,6 +2849,8 @@ export class SessionTransport {
       text = appendDeliveredSegment(text, this.now().getTime() - Date.parse(opts.stampISO));
     }
 
+    // A caller that went away while this send waited: nothing has been written, so nothing ever is.
+    if (callerSignal(opts)?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     // Recheck the selected recipient after readiness/capture awaits, at the input boundary.
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
@@ -2810,6 +2859,11 @@ export class SessionTransport {
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
+    // The caller's cancellation is checked once more at the adapter's last step before the paste (after its buffer
+    // setup). A refusal there is proven pre-input and returns caller_cancelled; Enter below never checks it.
+    const cancel = callerSignal(opts);
+    if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
+    const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
     // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
     let writeIssued = false;
     const tagIssued = (error: unknown): never => {
@@ -2821,11 +2875,14 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
-        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false });
+        return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
     ).catch(tagIssued);
+    if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
+      return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
+    }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
       const policyRefusal = typeof textResult.code === "string" && textResult.code.startsWith("draft_");
@@ -3014,6 +3071,8 @@ export class SessionTransport {
     attachmentType: string | null;
     timeoutMs: number;
     signal?: AbortSignal;
+    /** Whose cancellation the signal carries: managed preparation (the default) or the send's caller. */
+    cancelledBy?: "caller";
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3056,12 +3115,15 @@ export class SessionTransport {
         };
     };
 
+    const cancelReason = input.cancelledBy === "caller" ? CALLER_CANCELLED : "preparation_cancelled";
     const cancelled = () => ({
       ok: false as const,
-      reason: "preparation_cancelled",
-      error: "Managed preparation ended; no compact authorized.",
+      reason: cancelReason,
+      error: input.cancelledBy === "caller"
+        ? "The request was cancelled while it waited for the seat to be idle. No text was sent, and none will be."
+        : "Managed preparation ended; no compact authorized.",
       activity: last ?? {
-        state: "unknown" as const, reason: "preparation_cancelled", evidenceSource: "pane_heuristic" as const,
+        state: "unknown" as const, reason: cancelReason, evidenceSource: "pane_heuristic" as const,
         sampledAt: this.now().toISOString(), evidence: null,
       },
       waitedMs: Math.max(0, Math.min(input.timeoutMs, input.timeoutMs - (deadline - Date.now()))),
@@ -3072,7 +3134,9 @@ export class SessionTransport {
       if (input.signal?.aborted) return cancelled();
       if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
-      const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      // A caller's cancellation also ends a pending observation (the abandoned read is ignored, never delivered on).
+      // Managed preparation's wait keeps its own behaviour: it doesn't race the read against its signal.
+      const activity = await this.observeReadinessWithin(input, deadline - Date.now(), input.cancelledBy === "caller" ? input.signal : undefined);
       if (input.signal?.aborted) return cancelled();
       if (activity === null || Date.now() > deadline) return expire();
       last = activity;
@@ -3099,22 +3163,28 @@ export class SessionTransport {
     }
   }
 
-  /** One readiness observation, raced against the time left before the wait's deadline. Null
-   *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
+  /** One readiness observation, raced against the time left before the wait's deadline and, when given, the
+   *  caller's cancellation. Null when the deadline or the cancellation wins; the abandoned observation is ignored,
+   *  never delivered on. */
   private async observeReadinessWithin(
     input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
+    cancel?: AbortSignal,
   ): Promise<AgentActivity | null> {
+    if (cancel?.aborted) return null;
     const observation = this.classifySendReadiness(input);
     observation.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
       return await Promise.race([
         observation,
         new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, remainingMs)); }),
+        ...(cancel ? [new Promise<null>((resolve) => { onAbort = () => resolve(null); cancel.addEventListener("abort", onAbort, { once: true }); })] : []),
       ]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      if (cancel && onAbort) cancel.removeEventListener("abort", onAbort);
     }
   }
 

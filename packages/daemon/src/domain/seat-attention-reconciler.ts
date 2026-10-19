@@ -11,8 +11,8 @@ import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow, type NativeProcessLister, type ClaudeResumeRotation, findExactNativeResumeProcess, listNativeProcesses } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { agentAppOf } from "./built-in-runtimes.js";
-import { sessionAgentAppSelect } from "./session-registry.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = NativeProcessRow;
@@ -234,11 +234,11 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const runtimeAmbiguous = input.runtime === "codex" || claudeProcessProof ? lineageMatch === null : runtimeMatch === "match" && (strictNativeLineage
     ? lineageMatch === null
     : input.runtime === "claude-code" && !normalizedCommand.includes("claude"));
-  // A community agent app's live pane is never proof of which session it runs. Only a session launched for that app
+  // A community harness's live pane is never proof of which session it runs. Only a session launched for that app
   // counts: the selection recorded on the session being rebound.
-  const selected = (input.db.prepare(`SELECT ${sessionAgentAppSelect(input.db, "sessions")} AS agent_app FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1`)
-    .get(input.nodeId, input.sessionName) as { agent_app: string | null } | undefined)?.agent_app;
-  const unconfirmed = pid !== null && runtimeMatch !== "mismatch" && !runtimeAmbiguous && !!agentAppOf(selected, input.runtime);
+  const selected = (input.db.prepare(`SELECT ${sessionCommunityHarnessSelect(input.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1`)
+    .get(input.nodeId, input.sessionName) as { community_harness: string | null } | undefined)?.community_harness;
+  const unconfirmed = pid !== null && runtimeMatch !== "mismatch" && !runtimeAmbiguous && !!communityHarnessOf(selected, input.runtime);
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
     verdict: pid === null

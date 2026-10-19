@@ -2647,23 +2647,29 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("an agent app's seat stops at resume-unsupported even with a saved token, launching nothing", async () => {
+  it.each(["current", "legacy"])("a community harness's %s snapshot stops at resume-unsupported even with a saved token, launching nothing", async (format) => {
     const rig = rigRepo.createRig("test-rig");
-    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-agent-app", rig.id, "Dev");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-app", podId: "pod-agent-app" });
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-community-harness", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-harness", podId: "pod-community-harness" });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
-    // A token left by a former runtime: nothing resumes an agent app with it.
+    // A token left by a former runtime: nothing resumes a community harness with it.
     sessionRegistry.updateResumeToken(session.id, "codex_id", "former-runtime-token");
-    sessionRegistry.recordAgentAppSelection(session.id, "synth-app");
-    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-app");
+    sessionRegistry.recordCommunityHarnessSelection(session.id, "synth-harness");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-harness");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    if (format === "legacy") {
+      const data = JSON.parse((db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snap.id) as { data: string }).data);
+      data.sessions[0].agentApp = data.sessions[0].communityHarness;
+      delete data.sessions[0].communityHarness;
+      db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
+    }
     sessionRegistry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
     const launchHarness = vi.fn(async () => ({ ok: true as const }));
     const mockAdapter = {
-      runtime: "synth-app",
+      runtime: "synth-harness",
       listInstalled: vi.fn(async () => []),
       project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
       deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
@@ -2672,25 +2678,25 @@ describe("RestoreOrchestrator", () => {
     };
 
     const orch = createOrchestrator();
-    const result = await orch.restore(snap.id, { adapters: { "synth-app": mockAdapter } });
+    const result = await orch.restore(snap.id, { adapters: { "synth-harness": mockAdapter } });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("awaiting-decision");
-      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
+      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-harness": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
       expect(launchHarness).not.toHaveBeenCalled();
     }
   });
 
-  it("a free-text runtime seat that wasn't launched for an agent app keeps the existing restore result", async () => {
+  it("a free-text runtime seat that wasn't launched for a community harness keeps the existing restore result", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-free-text", rig.id, "Dev");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-app", podId: "pod-free-text" });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "synth-harness", podId: "pod-free-text" });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateResumeToken(session.id, "codex_id", "some-token");
-    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-app");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "synth-harness");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
     sessionRegistry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);

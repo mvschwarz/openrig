@@ -231,6 +231,37 @@ describe("OMP RPC lifecycle", () => {
     expect(activity.at(-1)).toMatchObject({ hookEvent: "Stop", runtime: "omp" });
   });
 
+  it("mirrors OMP text deltas once when non-text updates include cumulative assistant text", () => {
+    const { core, appends } = runner();
+    core.handlePiLine(JSON.stringify({ type: "message_start", message: { role: "assistant", content: [] } }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+      message: { role: "assistant", content: [{ type: "text", text: "" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "Hello" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "usage_update" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: " there" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello there" }] },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_end", contentIndex: 0 },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello there" }] },
+    }));
+    expect(appends.join("")).toBe("Hello there");
+  });
+
   it("re-posts identity until the daemon confirms the token, then stops", async () => {
     let persisted = false;
     type Delivery = { promise: Promise<Record<string, unknown> | null>; resolve: (body: Record<string, unknown> | null) => void };

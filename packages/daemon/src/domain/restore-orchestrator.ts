@@ -79,8 +79,8 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // existing export surface and the execution call sites below are unchanged.
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError } from "./active-occupant.js";
 import { effectiveRestorePolicy, type RestoreSeatFacts } from "./restore-policy.js";
-import { agentAppOf } from "./built-in-runtimes.js";
-import { seatAdapter } from "../adapters/agent-app-runtime-adapter.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
@@ -140,7 +140,7 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: stri
   }
   const policy = effectiveRestorePolicy(seatFacts(data, nodeId, savedRuntime, runtime), session.restorePolicy);
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
-  if (agentAppOf(session.agentApp, runtime)) return { kind: "decision", why: "is a community harness whose preset is launch-only (resume unsupported)" };
+  if (communityHarnessOf(session.communityHarness, runtime)) return { kind: "decision", why: "is a community harness whose preset is launch-only (resume unsupported)" };
   if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
   if (!session.resumeType || session.resumeType === "none") return { kind: "fresh", why: "records no resume source for this seat" };
   return { kind: "resume" };
@@ -547,7 +547,7 @@ export class RestoreOrchestrator {
             const runtime = allNodes.find(current => current.id === node.id)?.runtime ?? node.runtime;
             // Launch needs consistent positive evidence: both samples idle with the same fingerprint, and the
             // bound pane still in this session (a recycled pane id could name another session's shell).
-            if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || agentAppOf(session.agentApp, runtime))
+            if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
               && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
               && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
               && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell"
@@ -920,8 +920,8 @@ export class RestoreOrchestrator {
       const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
       const policy = effectiveRestorePolicy(seatFacts(data, nodeId, node.runtime, liveNode ? liveNode.runtime : node.runtime), snapSession?.restorePolicy);
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
-      // An agent app is launch-only: nothing resumes it, so even a saved token (say, from a former runtime) stops here.
-      if (policy === "resume_if_possible" && snapSession && !freshRequested && agentAppOf(snapSession.agentApp, node.runtime)) {
+      // A community harness is launch-only: nothing resumes it, so even a saved token (say, from a former runtime) stops here.
+      if (policy === "resume_if_possible" && snapSession && !freshRequested && communityHarnessOf(snapSession.communityHarness, node.runtime)) {
         return {
           nodeId,
           logicalId: node.logicalId,
@@ -1147,10 +1147,10 @@ export class RestoreOrchestrator {
     }
     const session = sessionResolution.kind === "resolved" ? sessionResolution.session : null;
     const checkpoint = data.checkpoints[node.id] ?? null;
-    // Relaunching a seat that was launched for a community agent app keeps that selection on the session registered
+    // Relaunching a seat that was launched for a community harness keeps that selection on the session registered
     // for it, whether or not the app can start now: never a fallback to a built-in reading.
-    const carriedAgentApp = agentAppOf(session?.agentApp, node.runtime);
-    if (carriedAgentApp && launchResult?.session?.id) this.sessionRegistry.recordAgentAppSelection(launchResult.session.id, carriedAgentApp);
+    const carriedCommunityHarness = communityHarnessOf(session?.communityHarness, node.runtime);
+    if (carriedCommunityHarness && launchResult?.session?.id) this.sessionRegistry.recordCommunityHarnessSelection(launchResult.session.id, carriedCommunityHarness);
 
     // Check restore policy. OPR.0.3.4.2: a --fresh-listed seat (operation B)
     // deliberately skips the resume attempt; its launch reports `fresh-primed`.
@@ -1291,7 +1291,7 @@ export class RestoreOrchestrator {
       // (e.g. a node-subset launch that did not thread adapters), we CANNOT resume
       // and MUST NOT silently fresh-prime — fail closed to awaiting-decision.
       // Explicit --fresh and non-resume policies stay the only fresh-prime paths.
-      const resumeAdapter = seatAdapter(opts?.adapters, node.runtime, session?.agentApp);
+      const resumeAdapter = seatAdapter(opts?.adapters, node.runtime, session?.communityHarness);
       if (!resumeAdapter) {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return {
@@ -1332,7 +1332,7 @@ export class RestoreOrchestrator {
     // nothing else is replayed.
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
-    const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.agentApp);
+    const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
 
     // A new pod-aware agent needs a startup context to run StartupOrchestrator.
     // Do not report a healthy fresh-primed result when that context or adapter
@@ -1354,7 +1354,7 @@ export class RestoreOrchestrator {
     // Attempt restore-safe startup replay if context available
     if (data.nodeStartupContext && opts?.adapters && launchResult) {
       if (startupCtx) {
-        const adapter = seatAdapter(opts.adapters, startupCtx.runtime, session?.agentApp);
+        const adapter = seatAdapter(opts.adapters, startupCtx.runtime, session?.communityHarness);
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);

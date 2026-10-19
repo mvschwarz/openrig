@@ -42,8 +42,8 @@ import {
   CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
-import { AgentAppRuntimeAdapter, seatAdapter } from "../adapters/agent-app-runtime-adapter.js";
-import { sessionAgentAppSelect } from "./session-registry.js";
+import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -241,7 +241,7 @@ interface LatestSessionRow {
   session_name: string;
   status: string;
   origin: string;
-  agent_app?: string | null;
+  community_harness?: string | null;
 }
 
 interface PersistedStartupContextRow {
@@ -371,16 +371,16 @@ export class SeatLifecycleService {
     if (!node.runtime || startup.context.runtime !== node.runtime) {
       return { ok: false, code: "startup_context_runtime_mismatch", message: "The saved startup context belongs to a different runtime." };
     }
-    // Resolved as launch resolves it, so a recorded community agent app finds its adapter too.
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.agent_app);
+    // Resolved as launch resolves it, so a recorded community harness finds its adapter too.
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
     if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
 
     const warnings: string[] = [];
     // The filesystem startup files the next fresh launch would deliver (never send_text or actions), with legacy auto
     // hints resolved, for the read-only destination check.
     const files: ResolvedStartupFile[] = [];
-    // A community agent app takes no startup files at launch (its adapter delivers none), so there's nothing to check.
-    const takesStartupFiles = !(adapter instanceof AgentAppRuntimeAdapter);
+    // A community harness takes no startup files at launch (its adapter delivers none), so there's nothing to check.
+    const takesStartupFiles = !(adapter instanceof CommunityHarnessRuntimeAdapter);
     for (const file of takesStartupFiles ? startup.context.resolvedStartupFiles : []) {
       if (!file.appliesOn.includes("fresh_start") || file.deliveryHint === "send_text") continue;
       try {
@@ -873,7 +873,7 @@ export class SeatLifecycleService {
     }
     const pane = await observeSolePane(this.tmuxAdapter, binding.tmuxSession);
     if (!pane.ok || pane.pane !== binding.tmuxPane) return { ok: false as const, code: "binding_changed", message: "The managed terminal binding changed; context was not delivered." };
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, session.agent_app);
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, session.community_harness);
     if (!adapter) return { ok: false as const, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
     const ready = await adapter.checkReady({ ...binding, cwd: node.cwd ?? "." });
     if (!ready.ready) return { ok: false as const, code: "attention_required", message: ready.reason ?? "Resolve the native prerequisite first." };
@@ -921,7 +921,7 @@ export class SeatLifecycleService {
         message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
       };
     }
-    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.agent_app);
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
     if (!adapter) {
       return {
         ok: false as const,
@@ -1807,7 +1807,7 @@ export class SeatLifecycleService {
 
   private latestSession(nodeId: string): LatestSessionRow | null {
     const row = this.db.prepare(
-      `SELECT id, session_name, status, origin, ${sessionAgentAppSelect(this.db, "sessions")} AS agent_app FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
+      `SELECT id, session_name, status, origin, ${sessionCommunityHarnessSelect(this.db, "sessions")} AS community_harness FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as LatestSessionRow | undefined;
     return row ?? null;
   }

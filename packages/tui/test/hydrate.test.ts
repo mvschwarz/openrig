@@ -446,14 +446,14 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
     expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
   });
-  it("shows a quiet community agent app as unknown, never idle, and leaves built-in rows as they were", async () => {
+  it("shows a quiet community harness as unknown, never idle, and leaves built-in rows as they were", async () => {
     const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
     const quiet = { startupStatus: "ready", sessionStatus: "running", terminalActive: false, agentActivity: { state: "unknown" },
       activityState: { activity: "unknown", display: "unknown", needsInput: { count: 0, reason: null }, decidedBy: null } };
     const nodes = [
-      { ...base, ...quiet, logicalId: "dev.app-quiet", runtime: "synth-app", agentApp: { app: "synth-app" } },
-      { ...base, ...quiet, logicalId: "dev.app-moving", runtime: "synth-app", agentApp: { app: "synth-app" }, terminalActive: true },
-      { ...base, ...quiet, logicalId: "dev.app-prompt", runtime: "synth-app", agentApp: { app: "synth-app" }, agentActivity: { state: "needs_input" } },
+      { ...base, ...quiet, logicalId: "dev.app-quiet", runtime: "synth-harness", communityHarness: { harness: "synth-harness" } },
+      { ...base, ...quiet, logicalId: "dev.app-moving", runtime: "synth-harness", communityHarness: { harness: "synth-harness" }, terminalActive: true },
+      { ...base, ...quiet, logicalId: "dev.app-prompt", runtime: "synth-harness", communityHarness: { harness: "synth-harness" }, agentActivity: { state: "needs_input" } },
       { ...base, ...quiet, logicalId: "dev.pi-quiet", runtime: "pi" },
       { ...base, ...quiet, logicalId: "dev.claude-quiet", runtime: "claude-code" },
     ];

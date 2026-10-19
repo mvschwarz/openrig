@@ -70,7 +70,7 @@ import { contextCommand } from "./commands/context.js";
 import { pluginCommand } from "./commands/plugin.js";
 import { skillCommand } from "./commands/skill.js";
 import { agentImageCommand } from "./commands/agent-image.js";
-import { agentAppCommand } from "./commands/agent-app.js";
+import { communityHarnessCommand } from "./commands/community-harness.js";
 import { forkCommand } from "./commands/fork.js";
 import { workspaceCommand, type WorkspaceDeps } from "./commands/workspace.js";
 import { whoamiCommand } from "./commands/whoami.js";
@@ -139,7 +139,7 @@ export interface ProgramDeps {
   pluginDeps?: StatusDeps;
   skillDeps?: StatusDeps;
   agentImageDeps?: StatusDeps;
-  agentAppDeps?: StatusDeps;
+  communityHarnessDeps?: StatusDeps;
   forkDeps?: StatusDeps;
   workspaceDeps?: WorkspaceDeps;
   whoamiDeps?: StatusDeps;
@@ -221,7 +221,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(pluginCommand(depsOverride?.pluginDeps));
   program.addCommand(skillCommand(depsOverride?.skillDeps));
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
-  program.addCommand(agentAppCommand(depsOverride?.agentAppDeps));
+  program.addCommand(communityHarnessCommand(depsOverride?.communityHarnessDeps));
   program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(rigModeCommand(depsOverride?.rigModeDeps));
