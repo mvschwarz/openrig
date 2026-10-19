@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { helperCwd } from "../helper-cwd.js";
 import type { TerminalOpenResult } from "../daemon-client.js";
 
 export function terminalWindowNotice(view: string, result: TerminalOpenResult): string {
@@ -21,7 +22,7 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
   let executionError: string | undefined;
   try {
     ({ stdout } = await promisify(execFile)(cliEntry ? process.execPath : "rig", cliEntry ? [cliEntry, ...args] : args, {
-      env: { ...process.env, OPENRIG_URL: endpoint }, timeout: 180_000, maxBuffer: 1024 * 1024, encoding: "utf8",
+      cwd: helperCwd(), env: { ...process.env, OPENRIG_URL: endpoint }, timeout: 180_000, maxBuffer: 1024 * 1024, encoding: "utf8",
     }));
   } catch (error) {
     const failure = error as Error & { stdout?: string };

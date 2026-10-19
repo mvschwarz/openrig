@@ -32,15 +32,39 @@ function formatSnapshotAge(snapshotAt: string | null): string {
 }
 
 export function statusCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("status").description("Show rig status");
+  const cmd = new Command("status").description("Show rig status")
+    .option("--json", "JSON output");
 
-  cmd.action(async () => {
+  cmd.action(async (opts: { json?: boolean }) => {
+    const json = opts.json === true;
+    // JSON mode: one object, same keys on every path; sections the command did not
+    // (or could not) read are null rather than absent.
+    const emit = (daemon: Record<string, unknown>, rest: Record<string, unknown> = {}): void => {
+      console.log(JSON.stringify({ daemon, kernel: null, workspaceRoot: null, rigs: null, cmux: null, ...rest }, null, 2));
+    };
+
     const deps = depsOverride ?? {
       lifecycleDeps: realDeps(),
       clientFactory: (baseUrl: string) => new DaemonClient(baseUrl),
     };
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
+
+    if (json && status.state !== "running") {
+      // reachable: false = positively down (stopped, stale); null = not confirmed (unverified).
+      const unverified = status.state === "unverified";
+      const life = unverified ? null : readLifecycleDescription();
+      emit({
+        state: status.state,
+        reachable: unverified ? null : false,
+        message: statusGuardMessage(status).fact,
+        ...(status.pid !== undefined ? { pid: status.pid } : {}),
+        ...(status.probeErrorCode ? { probeErrorCode: status.probeErrorCode } : {}),
+        ...(status.siblingHint ? { siblingHint: status.siblingHint } : {}),
+        ...(life ? { lifecycle: life } : {}),
+      });
+      return;
+    }
 
     if (status.state === "stopped" || status.state === "stale") {
       console.log(statusGuardMessage(status).fact); // B8-1b: one language source
@@ -65,6 +89,21 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
     }
 
     // state === "running"
+    if (json && status.healthy === false) {
+      // The process is up. reachable is true when /healthz answered (a starved loop or a
+      // non-OK reply), null when it did not answer at all ("unresponsive"): not confirmed down.
+      emit({
+        state: "running",
+        reachable: status.reason === "unresponsive" ? null : true,
+        ...(status.pid !== undefined ? { pid: status.pid } : {}),
+        port: status.port,
+        healthy: false,
+        ...(status.reason ? { reason: status.reason } : {}),
+        ...(status.eventLoop ? { eventLoop: status.eventLoop } : {}),
+        ...(status.probeErrorCode ? { probeErrorCode: status.probeErrorCode } : {}),
+      });
+      return;
+    }
     if (status.healthy === false) {
       console.log(`Daemon running (pid ${status.pid}) but unhealthy — healthz failed`);
       return;
@@ -82,6 +121,27 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
         last_boot_failure?: { state: string; detail: string | null; at: string | null } | null;
       }>("/api/kernel/status").catch(() => null),
     ]);
+
+    if (json) {
+      let workspaceRoot: { value: string | number | boolean; source: string } | null = null;
+      try {
+        const resolved = new ConfigStore().resolveWithSource("workspace.root");
+        workspaceRoot = { value: resolved.value, source: resolved.source };
+      } catch {
+        // config resolution unavailable - null rather than a guess.
+      }
+      const kernel = kernelRes && kernelRes.status === 200 && kernelRes.data?.kernel_state
+        ? { state: kernelRes.data.kernel_state, lastBootFailure: kernelRes.data.last_boot_failure ?? null }
+        : { state: kernelRes && kernelRes.status === 503 ? "not_tracked" : "unknown", lastBootFailure: null };
+      const daemon = { state: "running", reachable: true, pid: status.pid, port: status.port, healthy: true };
+      if (summaryRes.status !== 200) {
+        emit(daemon, { kernel, workspaceRoot, cmux: { available: cmuxRes?.data?.available ?? false }, error: `Failed to fetch rig summary (HTTP ${summaryRes.status})` });
+        process.exitCode = 1;
+        return;
+      }
+      emit(daemon, { kernel, workspaceRoot, rigs: summaryRes.data, cmux: { available: cmuxRes?.data?.available ?? false } });
+      return;
+    }
 
     console.log(`Daemon running on port ${status.port}`);
 

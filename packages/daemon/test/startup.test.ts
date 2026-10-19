@@ -1,3 +1,4 @@
+import type { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
@@ -42,7 +43,8 @@ function seedDbWithStaleSessions(dbPath: string, rigs: { rigName: string; logica
     const rig = rigRepo.createRig(r.rigName);
     const node = rigRepo.addNode(rig.id, r.logicalId);
     const session = sessionRegistry.registerSession(node.id, r.sessionName);
-    sessionRegistry.updateStatus(session.id, "running");
+    // Seed the old schema directly; createDaemon must apply newer migrations.
+    db.prepare("UPDATE sessions SET status = 'running', last_seen_at = datetime('now') WHERE id = ?").run(session.id);
   }
 
   db.close();
@@ -99,6 +101,29 @@ describe("createDaemon startup composition", () => {
       db.close();
     }
   }, 30000); // createDaemon full composition can exceed the 5s default on a cold start
+
+  it("wires staged replacement into the production Claude collector adapter", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec: async () => "" });
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "startup-collector-wiring-"));
+    const copy = vi.spyOn(fs, "copyFileSync");
+    const rename = vi.spyOn(fs, "renameSync");
+    try {
+      const adapter = deps.runtimeAdapters!["claude-code"] as ClaudeCodeAdapter;
+      adapter.ensureContextCollector({ cwd });
+      adapter.ensureContextCollector({ cwd });
+      const dest = path.join(cwd, ".openrig/context-collector.cjs");
+      expect(rename).toHaveBeenCalledTimes(2);
+      expect(rename).toHaveBeenCalledWith(expect.any(String), dest);
+      expect(copy).toHaveBeenCalledTimes(2);
+      expect(copy.mock.calls.every(call => call[1] !== dest && call[2] === fs.constants.COPYFILE_EXCL)).toBe(true);
+      expect(fs.readFileSync(dest, "utf8")).toBe(fs.readFileSync(copy.mock.calls[0]![0], "utf8"));
+    } finally {
+      copy.mockRestore(); rename.mockRestore(); db.close(); fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30000);
 
   // GHOST-STAGE (e/Class-B) seam-coexist pin: dev-driver's fold added the invalidateRetiringOccupant
   // CALL at SeatHandoverService.commit() but no concrete invalidator was ever wired, so in production

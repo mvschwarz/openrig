@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { Command } from "commander";
 import { readOwnHostName, resolveEffectiveHost } from "../host-selection.js";
 import { execSync } from "node:child_process";
@@ -9,6 +10,9 @@ import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, bearerAuthHeaders, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
+import { ConfigStore } from "../config-store.js";
+import { compactOutputEnabled } from "../queue-receipt.js";
+import { shellQuote } from "../cross-host-executor.js";
 
 interface WhoamiCliOptions {
   nodeId?: string;
@@ -19,6 +23,7 @@ interface WhoamiCliOptions {
   json?: boolean;
   full?: boolean;
   verbose?: boolean;
+  allPeers?: boolean;
 }
 
 export interface WhoamiDeps extends StatusDeps {
@@ -75,9 +80,9 @@ interface WhoamiResult {
  * cannot silently re-bloat the every-boot path). Carries exactly the fields the
  * boot + compaction-restore recovery contract treats as ground truth.
  */
-function projectCompactWhoami(data: Record<string, unknown>): Record<string, unknown> {
+function projectCompactWhoami(data: Record<string, unknown>, bounded?: BoundedPeers): Record<string, unknown> {
   const id = (data["identity"] ?? {}) as Record<string, unknown>;
-  const peers = Array.isArray(data["peers"]) ? (data["peers"] as unknown[]) : [];
+  const peers = bounded ? bounded.peers : Array.isArray(data["peers"]) ? (data["peers"] as unknown[]) : [];
   const transcript = (data["transcript"] ?? {}) as Record<string, unknown>;
   return {
     resolvedBy: data["resolvedBy"],
@@ -96,11 +101,61 @@ function projectCompactWhoami(data: Record<string, unknown>): Record<string, unk
       return { logicalId: peer["logicalId"], sessionName: peer["sessionName"], runtime: peer["runtime"] };
     }),
     // KEEP: openrig-user SKILL.md documents peersNote as a required recovery field.
-    peersNote: data["peersNote"],
+    peersNote: bounded ? bounded.note : data["peersNote"],
+    ...(bounded ? { peersOmitted: bounded.omitted } : {}),
     // edges already carry only kind + to/from {logicalId, sessionName}.
     edges: data["edges"],
     transcript: { path: transcript["path"], tailCommand: transcript["tailCommand"] },
   };
+}
+
+export interface BoundedPeers {
+  peers: unknown[];
+  omitted: number;
+  /** The daemon's own note when every peer fits; otherwise what was left out and how to list it. */
+  note: unknown;
+}
+
+/**
+ * Slice 15 (OPR.0.7.0.15) P5 — with `output.compact` on, compact `--json` lists at most `bound` peers so the
+ * every-boot call stays small as a rig grows. Edge peers (either direction) come first, then peers in the
+ * seat's own pod, then the rest, each in the daemon's roster order. Nothing is silently missing: the note
+ * says how many were left out and the exact command that lists them all, and `edges` stays complete. When
+ * every peer fits, the roster and the daemon's note pass through unchanged, so a small rig pays only for
+ * `peersOmitted: 0`.
+ */
+export function boundPeers(data: Record<string, unknown>, bound: number, allPeersCommand: string): BoundedPeers {
+  const peers = Array.isArray(data["peers"]) ? (data["peers"] as Array<Record<string, unknown> | null>) : [];
+  if (peers.length <= bound) return { peers, omitted: 0, note: data["peersNote"] };
+  const id = (data["identity"] ?? {}) as Record<string, unknown>;
+  const edges = (data["edges"] ?? {}) as { outgoing?: WhoamiEdge[]; incoming?: WhoamiEdge[] };
+  const linked = new Set<unknown>([
+    ...(Array.isArray(edges.outgoing) ? edges.outgoing : []).map((edge) => edge?.to?.logicalId),
+    ...(Array.isArray(edges.incoming) ? edges.incoming : []).map((edge) => edge?.from?.logicalId),
+  ]);
+  const ownPod = id["podId"] ?? null;
+  const tier = (peer: Record<string, unknown> | null): number => {
+    if (linked.has(peer?.["logicalId"])) return 0;
+    if (ownPod !== null && peer?.["podId"] === ownPod) return 1;
+    return 2;
+  };
+  const ordered = [0, 1, 2].flatMap((t) => peers.filter((peer) => tier(peer) === t));
+  const shown = ordered.slice(0, bound);
+  const omitted = peers.length - shown.length;
+  const note = `peers = ${shown.length} of this rig's ${peers.length} (roster excluding self; edge peers first, then your pod, then roster order; `
+    + `bound output.whoami_peers=${bound}); ${omitted} not shown; all: ${allPeersCommand}; `
+    + "edges = directional relationships (always complete); use `rig ps --nodes` for node inventory including self + live state";
+  return { peers: shown, omitted, note };
+}
+
+/** The bound from `output.whoami_peers`, by the config store's own resolution; the default if unreadable. */
+function whoamiPeersBound(): number {
+  try {
+    const value = new ConfigStore().get("output.whoami_peers");
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : 8;
+  } catch {
+    return 8;
+  }
 }
 
 type TmuxExecFn = (cmd: string) => string;
@@ -228,13 +283,18 @@ export function whoamiCommand(depsOverride?: WhoamiDeps): Command {
     .option("--json", "JSON output for agents (compact identity-recovery projection by default)")
     .option("--full", "Show the complete whoami payload (contextUsage, commands, runtimeContext, workspace, all sub-fields)")
     .option("--verbose", "Alias for --full")
+    .option("--all-peers", "With output.compact on, list every peer in --json (today's compact output)")
     .addHelpText("after", `
 By default rig whoami is COMPACT: identity (rig/pod/member/session/runtime),
 peers (with sessionName for 'rig send'), edges, and the transcript path — the
 boot + compaction-restore recovery essentials. Use --full / --verbose for the
 complete payload (contextUsage, command examples, runtime token detail,
 workspace block). The compact form omits the Context line; use 'rig context' or
-'rig whoami --full' for usage.`)
+'rig whoami --full' for usage.
+
+With output.compact on, --json lists at most output.whoami_peers peers (default
+8), edge peers first, then your pod; peersNote and peersOmitted say how many were
+left out. --all-peers lists every one (today's compact output).`)
     .action(async (opts: WhoamiCliOptions) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
@@ -292,8 +352,12 @@ workspace block). The compact form omits the Context line; use 'rig context' or
           // Preserve the complete payload and original error; the routing hint is additive.
           console.log(JSON.stringify(hint ? { ...res.data, hint } : res.data, null, 2));
         } else {
-          // Compact default: the identity-recovery ALLOWLIST projection.
-          console.log(JSON.stringify(projectCompactWhoami(res.data)));
+          // Compact default: the identity-recovery ALLOWLIST projection; with output.compact on,
+          // a bounded peer list unless --all-peers asks for every one.
+          const bounded = !opts.allPeers && compactOutputEnabled()
+            ? boundPeers(res.data, whoamiPeersBound(), allPeersCommand(opts))
+            : undefined;
+          console.log(JSON.stringify(projectCompactWhoami(res.data, bounded)));
         }
         if (res.status >= 400) process.exitCode = 1;
         return;
@@ -421,6 +485,8 @@ async function runCrossHostWhoami(
   if (opts.nodeId !== undefined) argv.push("--node-id", opts.nodeId);
   if (opts.session !== undefined) argv.push("--session", opts.session);
   if (opts.json) argv.push("--json");
+  if (opts.allPeers) argv.push("--all-peers");
+  if (opts.full || opts.verbose) argv.push("--full");
 
   const result = await runner(host, argv);
 
@@ -428,7 +494,7 @@ async function runCrossHostWhoami(
     if (result.ok) {
       // Verbatim remote stdout passthrough — the remote `rig whoami --json`
       // already produced the correct JSON envelope; we do NOT double-wrap.
-      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stdout) process.stdout.write(withOriginPeersCommand(result.stdout, host.id, opts));
       if (result.stderr) process.stderr.write(result.stderr);
       return;
     }
@@ -592,4 +658,48 @@ async function runFanOutWhoami(opts: WhoamiCliOptions, deps: WhoamiDeps): Promis
   }
 
   if (hasFailure) process.exitCode = 3;
+}
+
+/** The exact command that lists every peer, for the same identity this call resolved. From the origin of an SSH
+ *  `--host` call it also names that host, and the identity the remote resolved when none was asked for. */
+function allPeersCommand(opts: WhoamiCliOptions, origin?: { hostId: string; resolvedNodeId?: string }): string {
+  const parts = ["rig", "whoami", "--json", "--all-peers"];
+  if (origin) parts.push("--host", shellQuote(origin.hostId));
+  if (opts.nodeId) parts.push("--node-id", shellQuote(opts.nodeId));
+  else if (opts.session) parts.push("--session", shellQuote(opts.session));
+  else if (origin?.resolvedNodeId) parts.push("--node-id", shellQuote(origin.resolvedNodeId));
+  return parts.join(" ");
+}
+
+/**
+ * Slice 15 (OPR.0.7.0.15) P5 over SSH `--host`: the remote bounds its peer list, and its note names the full-list
+ * command as run there. Copied at the origin, that command would query this host instead, so here it gains the
+ * host (and the identity the remote resolved, when none was asked for). Only that exact command, inside the
+ * top-level `peersNote` value itself, is replaced: the note must appear once, serialized exactly as JSON.stringify
+ * writes it, and the result must parse to the same object with only that note changed. Anything else (unbounded,
+ * older, malformed, differently encoded or ambiguous output, or a note in another form) passes through byte for
+ * byte.
+ */
+export function withOriginPeersCommand(stdout: string, hostId: string, opts: WhoamiCliOptions): string {
+  let parsed: unknown;
+  try { parsed = JSON.parse(stdout); } catch { return stdout; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return stdout;
+  const body = parsed as Record<string, unknown>;
+  const note = body["peersNote"];
+  if (typeof body["peersOmitted"] !== "number" || body["peersOmitted"] <= 0 || typeof note !== "string") return stdout;
+  const remote = `all: ${allPeersCommand(opts)};`;
+  if (note.split(remote).length !== 2) return stdout;
+  const resolved = ((body["identity"] ?? {}) as Record<string, unknown>)["nodeId"];
+  const origin = `all: ${allPeersCommand(opts, { hostId, resolvedNodeId: typeof resolved === "string" && resolved ? resolved : undefined })};`;
+  const serialized = JSON.stringify(note);
+  const hits = [...stdout.matchAll(new RegExp(`"peersNote"\\s*:\\s*${serialized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"))];
+  if (hits.length !== 1) return stdout;
+  const hit = hits[0]!;
+  const rewrittenNote = note.replace(remote, () => origin);
+  const out = stdout.slice(0, hit.index) + hit[0].replace(serialized, () => JSON.stringify(rewrittenNote)) + stdout.slice(hit.index + hit[0].length);
+  try {
+    return isDeepStrictEqual(JSON.parse(out), { ...body, peersNote: rewrittenNote }) ? out : stdout;
+  } catch {
+    return stdout;
+  }
 }

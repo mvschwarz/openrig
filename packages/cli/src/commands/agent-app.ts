@@ -1,0 +1,50 @@
+// `rig agent-app list`: the community agent apps installed as presets under $OPENRIG_HOME/agent-apps, each with its
+// maintainer and declared limits. OpenRig hasn't tested these apps.
+import { Command } from "commander";
+import { DaemonClient } from "../client.js";
+import { getDaemonStatus, getDaemonUrl, statusGuardMessage } from "../daemon-lifecycle.js";
+import { realDeps } from "./daemon.js";
+import type { StatusDeps } from "./status.js";
+
+interface AgentAppWire {
+  name: string;
+  usable: boolean;
+  maintainer?: string;
+  limits?: string[];
+  path: string;
+  problem?: string;
+}
+
+export function agentAppCommand(depsOverride?: StatusDeps): Command {
+  const cmd = new Command("agent-app").description("Community agent apps installed as presets (not tested by OpenRig)");
+  const getDeps = (): StatusDeps => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
+
+  cmd.command("list")
+    .description("List installed agent app presets, with maintainer and declared limits")
+    .option("--json", "JSON output")
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const deps = getDeps();
+        const status = await getDaemonStatus(deps.lifecycleDeps);
+        if (status.state !== "running" || status.healthy === false) {
+          const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
+        }
+        const res = await deps.clientFactory(getDaemonUrl(status)).get<{ dir: string; apps: AgentAppWire[] }>("/api/agent-apps");
+        if (res.status !== 200 || !res.data) throw new Error(`Daemon returned HTTP ${res.status}`);
+        if (opts.json) { console.log(JSON.stringify(res.data, null, 2)); return; }
+        if (res.data.apps.length === 0) {
+          console.log(`No agent app presets installed. Add one as ${res.data.dir}/<name>.yaml.`);
+          return;
+        }
+        for (const app of res.data.apps) {
+          if (!app.usable) { console.log(`${app.name}: can't be used. ${app.problem}`); continue; }
+          const limits = app.limits?.length ? ` Declared limits: ${app.limits.join("; ")}.` : "";
+          console.log(`${app.name}: community app, maintained by ${app.maintainer}, not tested by OpenRig.${limits}`);
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+  return cmd;
+}

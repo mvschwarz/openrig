@@ -56,11 +56,19 @@ export function lastLines(content: string, n: number): { content: string; lines:
   return { content: kept.length > 0 ? kept.join("\n") + "\n" : "", lines: kept.length, omittedLines: rows.length - kept.length };
 }
 
+/** When `--lines N` left earlier lines out, a busy seat's activity indicator (Claude draws its own above the input box)
+ *  may be among them, so this capture can't say the seat is idle. It says unknown and names where activity is known.
+ *  Capture never reported activity before, so no known fact is replaced. */
+export const CUT_ACTIVITY_NOTE = "lines cut; busy or idle not shown here; see rig ps --nodes or --history-plus-pane";
+
 /** Cut each successful capture in a route payload to its last `n` lines; `lines` becomes the count returned. */
 function withExactLines<T>(data: T, n: number | undefined): T {
   if (n === undefined || data === null || typeof data !== "object") return data;
-  const cut = (r: Record<string, unknown>): Record<string, unknown> =>
-    r["ok"] === true ? { ...r, ...lastLines(typeof r["content"] === "string" ? r["content"] : "", n), requestedLines: n } : r;
+  const cut = (r: Record<string, unknown>): Record<string, unknown> => {
+    if (r["ok"] !== true) return r;
+    const last = lastLines(typeof r["content"] === "string" ? r["content"] : "", n);
+    return { ...r, ...last, requestedLines: n, ...(last.omittedLines > 0 ? { activity: "unknown", activityNote: CUT_ACTIVITY_NOTE } : {}) };
+  };
   const payload = data as Record<string, unknown>;
   if (Array.isArray(payload["results"])) {
     return { ...payload, results: (payload["results"] as Array<Record<string, unknown>>).map(cut) } as T;
@@ -73,7 +81,7 @@ function renderCapture(data: Record<string, unknown>): void {
   const note = (r: Record<string, unknown>): void => {
     const omitted = r["omittedLines"];
     if (typeof omitted === "number" && omitted > 0) {
-      console.error(`[rig capture: ${r["sessionName"]}: ${omitted} earlier line${omitted === 1 ? "" : "s"} not shown; last ${r["lines"]} shown]`);
+      console.error(`[rig capture: ${r["sessionName"]}: ${omitted} earlier line${omitted === 1 ? "" : "s"} not shown; last ${r["lines"]} shown; activity unknown: rig ps --nodes]`);
     }
   };
 
@@ -131,6 +139,10 @@ Supported notes:
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace
     are dropped before counting (a deliberately blank last row isn't returned); omittedLines counts
     only the earlier rows the limit left out.
+  - When --lines N leaves earlier lines out, a busy seat's activity indicator may be among them,
+    so the capture says activity unknown (the stderr note; --json: activity "unknown" with an
+    activityNote) rather than looking idle. rig ps --nodes shows the seat's activity; the default
+    capture and --history-plus-pane include the whole visible pane.
   - Over ssh (--host), the remote host's own rig CLI does the capture, so mixed versions differ:
     an older CLI here with no --lines gets the last 20 lines from a remote with this CLI (older
     CLIs always forward --lines 20); this CLI with --lines N gets the older history-plus-pane

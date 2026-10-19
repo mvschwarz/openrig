@@ -72,6 +72,8 @@ export interface EnforcerInput {
   usedPercentage: number | null;
   transcriptPath?: string | null;
   sessionId?: string | null;
+  /** Revalidate a poll's source snapshot after acquiring the delivery lease. */
+  isObservationCurrent?: () => boolean;
 }
 
 export type EnforcerOutcome =
@@ -120,6 +122,7 @@ export type EnforcerSkipReason =
   | "send_failed"
   | "invalid_policy"
   | "stale_generation"
+  | "stale_observation"
   | "preparation_pending"
   | "preparation_incomplete"
   | "preparation_stopped"
@@ -127,7 +130,7 @@ export type EnforcerSkipReason =
   | "no_pending_stage";
 
 /** Out-of-contract thresholds (0, 101, NaN, a non-integer) are treated as disabled. */
-function isValidThresholdPercent(value: unknown): boolean {
+export function isValidThresholdPercent(value: unknown): boolean {
   return typeof value === "number"
     && Number.isFinite(value)
     && Number.isInteger(value)
@@ -451,15 +454,17 @@ export class ClaudeCompactionEnforcer {
     input: EnforcerInput,
     run: () => Promise<EnforcerOutcome>,
   ): Promise<EnforcerOutcome> {
+    const runIfCurrent = (): Promise<EnforcerOutcome> => input.isObservationCurrent && !input.isObservationCurrent()
+      ? Promise.resolve({ triggered: false, reason: "stale_observation" }) : run();
     const guard = this.sessionTransport.deliveryGuard;
     if (guard && input.runtime === "claude-code") {
-      try { return await guard.lifecycle([guard.target(input.sessionName).nodeId], run); }
+      try { return await guard.lifecycle([guard.target(input.sessionName).nodeId], runIfCurrent); }
       catch (error) {
         if (error instanceof DeliveryGuardError) return { triggered: false, reason: error.code === "typing_guard_enabled" ? "typing_guard_enabled" : "guard_target_unknown" };
         throw error;
       }
     }
-    return run();
+    return runIfCurrent();
   }
 
   /**

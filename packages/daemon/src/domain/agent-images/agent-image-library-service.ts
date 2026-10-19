@@ -317,7 +317,7 @@ export class AgentImageLibraryService {
       );
     }
     for (const relPath of fileContents.keys()) {
-      if (relPath.includes("..") || relPath.startsWith("/")) {
+      if (relPath.split(/[\\/]/).includes("..") || relPath.startsWith("/")) {
         throw new AgentImageError(
           "manifest_invalid",
           `install file path '${relPath}' must be relative inside the image (no '..', no leading '/')`,

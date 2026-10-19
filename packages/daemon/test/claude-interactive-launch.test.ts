@@ -100,7 +100,6 @@ fs.writeFileSync(process.env.MARKER, JSON.stringify({argv:process.argv.slice(2),
                 mkdirp: () => {}, copyFile: () => {}, readdir: () => [], homedir: dir },
               sessionIdFactory: () => "22222222-2222-4222-8222-222222222222" });
             (adapter as any).verifyResumeLaunch = async () => ({ ok: false, error: "native identity not assessed" });
-            (adapter as any).pollForResumeToken = async () => null;
             await adapter.launchHarness({ nodeId: name, id: name, tmuxSession: name, cwd: dir, model,
               launchGeneration: "1", launchPosture: "floor" } as never, { name,
               ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: token } }

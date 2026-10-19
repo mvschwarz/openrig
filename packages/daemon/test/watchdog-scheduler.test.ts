@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -11,6 +12,7 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
 import { WatchdogScheduler, isDue } from "../src/domain/watchdog-scheduler.js";
+import { watchdogRoutes } from "../src/routes/watchdog.js";
 
 describe("WatchdogScheduler (PL-004 Phase C)", () => {
   let db: Database.Database;
@@ -41,6 +43,53 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       },
     });
   }
+
+  it("honors an HTTP stop of a later due job while an earlier delivery is pending", async () => {
+    const register = (targetSession: string) => jobsRepo.register({
+      policy: "periodic-reminder", specYaml: `target: { session: ${targetSession} }\nmessage: ping\n`,
+      targetSession, intervalSeconds: 60, registeredBySession: "ops@kernel",
+    });
+    const first = register("first@rig");
+    const stopped = register("stopped@rig");
+    const active = register("active@rig");
+    let release!: () => void;
+    let started!: () => void;
+    const deliveryStarted = new Promise<void>(resolve => { started = resolve; });
+    const blockedDelivery = new Promise<void>(resolve => { release = resolve; });
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo, historyLog: log, eventBus: bus,
+      deliver: async (req) => {
+        deliveries.push(req);
+        if (req.targetSession === first.targetSession) { started(); await blockedDelivery; }
+        return { status: "ok" };
+      },
+    });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("watchdogJobsRepo" as never, jobsRepo);
+      c.set("eventBus" as never, bus);
+      await next();
+    });
+    app.route("/api/watchdog", watchdogRoutes());
+    const scheduler = new WatchdogScheduler({ jobsRepo, policyEngine: engine,
+      now: () => new Date(Date.parse(active.registeredAt) + 60_000) });
+    const tick = scheduler.runTickNow();
+    await deliveryStarted;
+    try {
+      const response = await app.request(`/api/watchdog/${stopped.jobId}/stop`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "work finished" }),
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).state).toBe("stopped");
+    } finally {
+      release();
+      await tick;
+    }
+    expect(deliveries.map(req => req.targetSession)).toEqual([first.targetSession, active.targetSession]);
+    expect(log.countForJob(stopped.jobId)).toBe(0);
+    expect(jobsRepo.getByIdOrThrow(stopped.jobId)).toMatchObject({ state: "stopped", lastFireAt: null, actionable: false });
+  });
 
   it("isDue waits a full interval for a never-evaluated periodic reminder (#801)", () => {
     const job = jobsRepo.register({

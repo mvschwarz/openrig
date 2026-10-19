@@ -1293,4 +1293,23 @@ describe("SeatHandoverService", () => {
     const successorBinding = launchHarness.mock.calls[0]![0] as { effort?: string };
     expect(successorBinding.effort).toBe("high");
   });
+
+  it("a seat's declared env (its rig's, with the member's over it) reaches the successor's pane — the REAL lookupNode→createSuccessor→respawn path", async () => {
+    const { rig, node } = seedSeat({ runtime: "codex" });
+    rigRepo.setRigEnv(rig.id, { SHARED: "from-rig", RIG_ONLY: "rig" });
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ SHARED: "from-member" }), node.id);
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig" });
+    expect(result.ok).toBe(true);
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+    const env = respawnPane.mock.calls[0]![2].env as Record<string, string>;
+    expect(env).toMatchObject({ SHARED: "from-member", RIG_ONLY: "rig", OPENRIG_SEAT_ENV_KEYS: "SHARED,RIG_ONLY" });
+  });
+
+  it("OPR.0.7.0.7: a seat's saved effort choice wins over its authored effort at handover (the shared resolver)", async () => {
+    const { node } = seedSeat({ runtime: "codex", effort: "medium" });
+    rigRepo.setNodeEffortChoice(node.id, "high");
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh", operator: "orch-lead@seat-rig" });
+    expect(result.ok).toBe(true);
+    expect((launchHarness.mock.calls[0]![0] as { effort?: string }).effort).toBe("high");
+  });
 });

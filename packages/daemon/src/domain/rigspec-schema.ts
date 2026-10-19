@@ -17,6 +17,7 @@ import { validateSafePath } from "./path-safety.js";
 import { CLAUDE_MANAGED_BLOCK_FILES } from "./managed-blocks.js";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
+import { normalizeSeatEnv, validateSeatEnv } from "./seat-env.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
 import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
@@ -46,13 +47,13 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "role", "permission_policy", "cwd", "restore_policy",
-  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref",
+  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -180,6 +181,9 @@ export class RigSpecSchema {
       errors.push("non_interruptive: must be a boolean");
     }
 
+    // Launch environment for every seat in the rig; a member's own env overrides it.
+    if (obj["env"] !== undefined) errors.push(...validateSeatEnv(obj["env"], "env"));
+
     // #25: optional per-runtime managed-block destination. Only claude-code is
     // configurable in this release; Codex stays on AGENTS.md.
     if (obj["managed_blocks"] !== undefined) {
@@ -256,6 +260,7 @@ export class RigSpecSchema {
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
+      env: normalizeSeatEnv(raw["env"]),
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
@@ -526,6 +531,8 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
       errors.push(`${prefix}.permission_policy: not valid on terminal members (a terminal node is not an agent seat)`);
     }
   }
+
+  if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
@@ -893,6 +900,7 @@ function validateServicesBlock(raw: unknown, prefix: string): string[] {
 }
 
 function validateWaitTarget(raw: Record<string, unknown>, index: number, prefix: string): string[] {
+  if (!isMapping(raw)) return [`${prefix}.wait_for[${index}]: must be an object`];
   const errors: string[] = [];
   const targetPrefix = `${prefix}.wait_for[${index}]`;
   const hasService = typeof raw["service"] === "string" && raw["service"];
@@ -932,6 +940,10 @@ function validateSurfaces(raw: unknown, prefix: string): string[] {
     } else {
       for (let i = 0; i < (obj["urls"] as unknown[]).length; i++) {
         const url = (obj["urls"] as Record<string, unknown>[])[i]!;
+        if (!isMapping(url)) {
+          errors.push(`${prefix}.surfaces.urls[${i}]: must be an object`);
+          continue;
+        }
         if (!url["name"] || typeof url["name"] !== "string") {
           errors.push(`${prefix}.surfaces.urls[${i}].name: required non-empty string`);
         }
@@ -948,6 +960,10 @@ function validateSurfaces(raw: unknown, prefix: string): string[] {
     } else {
       for (let i = 0; i < (obj["commands"] as unknown[]).length; i++) {
         const command = (obj["commands"] as Record<string, unknown>[])[i]!;
+        if (!isMapping(command)) {
+          errors.push(`${prefix}.surfaces.commands[${i}]: must be an object`);
+          continue;
+        }
         if (!command["name"] || typeof command["name"] !== "string") {
           errors.push(`${prefix}.surfaces.commands[${i}].name: required non-empty string`);
         }
@@ -968,6 +984,10 @@ function validateCheckpointHooks(raw: unknown, prefix: string): string[] {
   const errors: string[] = [];
   for (let i = 0; i < raw.length; i++) {
     const hook = raw[i] as Record<string, unknown>;
+    if (!isMapping(hook)) {
+      errors.push(`${prefix}.checkpoints[${i}]: must be an object`);
+      continue;
+    }
     if (!hook["id"] || typeof hook["id"] !== "string") {
       errors.push(`${prefix}.checkpoints[${i}].id: required non-empty string`);
     }
@@ -1147,6 +1167,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     effort: typeof m["effort"] === "string" && m["effort"].trim() ? m["effort"].trim() : undefined,
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
+    env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
     // OPR.0.5.6.20 A5 — aliases normalize at ingestion; absent stays undefined so the

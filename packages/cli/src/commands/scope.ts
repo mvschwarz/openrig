@@ -48,10 +48,12 @@ import {
   moveSlice,
   rollbackMovedSlice,
   nextSliceNN,
+  tryClaimSliceNN,
   NOTES_FILE_PRECEDENCE,
   pad2,
   readFrontmatter,
   resolveNotesFile,
+  readProjectMissionsRoot,
   resolveMissionsRoot,
   splitFrontmatter,
   todayDateISO,
@@ -78,6 +80,7 @@ import { deriveScopeTrust } from "../lib/scope/trust.js";
 import { capabilityDeltaExpiryFindings } from "../lib/scope/capability-delta.js";
 import {
   applyMissionCompositionEdits,
+  appendMissionMembership,
   nextMissionMembershipOrder,
   planMissionMembershipAdd,
   planMissionMembershipRemove,
@@ -98,6 +101,11 @@ function makeStdout(): Stdout {
 
 const MISSION_MANIFEST = `schema: openrig.mission/v0alpha1
 kind: mission
+# The project proof rollup counts only missions whose status is active or
+# release-candidate. A new mission is planned, so it stays outside the rollup
+# until you change this to active (or release-candidate).
+metadata:
+  status: planned
 composition:
   mission_markdown:
     spec: SPEC.md
@@ -335,41 +343,50 @@ function buildSliceCreateCommand(): Command {
         }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const mission = findMission(missionsRoot, missionName);
-        const nn = nextSliceNN(mission.absPath);
-        const sliceFolder = `${pad2(nn)}-${slug}`;
-        const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
-        if (fs.existsSync(sliceAbs)) {
-          throw new ScopeCliError({
-            fact: `Slice folder ${sliceAbs} already exists.`,
-            consequence: "Refusing to overwrite.",
-            action: "Pick a different slug, or rm -rf the existing folder first.",
-          });
-        }
+        let nn = nextSliceNN(mission.absPath);
         const title = opts.title ?? titleFromSlug(slug);
         const intent = opts.intent ?? title;
-        const compositionEdit = planMissionMembershipAdd(
-          mission.absPath,
-          `slices/${sliceFolder}/slice.yaml`,
-          nextMissionMembershipOrder(mission.absPath),
-        );
         const missionId = ensureMissionId(mission, missionsRoot);
-        const id = sliceIdFromMission(missionId, nn);
+        let id = sliceIdFromMission(missionId, nn);
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
-        for (const dependency of dependsOn) {
-          if (dependency === id) {
+        // Validate before reserving any number; re-check self-dependency if a
+        // competing creator claimed the initial candidate.
+        let sliceFolder: string;
+        let sliceAbs: string;
+        for (;;) {
+          for (const dependency of dependsOn) {
+            if (dependency === id) {
+              throw new ScopeCliError({
+                fact: `Slice ${id} cannot depend on itself.`,
+                consequence: "Slice not created.",
+                action: "Use a different sibling slice ID, or omit --depends-on.",
+              });
+            }
+            if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
+              throw new ScopeCliError({
+                fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
+                consequence: "Slice not created.",
+                action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
+              });
+            }
+          }
+          sliceFolder = `${pad2(nn)}-${slug}`;
+          sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
+          if (fs.existsSync(sliceAbs)) {
             throw new ScopeCliError({
-              fact: `Slice ${id} cannot depend on itself.`,
-              consequence: "Slice not created.",
-              action: "Use a different sibling slice ID, or omit --depends-on.",
+              fact: `Slice folder ${sliceAbs} already exists.`,
+              consequence: "Refusing to overwrite.",
+              action: "Pick a different slug, or rm -rf the existing folder first.",
             });
           }
-          if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
-            throw new ScopeCliError({
-              fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
-              consequence: "Slice not created.",
-              action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
-            });
-          }
+          // Validate an explicit manifest before reserving an ordinal. The
+          // post-scaffold write re-plans from the latest manifest and disk.
+          planMissionMembershipAdd(
+            mission.absPath, `slices/${pad2(nn)}-${slug}/slice.yaml`,
+          );
+          if (tryClaimSliceNN(mission.absPath, nn, `slices/${sliceFolder}/slice.yaml`)) break;
+          nn++;
+          id = sliceIdFromMission(missionId, nn);
         }
         const createdDate = todayDateISO();
         const body = renderSliceTemplate(kind, {
@@ -383,11 +400,12 @@ function buildSliceCreateCommand(): Command {
           depends_on: dependsOn,
         });
         const proofBody = renderSliceProofTemplate({ id, title });
-        const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
         const readmePath = path.join(sliceAbs, "SPEC.md");
+        const proofPath = path.join(sliceAbs, "PROOF.md");
+        let scaffoldCompleted = false;
         try {
-          // Persist the parent id in the same rollback boundary as the child
-          // and composition membership. Validation above performs no writes.
+          // Persist the parent id before building the scaffold. Incomplete
+          // scaffolds roll back; the ordinal remains reserved even then.
           ensureMissionIdPersisted(mission, missionsRoot);
           fs.mkdirSync(sliceAbs, { recursive: true });
           fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
@@ -405,11 +423,20 @@ function buildSliceCreateCommand(): Command {
             fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
           }
           fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
-          fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
-          applyMissionCompositionEdits(compositionEdit ? [compositionEdit] : []);
+          // Publish the completion sentinel only after its entire contents exist.
+          const proofTemporary = `${proofPath}.openrig-${process.pid}.tmp`;
+          fs.writeFileSync(proofTemporary, proofBody, { encoding: "utf8", flag: "wx" });
+          fs.renameSync(proofTemporary, proofPath);
+          scaffoldCompleted = true;
+          await appendMissionMembership(mission.absPath, `slices/${sliceFolder}/slice.yaml`);
         } catch (error) {
-          fs.rmSync(sliceAbs, { recursive: true, force: true });
-          if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
+          // PROOF.md is the final scaffold file. Once complete, leave this
+          // pending registration available for a later creator to repair.
+          if (!scaffoldCompleted) {
+            fs.rmSync(sliceAbs, { recursive: true, force: true });
+            // The parent identity may already be shared by another creator.
+            // Rolling this child back must not undo it or authored parent edits.
+          }
           throw error;
         }
         const payload = {
@@ -424,10 +451,10 @@ function buildSliceCreateCommand(): Command {
           },
         };
         emit(out, payload, json, [
-          `Created ${mission.name}/slices/${sliceFolder}`,
-          `  id: ${id}`,
+          `Created ${payload.slice.mission}/slices/${payload.slice.name}`,
+          `  id: ${payload.slice.id}`,
           `  template: ${kind}`,
-          `  path: ${sliceAbs}`,
+          `  path: ${payload.slice.path}`,
         ]);
       } catch (err) {
         fail(err, json, out);
@@ -759,6 +786,38 @@ function buildMissionShowCommand(): Command {
     });
 }
 
+function resolveMissionCreateRoot(override: string | null | undefined, advisories: string[]): string {
+  const selected = override ?? process.env.OPENRIG_WORK_ROOT;
+  if (!selected) return resolveMissionsRoot();
+
+  const candidate = path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected);
+  const childMissionsRoot = path.join(candidate, "missions");
+  const hasChildMissionsRoot =
+    fs.existsSync(childMissionsRoot) && fs.statSync(childMissionsRoot).isDirectory();
+  const directMissionsRoot = path.basename(candidate) === "missions" && !hasChildMissionsRoot;
+  const workspaceRoot = directMissionsRoot ? path.dirname(candidate) : candidate;
+  // A missing workspace is created at the named path by the mission's own mkdir, after rendering; it never falls
+  // back to the configured root. A path that can't be created reports the filesystem's own error there.
+
+  // A named workspace uses its project.yaml missions.root, as work positions do; a named missions folder is used as is.
+  const missionsRoot = directMissionsRoot ? candidate : readProjectMissionsRoot(workspaceRoot, advisories);
+  if (!missionsRoot) {
+    throw new ScopeCliError({
+      fact: `project.yaml missions.root in ${workspaceRoot} resolves outside the workspace.`,
+      consequence: "Mission not created.",
+      action: "Set missions.root to a relative path inside the workspace.",
+    });
+  }
+  if (fs.existsSync(missionsRoot) && !fs.statSync(missionsRoot).isDirectory()) {
+    throw new ScopeCliError({
+      fact: `Mission root is not a directory: ${missionsRoot}.`,
+      consequence: "Mission not created.",
+      action: "Move the conflicting path and retry mission creation.",
+    });
+  }
+  return missionsRoot;
+}
+
 function buildMissionCreateCommand(): Command {
   return new Command("create")
     .description("Create a new mission with SPEC.md and mission.yaml (mints a stable dot-ID into frontmatter)")
@@ -783,7 +842,8 @@ function buildMissionCreateCommand(): Command {
             action: "Pick a name with no whitespace or path separators.",
           });
         }
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const rootAdvisories: string[] = [];
+        const missionsRoot = resolveMissionCreateRoot(getOpts(command).workspace, rootAdvisories);
         const absPath = path.join(missionsRoot, name);
         if (fs.existsSync(absPath)) {
           throw new ScopeCliError({
@@ -911,9 +971,13 @@ function buildMissionCreateCommand(): Command {
           humanLines.push(`  notes: ${notesPath} (template: ${notesRendered?.resolvedFrom})`);
         }
         if (capabilityDeltaPath) humanLines.push(`  capability delta: ${capabilityDeltaPath}`);
-        if (notesRendered?.resolvedFrom === "legacy-env") {
-          humanLines.push("  advisory: OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH");
-        }
+        const advisories = [
+          ...rootAdvisories,
+          ...(notesRendered?.resolvedFrom === "legacy-env"
+            ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
+            : []),
+        ];
+        for (const advisory of advisories) humanLines.push(`  advisory: ${advisory}`);
         emit(out, {
           ok: true,
           mission: {
@@ -925,9 +989,7 @@ function buildMissionCreateCommand(): Command {
             notesPath,
             capabilityDeltaPath,
             notesResolvedFrom: notesRendered?.resolvedFrom ?? null,
-            advisories: notesRendered?.resolvedFrom === "legacy-env"
-              ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
-              : [],
+            advisories,
           },
         }, json, humanLines);
       } catch (err) {
@@ -2079,7 +2141,7 @@ function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): {
 export function scopeCommand(): Command {
   const cmd = new Command("scope")
     .description("Scope tree primitive: missions, slices, sub-slices (per conventions/scope-and-versioning)")
-    .option("--workspace <path>", "Override workspace root (otherwise inferred from cwd or $OPENRIG_WORK_ROOT)");
+    .option("--workspace <path>", "Workspace root; its missions are in project.yaml's missions.root, else missions/ (otherwise $OPENRIG_WORK_ROOT, then workspace.slices_root)");
 
   const slice = new Command("slice").description("Slice-tier commands");
   slice.addCommand(buildSliceLsCommand());

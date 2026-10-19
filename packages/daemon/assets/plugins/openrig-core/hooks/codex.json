@@ -26,7 +26,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
-            "timeout": 5
+            "timeout": 60
           }
         ]
       }
@@ -48,7 +48,7 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
-            "timeout": 5
+            "timeout": 60
           }
         ]
       }

@@ -80,6 +80,50 @@ const baseFiles = {
 const baseDirs = ["/root", "/root/slices", S, `${S}/proof`];
 
 describe("scope-view projection (store-direct)", () => {
+  it("projects authored intent and requirements instead of fenced examples", () => {
+    const example = "```md\n## Intent\nExample intent\n## Mini-requirements\n1. Example requirement\n```\n\n";
+    const content = README.replace("## Intent", example + "## Intent");
+    const detail = projectSliceScope(fsFixture({ ...baseFiles, [`${S}/README.md`]: content }, baseDirs), S)!;
+    expect(detail.intent).toBe('"Milestone cut: Slack to the founder on the bones we keep."');
+    expect(detail.miniRequirements).toEqual([
+      "The daemon resolves @external addresses via domain-class admission; unregistered bounces loudly.",
+      "Human specs are one file per human.",
+    ]);
+  });
+  it("reads `1)` mini-requirements like `1.` ones, as the authored-item grammar does", () => {
+    const dotted = projectSliceScope(fsFixture(baseFiles, baseDirs), S)!;
+    const content = README.replace(/^(\d+)\. /gm, "$1) ");
+    expect(content).not.toBe(README);
+    const detail = projectSliceScope(fsFixture({ ...baseFiles, [`${S}/README.md`]: content }, baseDirs), S)!;
+    expect(detail.miniRequirements).toHaveLength(2);
+    expect(detail.miniRequirements).toEqual(dotted.miniRequirements);
+  });
+
+  it("reads a CRLF slice like its LF twin: requirements, evidence pairing and the locked spec path", () => {
+    const crlf = (text: string) => text.replace(/\n/g, "\r\n");
+    const files = {
+      [`${S}/README.md`]: crlf(README),
+      [`${S}/proof/qa-pass-1.md`]: crlf(DROP1),
+      [`${S}/proof/guard-clear-3.md`]: crlf(DROP3),
+      [`${S}/IMPLEMENTATION-PRD.md`]: "spec bytes",
+    };
+    const lf = projectSliceScope(fsFixture({ ...files, [`${S}/README.md`]: README, [`${S}/proof/qa-pass-1.md`]: DROP1, [`${S}/proof/guard-clear-3.md`]: DROP3 }, baseDirs), S)!;
+    const detail = projectSliceScope(fsFixture(files, baseDirs), S)!;
+    expect(detail.miniRequirements).toEqual(lf.miniRequirements);
+    expect(detail.miniRequirements).toHaveLength(2);
+    expect(detail.proof).toEqual({ paired: 2, total: 3 });
+    expect(detail.proofContract[0]!.drops[0]!.media).toEqual(["relay-repair-e2e.txt"]);
+    expect(detail.specShaShort).toBe(lf.specShaShort);
+    expect(detail.specShaShort).not.toBeNull();
+  });
+  it("retains fenced headings inside the actual intent span", () => {
+    const example = "\n\n```md\n## Example heading\nKept example\n```\n\nAfter the example.";
+    const content = README.replace('"Milestone cut: Slack to the founder on the bones we keep."', '"Milestone cut: Slack to the founder on the bones we keep."' + example);
+    const detail = projectSliceScope(fsFixture({ ...baseFiles, [`${S}/README.md`]: content }, baseDirs), S)!;
+    expect(detail.intent.endsWith("After the example.")).toBe(true);
+    expect(detail.intent).toContain("## Example heading");
+  });
+
   it("N/M pairing derives from C1 drops ONLY: 2/3 paired; each paired item carries its drops", () => {
     const d = projectSliceScope(fsFixture(baseFiles, baseDirs), S)!;
     expect(d.proof).toEqual({ paired: 2, total: 3 });
@@ -88,6 +132,26 @@ describe("scope-view projection (store-direct)", () => {
     expect(d.proofContract[1]!.paired).toBe(false);
     expect(d.proofContract[2]!.paired).toBe(true);
     expect(d.proofContract[2]!.drops[0]!.artifactType).toBe("guard");
+  });
+
+  it("pairs a text evidence ref that YAML.stringify folded onto a continuation line", () => {
+    // `rig proof add` writes the C1 header with YAML.stringify, which folds a long plain scalar.
+    const folded = `---
+slice: OPR.0.5.2.9
+candidate_sha: abc123
+artifact_type: qa
+verdict: PASS
+evidences:
+  - A registered entity cold-DMs from Slack and it queues
+    exactly as today.
+media:
+  - relay-cold-dm.txt
+---
+body`;
+    const d = projectSliceScope(fsFixture({ ...baseFiles, [`${S}/proof/qa-pass-2.md`]: folded }, baseDirs), S)!;
+    expect(d.proof).toEqual({ paired: 3, total: 3 });
+    expect(d.proofContract[1]!.paired).toBe(true);
+    expect(d.proofContract[1]!.drops[0]!.media).toEqual(["relay-cold-dm.txt"]);
   });
 
   it("PROGRESS.md is NEVER a data source: its lying checkbox moves nothing (the drift-class kill)", () => {

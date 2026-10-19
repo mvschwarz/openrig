@@ -33,11 +33,12 @@ blanket-replaced: `rigged` → `rig` is a per-occurrence question, not a global
 substitution.
 
 **Axis 1 — MCP tool names are `rig_*`.** `packages/cli/src/mcp-server.ts`
-registers **18** tools, all named `rig_*`
+registers **23** tools, all named `rig_*`
 (`grep -c 'server.tool(' packages/cli/src/mcp-server.ts`), including
-`rig_rig_nodes` (`mcp-server.ts:288`), `rig_send` (`:305`),
-`rig_capture` (`:339`), `rig_chatroom_send` (`:364`) and `rig_chatroom_watch`
-(`:400`). No `rigged_*` name other than the tmux keys below remains in product
+`rig_rig_nodes` (`mcp-server.ts:290`), `rig_send` (`:307`),
+`rig_capture` (`:341`), `rig_chatroom_send` (`:366`) and `rig_chatroom_watch`
+(`:402`), and the five queue tools `rig_queue_create`, `_show`, `_list`, `_claim`
+and `_update`. No `rigged_*` name other than the tmux keys below remains in product
 source: **0** hits
 (`git grep -n 'rigged_' -- ':(glob)packages/*/src/**' | grep -v -c '@rigged_'`).
 
@@ -95,7 +96,15 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    (`send`, `:1155`). With the seat's typing guard on, the message is held
    instead of typed: the result is `outcome: "retained"` with HTTP 200
    (`routes/transport.ts:115`); operators use `rig seat set-typing-guard` and
-   `rig seat held-messages`.
+   `rig seat held-messages`. This same typing guard has `off` (default),
+   `draft-aware`, and `hold` modes. The legacy enabled boolean selects hold/off.
+   `DraftAwareDelivery` makes one attempt for opted-in seats and immediately returns
+   the exact refusal reason and original held IDs when input is unavailable.
+   Migration `100_typing_guard_modes` extends existing guard/audit rows and adds
+   non-executable receipt metadata to the original outbox; it creates no tables
+   or retry scheduler. Combined wakes preserve every original ID/body.
+   Legacy storage bits fail safe to hold on rollback; newer legacy audit writes
+   supersede older saved modes on re-upgrade, including same-value writes.
 3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
    (`session-transport.ts:1482`), unless the caller passes
@@ -118,15 +127,205 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    without `-p` (`session-transport.ts:1541`) and Enter is pressed only if the
    whole answer is still staged (`:1562`–`1570`). A successful paste proves
    transport execution, not runtime consumption.
-5. Optional `--verify`: capture the last 30 pane lines before and after the
-   send (after a 500 ms wait, `:1597`) and count the message's first 40
-   characters in each. A higher count after the send reports
-   `outcome: "delivered"`; otherwise the outcome is `rendered-unconfirmed` —
-   text and Enter landed but the capture could not re-confirm the render,
-   which is not a failure at the daemon (`session-transport.ts:700`
-   `verify?`; `:1596` `if (opts?.verify)`; `:1608`
-   `verified = postCount > preCount`). The outcome values are `delivered`,
-   `rendered-unconfirmed`, `failed` and `retained` (`:772`).
+   The transport's prompt reader uses the shared `composer-prompts.ts` matchers
+   from Mr-Neutr0n's #635. Its cursor-aware extension preserves capture styling
+   and excludes a wholly dim autocomplete suffix after the cursor. The daemon
+   directly depends on `string-width` to compare Unicode terminal cell widths
+   with cursor positions and exact staged text; a dependency hoisted from the
+   TUI would not declare this daemon runtime requirement. Default seats retain
+   their existing advisory recognition and staged-text verification behavior.
+   For draft-aware seats, `TmuxAdapter` checks the current composer after buffer
+   preparation and again immediately before keys. The delivery lease records
+   the pasted text and any observed collapsed-paste label; Enter requires that
+   owned input. Late human input, changed recipients or stopped queue wakes refuse
+   further input or hold the message; ambiguous writes remain indeterminate. Nothing
+   is retried automatically. Unicode cell widths use the daemon's direct
+   `string-width` dependency. See [per-seat terminal delivery](../../reference/seat-delivery.md)
+   for activation, persistence, inspection and lifecycle tradeoffs.
+5. Optional `--verify`: capture the last 30 pane lines before the paste and,
+   500 ms after Enter, again, leaving out the current input box (the last
+   prompt line and its continuation, `verificationTranscript`). A send
+   carrying OpenRig's From/To header is matched as the whole message with
+   whitespace normalized (`countEnvelopeOccurrences`); a raw send is matched
+   by its first 40 characters (`verificationSnippet`). More occurrences after
+   the send report `outcome: "delivered"`; otherwise the outcome is
+   `rendered-unconfirmed`: text and Enter landed but the capture could not
+   re-confirm the render, which is not a failure. The outcome values are
+   `delivered`, `rendered-unconfirmed`, `failed` and `retained`.
+   With `transport.verify_input_box` on (off by default), a Claude Code or
+   Codex send is verified only when the seat was proven idle before the paste
+   and the input box shows the message, and is unconfirmed otherwise:
+
+   - **Seat idle before the paste** (`readSeatBeforePaste`). The `--verify`
+     capture taken before the paste (the whole screen) must match an idle
+     allow-list (`SEAT_IDLE_SHAPES`) built from real Claude Code 2.1.296 and
+     Codex 0.160.0 frames and, where no frame was captured, from the Claude
+     Code 2.1.296 bundle, the Codex 0.160.0 source and OpenRig's own launch
+     code. Claude Code: the empty box or its `Try "…"` suggestion between two
+     rules; the opening rule plain, or carrying this seat's own session name
+     the way Claude Code draws `--name` (`─…─ <session> ─`, or `──` as in
+     earlier versions, as wide as the closing rule; OpenRig launches every
+     Claude seat with `--name`); the footer row of the seat's permission
+     posture, one for each mode OpenRig can launch: bypass
+     (`⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents`), accept
+     edits (OpenRig's default), auto, don't ask, plan, and default
+     (`⏸ manual mode on · ← for agents`); no statusLine row between the
+     closing rule and the footer (OpenRig's statusLine collector prints
+     nothing); a blank, effort or tmux-notice row above the box; and above
+     that, in the status slot, the completion row of the seat's last turn
+     (`✻ <verb> for <duration> · done <time>` at column 0, matched by the
+     Claude Code 2.1.296 bundle's grammar: one of its eight past-tense verbs,
+     its duration format, and the time of a turn finished today on a 12- or
+     24-hour en-US clock). A blank slot counts only under that completion
+     row, with only blank rows between them (as in the fullscreen renderer),
+     or, before the first turn, under the last row of the Claude Code v2.1.296
+     welcome banner. OpenRig launches Claude in the classic renderer, where the
+     box follows the transcript, so an idle seat that has finished a turn
+     shows that turn's completion row in the slot; real frames of idle seats
+     OpenRig launched show it. A configured statusLine, which OpenRig installs
+     on every Claude seat, makes Claude Code drop the footer's hints, so a
+     running turn draws the same footer row as an idle one, without
+     `esc to interrupt`: the status slot is what tells them apart. The 2.1.296
+     bundle draws the live status row (the spinner) there only while no
+     streamed text with a complete line is on screen
+     (`isLoading && (!hasDisplayedStreamingText || tailBlank || …)`); while
+     streamed text is shown it draws nothing in its place, and the last
+     streamed row moves into the slot. That row never matches the completion
+     row, because Claude Code draws a message behind its `●` column. The
+     bundle does not show that the last streamed row is never blank, so a
+     blank slot under transcript text reads `unknown`: that case is left
+     unconfirmed rather than read as idle. Codex: the empty box over its
+     status line and a `? for shortcuts` hint row, with the completion row or
+     the fresh session's greeting as the last row above the box. The
+     completion row is matched by the grammar Codex 0.160.0 prints it with
+     (`Worked for <elapsed> • <time>`, a 12- or 24-hour clock, a date before
+     the time on another day, runtime metrics after it). No row anywhere may
+     be a running, streaming, queued, pending-input or paste-hint row (a live
+     status row, `esc to interrupt`, `paste again to expand`, a queued label,
+     Codex's pending-input headers or `↳` rows, a spinner). Any other frame,
+     including every running, streaming, steer-preview, paste-hint or unknown
+     layout, another seat's name, a statusLine that prints a row, a background
+     shell in the footer and a fullscreen renderer with a statusLine (which
+     reserves a row for it), reads `seat: not-idle` or
+     `unknown`, and the send reads unconfirmed. This holds when a running turn
+     hides its signal (Codex hides its `• Working` row while it streams;
+     Claude Code shows only `paste again to expand` in its footer for 8 s
+     after a paste, and no `esc to interrupt` under a statusLine). So a send to
+     a busy or unknown seat always reads unconfirmed.
+
+     **Versions.** The layouts were recorded from Claude Code 2.1.296 and
+     Codex 0.160.0 (the versioned frames under
+     `packages/daemon/test/fixtures/input-box/`, with their limits in that
+     folder's README). A frame that visibly names another client version reads
+     `unknown` before the paste and `unrecognized` in the box: Claude Code's
+     welcome banner (`Claude Code v2.1.297`), Codex's session header
+     (`>_ OpenAI Codex (v0.161.0)`) or its update notice, whose first version
+     is the running one (`Update available! 0.159.0 -> …`). Most frames
+     show no version (the banner and header scroll away), and there a matching
+     layout is evidence about the layout only, not proof of the client
+     version: another version that draws the same rows reads the same. There is
+     no version discovery and no extra read for it.
+
+     Which Claude seats OpenRig launches can verify: an idle Claude Code
+     seat in any posture OpenRig launches, after any number of turns, whose
+     status slot holds its last turn's completion row as above, or a fresh
+     seat whose slot is blank under the welcome banner. It reads `unknown`
+     when that row is anything else: a blank row under transcript text, a
+     completion row with more after the time (a still-running note, hidden
+     messages, a budget), the weekday or date of a turn that finished on an
+     earlier day, another locale's or a custom time format, an interrupted
+     turn, or a row printed after the turn. And only a text Claude Code shows
+     inline in its box can verify (see the box reading below): a multi-line
+     text, which includes every `rig send` envelope and every queue wake,
+     collapses to a paste label and stays unconfirmed.
+   - **The box held exactly this message before Enter.** One extra capture
+     between the paste and Enter must show exactly the sent text in the input
+     box with its word boundaries kept (`readInputBox`, `boxHoldsText`): runs
+     of whitespace, including Unicode spaces, compare as one space, so a box
+     holding `nowhere` is not the text `now here`. A row break counts as a
+     space only where it must be whitespace of the box's text. Claude Code
+     2.1.296 wraps its input at spaces only (wrap-ansi). Codex 0.160.0 wraps
+     it with textwrap (FirstFit, UAX #14 break opportunities, the hyphen
+     splitter), which also breaks with no space drawn after a hyphen or a
+     slash and between ideographs. So a break counts where the next row's
+     first word would have fit on the row before it (both wrappers fill a row
+     first, so the text has a line break there), or where it falls between
+     two ASCII letters or digits, or before a hyphen, a slash, a closing
+     bracket or `.,:;!?`, and the two words it separates, joined, fit in the
+     box's widest row, but only after a row whose text starts at its first
+     cell with a printable ASCII character and whose last word is ASCII
+     letters, digits, `'` and `.,:;` only. Codex keeps a word that fits in a
+     row whole only where the word starts on a row that already holds text:
+     a row holding only indentation absorbs the next word and splits it
+     where the row fills, and a word after a hyphen or a slash can be split
+     the same way in a row that took the next textwrap line. So on Codex a
+     split between two letters is not always the text's space; after an
+     indented row, or after a last word with a break opportunity inside it,
+     only the first rule reads the break. The first rule has one known
+     residual on Codex, found in a model of the rust-v0.160.0 source, not in
+     a live capture: once an indented row has absorbed and split a word, the
+     re-pass can end a later row early at a hyphen, so a break with no
+     whitespace can pass the first rule. Every such box in that model also
+     holds the earlier split after the indented row, which reads `ambiguous`,
+     so the box never reads `exact`. The widest row is counted in
+     printable ASCII cells only, so combining marks, joiners and zero-width
+     characters never widen it. Any other break, and a break inside a word of
+     the text, reads `ambiguous` and the send stays unconfirmed. A collapsed paste label, Claude's
+     queued-messages label or `Try "…"` suggestion, or another draft is never
+     the message. The default `--verify` matcher above is unchanged.
+   - **The box is empty after Enter on the same pane process.** The capture
+     after Enter must show the box empty, with the pane process
+     (`#{pane_pid}`) and the seat's binding unchanged.
+
+   The result's `inputBox: { seat, before, after, sameProcess }` says which
+   reading failed. An empty box reads `queued` instead of `empty` where the
+   frames say the message may wait behind a turn: Codex's pending-input rows
+   or a row under its running-turn status, or a running turn in the frame
+   read before Enter (Codex's `• Working` row; for Claude Code,
+   `esc to interrupt` or a live status row above the box, including above a
+   box of several rows). The verdict uses these readings: verified needs
+   `empty`, so for a seat that was idle before the paste they are the only
+   check that rejects a message queued behind a turn that started after the
+   pre-paste capture. An audited prompt answer (step 4) reads no box: with
+   the setting on its `inputBox` reads `unchecked` for `seat`, `before` and
+   `after`, `sameProcess` is `false` (it stays a boolean), and the send reads
+   unconfirmed, whatever the default matcher would say.
+   It reports only: the seat is read from the capture `--verify` already
+   takes, and none of the extra reads decides whether Enter is sent. Each has
+   a 500 ms deadline, which is a budget, not a guarantee: the pre-Enter read
+   comes after the existing 200 ms wait and can add about 500 ms before
+   Enter, and the post-Enter process read can add about another 500 ms
+   before the reply. A read that misses its deadline reads `unavailable`, the
+   send stays unconfirmed, and Enter is still sent once. With a deliberately
+   slowed screen read, review measured about 718 to 721 ms from paste to
+   Enter, against about 216 to 219 ms on main under the same slowdown.
+   Limits: the seat is read once, before the paste, and Enter
+   follows about 200 ms later. A turn can start in that window, from a person
+   typing in the pane or from the agent itself (Claude Code and Codex start
+   turns on their own when a background task finishes, a scheduled wake-up
+   fires or a teammate's message arrives). Such a turn is caught only when
+   the frame read before Enter shows it; a Codex turn already streaming
+   there hides its `• Working` row and is not seen. An empty box after an
+   exact one means the box was cleared, normally by our Enter; a clear by
+   something else at that moment (a person's C-c) looks the same, and so
+   does a text the TUI runs as a command (a Claude Code `/command`, a Codex
+   `!command`), which clears the box without the model reading a message.
+   `#{pane_pid}` is the pane's root process (the shell for most launches), so
+   an agent restarted under the same shell is not caught by the pane process
+   check, and the same pane and binding are not proof of the same native
+   conversation.
+   An empty box means the TUI took the text, not that the model read it.
+   Consumers see only the report. With the setting on, a queue wake that
+   reads unconfirmed records the existing `delivered-ack-pending` state, as
+   an unconfirmed wake does today. Every queue wake to Claude Code is
+   unconfirmed under the setting, because its multi-line envelope collapses
+   to a paste label, and so is a wake to a busy or not-proven-idle Claude
+   Code or Codex seat. A pending, unclaimed handoff with no pickup evidence
+   can then enter the wake ladder's existing escalation path after
+   `queue.wake_unconfirmed_window_minutes` (default 30). It is not blindly
+   re-sent: the ladder's unconfirmed path skips its retry rung
+   (`queue-wake-ladder.ts`), and nothing in the send path retries or
+   re-sends.
 6. CLI `--verify` goes further (`packages/cli/src/commands/send.ts:596`): it
    looks for the text still unsubmitted at the prompt, makes one guarded
    Enter-only retry through the daemon's `submitOnly` path
@@ -144,6 +343,15 @@ a delivered-latency note for delays of 10 s or more.
 Architecture rule 18 (`architecture-rules-and-event-system.md`): tmux is
 transport, not truth — `send/capture/broadcast` wrap tmux reliably with honest
 errors.
+
+The daemon runs tmux without a shell: argv straight to the tmux binary found on
+`PATH`. `OPENRIG_TMUX_SHELL=1` at daemon start runs every tmux call through
+`/bin/sh` instead (Linux and macOS; Windows always uses argv). A binary that
+can't be started at all (a script without `#!`, a missing interpreter) runs
+through `/bin/sh -c 'exec "$0" "$@"' tmux …`, which finds tmux as the shell
+path does; nothing ran before, so no command runs twice. The resolved path is
+cached, so a different tmux installed earlier on `PATH` takes effect after a
+daemon restart.
 
 ### 3b. Cross-host coordination verbs
 
@@ -210,32 +418,37 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 
 1. `NodeLauncher` starts transcript rotation right after tmux session
    creation, before the harness boots
-   (`packages/daemon/src/domain/node-launcher.ts:181`).
-2. Each rotation tick captures the trailing lines with
-   `capturePaneContent` (`transcript-rotation.ts:213` →
-   `adapters/tmux.ts:1082`) and atomically overwrites (temp file + rename,
-   `transcript-rotation.ts:283`–`285`)
+   (`NodeLauncher`, `startTranscriptRotation`).
+2. Each rotation tick captures the trailing lines and atomically overwrites
+   (temp file + rename in `startTranscriptRotation`)
    `transcripts/{rig-name}/{session-name}.log` under the OpenRig home (or
    the `transcripts.path` setting). It skips the write when the captured bytes
    are unchanged. Defaults: 1000 trailing lines every 2 s
-   (`transcript-rotation.ts:27`–`28`); an idle seat is captured less often,
+   (`DEFAULT_TRANSCRIPT_LINES`, `DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS`); an idle seat is captured less often,
    within the 10-second freshness window. Both are tunable with
    `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`
    or the matching `transcripts.*` settings. This bounded capture replaced the
-   earlier `tmux pipe-pane` stream (`transcript-rotation.ts:3`), so the file
-   holds a trailing window, not the whole session.
+   earlier `tmux pipe-pane` stream (see the header comment of `transcript-rotation.ts`), so the file
+   holds a trailing window, not the whole session. Sessions on one adapter
+   tick on one shared timer, and the captures due in a tick share
+   `capturePanesContent`: one chained call per chunk of 24, with a
+   `list-sessions` started beside it on every batch, whose result is consulted
+   only when the chain fails, each chunk on its own (`captureBatch` in
+   `transcript-rotation.ts` → `capturePanesContent` in `adapters/tmux.ts`).
+   A session the batch leaves out, a lone due session, or a pane or window
+   target reads per target with `capturePaneContent` (`adapters/tmux.ts`).
 3. `TranscriptStore` owns path convention, ANSI stripping for `readTail` and
    `grep`, boundary
    markers, `readTail`, `readFull`, `grep`. `readFull` returns the raw bytes
-   (`transcript-store.ts:378`); the `/full` route redacts them. The transcript
+   (`TranscriptStore.readFull`); the `/full` route redacts them. The transcript
    routes check capture health first and can start capture lazily for a seat
    that has none.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
    agent-facing access.
 5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
-   re-launch (`restore-orchestrator.ts:900`); each rotation tick keeps each
+   re-launch (`RestoreOrchestrator`); each rotation tick keeps each
    distinct boundary line once, as a header above the fresh capture
-   (`transcript-rotation.ts:254`–`257`). (Restore-side detail in
+   (`startTranscriptRotation`, boundary header). (Restore-side detail in
    `lifecycle-snapshot-restore.md`.)
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts,
    insufficiency state, and guidance.
@@ -264,8 +477,8 @@ Claude or Codex session (`claude -p --resume` / `codex exec resume`,
    (`packages/ui/src/components/RigChatPanel.tsx`), but no UI view mounts it:
    **1** file under `packages/ui/src` names it, its own
    (`git grep -l 'RigChatPanel' -- packages/ui/src | wc -l`).
-5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:364`,
-   `:400`).
+5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:366`,
+   `:402`).
 6. Source of truth: daemon-backed SQLite (`chat_messages` table), NOT tmux
    scrollback.
 
@@ -283,10 +496,14 @@ The intentional limits in this layer (numbered as in
 - Note 5 — transcript search prefers `rg` but falls back to `grep -E`;
   search quality/performance varies by backend.
 - Note 6 — chat is rig-scoped only: no cross-rig channels or DMs.
-- Note 7 — `--verify` on `rig send` checks the pane for the message by
-  comparing snippet counts before and after the send (§3 step 4); when the
-  capture cannot re-confirm the render it reports `rendered-unconfirmed`,
-  not a failure.
+- Note 7 — `--verify` on `rig send` reports what the pane shows, not agent
+  acknowledgement. By default it compares the message (whole for a
+  header-carrying send, the first 40 characters for a raw one) in captures
+  before and after the send, leaving out the current input box; with
+  `transport.verify_input_box` on, Claude Code and Codex sends are verified
+  only for a seat proven idle before the paste and on input-box evidence; a
+  busy or unknown seat reads unconfirmed (§3 step 5). When it cannot confirm,
+  it reports `rendered-unconfirmed`, not a failure.
 
 (The full compatibility-notes list lives in
 `architecture-rules-and-event-system.md`.)

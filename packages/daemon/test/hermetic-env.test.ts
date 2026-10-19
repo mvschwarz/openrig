@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   DAEMON_TARGET_ENV_VARS,
   detectForeignDaemonTarget,
@@ -52,5 +54,17 @@ describe("hermetic-env fail-closed guard", () => {
     // An exported-but-empty var does not point at a daemon; treat it as absent.
     expect(detectForeignDaemonTarget({ OPENRIG_URL: "" })).toBeNull();
     expect(() => assertNoForeignDaemon({ OPENRIG_URL: "" })).not.toThrow();
+  });
+});
+
+// The shared setup (test/hermetic-env.setup.ts) gives compaction packets a folder inside the fixture home, so a test
+// that sets no root of its own never writes to the /tmp/claude-compaction-restore real seats use.
+describe("hermetic-env setup: compaction packet folder", () => {
+  it("defaults OPENRIG_COMPACTION_OUT_ROOT to a folder under the fixture-scoped home", () => {
+    const home = process.env["OPENRIG_HOME"]!;
+    const outRoot = process.env["OPENRIG_COMPACTION_OUT_ROOT"]!;
+    expect(fs.existsSync(path.join(home, ".openrig-fixture"))).toBe(true);
+    expect(outRoot).toBe(path.join(home, "compaction-packets"));
+    expect(outRoot.startsWith("/tmp/claude-compaction-restore")).toBe(false);
   });
 });

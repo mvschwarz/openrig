@@ -307,3 +307,161 @@ describe("scope-membership B1/B2/P2 blocker regressions (fixback)", () => {
     expect(first).toEqual(["qtie-b", "qtie-a"]); // qitem_id DESC tiebreak (P2)
   });
 });
+
+// A slice has two names: its frontmatter `id` (a dot-ID such as CUS.1.1) and its
+// directory name. A `slice:` tag names it by either form, and every consumer
+// that resolves a tag to a slice (the Queue tab, the typed-mission verdict,
+// the agents band, the phase signal, attention) must agree on that.
+describe("slice: tag by frontmatter id or directory name (every membership consumer agrees)", () => {
+  let missionsRoot: string;
+  let cleanup: string;
+  let db: Database.Database;
+
+  function writeIdSlice(mission: string, name: string, id: string): void {
+    const dir = path.join(missionsRoot, mission, "slices", name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SPEC.md"), `---\nid: ${id}\nslice: ${name}\nstatus: active\n---\n# ${name}\n`);
+  }
+
+  beforeEach(() => {
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "scope-id-dir-"));
+    missionsRoot = path.join(cleanup, "missions");
+    fs.mkdirSync(missionsRoot, { recursive: true });
+    writeIdSlice("cus", "01-custody", "CUS.1.1");
+    writeIdSlice("cus", "02-other", "CUS.1.2");
+    db = createDb(":memory:");
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema, queueItemSummarySchema]);
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  function harness() {
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db });
+    const gatherer = new ReviewGatherer({ db, indexer, gitRepoPath: null, now: () => NOW });
+    return { indexer, gatherer };
+  }
+
+  function seed(): void {
+    insertQitem(db, { id: "q-id", dest: "alice@rig", tags: ["mission:cus", "slice:CUS.1.1"] });
+    insertQitem(db, { id: "q-dir", dest: "bob@rig", tags: ["mission:cus", "slice:01-custody"] });
+    insertQitem(db, { id: "q-both", dest: "carol@rig", tags: ["mission:cus", "slice:CUS.1.1", "slice:01-custody"] });
+    insertQitem(db, { id: "q-sib", dest: "dave@rig", tags: ["mission:cus", "slice:CUS.1.2"] });
+    insertQitem(db, { id: "q-suffix", dest: "erin@rig", tags: ["slice:CUS.1.1-x"] });
+    insertQitem(db, { id: "q-mission", dest: "frank@rig", tags: ["mission:cus"] });
+    insertQitem(db, { id: "q-hg-id", dest: "grace@rig", tags: ["slice:CUS.1.1"], tier: "human-gate" });
+    insertQitem(db, { id: "q-hg-suffix", dest: "heidi@rig", tags: ["slice:CUS.1.1-x"], tier: "human-gate" });
+  }
+
+  it("the Queue tab lists a row tagged by id, by dir, or by both once each, and not a sibling's or a suffix", () => {
+    seed();
+    const ids = harness().indexer.get("01-custody")!.qitemIds;
+    expect([...ids].sort()).toEqual(["q-both", "q-dir", "q-hg-id", "q-id"]);
+  });
+
+  it("the sibling slice lists only its own id-tagged row", () => {
+    seed();
+    expect(harness().indexer.get("02-other")!.qitemIds).toEqual(["q-sib"]);
+  });
+
+  it("an id-only typed row makes its mission modern, so a zero-typed sibling does not inherit mission-only rows", () => {
+    // Only slice 01 has a typed row, tagged by id. Slice 02 has none.
+    insertQitem(db, { id: "q-id", dest: "alice@rig", tags: ["mission:cus", "slice:CUS.1.1"] });
+    insertQitem(db, { id: "q-mission", dest: "frank@rig", tags: ["mission:cus"] });
+    expect(harness().indexer.get("02-other")!.qitemIds).not.toContain("q-mission");
+  });
+
+  it("a tag that is another slice's directory name is never read as this slice's id", () => {
+    writeIdSlice("cus", "03-odd", "02-other");
+    insertQitem(db, { id: "q-dir-of-sibling", dest: "ivan@rig", tags: ["slice:02-other"] });
+    const { indexer } = harness();
+    expect(indexer.get("02-other")!.qitemIds).toEqual(["q-dir-of-sibling"]);
+    expect(indexer.get("03-odd")!.qitemIds).not.toContain("q-dir-of-sibling");
+  });
+
+  it("an id declared by slices in two missions names no slice: it pulls nothing in and leaves mission fallback rows visible", () => {
+    // m1/01-a and m2/01-b carry the same id (a SPEC copied across missions).
+    writeIdSlice("m1", "01-a", "X.1.1");
+    writeIdSlice("m2", "01-b", "X.1.1");
+    writeIdSlice("m1", "02-c", "X.1.2");
+    insertQitem(db, { id: "q-m2", dest: "alice@rig", tags: ["mission:m2", "slice:X.1.1"] });
+    insertQitem(db, { id: "q-m1", dest: "bob@rig", tags: ["mission:m1"] });
+    const { indexer, gatherer } = harness();
+    expect(indexer.sliceTagKeys("01-a")).toEqual(["01-a"]);
+    expect(indexer.sliceTagKeys("01-b")).toEqual(["01-b"]);
+    // m1 stays a legacy mission, so its mission-only row still shows on every m1 slice.
+    expect(indexer.get("01-a")!.qitemIds).not.toContain("q-m2");
+    expect(indexer.get("01-a")!.qitemIds).toContain("q-m1");
+    expect(indexer.get("02-c")!.qitemIds).toContain("q-m1");
+    const sessions = (scope: `slice:${string}` | `mission:${string}`) =>
+      new Set((gatherer.composeAgents(scope)?.rows ?? []).map((r) => r.sessionName));
+    expect(sessions("slice:01-a").has("alice@rig")).toBe(false);
+    expect(sessions("mission:m1").has("alice@rig")).toBe(false);
+    expect(sessions("mission:m1").has("bob@rig")).toBe(true);
+  });
+
+  it("a mission-scoped indexer (the project-mode route builds one) still sees an id shared with another mission", () => {
+    writeIdSlice("m1", "01-a", "X.1.1");
+    writeIdSlice("m2", "01-b", "X.1.1");
+    writeIdSlice("m1", "02-c", "X.1.2");
+    insertQitem(db, { id: "q-m2", dest: "alice@rig", tags: ["mission:m2", "slice:X.1.1"] });
+    insertQitem(db, { id: "q-m1", dest: "bob@rig", tags: ["mission:m1"] });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db, missionId: "m1" });
+    expect(indexer.sliceTagKeys("01-a")).toEqual(["01-a"]);
+    expect(indexer.get("01-a")!.qitemIds).toEqual(["q-m1"]);
+    expect(indexer.get("02-c")!.qitemIds).toEqual(["q-m1"]);
+  });
+
+  it("a mission-scoped indexer does not read an id as an alias when another mission has a directory of that name", () => {
+    writeIdSlice("m1", "01-a", "02-b");
+    writeIdSlice("m2", "02-b", "X.2.2");
+    insertQitem(db, { id: "q-dir", dest: "alice@rig", tags: ["slice:02-b"] });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db, missionId: "m1" });
+    expect(indexer.sliceTagKeys("01-a")).toEqual(["01-a"]);
+    expect(indexer.get("01-a")!.qitemIds).not.toContain("q-dir");
+  });
+
+  it("an id shared by same-named slices in two missions is no alias, though directory dedupe shows only one of them", () => {
+    writeIdSlice("m1", "01-a", "X.1.1");
+    writeIdSlice("m2", "01-a", "X.1.1");
+    insertQitem(db, { id: "q-m2", dest: "alice@rig", tags: ["mission:m2", "slice:X.1.1"] });
+    insertQitem(db, { id: "q-m1", dest: "bob@rig", tags: ["mission:m1"] });
+    const { indexer } = harness();
+    expect(indexer.sliceTagKeys("01-a")).toEqual(["01-a"]);
+    expect(indexer.get("01-a")!.qitemIds).not.toContain("q-m2");
+  });
+
+  it("one slice found under two slice roots still answers to its id", () => {
+    const second = path.join(cleanup, "second");
+    fs.mkdirSync(path.join(second, "cus", "slices", "01-custody"), { recursive: true });
+    fs.writeFileSync(path.join(second, "cus", "slices", "01-custody", "SPEC.md"), "---\nid: CUS.1.1\nstatus: active\n---\n# dup\n");
+    insertQitem(db, { id: "q-id", dest: "alice@rig", tags: ["mission:cus", "slice:CUS.1.1"] });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, additionalSliceRoots: [second], dogfoodEvidenceRoot: null, db });
+    expect(indexer.sliceTagKeys("01-custody")).toEqual(["01-custody", "CUS.1.1"]);
+    expect(indexer.get("01-custody")!.qitemIds).toEqual(["q-id"]);
+  });
+
+  it("the agents band holds a seat for an id-tagged row, a dir-tagged row and a both-tagged row", () => {
+    seed();
+    const sessions = new Set((harness().gatherer.composeAgents("slice:01-custody")?.rows ?? []).map((r) => r.sessionName));
+    expect(sessions).toEqual(new Set(["alice@rig", "bob@rig", "carol@rig", "grace@rig"]));
+  });
+
+  it("the phase signal sees active work that is tagged only by id", () => {
+    insertQitem(db, { id: "q-id", dest: "alice@rig", tags: ["mission:cus", "slice:CUS.1.1"] });
+    const { gatherer } = harness();
+    expect((gatherer as unknown as { hasActiveQitem(n: string): boolean }).hasActiveQitem("01-custody")).toBe(true);
+    expect((gatherer as unknown as { hasActiveQitem(n: string): boolean }).hasActiveQitem("02-other")).toBe(false);
+  });
+
+  it("slice attention includes an id-tagged human-gate row and rejects an id suffix", () => {
+    seed();
+    const { gatherer } = harness();
+    const attn = (gatherer as unknown as { attentionForTag(t: string): Array<{ qitemId: string }> }).attentionForTag("slice:01-custody");
+    const ids = attn.map((a) => a.qitemId);
+    expect(ids).toContain("q-hg-id");
+    expect(ids).not.toContain("q-hg-suffix");
+  });
+});

@@ -5,6 +5,8 @@ import type { AgentActivity, PersistedEvent } from "./types.js";
 export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
 export interface HookActivityInput {
+  turnId?: string | null;
+
   runtime: string | null;
   sessionName?: string | null;
   nodeId?: string | null;
@@ -108,6 +110,7 @@ export class AgentActivityStore {
       eventAt,
       generation,
     });
+    activity.turnId = input.turnId ?? null;
 
     const event = this.eventBus.emit({
       type: "agent.activity",
@@ -324,14 +327,8 @@ export class AgentActivityStore {
  *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. */
 export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
   if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
-  // OPR.0.4.1.10 — Codex's official approval hook (openai/codex PR #17563). A PermissionRequest
-  // means the agent is BLOCKED waiting on a command / patch / network approval = needs_input. This is
-  // the HOOK-PRIMARY signal for Codex, which emits no Claude-style Notification; classifySendReadiness
-  // already prefers a fresh runtime_hook needs_input runtime-agnostically, so wiring this event makes
-  // the Codex rig-send guard hook-primary by construction (capture-pane scan stays as the fallback).
-  // The official payload carries session_id/turn_id/cwd/model/permission_mode/tool_name/tool_input;
-  // the relay forwards tool_name as the subtype, so `evidence` names the tool being approved.
-  if (rawEvent === "PermissionRequest") return "needs_input";
+  if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
+  if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {
     if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
@@ -357,6 +354,13 @@ function latestHookState(activity: AgentActivity | null | undefined, seatRuntime
  *  answered it. Shared by the send gate and the wake ladder. */
 export function latestHookWaitsOnPerson(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
   return latestHookState(activity, seatRuntime) === "needs_input";
+}
+
+export function latestHookPermissionPending(activity: AgentActivity | null | undefined, seatRuntime: string | null): boolean {
+  return seatRuntime === "codex" && activity?.evidenceSource === "runtime_hook" && (
+    (activity.reason === "permission_request_pending" && activity.stale !== true) ||
+    (activity.reason === "stale_runtime_hook" && activity.rawEvent === "PermissionRequest")
+  );
 }
 
 /** The store's latest hook shows the seat moved on after `since`: observed after it, generation-valid, and
@@ -385,7 +389,11 @@ function normalizeHookActivity(input: {
   const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime);
   let normalizedReason = reason;
   if (rawEvent === "PermissionRequest") {
-    normalizedReason = "permission_request";
+    normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
+  } else if (rawEvent === "PermissionPromptConfirmed") {
+    normalizedReason = "permission_prompt";
+  } else if (rawEvent === "PermissionPromptCleared") {
+    normalizedReason = "permission_prompt_cleared";
   } else if (rawEvent === "at_limit") {
     normalizedReason = "usage_limit";
   } else if (rawEvent === "Notification") {

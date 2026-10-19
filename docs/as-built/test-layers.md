@@ -39,10 +39,10 @@ to `main`. In the PR description, say which layers you ran and which you could n
 |---|---|---|---|---|
 | Typecheck | `npm run lint` | Builds the daemon, then `tsc --noEmit` passes for daemon, ui, cli and tui | Any runtime behaviour. Formatting. | Every change |
 | Build | `npm run build` | All four workspaces compile (the UI also runs `vite build`) | That the *published* package is complete (see Packaging) | Every change |
-| Repo checks | `npm run test:repo` | Builds the daemon, then runs `node --test --test-concurrency=1 scripts/*.test.mjs`, `scripts/check-first-run-references.mjs`, `scripts/check-docs-guard.mjs`, `mirror-skills --check` and `generate-context-packs --check` | Package behaviour | Every change. It matters most when you touch `scripts/`, `docs/` or skills. |
+| Repo checks | `npm run test:repo` | Builds the daemon, then runs `node --test --test-concurrency=1 scripts/*.test.mjs`, `scripts/check-first-run-references.mjs`, `scripts/check-docs-guard.mjs`, `mirror-skills --check` (skill homes, generated copies, layout and digests) and `generate-context-packs --check` | Package behaviour | Every change. It matters most when you touch `scripts/`, `docs/` or skills. |
 | Package suites | `npm run test:workspaces`. One package: `npm run test -w packages/cli`. One file, from the repo root: `npx vitest run packages/cli/test/<file>.test.ts` | Vitest unit and integration tests for daemon, cli and tui. Some of them start real scenario daemons, tmux sessions and stub runners. | The installed package. Real Claude Code or Codex. CI's sandbox conditions (see CI). | Every change (`npm test` covers it) |
 | Web UI suite | `npm run test:ui` | jsdom unit tests for `packages/ui` | Real browser rendering | When you touch `packages/ui`, or a daemon API the UI reads. The web UI is in maintenance mode, so this suite is advisory locally and is not part of `npm test`. |
-| Generated files | `npm run mirror-skills:check`, `npm run generate-context-packs:check` (both part of `npm test`) | Every copy of each shipped skill matches its recorded hash, and every static context pack passes the daemon's own manifest parser and the leak scan | Whether the skill content is any good | After you edit a shipped skill: edit the same file in every copy that carries it, run `node scripts/regen-edge-digests.mjs`, then the check. The full `npm run mirror-skills` apply needs maintainer-only inputs. See "A shipped skill" in [ARCHITECTURE.md](../../ARCHITECTURE.md#a-shipped-skill). |
+| Generated files | `npm run mirror-skills:check`, `npm run generate-context-packs:check` (both part of `npm test`) | Shipped skill homes are publishable, generated copies match their homes, all edges match their recorded hashes, and every static context pack passes the daemon's own manifest parser and the leak scan | Whether the skill content is any good | Edit a shipped skill's one in-repo home, run `npm run mirror-skills` to regenerate its other copies and refresh digests, then run the checks and commit the result. The apply reads nothing outside the repository. See "A shipped skill" in [ARCHITECTURE.md](../../ARCHITECTURE.md#a-shipped-skill). |
 | Local gate | `npm run gate` | Lint plus `npm test` on a clean tree, tied to `HEAD`, one run per machine at a time, with a JSON receipt | Anything that lint and `npm test` don't already prove | Optional. Useful when several agents share one machine, or when you want a receipt tied to a commit. |
 | Packaging | `npm run build:package`, `npm run test:tui-package`, `bash scripts/smoke-fresh-install.sh` | The publishable `@openrig/cli` assembles, the packed TUI launches, and a fresh install starts a daemon | Behaviour beyond startup | When you touch dependencies, bin entries, build scripts, or files a package ships |
 | Stub scenarios, host mode | `node --import tsx packages/daemon/scripts/run-scenarios.mjs [scenario.yaml …]` | A scenario's steps and assertions pass against a scratch daemon, real tmux and `runtime: stub` seats | The installed package. Seeded-regression pairing. Everything under [What a stub can and cannot prove](#what-a-stub-can-and-cannot-prove). | While you write or debug a scenario |
@@ -139,7 +139,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 16 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
+| Scenario library | `packages/test-system/scenarios/`: 17 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -247,7 +247,7 @@ means:
 
 | Area | What the stub does at `e8f0ab34` | What that means for your test |
 |---|---|---|
-| Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
+| Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane" (with transport.verify_input_box on, a Claude Code or Codex send means "the seat was idle before the paste and its input box took the exact text"), not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
 | Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). Otherwise Claude Code, Codex and Pi launch through `SeatLaunchEnvironment.command` and `tmux.sendShellCommand`; the stub adapter does not get that environment. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal` and `claude-code`, and only `codex` has a native-process proof; Claude Code ordinary delivery applies its own uncertainty policy at the input boundary. | A stub seat doesn't exercise the seat launch environment, managed launch, wrappers or native-process identity (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
 | Permissions | `validateNativePermissionSelection` accepts only `codex` and `claude-code`. The stub carries the resolved `floor` / `full_bypass` posture, including one set by a declarative `permission_policy`, into its runner's `--posture` argument and READY line. It ignores non-interruptive launches, and it doesn't exercise Claude or Codex native permission behaviour. | Testing Claude permission modes or per-seat permission selection needs a real runtime. |
 | Queue pickup and wake | No stub worker reacts to a nudge by claiming an item, working on it and handing it back. | The baton scenarios prove the claim *survives a restart*. They don't prove delivery, pickup or wake. |
@@ -271,11 +271,11 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 ### Library status
 
-Three scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
-and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` in passing form
-only. Three more, `down-stops-every-seat`, `send-renders-in-addressed-pane` and
-`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI. Those five
-later scenarios are not in this table; see "Status
+Four scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
+and `transcript-reads-addressed-seat`, `capture-returns-addressed-seat` and
+`daemon-restart-preserves-team-identity` in passing form only. Three more,
+`down-stops-every-seat`, `send-renders-in-addressed-pane` and
+`up-relaunch-restores-a-two-seat-team`, run with the local runner but not in CI. Those six later scenarios are not in this table; see "Status
 today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
 other ten scenarios are authored but not yet runnable as meaningful checks:
 
@@ -403,17 +403,24 @@ that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage i
 pane. The scenario catches a capture that resolves the seat by a prefix match on its member
 name (so `dev-impl` also matches `dev-impl2`) and takes the first hit, or any resolver that
 returns the same pane for both seats; it does not exercise a prefix match on the full seat
-name. All five run with the local runner (`run-scenarios.mjs`). The transcript and capture
+name. All six run with the local runner (`run-scenarios.mjs`). The transcript, capture and daemon
 scenarios also run in the CI job, in passing form only; the down, send and up scenarios don't.
 They do not prove that panes are gone or that a seat consumed a message. The transcript
 case does not establish ordering, uniqueness, sibling-token absence, tail limits or restart
 persistence. `up` has partial coverage in `up-relaunch-restores-a-two-seat-team.yaml`: a
 two-seat stub team comes up, goes down, and the same spec starts a new team in place of the
-stopped one with the same name, exactly two seats, both running and not archived, so a
+stopped one with the same name, exactly two seats, both running, not archived, so a
 relaunch that re-records the old seats into the team's row fails on the final `ps` counts.
 It does not prove that conversations survive the round trip (that is the `--existing`
 restore path), that a seat consumed a message, or that the panes are gone after `down`.
-`daemon` is used by the existing scenarios but has no scenario of its own. Everything else
+`daemon` has partial coverage in `daemon-restart-preserves-team-identity.yaml`: a two-seat
+stub team is up, the runner restarts the scratch daemon, and `rig ps --json` must report the
+same name still running with exactly two seats, both running, not archived, so a restart
+that loses the team's row, or changes its seat counts or status, fails on the post-restart `ps`;
+`rig down` then records it stopped, so the restart left a governable team. It does not prove
+that queue items survive the restart (that is `queue-baton-survives-restart.yaml`), that a
+kill inside a handoff window is reconciled (that is `kill-daemon-mid-handoff.yaml`), the
+port-and-process half of the row, or that the panes are gone after `down`. Everything else
 has none.
 
 Before you start, two honest constraints:
@@ -436,7 +443,7 @@ Before you start, two honest constraints:
 | Group | Family | Proposed first check (observable result) |
 |---|---|---|
 | lifecycle | `start` | Restore two stopped stub seats. Both answer distinct fresh nonces, and no second daemon starts. |
-| lifecycle | `daemon` | start/status/stop/restart. Port, process and persisted queue identity agree through public commands. |
+| lifecycle | `daemon` (partial) | Restart-preserving-the-persisted-team-row is covered by `daemon-restart-preserves-team-identity.yaml`. Next: port and process agreement through public commands, and `stop`, which needs a runner binding. |
 | lifecycle | `bootstrap` | Bootstrap a minimal stub spec. Seats come up ready and the selected spec is the one used. |
 | lifecycle | `up` (partial) | Relaunch-not-duplicating-identities is covered by `up-relaunch-restores-a-two-seat-team.yaml`. Next: each seat consumes its own send, which needs the input-consuming stub. |
 | lifecycle | `down` | (partial) Next: its panes are gone, a sibling rig still answers, retained data follows the docs. |

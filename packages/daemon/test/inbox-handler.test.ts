@@ -120,6 +120,49 @@ describe("InboxHandler", () => {
     await expect(inbox.absorb(entry.inboxId, "carol@rig")).rejects.toThrow(/destined for/);
   });
 
+  it("overlapping absorb retries promote an inbox entry only once", async () => {
+    const entry = inbox.drop({ destinationSession: "bob@rig", senderSession: "alice@rig", body: "one obligation" });
+    const results = await Promise.all(Array.from({ length: 5 }, () => inbox.absorb(entry.inboxId, "bob@rig")));
+    expect(new Set(results.map(result => result.qitemId)).size).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toEqual({ count: 1 });
+    expect(captured.filter(event => event.type === "inbox.absorbed")).toHaveLength(1);
+    expect(captured.filter(event => event.type === "queue.created")).toHaveLength(1);
+  });
+
+  it("rolls back queue promotion when recording the absorption fails", async () => {
+    const entry = inbox.drop({ destinationSession: "bob@rig", senderSession: "alice@rig", body: "retry after failure" });
+    db.exec(`CREATE TRIGGER fail_absorption BEFORE UPDATE OF state ON inbox_entries
+      WHEN NEW.state = 'absorbed' BEGIN SELECT RAISE(ABORT, 'injected absorption failure'); END`);
+    await expect(inbox.absorb(entry.inboxId, "bob@rig")).rejects.toThrow("injected absorption failure");
+    expect(inbox.getById(entry.inboxId)?.state).toBe("pending");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toEqual({ count: 0 });
+    expect(captured).toEqual([]);
+    db.exec("DROP TRIGGER fail_absorption");
+    const result = await inbox.absorb(entry.inboxId, "bob@rig");
+    expect(result.entry.absorbedQitemId).toBe(result.qitemId);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM queue_items").get()).toEqual({ count: 1 });
+  });
+
+  it("publishes the queue promotion only after the inbox is absorbed", async () => {
+    const entry = inbox.drop({ destinationSession: "bob@rig", senderSession: "alice@rig", body: "atomic notification" });
+    const observed: Array<string | undefined> = [];
+    bus.subscribe(event => {
+      if (event.type === "queue.created") observed.push(inbox.getById(entry.inboxId)?.state);
+    });
+    await inbox.absorb(entry.inboxId, "bob@rig");
+    expect(observed).toEqual(["absorbed"]);
+  });
+
+  it("publishes committed promotion events once in order when a subscriber emits another event", async () => {
+    const entry = inbox.drop({ destinationSession: "bob@rig", senderSession: "alice@rig", body: "ordered notification" });
+    bus.subscribe(event => {
+      if (event.type === "queue.created") bus.emit({ type: "rig.created", rigId: "another-rig" });
+    });
+    await inbox.absorb(entry.inboxId, "bob@rig");
+    expect(captured.map(event => event.type)).toEqual(["queue.created", "inbox.absorbed", "rig.created"]);
+    expect(captured.map(event => event.seq)).toEqual([...new Set(captured.map(event => event.seq))].sort((a, b) => a - b));
+  });
+
   it("deny records reason + emits inbox.denied; cannot subsequently absorb", async () => {
     const entry = inbox.drop({
       destinationSession: "bob@rig",

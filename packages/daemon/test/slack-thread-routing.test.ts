@@ -10,9 +10,10 @@ import { tmpdir } from "node:os";
 import { migrate } from "../src/db/migrate.js";
 import { threadSeatMapSchema } from "../src/db/migrations/072_thread_seat_map.js";
 import { threadPartMapSchema } from "../src/db/migrations/097_thread_part_map.js";
+import { threadSeatMapChannelKeySchema } from "../src/db/migrations/115_thread_seat_map_channel_key.js";
 import { ThreadSeatMap, formatPostedStamp, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
-import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
+import { InboundRouter, type SlackEvent, type SlackBlockActions } from "../src/domain/gateway/slack/inbound.js";
 import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
 import { buildInProcessWire } from "../src/domain/gateway/gateway-subsystem.js";
@@ -21,7 +22,7 @@ import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 
 function mapDb(): Database.Database {
   const db = new Database(":memory:");
-  migrate(db, [threadSeatMapSchema, threadPartMapSchema]);
+  migrate(db, [threadSeatMapSchema, threadPartMapSchema, threadSeatMapChannelKeySchema]);
   return db;
 }
 function memFs(): StateFsOps {
@@ -44,6 +45,37 @@ describe("thread↔seat map — exact-lookup semantics", () => {
     expect(map.resolveByThread("T1")).toMatchObject({ seat: "dev-driver@v-openrig-build", state: "open" });
     map.close("T1");
     expect(map.resolveByThread("T1")).toMatchObject({ seat: "dev-driver@v-openrig-build", state: "closed" }); // closed ≠ unmapped
+  });
+
+  it("roots are per channel: one thread_ts in two channels is two roots, and a person's minted root says so", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    map.open({ threadTs: "T9", channel: "C1", human: "human-founder@kernel", seat: "a@r", conversationId: "qitem-a" });
+    map.open({ threadTs: "T9", channel: "C2", human: "human-founder@kernel", seat: "b@r", conversationId: "qitem-b", origin: "person" });
+    expect(map.resolveByThread("T9", "C1")).toMatchObject({ seat: "a@r", conversationId: "qitem-a", origin: "posted" });
+    expect(map.resolveByThread("T9", "C2")).toMatchObject({ seat: "b@r", conversationId: "qitem-b", origin: "person" });
+    expect(map.resolveByThread("T9", "C3")).toBeNull();
+  });
+
+  it("a person's root rebuilds from its stamp as theirs; a stamp without an origin is OpenRig's", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    const base = { messageTs: "T7", channel: "C1", human: "human-founder@kernel", seat: "a@r" };
+    const person = `${formatPostedStamp({ ...base, threadTs: "T7", conversationId: "qitem-p" })} origin=person`;
+    const posted = formatPostedStamp({ ...base, threadTs: "T8", messageTs: "T8", conversationId: "qitem-o" });
+    expect(parsePostedStamp(person)).toMatchObject({ origin: "person" });
+    expect(map.rebuildFromStamps([person, posted])).toEqual({ inserted: 2, skipped: 0 });
+    expect(map.resolveByThread("T7", "C1")).toMatchObject({ conversationId: "qitem-p", origin: "person" });
+    expect(map.resolveByThread("T8", "C1")).toMatchObject({ conversationId: "qitem-o", origin: "posted" });
+  });
+
+  it("the channel-key migration keeps every existing root, as one OpenRig posted", () => {
+    const db = new Database(":memory:");
+    migrate(db, [threadSeatMapSchema, threadPartMapSchema]);
+    db.prepare(`INSERT INTO thread_seat_map (thread_ts, channel, human, seat, conversation_id, state, opened_at, closed_at)
+      VALUES ('T1', 'C1', 'human-founder@kernel', 'a@r', 'qitem-1', 'closed', '2026-08-27T00:00:00.000Z', '2026-08-28T00:00:00.000Z')`).run();
+    migrate(db, [threadSeatMapSchema, threadPartMapSchema, threadSeatMapChannelKeySchema]);
+    expect(new ThreadSeatMap(db, clock).resolveByThread("T1", "C1")).toMatchObject({
+      seat: "a@r", conversationId: "qitem-1", state: "closed", closedAt: "2026-08-28T00:00:00.000Z", origin: "posted",
+    });
   });
 
   it("open is idempotent on thread_ts (a replayed root keeps ONE row, the first mapping)", () => {
@@ -296,5 +328,44 @@ describe("#192 channel map — one resolved channel per post (post, reconcile sc
     expect(channelOf("chat.postMessage")).toEqual(["C0EXAMPLE2"]);
     expect(channelOf("files.completeUploadExternal")).toEqual(["C0EXAMPLE2"]);
     expect(roots).toEqual(["C0EXAMPLE2:1800.1"]);
+  });
+});
+
+describe("a click finds its decision by channel and ts", () => {
+  it("a click naming its channel only in its container reaches that channel's decision, live and on a retained retry", async () => {
+    let tick = 0;
+    const map = new ThreadSeatMap(mapDb(), () => new Date(Date.UTC(2026, 7, 27, 0, 0, tick++)));
+    map.open({ threadTs: "800.1", channel: "C0A", human: "human-founder@kernel", seat: "a@r", conversationId: "qitem-a" });
+    map.open({ threadTs: "800.1", channel: "C0B", human: "human-founder@kernel", seat: "b@r", conversationId: "qitem-b" }); // opened later
+    const answered: string[] = [];
+    let failContinuation = true;
+    const fs = memFs();
+    const actionDeadLetter = new DeadLetterStore<SlackBlockActions>("/a.jsonl", fs, clock);
+    const router = new InboundRouter({
+      queue: { createQitem: async (input: { qitemId: string }) => { if (failContinuation) throw new Error("database is locked"); return input.qitemId; } },
+      seen: new SeenStore("/s.jsonl", fs, clock),
+      deadLetter: new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock),
+      actionDeadLetter,
+      destination: "operator-agent@kernel",
+      resolveSender: () => ({ admitted: true, source: "human-founder@kernel" }),
+      resolveRoute: makeThreadRouteResolver({ map, unroutedDestination: "operator-agent@kernel" }),
+      recordHumanAnswer: (input: { qitemId: string }) => {
+        answered.push(input.qitemId);
+        return { status: "recorded", complete: true, answers: { ship: "yes" }, questions: [{ id: "ship", question: "Ship?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }] };
+      },
+      resolveHumanReply: async () => "resolved",
+    } as never);
+    // Slack can name the channel only in the container; the click is on C0A's root.
+    const click: SlackBlockActions = {
+      type: "block_actions", user: { id: "UFOUNDER" },
+      container: { message_ts: "800.1", channel_id: "C0A" },
+      actions: [{ block_id: "or-q:ship", action_id: "or-opt:yes", action_ts: "801.5" }],
+    };
+    expect(await router.routeAction(click)).toMatchObject({ status: "handler-failed" }); // its hand-back fails: kept for retry
+    expect(actionDeadLetter.readAll()).toHaveLength(1);
+    failContinuation = false;
+    await router.retryDeadLetters();
+    expect(answered).toEqual(["qitem-a", "qitem-a"]);
+    expect(actionDeadLetter.readAll()).toEqual([]);
   });
 });

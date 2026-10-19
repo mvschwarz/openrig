@@ -573,6 +573,20 @@ describe("ContextMonitor", () => {
     }));
   });
 
+  it.each([false, true])("keeps a ready Codex fork in attention while its role is owed (token available: %s)", async tokenAvailable => {
+    const { rig, node } = seedCodexNode();
+    const session = sessionRegistry.getSessionsForRig(rig.id)[0]!;
+    db.prepare("UPDATE sessions SET startup_status = 'attention_required', resume_token = ? WHERE id = ?")
+      .run(tokenAvailable ? "child-thread" : null, session.id);
+    new EventBus(db).emit({ type: "node.startup_failed", rigId: rig.id, nodeId: node.id,
+      sessionId: session.id, error: "fork identity pending", forkContextPending: { parentToken: "parent-thread", isRestore: false } });
+    const ready = vi.fn(async (): Promise<ReadinessResult> => ({ ready: true }));
+    monitor = new ContextMonitor(db, store, undefined, undefined, { codex: { checkReady: ready } });
+    await monitor.pollOnce();
+    expect(ready).toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(session.id)).toEqual({ startup_status: "attention_required" });
+  });
+
   it("pollOnce does not overwrite pending Claude startup state", async () => {
     const { sessionName, session } = (() => {
       const rig = rigRepo.createRig("test-rig-6");

@@ -8,6 +8,7 @@ import type {
   SkillResource, GuidanceResource, SubagentResource, RuntimeResource, PluginResource,
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
+import { resolveAuthoredCwd } from "./cwd-resolution.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
@@ -28,6 +29,12 @@ export interface ResolvedResources {
   subagents: QualifiedResource[];
   plugins: QualifiedResource[];
   runtimeResources: QualifiedResource[];
+}
+
+/** Where each selected plugin resolved to, as the projection and the plugin-skill loadout see it. */
+export function selectedPluginPaths(resources: ResolvedResources): string[] {
+  return resources.plugins.map((plugin) =>
+    resolvePluginPath((plugin.resource as PluginResource).source.path, plugin.sourcePath));
 }
 
 export interface ResolvedNodeConfig {
@@ -154,9 +161,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
 
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
-    : ctx.specRoot
-      ? (nodePath.isAbsolute(member.cwd) ? member.cwd : nodePath.resolve(ctx.specRoot, member.cwd))
-      : member.cwd;
+    : resolveAuthoredCwd(member.cwd, ctx.specRoot || null);
 
   // 2b. Augment the pool with filesystem-discovered skills. Rig-local
   // resources.skills (already in the pool from buildResourcePool) win

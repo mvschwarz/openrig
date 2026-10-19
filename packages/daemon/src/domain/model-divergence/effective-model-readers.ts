@@ -7,6 +7,8 @@
 //     provider transcript — the API response names the model that produced it. Absent until the
 //     seat's first such record.
 //   - codex: the latest `world_state` event's `collaboration_mode.model` in the rollout.
+//   - pi: the newest determinate assistant record's `provider/model` in the session file, when that
+//     record is the current occupant's own (not inherited from a fork parent, not a prior runner's).
 //
 // BOUNDED READS by contract: provider records on live seats reach hundreds of MB (a whole-file
 // readFileSync throws ERR_STRING_TOO_LONG past ~0.5GB and stalls the loop long before that — the
@@ -16,7 +18,10 @@
 // tail-sized chunks up to MAX_SCAN_BYTES. A signal older than the scan cap reads as null (honest
 // UNKNOWN — the detector reports it as observable pending), never a guess.
 
-import { openSync, readSync, closeSync, fstatSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { parsePiModelsJson } from "../../adapters/pi-readiness.js";
+import { parsePiSessionHeader, piAssistantFields, piEntryOrigin, type PiSessionBoundary } from "../pi-usage-facts.js";
 
 const TAIL_BYTES = 512 * 1024;
 const MAX_SCAN_BYTES = 8 * 1024 * 1024;
@@ -110,9 +115,16 @@ function newestCodexModel(lines: string[]): string | null {
  *  census put records 0.4-0.8MB from EOF on the big rollouts), so one tail window is not always
  *  enough, but 8MB bounds the read far under the loop-stall class. */
 export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_SCAN_BYTES): string | null {
+  return scanBackward(rolloutPath, newestCodexModel, maxScanBytes);
+}
+
+/** The ONE bounded backward scan: tail-sized windows from EOF down to `maxScanBytes`, each handed
+ *  to `pick` as whole lines (oldest first). The first non-null pick ends the scan; null = keep
+ *  scanning older windows. Missing/unreadable file, or nothing picked within the cap → null. */
+function scanBackward<T>(path: string, pick: (lines: string[]) => T | null, maxScanBytes: number): T | null {
   let fd: number;
   try {
-    fd = openSync(rolloutPath, "r");
+    fd = openSync(path, "r");
   } catch {
     return null;
   }
@@ -136,8 +148,8 @@ export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_
         droppedBytes = Buffer.byteLength(lines[0]!, "utf-8");
         lines.shift();
       }
-      const model = newestCodexModel(lines);
-      if (model !== null) return model;
+      const picked = pick(lines);
+      if (picked !== null) return picked;
       if (start === scanFloor) break;
       // Fragment-sized step-back — UNLESS the fragment fills the whole window (a single line wider
       // than 512KB: real, r1 measured 44 such lines on this box, longest 8.2MB). In that case
@@ -150,6 +162,145 @@ export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_
       end = next < end ? next : start;
     }
     return null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The occupant whose Pi session-file records may answer: records stamped at or before
+ *  `notBeforeMs` belong to an earlier runner or occupant of the same file (a resume keeps it). */
+export interface PiOccupantScope {
+  notBeforeMs: number;
+}
+
+/** Pi's thinking levels for `--thinking` and the `--model` suffix (`pi --help`; the same at the
+ *  tested 0.87.1 baseline and 1.3.0). */
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** The model ids a Pi pin can resolve to, in Pi's own order (`parseModelPattern`): the whole pin
+ *  first, then with each trailing `:<thinking level>` removed in turn. Pi records the model without
+ *  the level, so `openrouter/x-ai/grok-4:high` matches a `grok-4` record, and a model id that
+ *  really ends in `:high` still matches as itself. Any other `:` suffix, such as OpenRouter's
+ *  `:free`, stays part of the id, and the provider is never touched. */
+export function piPinReadings(pinned: string): string[] {
+  const readings = [pinned.trim()];
+  for (;;) {
+    const last = readings[readings.length - 1]!;
+    const colon = last.lastIndexOf(":");
+    if (colon === -1 || !PI_THINKING_LEVELS.has(last.slice(colon + 1))) return readings;
+    readings.push(last.slice(0, colon));
+  }
+}
+
+/** The readings a Pi seat's record may match. Pi tries the exact pin first and stops there, so
+ *  when the seat's own `models.json` defines a model whose `provider/id` is the pin, or the pin
+ *  with only some levels removed, that reading is the only one: `lab/y:high` stays `lab/y:high`
+ *  when `lab` defines `y:high`. Otherwise every reading, since Pi's built-in models and extension
+ *  models are not read here. Only a pin with a level suffix reads the file. A missing file defines
+ *  no model; one that can't be read or doesn't have Pi's shape is unknown (the seat stays pending).
+ *  Ids compare case-insensitively, as in Pi's exact match. */
+export function piSeatPinReadings(pinned: string, agentDir: string): { ok: true; readings: string[] } | { ok: false; reason: string } {
+  const readings = piPinReadings(pinned);
+  if (readings.length === 1) return { ok: true, readings };
+  const file = join(agentDir, "models.json");
+  const unknown = { ok: false as const, reason: `the seat's models.json (${file}) could not be read as Pi's model config` };
+  let config: unknown;
+  try {
+    if (statSync(file).size > 1024 * 1024) return unknown;
+    config = parsePiModelsJson(readFileSync(file, "utf8"));
+  } catch (error) {
+    // Never report the error itself: models.json can hold keys.
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? { ok: true, readings } : unknown;
+  }
+  const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+  if (!object(config)) return unknown;
+  if (config.providers === undefined) return { ok: true, readings };
+  if (!object(config.providers)) return unknown;
+  const defined = new Set<string>();
+  for (const [provider, entry] of Object.entries(config.providers)) {
+    if (!object(entry)) return unknown;
+    if (entry.models === undefined) continue;
+    if (!Array.isArray(entry.models)) return unknown;
+    for (const model of entry.models) {
+      if (!object(model) || typeof model.id !== "string") return unknown;
+      defined.add(`${provider}/${model.id}`.toLowerCase());
+    }
+  }
+  const literal = readings.slice(0, -1).find((reading) => defined.has(reading.toLowerCase()));
+  return { ok: true, readings: literal ? [literal] : readings };
+}
+
+/** The Pi runtime's effective model, `provider/model`, from the NEWEST determinate assistant
+ *  record in the session file — provided that record is this occupant's own. Pi's `model` is the
+ *  runtime's own record of what answered; `responseModel` (a routed/dated API variant) is not
+ *  compared, since modelsMatch canonicalizes only the pin.
+ *
+ *  The newest determinate record DECIDES: when it is inherited from a fork parent, of unknown
+ *  origin, stamped no later than `scope.notBeforeMs`, or carries no provider, the answer is a
+ *  named no-answer (pending) and the scan does NOT reach for an older record — an older one is
+ *  at least as stale. Error and aborted turns are skipped (they name the requested model, not one
+ *  that answered). The session header decides origin; an unreadable header is a no-answer. */
+export function readPiEffectiveModel(
+  sessionFile: string,
+  scope: PiOccupantScope,
+  maxScanBytes = MAX_SCAN_BYTES,
+): { ok: true; model: string } | { ok: false; reason: string } {
+  const header = readFirstLine(sessionFile);
+  if (header === null) return { ok: false, reason: `Pi session file ${sessionFile} is unreadable` };
+  const boundary = parsePiSessionHeader(header);
+  if (!boundary) return { ok: false, reason: `Pi session file ${sessionFile} has no readable session header` };
+  const picked = scanBackward(sessionFile, (lines) => newestPiModel(lines, boundary, scope), maxScanBytes);
+  return picked ?? { ok: false, reason: `no determinate assistant record from the current occupant in the bounded read of ${sessionFile}` };
+}
+
+function newestPiModel(
+  lines: string[],
+  boundary: PiSessionBoundary,
+  scope: PiOccupantScope,
+): { ok: true; model: string } | { ok: false; reason: string } | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes('"assistant"')) continue;
+    let entry: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      entry = parsed as Record<string, unknown>;
+    } catch {
+      continue; // corrupt line — keep scanning
+    }
+    const fields = piAssistantFields(entry);
+    if (!fields) continue;
+    if (fields.stopReason === "error" || fields.stopReason === "aborted") continue;
+    const id = typeof entry["id"] === "string" ? entry["id"] : "";
+    const timestamp = typeof entry["timestamp"] === "string" ? entry["timestamp"] : "";
+    const at = Date.parse(timestamp);
+    if (!id || !Number.isFinite(at)) return { ok: false, reason: `newest Pi assistant record carries no entry id or timestamp` };
+    const origin = piEntryOrigin(id, timestamp, boundary);
+    if (origin !== "own") return { ok: false, reason: `newest Pi assistant record ${id} is ${origin === "inherited" ? "inherited from the fork parent" : "of undecidable fork origin"}` };
+    if (at <= scope.notBeforeMs) return { ok: false, reason: `newest Pi assistant record ${id} predates the current runner` };
+    if (!fields.provider || !fields.model) return { ok: false, reason: `newest Pi assistant record ${id} names no provider and model` };
+    return { ok: true, model: `${fields.provider}/${fields.model}` };
+  }
+  return null;
+}
+
+/** The first line of a file, read bounded (a Pi session header is small). null when unreadable. */
+function readFirstLine(path: string, maxBytes = 64 * 1024): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    const read = readSync(fd, buf, 0, maxBytes, 0);
+    const text = buf.subarray(0, read).toString("utf-8");
+    const newline = text.indexOf("\n");
+    return newline >= 0 ? text.slice(0, newline) : text;
   } catch {
     return null;
   } finally {

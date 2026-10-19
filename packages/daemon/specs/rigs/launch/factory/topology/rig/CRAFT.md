@@ -4,8 +4,8 @@
      later rig-up never overwrites). Rig-wide norms every member holds. -->
 
 - **If another seat must ACT, it needs a queue row.** A send informs; only a
-  row creates an auditable obligation. Pass work with `rig queue handoff` so
-  the close and the create are one transaction.
+  row creates an auditable obligation. Pass work with `rig queue handoff` (give it a
+  `--summary`) so the close and the create are one transaction.
 - **A turn holding work ends by handing off or naming a live blocker.**
   Ending a turn with a summary in your own terminal is going dark: from
   outside, a clean finish and a crash are identical.

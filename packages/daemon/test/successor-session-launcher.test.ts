@@ -63,6 +63,38 @@ describe("SuccessorSessionLauncher", () => {
     });
   }
 
+  it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: { MODE: "fast", REGION: "eu" } },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    const opts = respawnPane.mock.calls[0]![2];
+    expect(opts.env).toMatchObject({ MODE: "fast", REGION: "eu", OPENRIG_SEAT_ENV_KEYS: "MODE,REGION", OPENRIG_NODE_ID: "node-1" });
+  });
+
+  it("a seat that declares no env gets no env keys variable", async () => {
+    await launcher().createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+    expect(respawnPane.mock.calls[0]![2].env).not.toHaveProperty("OPENRIG_SEAT_ENV_KEYS");
+  });
+
+  it("never reads or writes the departing session's environment: a handover that works on main works here, whatever tmux does to those calls", async () => {
+    const refused = async () => { throw new Error("tmux environment calls are not part of a handover"); };
+    const tmux = {
+      listPanes, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand,
+      getSessionEnv: refused, setSessionEnv: refused, unsetSessionEnv: refused,
+    } as unknown as TmuxAdapter;
+    for (const seatEnv of [undefined, { MODE: "fast" }]) {
+      respawnPane.mockClear();
+      const plain = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+        runtimeAdapters: { codex: fakeAdapter("codex") }, readinessTimeoutMs: 50, sleep: async () => {}, exitPollMs: 1, exitTimeoutMs: 5,
+      });
+      const res = await plain.createSuccessor({ node: { id: "node-1", runtime: "codex", cwd: "/w", ...(seatEnv ? { seatEnv } : {}) }, departingSessionName: "dev-impl@rig" });
+      expect(res.ok).toBe(true);
+      expect(respawnPane).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("MONEY PROOF (0.5.2-07): the successor's launch binding carries the SPEC-pinned model, not the runtime default", async () => {
     // Boot cheap → hand over → the successor LAUNCH must carry the spec's model. The adapter emits
     // -m/--model from binding.model (51-07 A1); this pins that the handover FEEDS it the spec model.

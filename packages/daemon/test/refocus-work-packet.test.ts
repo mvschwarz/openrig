@@ -222,6 +222,19 @@ describe("frontmatterIntent — folded and literal intents", () => {
     expect(frontmatterIntent("---\nintent: plain words\n---\n")).toBe("plain words");
     expect(frontmatterIntent("# no frontmatter\nintent: nope\n")).toBeNull();
   });
+
+  it("reads the same intent from a CRLF SPEC.md as from its LF twin", () => {
+    for (const lf of [
+      "---\nid: x\nintent: >-\n  Ship the\n  alpha thing\nstage: wip\n---\n# A\n",
+      "---\nintent: |\n  one\n  two\n---\n",
+      "---\nintent: \"quoted: yes\"\n---\n",
+      "---\nintent: plain words\n---\n",
+    ]) {
+      const expected = frontmatterIntent(lf);
+      expect(expected).not.toBeNull();
+      expect(frontmatterIntent(lf.replace(/\n/g, "\r\n"))).toBe(expected);
+    }
+  });
 });
 
 describe("trace-to-root --packet — the work packet as text", () => {
@@ -284,6 +297,26 @@ describe("trace-to-root --packet — the work packet as text", () => {
     expect(out.slice(held, next)).toContain("- q-held — parked — blocked on q-gate — continuation: resume the build");
     expect(out.slice(next)).toContain("- q-next — later");
     expect(out.slice(next)).not.toContain("q-held");
+  });
+
+  it("names which of the held and next lists was cut, and keeps the older combined notice", () => {
+    const w = world();
+    const evidence = deriveWorkCandidates([
+      { qitemId: "q-held", state: "blocked", summary: "parked", tags: [], blockedOn: "q-gate" },
+      { qitemId: "q-next", state: "pending", summary: "later", tags: [] },
+    ], w.missions, nothingElse);
+    const trace = (flags: Record<string, boolean>) =>
+      w.trace(["--trees", "work", "--packet", "--work-candidates", "-"], { ...evidence, ...flags }).stdout;
+    const nextCut = trace({ heldTruncated: false, nextTruncated: true, heldAndNextTruncated: true });
+    expect(nextCut).toContain("(the next list was cut; `rig queue list --owned --state pending` has the rest)");
+    expect(nextCut).not.toContain("held list was cut");
+    expect(nextCut).not.toContain("held and next lists were cut");
+    const heldCut = trace({ heldTruncated: true, nextTruncated: false, heldAndNextTruncated: true });
+    expect(heldCut).toContain("(the held list was cut; `rig queue list --owned --state blocked` has the rest)");
+    expect(heldCut).not.toContain("next list was cut");
+    expect(trace({ heldTruncated: false, nextTruncated: false, heldAndNextTruncated: false })).not.toContain("was cut");
+    // A daemon from before the per-list flags sends only the combined one.
+    expect(trace({ heldAndNextTruncated: true })).toContain("(held and next lists were cut; `rig queue list` has the rest)");
   });
 
   it("carries the seat's job and duties as text, or says the section was not found (W6)", () => {

@@ -56,6 +56,7 @@ function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbNam
 describe("ResumeMetadataRefresher", () => {
   it("PERF FIX 2 — the periodic snapshot refresh is SINGLE-ATTEMPT per codex seat: no x8 retry burst under failing discovery", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
       markResumeProbeResult: vi.fn(),
     } as unknown as SessionRegistry;
@@ -85,6 +86,7 @@ describe("ResumeMetadataRefresher", () => {
 
   it("refreshes missing Codex resume token from the live child process", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
     } as unknown as SessionRegistry;
     const tmux = mockTmux({
@@ -121,6 +123,7 @@ describe("ResumeMetadataRefresher", () => {
 
   it("refreshes missing Codex resume token from a nested wrapper -> vendor codex process tree", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
     } as unknown as SessionRegistry;
     const tmux = mockTmux({
@@ -162,6 +165,7 @@ describe("ResumeMetadataRefresher", () => {
     createCodexLogsDb(actualHome, 901, "019d45c3-e909-7152-b52e-34edab4070ed");
 
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
     } as unknown as SessionRegistry;
     const tmux = mockTmux({
@@ -203,6 +207,7 @@ describe("ResumeMetadataRefresher", () => {
     createCodexLogsDb(actualHome, 901, "019d45c3-e909-7152-b52e-34edab4070ed", "logs_2.sqlite");
 
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
     } as unknown as SessionRegistry;
     const tmux = mockTmux({
@@ -240,6 +245,7 @@ describe("ResumeMetadataRefresher", () => {
 
   it("skips sessions that already have a resume token", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
       clearResumeToken: vi.fn(),
     } as unknown as SessionRegistry;
@@ -269,6 +275,7 @@ describe("ResumeMetadataRefresher", () => {
   // option-setter across a run (mouse/status/set-clipboard/copy-command).
   it("EXCLUSION: the probe/refresh path never applies tmux option defaults", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
       clearResumeToken: vi.fn(),
       markResumeProbeResult: vi.fn(),
@@ -302,6 +309,7 @@ describe("ResumeMetadataRefresher", () => {
   // STALE instead of clearing: a present-but-not-resumable token stays in the ledger.
   it("marks a not-resumable Claude token STALE without clearing it (FR-6 §2.1b)", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
       clearResumeToken: vi.fn(),
       markResumeProbeResult: vi.fn(),
@@ -333,6 +341,7 @@ describe("ResumeMetadataRefresher", () => {
 
   it("stamps a resumable Claude token verified via the validate path (FR-6 §2.1b)", async () => {
     const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false),
       updateResumeToken: vi.fn(),
       clearResumeToken: vi.fn(),
       markResumeProbeResult: vi.fn(),
@@ -352,7 +361,8 @@ describe("ResumeMetadataRefresher", () => {
 
   // OPR.0.4.3.20 FR-4 — Claude sidecar null-fill during snapshot refresh.
   it("FR-4: null-fills a Claude token from the sidecar session_id (scrape)", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
       tmuxAdapter: mockTmux(),
@@ -371,7 +381,8 @@ describe("ResumeMetadataRefresher", () => {
     ["fills from a sample taken after the process started", 60_000, true],
   ])("FR-4: %s", async (_label, offsetMs, fills) => {
     const processStart = "Fri Oct  2 11:00:00 2026";
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const claudeProcessStartedAt = vi.fn(async () => processStart);
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
@@ -388,7 +399,8 @@ describe("ResumeMetadataRefresher", () => {
   });
 
   it("FR-4: a missing/parse-error sidecar leaves the Claude token null (no write, no throw)", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
       tmuxAdapter: mockTmux(),
@@ -401,7 +413,8 @@ describe("ResumeMetadataRefresher", () => {
   });
 
   it("FR-4: an empty sidecar session_id is not written (honest null)", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
       tmuxAdapter: mockTmux(),
@@ -414,7 +427,8 @@ describe("ResumeMetadataRefresher", () => {
   });
 
   it("FR-4: a Claude session with a PRESENT token is validated, NOT sidecar-filled", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
     const readSidecar = vi.fn(() => ({ ok: true as const, data: { session_id: "should-not-be-used" } }));
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
@@ -430,7 +444,8 @@ describe("ResumeMetadataRefresher", () => {
   });
 
   it("FR-4: no contextUsageStore wired → Claude null-fill is a silent no-op (back-compat)", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const refresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter: mockTmux() });
     await refresher.refresh([
       { sessionId: "sess-c", sessionName: "seat@rig", runtime: "claude-code", resumeType: null, resumeToken: null },
@@ -441,7 +456,8 @@ describe("ResumeMetadataRefresher", () => {
   // OPR.0.4.3.20 FR-4 (rev1 fix) — the RECURRING snapshot-refresh mode: fill-null only,
   // never clear a present token (rev1-r2), never spawn a `claude --resume` probe (rev1-r1).
   it("FR-4 rev1: fillNullOnly NEVER clears a present Claude token AND NEVER spawns a resume probe", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     // Probe would say not_resumable — the default path would clear; fillNullOnly must not even call it.
     const probeClaudeResume = vi.fn(async () => "not_resumable" as const);
     const readSidecar = vi.fn(() => ({ ok: true as const, data: { session_id: "unused" } }));
@@ -466,7 +482,8 @@ describe("ResumeMetadataRefresher", () => {
   });
 
   it("FR-4 rev1: fillNullOnly still null-fills a Claude token from the sidecar (lightweight, no probe)", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const probeClaudeResume = vi.fn(async () => "resumable" as const);
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
@@ -483,7 +500,8 @@ describe("ResumeMetadataRefresher", () => {
   });
 
   it("FR-4 rev1: fillNullOnly still null-fills a Codex token via captureCodexThreadId (lightweight pid-log read)", async () => {
-    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const tmux = mockTmux({ getPanePid: vi.fn(async () => 900) });
     const refresher = new ResumeMetadataRefresher({
       sessionRegistry,
@@ -506,7 +524,8 @@ describe("ResumeMetadataRefresher", () => {
   // no-op (no re-stamp, no clobber); no probe/spawn on the fillNullOnly path.
   describe("FR-6.1 periodic freshness re-stamp", () => {
     it("Codex present + equal derive → re-stamps freshness via markResumeProbeResult('resumable'), no clobber", async () => {
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,
         tmuxAdapter: mockTmux({ getPanePid: vi.fn(async () => 900) }),
@@ -522,7 +541,8 @@ describe("ResumeMetadataRefresher", () => {
     });
 
     it("Codex present + DIFFERENT derive → no re-stamp, no clobber (left honest)", async () => {
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,
         tmuxAdapter: mockTmux({ getPanePid: vi.fn(async () => 900) }),
@@ -538,7 +558,8 @@ describe("ResumeMetadataRefresher", () => {
     });
 
     it("Codex present + ABSENT derive (no pane pid) → no-op", async () => {
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,
         tmuxAdapter: mockTmux({ getPanePid: vi.fn(async () => null) }),
@@ -554,7 +575,8 @@ describe("ResumeMetadataRefresher", () => {
     });
 
     it("Claude present + equal sidecar derive → re-stamps freshness, NO probe, no clobber", async () => {
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const probeClaudeResume = vi.fn(async () => "resumable" as const);
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,
@@ -578,7 +600,8 @@ describe("ResumeMetadataRefresher", () => {
       ["re-stamps from a sample taken after the process started", 60_000, true],
     ])("Claude present + equal sidecar derive: %s", async (_label, offsetMs, restamps) => {
       const processStart = "Fri Oct  2 11:00:00 2026";
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const claudeProcessStartedAt = vi.fn(async () => processStart);
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,
@@ -597,7 +620,8 @@ describe("ResumeMetadataRefresher", () => {
     });
 
     it("Claude present + DIFFERENT sidecar derive → no re-stamp, no probe, no clobber", async () => {
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const probeClaudeResume = vi.fn(async () => "resumable" as const);
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,
@@ -615,7 +639,8 @@ describe("ResumeMetadataRefresher", () => {
     });
 
     it("Claude present + sidecar unreadable (parse-error/not ok) → no-op, no probe", async () => {
-      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const sessionRegistry = {
+      isForkClaimingHeldToken: vi.fn(() => false), updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
       const probeClaudeResume = vi.fn(async () => "resumable" as const);
       const refresher = new ResumeMetadataRefresher({
         sessionRegistry,

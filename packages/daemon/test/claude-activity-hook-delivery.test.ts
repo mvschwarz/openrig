@@ -15,12 +15,13 @@
 // path is preserved). Malformed settings are preserved (fail-closed). Missing
 // source produces NO dangling commands and NO false projected claim.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
+import { basename, dirname, resolve as pathResolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import type { RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
@@ -131,6 +132,18 @@ function seededOwned(): string {
   return JSON.stringify({ hooks });
 }
 
+/** The file's mode as recorded in the git index ("100755"), or null outside a git checkout. */
+function committedMode(filePath: string): string | null {
+  try {
+    const out = execFileSync("git", ["ls-files", "--stage", "--", basename(filePath)], {
+      cwd: dirname(filePath), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.trim().split(/\s+/)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 // Packaged contract (QA blocker 1f53796c): the projected relay must be 0755, and production
 // PRESERVES the source mode (no adapter chmod policy). So the SHIPPED asset itself must be
 // executable — this regression STATS the real committed asset, not a synthetic 0o755 fixture.
@@ -139,7 +152,20 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
     const assetPath = pathResolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
     const mode = statSync(assetPath).mode & 0o777;
     expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
-    expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+    // A git checkout's working-tree mode is the committed mode filtered by the checkout user's
+    // umask (umask 002, the default for user-private-group accounts on many Linux distributions,
+    // yields 0775). So in a git checkout the exact 0755 is asserted on the GIT INDEX entry, which
+    // is what this measures: not HEAD's tree, and not the mode a later package tarball will carry
+    // (that is the packaging step's to keep). Outside a checkout (e.g. an extracted package) it
+    // is asserted on the file itself.
+    const indexMode = committedMode(assetPath);
+    if (indexMode !== null) {
+      expect(indexMode, "committed relay mode").toBe("100755");
+      expect(mode & 0o755, `checkout relay mode is 0${mode.toString(8)}, expected at least 0755`).toBe(0o755);
+      expect(mode & 0o002, `checkout relay mode is 0${mode.toString(8)}, world-writable`).toBe(0);
+    } else {
+      expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+    }
   });
 });
 
@@ -336,6 +362,31 @@ describe("Claude activity-hook delivery — hardening (guard r3 findings)", () =
       expect(res.skipped).toContain("claude-activity-hooks");
     });
   }
+});
+
+// #226: a seat whose cwd resolves to '/' has no project workspace. Delivery is still attempted there, as on
+// main (it works where '/' is writable, e.g. root in a container); when it fails, the warning says why.
+describe("Claude activity-hook delivery — cwd at the filesystem root", () => {
+  it("a writable root still gets the hooks delivered", async () => {
+    const fs = enableFs();
+    const res = await makeAdapter(fs).project(plan([activityEntry()]), binding("/"));
+    expect(res.projected).toContain("claude-activity-hooks");
+    expect(allCommands(JSON.parse(fs._store["/.claude/settings.local.json"]!)).length).toBeGreaterThan(0);
+  });
+
+  it("an unwritable root reports skipped and names the filesystem root as the reason", async () => {
+    const fs = enableFs();
+    fs.mkdirp = (p: string) => { if (p === "/.claude") throw new Error(`ENOENT: no such file or directory, mkdir '${p}'`); };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await makeAdapter(fs).project(plan([activityEntry()]), binding("/"));
+      expect(res.projected).not.toContain("claude-activity-hooks");
+      expect(res.skipped).toContain("claude-activity-hooks");
+      expect(log.mock.calls.flat().join("\n")).toMatch(/reconcile warning \(cwd '\/' resolves to the filesystem root, not a project workspace\): ENOENT/);
+    } finally {
+      log.mockRestore();
+    }
+  });
 });
 
 // M1 (R1 verdict): ownership must ROUND-TRIP shellQuote. A cwd containing a legal apostrophe

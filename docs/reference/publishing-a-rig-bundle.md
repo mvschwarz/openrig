@@ -21,7 +21,12 @@ Two rules matter most for strangers:
 - **Keep everything inside the folder.** Every `agent_ref` should be `local:` and point inside it. A path that exists on
   your machine won't exist on anyone else's.
 - **Never put credentials in it.** No tokens, keys or `.env` files. `rig bundle create` refuses well-known sensitive
-  file names (such as `.env`, `.pem` and `.key`) anyway.
+  file names (such as `.env`, `.pem` and `.key`) anyway. It also refuses contained `.claude/.credentials.json`,
+  `.codex/auth.json` and `.pi/agent/auth.json`, including nested copies in agents or a carried project. Remove them
+  and rebuild. Only if recipients should have these logins (for example, your own internal test bundle) and their
+  owner agrees, `rig bundle create --include-login-files` records the exact included login-file paths in the
+  manifest and consumers show a notice; anyone with the bundle could read those files.
+  Unrecorded login files and other sensitive paths still fail. See [harness login files](rig-bundle.md#harness-login-files).
 
 Two optional files sit beside `rig.yaml`:
 - **`bundle.yaml`** declares what people need before installing: setup steps (`preconditions`, shown before install

@@ -197,9 +197,16 @@ describe("Codex runtime adapter", () => {
   it("checkReady returns false when the pane has fallen back to a shell prompt", async () => {
     const tmux = mockTmux({
       getPaneCommand: vi.fn(async () => "zsh"),
+      getPanePid: vi.fn(async () => 900),
       capturePaneContent: vi.fn(async () => "user@example.test rigged %"),
     });
-    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 900, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
 
     const result = await adapter.checkReady(makeBinding());
 
@@ -207,6 +214,30 @@ describe("Codex runtime adapter", () => {
       ready: false,
       reason: "The probe pane returned to a shell instead of staying inside the runtime.",
       code: "returned_to_shell",
+    });
+  });
+
+  it("checkReady returns awaiting_runtime when paneCommand is a shell that is not a proven idle shell", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "bash"),
+      getPanePid: vi.fn(async () => 900),
+      capturePaneContent: vi.fn(async () => "booting wrapper..."),
+    });
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "/bin/bash", pgid: 900, tpgid: 901, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+
+    const result = await adapter.checkReady(makeBinding());
+
+    expect(result).toEqual({
+      ready: false,
+      reason: "The pane shows a shell that is not a proven idle shell; a launch script may still be starting Codex.",
+      code: "awaiting_runtime",
     });
   });
 
@@ -1074,6 +1105,7 @@ describe("Codex runtime adapter", () => {
       ok: false,
       error: "Codex resume failed: no saved session found for the requested session",
       recovery: "retry_fresh",
+      missingConversation: true,
     });
   });
 

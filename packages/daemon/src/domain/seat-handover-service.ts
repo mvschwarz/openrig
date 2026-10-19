@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { readSeatEffort } from "./seat-effort.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
@@ -22,6 +23,7 @@ import type { PersistedEvent } from "./types.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { findOtherSessionOwner } from "./session-owner.js";
+import { seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -78,7 +80,7 @@ export interface SeatHandoverMutationResult {
    *  declared addresses were gaps, and (when the chain is empty) the named
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
 }
 
@@ -101,7 +103,8 @@ interface NodeRow {
   // 0.5.2-07 A4-profile: the seat's SPEC-pinned codex config profile (nodes.codex_config_profile),
   // threaded onto the successor binding for the same reason as model — the adapter emits `-p <profile>`.
   codex_config_profile: string | null;
-  // #75: the seat's configured reasoning effort (nodes.effort), threaded onto successor binding.
+  // #75: the seat's authored reasoning effort (nodes.effort). The successor binding reads the shared
+  // resolver (OPR.0.7.0.7: a saved seat choice first), not this column alone.
   effort: string | null;
 }
 
@@ -132,6 +135,8 @@ interface SeatHandoverServiceDeps {
   sessionEnv?: Record<string, string | undefined>;
   /** Extra env for one runtime only (OMP's provider keys), merged over sessionEnv. */
   runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
+  /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
+  pluginsDir?: string;
   /** Injectable id source for the successor session name (tests). */
   newSuccessorId?: () => string;
   /** Runtime adapters keyed by runtime — used to launch a fresh successor into
@@ -222,6 +227,7 @@ export class SeatHandoverService {
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
   private now: () => Date;
+  private pluginsDir: string | undefined;
 
   constructor(deps: SeatHandoverServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatHandoverService: rigRepo must share the same db handle");
@@ -243,6 +249,7 @@ export class SeatHandoverService {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
+    this.pluginsDir = deps.pluginsDir;
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
     this.successorLauncher = deps.successorLauncher ?? new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
@@ -359,7 +366,7 @@ export class SeatHandoverService {
     // (the respawn), so a missing/undiscoverable token is an honest pre-mutation
     // refusal — never a blank successor silently reported as a fork, and never a
     // mid-swap abort for a condition knowable up front.
-    let forkSource: { kind: "native_id"; value: string } | null = null;
+    let forkSource: { kind: "native_id"; value: string; pendingIdAllowed: true } | null = null;
     if (parsed.source.mode === "fork") {
       const forkRef = parsed.source.ref ?? latestSession.session_name;
       const discovery = discoverResumeToken(this.db, forkRef);
@@ -387,7 +394,7 @@ export class SeatHandoverService {
           guidance: "Fork from a source session that runs the seat's runtime.",
         };
       }
-      forkSource = { kind: "native_id", value: discovery.result.nativeId };
+      forkSource = { kind: "native_id", value: discovery.result.nativeId, pendingIdAllowed: true };
     }
 
     // Already-created successor: route straight through the discovered->commit
@@ -452,13 +459,14 @@ export class SeatHandoverService {
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
+    const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withCorePlugin(this.rigRepo.getEffectiveSeatEnv(node.id), corePluginDir), ...(corePluginDir && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -526,8 +534,22 @@ export class SeatHandoverService {
     // OPR.0.5.5.5 — per-source execution outcome, recorded on the result so the
     // operator sees exactly what carried context (fork origin / primed set).
     let sourceOutcome: SeatHandoverMutationResult["sourceOutcome"];
+    // A fork's own id is never its parent's (the fork source) or the retiring occupant's; either answer
+    // from the launch-time capture is treated as not captured.
+    const launchedId = launch.resumeToken?.trim() || null;
+    const retireeId = (this.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(latestSession.id) as
+      { resume_token: string | null } | undefined)?.resume_token?.trim() || null;
+    const forkOwnId = forkSource && launchedId && launchedId !== forkSource.value && launchedId !== retireeId ? launchedId : null;
+    const launchToken = forkSource
+      ? (forkOwnId ? { token: forkOwnId, resumeType: launch.resumeType } : null)
+      : (launchedId ? { token: launchedId, resumeType: launch.resumeType } : null);
     if (parsed.source.mode === "fork" && forkSource) {
-      sourceOutcome = { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name };
+      // A fork whose own conversation id wasn't captured at launch commits with no resume token and
+      // says so: its exact resumability isn't established until the id is recorded.
+      sourceOutcome = forkOwnId
+        ? { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "captured" }
+        : { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "pending",
+            limit: "The fork's own conversation id wasn't captured at launch, so no resume token is recorded for this seat. It may stay unrecorded (for example when the process has logged more than one conversation); `rig ps --nodes --json` shows whether one has been. Until it is, exact resumption of this conversation isn't established, and a restore of the seat can't resume it; what restore does instead follows the seat's restore policy." };
     }
     if (parsed.source.mode === "rebuild") {
       // rebuild: the successor is a FRESH conversation primed from the seat's
@@ -591,7 +613,7 @@ export class SeatHandoverService {
       contextDelivered,
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
-      launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
+      launchToken,
       occupantGeneration,
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
@@ -786,7 +808,7 @@ export class SeatHandoverService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar",
   ): void {
     try {
       this.eventBus.emit({

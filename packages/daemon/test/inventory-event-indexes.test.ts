@@ -5,10 +5,12 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { eventsNodeTypeIndexSchema } from "../src/db/migrations/047_events_node_type_index.js";
 import { inventoryEventIndexesSchema } from "../src/db/migrations/084_inventory_event_indexes.js";
+import { sessionStopIntentSchema } from "../src/db/migrations/103_session_stop_intent.js";
 import { getNodeInventory, getNodeInventoryForRigs } from "../src/domain/node-inventory.js";
 
-const THROUGH = ALL_MIGRATIONS.filter(m => m.name <= inventoryEventIndexesSchema.name);
-const BEFORE = THROUGH.filter(m => m.name < inventoryEventIndexesSchema.name);
+// Current readers need the stop-intent column; only the index under test differs.
+const THROUGH = [...ALL_MIGRATIONS.filter(m => m.name <= inventoryEventIndexesSchema.name), sessionStopIntentSchema];
+const BEFORE = THROUGH.filter(m => m.name !== inventoryEventIndexesSchema.name);
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 function database() { const db = createDb(); databases.push(db); return db; }

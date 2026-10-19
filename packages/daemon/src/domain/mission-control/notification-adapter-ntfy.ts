@@ -90,8 +90,18 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
   }
 }
 
-/** ntfy headers must be ASCII single-line; truncate + strip newlines. */
+/**
+ * ntfy headers must be single-line, and fetch only accepts Latin-1 header values
+ * (anything above U+00FF, such as an em dash or an emoji, makes the whole send
+ * throw). Truncate and strip newlines, then send a non-ASCII value as an RFC 2047
+ * encoded word, which ntfy decodes: `=?UTF-8?B?<base64>?=`.
+ */
 function truncateHeader(s: string, max: number): string {
   const cleaned = s.replace(/[\r\n]+/g, " ").trim();
-  return cleaned.length > max ? cleaned.slice(0, max - 3) + "..." : cleaned;
+  // Count code points so truncation never splits a surrogate pair.
+  const chars = Array.from(cleaned);
+  const truncated = chars.length > max ? chars.slice(0, max - 3).join("") + "..." : cleaned;
+  return /[^\x20-\x7e]/.test(truncated)
+    ? `=?UTF-8?B?${Buffer.from(truncated, "utf-8").toString("base64")}?=`
+    : truncated;
 }

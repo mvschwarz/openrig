@@ -133,6 +133,9 @@ describe("Send CLI", () => {
             // does NOT match this send's identity (+100 lines vs a 1-line payload)
             // — someone else's staged content; unverifiable, never this send.
             "unrelated-paste-session": "❯ [Pasted text #7 +100 lines]\n  ⏵⏵ accept edits on (shift+tab to cycle)",
+            // #79: Codex 0.153 renders the composer prompt as `»`; the shared glyph set
+            // must read it exactly like `❯`/`›`.
+            "codex153-session": "» hello there\n  ⏵⏵ accept edits on (shift+tab to cycle)",
           };
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: panes[parsed.session as string] ?? "❯ " }));
@@ -142,7 +145,7 @@ describe("Send CLI", () => {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
           sendBodies.push(parsed);
-          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session" || parsed.session === "unrelated-paste-session") {
+          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session" || parsed.session === "unrelated-paste-session" || parsed.session === "codex153-session") {
             // S3 RED fixture: the TRANSPORT believes it delivered (its verify
             // is measured-unreliable in exactly this direction) — the staged
             // truth is visible only by pane effect.
@@ -159,6 +162,28 @@ describe("Send CLI", () => {
           } else if (parsed.session === "racy-session") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: "racy-session", verified: false, outcome: "rendered-unconfirmed" }));
+          } else if (parsed.session === "input-box-verified") {
+            // transport.verify_input_box on: the result carries the input-box readings.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-verified", verified: true, outcome: "delivered",
+              inputBox: { seat: "idle", before: "exact", after: "empty", sameProcess: true } }));
+          } else if (parsed.session === "input-box-queued") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-queued", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "not-idle", before: "exact", after: "queued", sameProcess: true } }));
+          } else if (parsed.session === "input-box-other-process") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-other-process", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "unknown", before: "hidden", after: "empty", sameProcess: false } }));
+          } else if (parsed.session === "input-box-ambiguous") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-ambiguous", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "idle", before: "ambiguous", after: "empty", sameProcess: true } }));
+          } else if (parsed.session === "input-box-unchecked") {
+            // An audited prompt answer with the setting on: its path reads no box.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: "input-box-unchecked", verified: false, outcome: "rendered-unconfirmed",
+              inputBox: { seat: "unchecked", before: "unchecked", after: "unchecked", sameProcess: false } }));
           } else if (parsed.session === "dead-session") {
             res.writeHead(502, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, sessionName: "dead-session", reason: "submit_failed", outcome: "failed", error: "Text is visible in 'dead-session' but was not submitted (Enter failed)." }));
@@ -403,6 +428,54 @@ describe("Send CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  it("verify with input-box evidence prints the input-box Delivery wording, never agent acknowledgement", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-verified", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: yes");
+    expect(output).toContain("Delivery: delivered (seat idle before the paste; input box: the exact text before Enter, empty after it, same pane process; not agent acknowledgement)");
+    expect(output).not.toContain("render confirmed");
+  });
+
+  it("verify with input-box evidence names both readings when unconfirmed, and says it is not a failure", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-queued", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed (seat before the paste: not idle (a running turn, a queue, a pending input or a paste hint showed); input box before Enter: the exact text; after Enter: queued or possibly queued (a queued label, or a turn was running); not a failure; to look, optionally: rig capture input-box-queued)");
+    expect(output).not.toContain("pane re-render not confirmed");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("verify with input-box evidence says when the pane process changed or is unknown", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-other-process", "hello", "--verify"]);
+    });
+    expect(logs.join("\n")).toContain("Delivery: rendered-unconfirmed (seat before the paste: not a known idle layout; input box before Enter: a collapsed paste (text hidden); after Enter: empty; pane process changed or unknown; not a failure; to look, optionally: rig capture input-box-other-process)");
+  });
+
+  it("verify with input-box evidence: an ambiguous box says the word boundaries were uncertain", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-ambiguous", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed (seat before the paste: idle; input box before Enter: the text, but a line break in the box may split a word (word boundaries uncertain); after Enter: empty; not a failure; to look, optionally: rig capture input-box-ambiguous)");
+  });
+
+  it("verify with input-box evidence: an unchecked path says plainly it was not checked and is unconfirmed, never verified", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "input-box-unchecked", "hello", "--verify"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("Verified: no");
+    expect(output).toContain("Delivery: rendered-unconfirmed (input box not checked: an audited prompt answer is typed as keys and its box is not read; not a failure; to look, optionally: rig capture input-box-unchecked)");
+    expect(output).not.toContain("pane re-render not confirmed");
+    expect(output).not.toMatch(/resend|send it again|re-send/i);
+  });
+
   it("verify genuine transport failure stays an error path, distinct from the middle (discriminator)", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dead-session", "hello", "--verify"]);
@@ -606,6 +679,30 @@ describe("Send CLI", () => {
     expect(argv[ri + 1]).toBe("why now");
   });
 
+
+  it.each(["\r", "\x1b", "\t", " "])("preserves an explicit interaction byte in SSH argv (%#)", async answer => {
+    let captured: readonly string[] = [];
+    const deps: SendDeps = { ...runningDeps(port),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "vm-test", transport: "ssh", target: "vm.local" }] } }),
+      crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "remote ok", stderr: "" }; } };
+    const result = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", answer,
+        "--host", "vm-test", "--dangerously-interact", "--reason", "explicit key"]);
+    });
+    expect(result.exitCode).toBeFalsy();
+    expect(captured.slice(0, 4)).toEqual(["rig", "send", "dev-impl@my-rig", answer]);
+    expect(captured).toContain("--dangerously-interact");
+    expect(captured[captured.indexOf("--reason") + 1]).toBe("explicit key");
+  });
+
+  it.each(["\r", "\t", " "])("--raw alone retains whitespace refusal (%#)", async answer => {
+    const result = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", answer, "--raw"]);
+    });
+    expect(result.exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
+  });
+
   // Slice-03 Atom 6b QA fix — the agent@rig@host SUGAR host folds in AFTER the
   // early --context guard, so --context must be re-rejected after the fold: it
   // must NEVER reach the cross-host argv (which would ship literal null with no
@@ -717,6 +814,14 @@ describe("Send CLI", () => {
       // "Verified: yes" and no staged report exists.
       expect(output).toMatch(/staged/i);
       expect(output).toMatch(/not (yet )?consumed|not submitted|still at the prompt/i);
+    });
+
+    it("PROOF-1b: a `»` Codex 0.153 prompt is staged evidence through the shared glyph set", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "codex153-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      expect(output).toMatch(/staged/i);
     });
 
     it("PROOF-2: a genuinely consumed send verifies positively and is NEVER reported staged", async () => {

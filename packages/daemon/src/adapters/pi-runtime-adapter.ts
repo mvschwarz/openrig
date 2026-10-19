@@ -59,6 +59,10 @@ export interface PiRuntimeAdapterDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
+  /** OPR.0.7.0.2: whether usage.pi_cost_facts is on, read at each launch (absent = off). */
+  usageFactsEnabled?: () => boolean;
+  /** OPR.0.7.0.2 K4: whether usage.pi_openrouter_charge is on, read at each launch (absent = off). */
+  openRouterChargeEnabled?: () => boolean;
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
@@ -71,8 +75,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private trustPosture: "approve" | "no-approve";
   private sleep: (ms: number) => Promise<void>;
   private newLaunchId: () => string;
+  private usageFactsEnabled: () => boolean;
+  private openRouterChargeEnabled: () => boolean;
 
   constructor(deps: PiRuntimeAdapterDeps) {
+    this.usageFactsEnabled = deps.usageFactsEnabled ?? (() => false);
+    this.openRouterChargeEnabled = deps.openRouterChargeEnabled ?? (() => false);
     this.tmux = deps.tmux;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
@@ -98,6 +106,18 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // that does not exist cannot be used as a resume token.
     if (this.runtime === "omp" && !this.fs.exists(state.sessionFile)) return { ok: false, reason: "missing_sidecar" };
     return { ok: true, sessionFile: state.sessionFile };
+  }
+
+  /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
+   *  runner entry path and state root this adapter launches with, for a reader that must tie the
+   *  sidecar to the pane's live runner before trusting it. */
+  readRunnerSidecar(sessionName: string): { state: PiRunnerState | null; sessionsDir: string; entryPath: string; stateRoot: string } {
+    return {
+      state: this.readRunnerState(sessionName),
+      sessionsDir: piSeatPaths(this.stateRoot, sessionName).sessionsDir,
+      entryPath: this.runnerEntryPath,
+      stateRoot: this.stateRoot,
+    };
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -234,7 +254,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       if (!this.fs.exists(opts.resumeToken)) {
         // Session file gone — the honest outcome is the caller's stop-and-ask
         // (awaiting-decision), never a silent fresh start (BR-6).
-        return { ok: false, error: `${this.runtime} resume: the persisted session file no longer exists`, recovery: "retry_fresh" };
+        return { ok: false, error: `${this.runtime} resume: the persisted session file no longer exists`, recovery: "retry_fresh", missingConversation: true };
       }
     }
 
@@ -274,6 +294,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       sessionFile: opts.resumeToken,
       forkRef,
       launchId,
+      usageFacts: this.runtime === "pi" && this.usageFactsEnabled(),
+      openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
     });
 
     const command = this.runtime === "pi" && this.seatLaunchEnvironment

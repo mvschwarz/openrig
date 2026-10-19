@@ -13,6 +13,7 @@
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { rigModeCommand, __test__, type RigModeDeps } from "../src/commands/rig-mode.js";
+import { DaemonResponseError } from "../src/client.js";
 import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
@@ -421,5 +422,178 @@ describe("rig policy unset — operator-only DELETE", () => {
     expect(process.exitCode).toBeUndefined();
     const del = calls.find((c) => c.method === "DELETE")!;
     expect(del.path).toBe("/api/rig-mode/bindings/global_host");
+  });
+});
+
+// Slice 04 (OPR.0.7.0.4) 04-A2 — a saved mode and a posture kept side by side at one target.
+describe("rig mode: a saved mode and a posture kept side by side (04-A2)", () => {
+  const categoryOfMode = (mode: string) => (mode === "human-led" || mode === "delegated" ? "posture" : "mode");
+  const binding = (mode: string, id: string) => ({ id, mode, record: {}, qualifier: "r1", setAt: "2026-10-14T18:00:00.000Z", setBy: "operator" });
+  const preview = async (getResponse: FakeResponse | "throw", extra: string[] = []) => {
+    const { client, calls } = fakeClient(getResponse === "throw" ? {} : { getResponse });
+    if (getResponse === "throw") {
+      const get = (client as { get: (path: string) => Promise<unknown> }).get;
+      (client as { get: unknown }).get = vi.fn(async (path: string) => {
+        if (path.startsWith("/api/rig-mode/bindings/")) throw new Error("connection reset");
+        return get(path);
+      });
+    }
+    // (The test defaults carry only the legacy modes, so the proposal is a saved mode.)
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "set", "focus", "--scope", "rig", "--qualifier", "r1", ...extra]);
+    expect(process.exitCode).toBe(2);
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+    return { out: logs.join("\n"), calls };
+  };
+
+  it("preview reads the target this write lands on and names what it replaces there; exit 2, no PUT", async () => {
+    const { out, calls } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [binding("debug", "rig:r1"), binding("delegated", "posture@rig:r1")] } });
+    expect(calls.filter((c) => c.method === "GET").map((c) => c.path)).toEqual(["/api/rig-mode/defaults", "/api/rig-mode/bindings/rig/r1?for=mode"]);
+    expect(out).toContain("  currently at rig:r1, where this write lands: mode=debug, posture=delegated");
+    expect(out).toContain("  this write replaces: debug (mode, rig:r1); any posture there is kept");
+  });
+
+  it("preview with nothing stored where the write lands says it replaces nothing there", async () => {
+    const { out } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [] } }, ["--json"]);
+    expect(JSON.parse(out)).toMatchObject({ confirm_required: true, current: { writeTarget: "rig:r1", mode: null, posture: null }, displaces: null });
+  });
+
+  it.each<[string, FakeResponse | "throw", string]>([
+    ["a daemon that predates categories (no writeTarget)", { status: 200, data: { binding: binding("focus", "rig:r1") } }, "this daemon doesn't report where this write lands"],
+    ["a daemon that predates categories (nothing stored: its 404)", { status: 404, data: { error: "not_found" } }, "this daemon doesn't report where this write lands"],
+    ["a refusal", { status: 400, data: { error: "scope_unresolved", hint: "x" } }, "scope_unresolved"],
+    ["an HTTP error", { status: 500, data: { error: "boom" } }, "boom"],
+    ["a malformed reply (bindings not a list)", { status: 200, data: { writeTarget: "rig:r1", bindings: "x" } }, "the daemon's answer was malformed"],
+    ["a malformed reply (a binding without a mode)", { status: 200, data: { writeTarget: "rig:r1", bindings: [{ id: "rig:r1" }] } }, "the daemon's answer was malformed"],
+    ["a malformed reply (not an object)", { status: 200, data: "ok" }, "this daemon doesn't report where this write lands"],
+    ["a failed request", "throw", "the read failed"],
+  ])("preview with %s restates the proposal with the current state UNKNOWN, never none; exit 2", async (_label, response, reason) => {
+    const { out } = await preview(response);
+    expect(out).toContain("Proposed binding (restate-and-confirm — NOT applied)");
+    expect(out).toContain(`  currently: UNKNOWN (${reason}); what this write replaces is unknown`);
+    expect(out).not.toMatch(/none|replaces: /);
+  });
+
+  // A successful reply is used only when it is usable: a named write target and bindings in supported modes.
+  it.each<[string, FakeResponse]>([
+    ["an empty writeTarget", { status: 200, data: { writeTarget: "", bindings: [] } }],
+    ["a binding in an unsupported mode", { status: 200, data: { writeTarget: "rig:r1", bindings: [binding("not-a-mode", "rig:r1")] } }],
+  ])("preview with a 200 carrying %s reads UNKNOWN, in the text and the JSON; exit 2, no PUT", async (_label, response) => {
+    const text = await preview(response);
+    expect(text.out).toContain("  currently: UNKNOWN (the daemon's answer was malformed); what this write replaces is unknown");
+    expect(text.out).not.toMatch(/none|replaces: /);
+    logs.length = 0;
+    const json = await preview(response, ["--json"]);
+    expect(JSON.parse(json.out)).toMatchObject({ confirm_required: true, current: "unknown", displaces: "unknown" });
+  });
+
+  it("controls: a named target with nothing stored stays a known absence, and every supported mode name is used as stored", async () => {
+    const empty = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [] } });
+    expect(empty.out).toContain("  this write replaces: no mode binding; any posture there is kept");
+    for (const mode of ["sleep", "desk", "mobile", "away", "focus", "debug", "human-led", "delegated"]) {
+      logs.length = 0;
+      const id = categoryOfMode(mode) === "posture" ? "posture@rig:r1" : "rig:r1";
+      const { out } = await preview({ status: 200, data: { writeTarget: "rig:r1", bindings: [binding(mode, id)] } });
+      expect(out, mode).toContain("  currently at rig:r1, where this write lands:");
+      if (categoryOfMode(mode) === "mode") expect(out, mode).toContain(`  this write replaces: ${mode} (mode, rig:r1); any posture there is kept`);
+      else expect(out, mode).toContain(`posture=${mode}`);
+    }
+  });
+
+  it("unset --category goes through the category path and says what's still kept, in the text and the JSON", async () => {
+    const deleteResponse = { status: 200, data: { removed: true, category: "posture", remaining: binding("focus", "rig:r1") } };
+    const { client, calls } = fakeClient({ deleteResponse });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "unset", "rig", "r1", "--category", "posture"]);
+    expect(calls.find((c) => c.method === "DELETE")!.path).toBe("/api/rig-mode/bindings/rig/r1/categories/posture");
+    expect(logs).toEqual(["Removed rig:r1", "  still kept: focus (mode, rig:r1)"]);
+    logs.length = 0;
+    const json = fakeClient({ deleteResponse });
+    await rigModeCommand(deps(json.client)).parseAsync(["node", "rig", "unset", "global_host", "--category", "mode", "--json"]);
+    expect(json.calls.find((c) => c.method === "DELETE")!.path).toBe("/api/rig-mode/bindings/global_host/categories/mode");
+    expect(JSON.parse(logs.join("\n"))).toEqual({ ok: true, removed: true, category: "posture", remaining: deleteResponse.data.remaining });
+  });
+
+  it("unset --category against a daemon without that route (its plain 404) removes nothing, says so and exits 1", async () => {
+    const { client } = fakeClient({});
+    (client as { delete: unknown }).delete = vi.fn(async () => { throw new DaemonResponseError(404, "404 Not Found"); });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "unset", "rig", "r1", "--category", "mode"]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toBe("This daemon can't remove a binding by category (it predates categories); nothing was removed.");
+    expect(logs).toEqual([]);
+  });
+
+  it("effective names the other category's binding when both apply", async () => {
+    const effective = { binding: { ...binding("delegated", "posture@rig:r1"), record: { scope: "rig" } }, resolvedScope: "rig" };
+    const { client } = fakeClient({ effectiveResponse: { status: 200, data: {
+      posture: "known", effective, categories: { mode: binding("focus", "rig:r1"), posture: effective.binding },
+    } } });
+    await rigModeCommand(deps(client)).parseAsync(["node", "rig", "effective", "--rig", "r1"]);
+    expect(logs.join("\n")).toContain("  also kept: focus (mode, rig:r1, set_at=2026-10-14T18:00:00.000Z)");
+  });
+});
+
+// Slice 04 (OPR.0.7.0.4) 04-A3 — eight legacy record fields are stored and shown, but nothing in OpenRig acts on them
+// yet. Every human surface that prints them says so, on exactly those eight, with one legend line; `scope` (the
+// binding's key) and `evidence_citation` (read by the operating-posture consumer) aren't marked. JSON is unchanged.
+describe("rig mode: legacy record fields marked stored, not applied (04-A3)", () => {
+  const MARKED = ["autonomy_scope", "heartbeat_cadence", "inspection_depth", "update_detail", "escalation_threshold", "concurrency_limit",
+    "permission_prompt_posture", "expiry_or_stale_rule"];
+  const UNMARKED = ["scope", "evidence_citation"];
+  const MARK = "(stored; not applied)";
+  const LEGEND = "fields marked (stored; not applied) are saved and shown, but nothing in OpenRig acts on them yet";
+  const record = {
+    autonomy_scope: "bounded_continuation", heartbeat_cadence: "fast", inspection_depth: "forensic", update_detail: "verbose",
+    escalation_threshold: "low", concurrency_limit: "serial", permission_prompt_posture: "normal",
+    scope: "rig", expiry_or_stale_rule: "re_confirm_on_long_gap", evidence_citation: "operator confirmed debug",
+  };
+  /** Each printed record line, keyed by its field. */
+  const fieldLines = (out: string[]) => Object.fromEntries(out.map((l) => l.match(/^\s+([a-z_]+): /)).filter(Boolean).map((m) => [m![1]!, m!.input!]));
+  const expectMarked = (out: string[]) => {
+    const lines = fieldLines(out);
+    for (const f of MARKED) expect(lines[f], f).toMatch(new RegExp(`: \\S+  \\(stored; not applied\\)$`));
+    for (const f of UNMARKED) expect(lines[f], f).not.toContain(MARK);
+    expect(out.filter((l) => l.trim() === LEGEND)).toHaveLength(1);
+  };
+
+  it("effective marks exactly the eight fields, with one legend line; --json is unchanged", async () => {
+    const effectiveResponse = { status: 200, data: { posture: "known", effective: { binding: { id: "rig:r1", mode: "debug", record, qualifier: "r1", setAt: "t", setBy: "operator" }, resolvedScope: "rig" } } };
+    await rigModeCommand(deps(fakeClient({ effectiveResponse }).client)).parseAsync(["node", "rig", "effective", "--rig", "r1"]);
+    expectMarked(logs);
+    logs.length = 0;
+    await rigModeCommand(deps(fakeClient({ effectiveResponse }).client)).parseAsync(["node", "rig", "effective", "--rig", "r1", "--json"]);
+    expect(logs.join("\n")).toBe(JSON.stringify(effectiveResponse.data, null, 2));
+  });
+
+  it("defaults marks the seven fields of every mode, says the served default stale rule isn't applied, and has one legend line; --json is unchanged", async () => {
+    // The daemon serves all eight modes (the six legacy names and both postures).
+    const seven = { autonomy_scope: "a", heartbeat_cadence: "b", inspection_depth: "c", update_detail: "d", escalation_threshold: "e", concurrency_limit: "f", permission_prompt_posture: "g" };
+    const modes = ["sleep", "desk", "mobile", "away", "focus", "debug", "human-led", "delegated"];
+    const defaultsResponse = { status: 200, data: { recommendedModeDefaults: Object.fromEntries(modes.map((m) => [m, seven])),
+      recommendedDefaultScope: Object.fromEntries(modes.map((m) => [m, "rig"])), defaultStaleRule: "re_confirm_on_long_gap" } };
+    await rigModeCommand(deps(fakeClient({ defaultsResponse }).client)).parseAsync(["node", "rig", "defaults"]);
+    const marked = logs.filter((l) => l.endsWith(`  ${MARK}`));
+    expect(marked).toHaveLength(8 * 7); // seven fields for each of the eight modes
+    for (const l of marked) expect(MARKED.some((f) => l.trimStart().startsWith(`${f}: `))).toBe(true);
+    // The served default isn't a stored field, so it reads "(not applied)" without "stored".
+    expect(logs).toContain("\ndefault stale rule: re_confirm_on_long_gap  (not applied)");
+    expect(logs.filter((l) => l.trim() === LEGEND)).toHaveLength(1);
+    logs.length = 0;
+    await rigModeCommand(deps(fakeClient({ defaultsResponse }).client)).parseAsync(["node", "rig", "defaults", "--json"]);
+    expect(logs.join("\n")).toBe(JSON.stringify(defaultsResponse.data, null, 2));
+  });
+
+  it("the set preview marks the eight fields of the proposed record, with one legend line; exit 2; --json is unchanged", async () => {
+    await rigModeCommand(deps(fakeClient({}).client)).parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1"]);
+    expect(process.exitCode).toBe(2);
+    expectMarked(logs);
+    logs.length = 0;
+    await rigModeCommand(deps(fakeClient({}).client)).parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--json"]);
+    expect(process.exitCode).toBe(2);
+    expect(logs.join("\n")).not.toContain("not applied");
+  });
+
+  it("set's help says the same on each of the eight options, and not on the others", () => {
+    const set = rigModeCommand(deps(fakeClient({}).client)).commands.find((c) => c.name() === "set")!;
+    const marked = set.options.filter((o) => (o.description ?? "").includes(`${MARK}: nothing in OpenRig acts on it yet`)).map((o) => o.long!.slice(2).replace(/-/g, "_"));
+    expect(marked.sort()).toEqual([...MARKED].sort());
   });
 });

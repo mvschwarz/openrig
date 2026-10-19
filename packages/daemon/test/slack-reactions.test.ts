@@ -34,7 +34,7 @@ function harness(opts: { admitted?: boolean; failCreates?: number; newerRoot?: s
       if (lookupFailures > 0) { lookupFailures--; throw new Error("database is locked"); }
       return ts === "400.0" ? { seat: "asker@rig", channel: "C1", conversationId: "qitem-ask-1", threadTs: ts, state: "open" } : null;
     },
-    resolveByConversation: () => opts.newerRoot ? { threadTs: opts.newerRoot } : null,
+    resolveByConversation: () => opts.newerRoot ? { threadTs: opts.newerRoot, channel: "C1" } : null,
     // Messages OpenRig posted into a thread: a long ask's reply part (400.5), and a second ask posted
     // into the first ask's thread (400.7), which belongs to its own seat, not to the thread's root.
     partOf: (ts: string, channel: string) => channel !== "C1" ? null

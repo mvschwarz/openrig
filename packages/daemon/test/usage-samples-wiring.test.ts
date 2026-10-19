@@ -9,40 +9,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "../src/db/migrations/008_packages.js";
-import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
-import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
-import { discoverySchema } from "../src/db/migrations/012_discovery.js";
-import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
-import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
-import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
-import { contextUsageSchema } from "../src/db/migrations/018_context_usage.js";
-import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
-import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
-import { usageSamplesSchema } from "../src/db/migrations/062_usage_samples.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
 import { UsageSamplesStore, type ProviderWindowSampleInput } from "../src/domain/usage-samples-store.js";
+import { telemetryRoutes } from "../src/routes/telemetry.js";
 import type { ReadinessResult } from "../src/domain/runtime-adapter.js";
-
-const ALL_MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
-  checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
-  discoverySchema, discoveryFkFix, agentspecRebootSchema, podNamespaceSchema,
-  contextUsageSchema, externalCliAttachmentSchema, rigArchiveSchema,
-  usageSamplesSchema,
-];
 
 describe("51-08 A1 wiring — the series accrues from the real poll tick", () => {
   let db: Database;
@@ -111,6 +85,33 @@ describe("51-08 A1 wiring — the series accrues from the real poll tick", () =>
 
   const seriesCount = (lane: string) =>
     (db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE lane = ?").get(lane) as { n: number }).n;
+
+  it("does not report a new conversation's starting tokens as burn through the telemetry route", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [at, sessionId, input] of [
+        ["2026-08-07T10:00:00.000Z", "old", 1000],
+        ["2026-08-07T10:30:00.000Z", "old", 1200],
+        ["2026-08-07T11:00:00.000Z", "new", 100_000],
+        ["2026-08-07T12:00:00.000Z", "new", 100_500],
+      ] as const) {
+        vi.setSystemTime(new Date(at));
+        writeSidecar({ session_id: sessionId, sampled_at: at,
+          context_window: { context_window_size: 200000, used_percentage: 10,
+            total_input_tokens: input, total_output_tokens: 100 } });
+        await monitor.pollOnce();
+      }
+      const app = telemetryRoutes({ db: () => db, nowIso: () => "2026-08-07T12:00:00.000Z" });
+      const response = await app.request("/usage/top?window_hours=4");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        ranked: [{ seatSession: sessionName, tokensDelta: 700, tokensPerHour: 350, resets: 0, samples: 4 }],
+        unknown: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("two polls over an UNCHANGED sidecar append ONE context row; an advanced sidecar appends the second", async () => {
     writeSidecar();

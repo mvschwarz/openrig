@@ -22,7 +22,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
 import type { SeatStructuralActivityService } from "../domain/seat-structural-activity-service.js";
-import { deriveRigLifecycleState } from "../domain/ps-projection.js";
+import { deriveRigLifecycleState, deriveRigLifecycleFromInventory } from "../domain/ps-projection.js";
 import { identityVerdictConfirmsSessionMissing } from "../domain/types.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
@@ -231,12 +231,14 @@ rigsRoutes.get("/summary", (c) => {
     const invByRig = getNodeInventoryForRigs(repo.db, new Set(summaries.map((s) => s.id)));
     const enriched = summaries.map((s) => {
       const inventory = invByRig.get(s.id) ?? [];
-      const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+      const lifecycleState = deriveRigLifecycleFromInventory(inventory);
+      // Restore eligibility still accounts for every seat, including intentional stops.
+      const restoreLifecycleState = deriveRigLifecycleState(inventory.map((entry) => entry.lifecycleState));
       const agents = inventory.filter((e) => e.nodeKind === "agent");
       // Presence is separate from lifecycle/attention, and uses this same inventory fold.
       const hasLiveAgents = agents.some((e) => e.sessionStatus === "running" || e.sessionStatus === "idle")
         ? true : agents.every((e) => e.sessionStatus === null || e.sessionStatus === "stopped" || e.sessionStatus === "exited") ? false : null;
-      return { ...s, lifecycleState, hasLiveAgents };
+      return { ...s, lifecycleState, restoreLifecycleState, hasLiveAgents };
     });
     return c.json(enriched);
   });

@@ -129,6 +129,36 @@ and the row records `failed:wake not retained: <reason>`. Startup reconciles
 and drains intents left pending by a crash once (`startup.ts:2361`–`2362`).
 `maybeNudge` remains only as the path for a repository with no outbox.
 
+**Which field answers "did it reach them".** `deliveryOutcome` is the gateway
+(human-delivery) ledger, derived at read time
+(`QueueRepository.deliveryOutcomeFor`): `posted` or `transport-failed` from the
+row's Slack receipt notes, or `never-posted` when a gateway-routed row still
+has no receipt once the post window has passed. A task delivered only to an
+agent's pane has no such receipt, so it reads `null`. A task that also has a
+gateway or human-notification side can carry a value, and the CLI then reports
+that gateway side too. For the pane side, read:
+
+- `lastNudgeWireResult`: the wake send's result as stored (for example
+  `verified`, `delivered-ack-pending`, `indeterminate:…`, `retained:…`,
+  `failed:…`). A claim never rewrites it; a later wake replaces it.
+- `lastNudgeResult`: the result as presented. It is the stored result, except
+  that a claimed row whose stored result is `delivered-ack-pending` or
+  `indeterminate:…` reads `claimed` (`presentedNudgeResult`). Unclaiming shows
+  the stored result again.
+- `claimedAt`: when the destination claimed the row. Closing doesn't clear it.
+- `pickup`: the derived pickup receipt (`unclaimed`, `working`,
+  `stalled-after-claim`, `parked`, `terminal`), computed at read time.
+
+A claim isn't proof that the body was read or that the terminal render was
+verified, and closing a task isn't a new delivery receipt: a claimed task that
+is later closed still reads `claimed` when its stored result was unconfirmed
+(`delivered-ack-pending` or `indeterminate:…`); a `verified` or `failed:…`
+result reads as stored. For such an unconfirmed, claimed item,
+`rig queue create --verify` says "Terminal receipt unconfirmed, but the seat
+has claimed the item (claimed)."; for any claimed item it adds "A claim shows
+the seat took the item; it does not prove the body was read."
+(`terminalDeliveryResult`, `packages/cli/src/commands/queue.ts`).
+
 The standing detector in `queue-stuck-sweep.ts` creates findings through the
 queue repository, with `evidenceRef: rig queue show <source-qitem-id>`
 (`queue-stuck-sweep.ts:605`) pointing to the underlying durable work row. This

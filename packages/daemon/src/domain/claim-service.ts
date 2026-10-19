@@ -8,6 +8,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
+import { verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import {
   observeSolePane,
   paneObservationVerdict,
@@ -76,6 +77,8 @@ interface ClaimServiceDeps {
   };
   /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is skipped. */
   claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
+  /** Process census for the runtime proof in `reconcileSession`; defaults to the live process table. */
+  listProcesses?: NativeProcessLister;
   resumeTokenCapturer?: {
     captureCodexThreadId(sessionName: string): Promise<string | undefined>;
   };
@@ -116,6 +119,7 @@ export class ClaimService {
   private claudeContextProvisioner: ClaimServiceDeps["claudeContextProvisioner"] | null;
   private contextUsageStore: ClaimServiceDeps["contextUsageStore"] | null;
   private claudeProcessStartedAt: ClaimServiceDeps["claudeProcessStartedAt"] | null;
+  private listProcesses: NativeProcessLister | undefined;
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
@@ -135,6 +139,7 @@ export class ClaimService {
     this.claudeContextProvisioner = deps.claudeContextProvisioner ?? null;
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
+    this.listProcesses = deps.listProcesses;
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
@@ -282,7 +287,7 @@ export class ClaimService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar",
   ): void {
     try {
       this.eventBus.emit({
@@ -396,6 +401,17 @@ export class ClaimService {
     } catch (err) {
       return { ok: false, code: "claim_error", error: (err as Error).message };
     }
+  }
+
+  /** Whether the pane's own process tree shows the node's runtime, whatever `pane_current_command` says. */
+  private async runtimeProvenInPane(runtime: string, target: string): Promise<boolean> {
+    if (!this.tmuxAdapter) return false;
+    const input = { target, tmux: this.tmuxAdapter, listProcesses: this.listProcesses };
+    try {
+      if (runtime === "claude-code") return !!await verifyClaudePaneRuntime(input);
+      if (runtime === "codex") return !!await verifyCodexPaneProcess(input);
+    } catch { /* unproven */ }
+    return false;
   }
 
   /**
@@ -520,7 +536,9 @@ export class ClaimService {
       const expected = expectation[nodeRow.runtime];
       if (!paneCommand) {
         projectionDrift.push(`runtime unverified: pane command unreadable; node declares runtime "${nodeRow.runtime}"`);
-      } else if (expected && expected.length > 0 && !expected.includes(paneCommand)) {
+      } else if (expected && expected.length > 0 && !expected.includes(paneCommand)
+        && !await this.runtimeProvenInPane(nodeRow.runtime, paneObservation.ok ? paneObservation.pane : sessionName)) {
+        // A script-launched runtime reads as its launcher (`sh`); only a pane whose process tree shows no such runtime is drift.
         projectionDrift.push(`runtime unverified: pane command "${paneCommand}" does not confirm runtime "${nodeRow.runtime}"`);
       }
     }

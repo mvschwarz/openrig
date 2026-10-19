@@ -227,7 +227,22 @@ export class WatchdogPolicyEngine {
     return this.policies.get(name);
   }
 
+  private inactiveJobResult(jobId: string): EvaluationResult | null {
+    const job = this.jobsRepo.getByIdOrThrow(jobId);
+    if (job.state === "active") return null;
+    return {
+      job,
+      outcome: { action: "skip", reason: "job_not_active" },
+      history: null,
+      delivery: null,
+      meaningful: false,
+    };
+  }
+
   async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string): Promise<EvaluationResult> {
+    // A prior job's delivery may have yielded since the scheduler selected this row.
+    const inactive = this.inactiveJobResult(job.jobId);
+    if (inactive) return inactive;
     const policy = this.resolvePolicy(job.policy);
     const evaluatedAt = this.now().toISOString();
     const receiptCutoffAt = evaluationPassStartedAt ?? evaluatedAt;
@@ -334,6 +349,11 @@ export class WatchdogPolicyEngine {
     };
 
     const outcome = this.resolveQueueWait?.({ jobId: job.jobId }) ?? await policy.evaluate(policyJob);
+
+    // Stop, park completion or seat handover may retire the job while its policy awaits I/O.
+    // Discard every outcome before it can deliver or overwrite the retirement's state.
+    const retired = this.inactiveJobResult(job.jobId);
+    if (retired) return retired;
 
     if (outcome.action === "skip") {
       // POC parity: skip clears actionable. Loud-vs-quiet decides
@@ -507,6 +527,7 @@ export class WatchdogPolicyEngine {
     if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
+    const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
@@ -540,7 +561,7 @@ export class WatchdogPolicyEngine {
           : delivery.status === "retained" ? { ...(outcome.notes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : outcome.notes ?? null,
     });
     if (!isContextUsageThreshold) {
-      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
     }
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
     // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
@@ -558,7 +579,14 @@ export class WatchdogPolicyEngine {
       targetSession: outcome.target.session,
       deliveryStatus: delivery.status,
     });
-    this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
+    // The history above audits the actual attempt. A newer park/blocker change
+    // must not receive its receipt or be backed off as though we sent for it.
+    const current = this.jobsRepo.getByIdOrThrow(job.jobId);
+    if (current.state === "active" && current.specYaml === deliverySchedule.specYaml
+      && current.intervalSeconds === deliverySchedule.intervalSeconds
+      && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
+      this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
+    }
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,

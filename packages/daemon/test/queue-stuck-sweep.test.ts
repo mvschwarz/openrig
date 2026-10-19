@@ -17,7 +17,7 @@
 //                          user-facing finding is verification-required/indeterminate, never
 //                          a declaration of absence. Selection is by DESTINATION + obligation
 //                          shape across ALL states, never by tag.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -714,13 +714,13 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
   });
 
-  it("DISPOSITION SURVIVES RETENTION: the custody-verified note still silences after the real archiver moves the terminal row's transitions", async () => {
+  it.each(["done", "handed-off"] as const)("DISPOSITION SURVIVES RETENTION: verified custody remains quiet after archiving (%s)", async (state) => {
     const row = await mkRow();
     const missing = "qitem-20990101000000-precon04";
     repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state,
       closureReason: "handed_off_to",
       closureTarget: missing,
     });
@@ -886,7 +886,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
 // closure_target=next@r) without a linked local successor must be swept as a dangling closure.
 // Transactional handoffs (which atomically create linked successors) and explicit repairs
 // (creating a linked successor or reopening) are respected and not flagged / auto-close the finding.
-describe("#318 seat-target handoff closure without successor", () => {
+describe.each(["done", "handed-off"] as const)("#318 seat-target closure without successor (%s)", (closureState) => {
   let db: Database.Database;
   let repo: QueueRepository;
 
@@ -934,7 +934,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -952,6 +952,10 @@ describe("#318 seat-target handoff closure without successor", () => {
     expect(findings[0]!.body).toContain("OPENRIG_URL=<registered-host> rig queue list --destination next@r");
     expect(findings[0]!.body).toContain("custody-verified: <target>");
     expect(findings[0]!.tags).toContain(`stuck-sweep:dangling-closure:${row.qitemId}`);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+    expect(repo.getById(row.qitemId)?.state).toBe(closureState);
+    expect(repo.list({ destinationSession: "next@r" })).toHaveLength(0);
   });
 
   it("TRANSACTIONAL HANDOFF: repo.handoff to a seat target creates linked successor in same txn — zero findings", async () => {
@@ -994,7 +998,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1015,7 +1019,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1026,12 +1030,50 @@ describe("#318 seat-target handoff closure without successor", () => {
     expect(findings[0]!.body).toContain("- next@r");
   });
 
+  it("SELF TARGET DOES NOT SUPPRESS: closureTarget = row.qitemId leaves it flagged", async () => {
+    const row = await mkRow();
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: closureState,
+      closureReason: "handed_off_to",
+      closureTarget: row.qitemId,
+    });
+
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(`- ${row.qitemId}`);
+  });
+
+  it("EXPLICIT SUCCESSOR TARGETED BY QITEM ID: successor targeted by qitemId is not flagged", async () => {
+    const row = await mkRow();
+    const successor = await repo.create({
+      sourceSession: "worker@r",
+      destinationSession: "next@r",
+      body: "follow-on",
+      chainOfRecord: [row.qitemId],
+      nudge: false,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: closureState,
+      closureReason: "handed_off_to",
+      closureTarget: successor.qitemId,
+    });
+
+    const { result } = await runSweep();
+    expect(result.outcome).toBe("clean");
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
   it("REMOTE CUSTODY NOTE SILENCES SEAT TARGET: custody-verified note on source row prevents finding", async () => {
     const row = await mkRow();
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1051,7 +1093,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1081,7 +1123,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1109,7 +1151,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1144,7 +1186,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "local-valid@r,missing-seat@r",
     });
@@ -1156,10 +1198,10 @@ describe("#318 seat-target handoff closure without successor", () => {
     expect(findings[0]!.body).not.toContain("- local-valid@r");
   });
 
-  it("SKIP HANDED-OFF ROWS: a row with state 'handed-off' is skipped by the sweep even without a successor", async () => {
+  it("SKIP RECORDED HANDOFF: an internal handoff owner keeps the successor-history fast path", async () => {
     const row = await mkRow();
     db.prepare(
-      "UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'next@r' WHERE qitem_id = ?"
+      "UPDATE queue_items SET state = 'handed-off', handed_off_to = 'next@r', closure_reason = 'handed_off_to', closure_target = 'next@r' WHERE qitem_id = ?"
     ).run(row.qitemId);
 
     const { result } = await runSweep();
@@ -1167,12 +1209,25 @@ describe("#318 seat-target handoff closure without successor", () => {
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
+  it("bounds custody candidates with the existing time and row-id indexes", async () => {
+    const prepare = vi.spyOn(db, "prepare");
+    try {
+      await runSweep();
+      const sql = prepare.mock.calls.find(([query]) => query.includes("WITH custody_candidates"))?.[0];
+      expect(sql).toBeDefined();
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(new Date().toISOString(), "[]") as Array<{ detail: string }>;
+      expect(plan.some(row => row.detail.includes("idx_queue_items_ts_updated (ts_updated>?)"))).toBe(true);
+      expect(plan.some(row => row.detail.includes("(qitem_id=?)"))).toBe(true);
+      expect(plan.some(row => row.detail.startsWith("SCAN queue_items"))).toBe(false);
+    } finally { prepare.mockRestore(); }
+  });
+
   it("UPGRADE / RECENT WINDOW: closure outside the custody window gives no finding; closure inside window is flagged", async () => {
     const oldRow = await mkRow();
     await repo.update({
       qitemId: oldRow.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1184,7 +1239,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: recentRow.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1203,7 +1258,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
@@ -1226,7 +1281,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     await repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
-      state: "done",
+      state: closureState,
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });

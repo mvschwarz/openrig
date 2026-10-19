@@ -1,6 +1,7 @@
 import type { SnapshotData, RestoreValidationBlocker, RigServicesRecord } from "./types.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 import { resolveActiveSnapshotSession } from "./active-occupant.js";
+import { effectiveRestorePolicy } from "./restore-policy.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 
 // Shared read-only validation. Keep restore's refusal order and replay eligibility here.
@@ -10,6 +11,8 @@ export function validatePreRestore(
     fsOps?: { exists(path: string): boolean };
     servicesRecord?: RigServicesRecord | null;
     freshLogicalIds?: string[];
+    /** The runtime each seat has now, by logical id. A seat not listed is read as its saved runtime. */
+    currentRuntimes?: Record<string, string | null | undefined>;
   },
 ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
   const blockers: RestoreValidationBlocker[] = [];
@@ -118,7 +121,11 @@ export function validatePreRestore(
       consumesReplay = true;
     } else {
       const sess = resolution.session;
-      const policy = sess.restorePolicy ?? "resume_if_possible";
+      const policy = effectiveRestorePolicy({
+        savedRuntime: node.runtime,
+        currentRuntime: opts.currentRuntimes?.[node.logicalId] ?? node.runtime,
+        recordedSessions: sessions?.filter((recorded) => recorded.nodeId === node.id) ?? [],
+      }, sess.restorePolicy);
       if (freshListed || policy !== "resume_if_possible") consumesReplay = true;
       else if (!sess.resumeToken) consumesReplay = false;
       else if (!!sess.resumeType && sess.resumeType !== "none") consumesReplay = false;

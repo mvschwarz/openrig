@@ -1,4 +1,4 @@
-// Available top-level channel history only. A seen event is not scanned coverage.
+// Available channel history, including broadcast replies. A seen event is not scanned coverage.
 import path from "node:path";
 import { callWebApi, type FetchImpl } from "./slack-api.js";
 import { ingestDecision, type InboundRouter, type SlackEvent } from "./inbound.js";
@@ -47,7 +47,7 @@ export class ChannelRecovery {
     return { state: this.state, reason: this.reason, channel: this.opts.channel, lastScanAt: this.lastScanAt,
       coverage: this.coverage ? structuredClone(this.coverage) : null,
       acceptedThisProcess: this.accepted, deadLetteredThisProcess: this.deadLettered,
-      limits: ["older history unknown", "counts reset on connector rewire/restart", "top-level configured-channel messages only; thread recovery deferred",
+      limits: ["older history unknown", "counts reset on connector rewire/restart", "configured-channel history, including broadcast replies; non-broadcast thread recovery deferred",
         ...(this.coverage?.historyLimited ? ["Slack plan limit excludes older history; only available messages were scanned"] : []),
         "coverage means scanned available history; dead letters are custody, not delivery",
         "five-second settle margin; larger clock skew or history visibility lag remains unverified",
@@ -124,7 +124,8 @@ export class ChannelRecovery {
         if (this.now() >= deadline || entries >= 100) { this.state = "incomplete"; this.reason = "pass-budget"; return; }
         entries++;
         const ev: SlackEvent = { ...message, channel: this.opts.channel!, recoveredAfterGap: true };
-        if (ev.thread_ts && ev.thread_ts !== ev.ts) continue;
+        // Broadcast replies are channel history too; preserve their thread routing.
+        if (ev.thread_ts && ev.thread_ts !== ev.ts && ev.subtype !== "thread_broadcast") continue;
         if (!ingestDecision(ev).ingest) continue;
         const landed = await this.opts.router.route(ev, 0, () => !this.stopped);
         if (this.stopped) return;

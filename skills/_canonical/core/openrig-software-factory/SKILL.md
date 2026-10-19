@@ -15,7 +15,6 @@ metadata:
     - workflow instantiate-lifecycle
   openrig:
     stage: WIP
-    transfer_test: pending
 ---
 
 # OpenRig Software Factory

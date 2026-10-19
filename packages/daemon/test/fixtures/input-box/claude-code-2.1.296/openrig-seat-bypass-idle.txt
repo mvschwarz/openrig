@@ -1,0 +1,54 @@
+user@machine:~/workspace1/run/work/proj1$ ( . '/srv/agenthome/workspace1/run/tmp
+/openrig-tmux-send-100002-00000000-0000-4000-8000-000000000002.txt' )
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Opus 5.5 with high effort · Claude Max
+ ▝▝   ▝▝   ~/workspace1/run/work/proj1
+
+
+❯ orch-advisor@sample-rig
+  OpenRig session identity:
+  - rig: sample-rig
+  - pod: orch
+  - pod_label: Orchestration
+  - member: advisor
+  - logical_id: orch.advisor
+  - agent_spec: demo-core-advisor
+  - runtime: claude-code
+  - session: orch-advisor@sample-rig
+    This is your startup identity hint. For durable identity recovery after
+  compaction, run:
+    rig whoami --json
+    That command returns your full topology context: rig, pod, peers, edges,
+  and transcript path.
+
+● Bash(rig whoami --json)
+  ⎿  {
+       "resolvedBy": "node_id",
+       "identity": {
+     … +56 lines (ctrl+o to expand)
+
+● Bash(rig queue list --help)
+  ⎿  Usage: rig queue list [options]
+
+     List qitems (default: active + compact + current-rig; like 'docker ps'
+     … +48 lines (ctrl+o to expand)
+
+● Bash(rig queue list --owned)
+  ⎿  []
+
+● I checked in as the advisor seat (orch.advisor) on rig sample-rig, and no work
+  is waiting for me: rig queue list --owned came back empty.
+
+  The advisor seat only acts on demand. It wakes when the coordinator
+  (orch.lead) or the Operator sends a queue item with a coordination or recovery
+  question. I'll leave my state alone and wait. When an item arrives, I'll
+  claim it, answer it as a report, and stop.
+
+✻ Crunched for 9s · done 10:50 PM
+
+────────────────────────────────────────────────────── orch-advisor@sample-rig ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+

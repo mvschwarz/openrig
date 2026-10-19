@@ -665,7 +665,7 @@ sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) =
 
   const result = await rigLifecycleService.unclaimSession(sessionRef);
   if (!result.ok) {
-    const status = result.code === "session_ambiguous" ? 409 : 404;
+    const status = result.code === "session_not_found" ? 404 : 409;
     return c.json(result, status);
   }
 

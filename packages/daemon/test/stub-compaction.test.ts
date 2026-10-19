@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -41,8 +41,12 @@ describe("stub compaction behavior fires the real precompact seam", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "stub-compaction-"));
     openrigHome = join(tmpDir, ".openrig");
+    // fireCompaction inherits process.env; keep the packet out of the production
+    // default (/tmp/claude-compaction-restore).
+    vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", join(tmpDir, "packets"));
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -62,6 +66,8 @@ describe("stub compaction behavior fires the real precompact seam", () => {
     expect(marker.sessionName).toBe(SEAT);
     // The packet the real seam generated actually exists (restore-from-jsonl ran).
     expect(existsSync(marker.outputDir)).toBe(true);
+    // ...under this test's own packets root, not the production default.
+    expect(dirname(marker.outputDir)).toBe(join(tmpDir, "packets"));
   });
 
   it("is deterministic under the injected clock (byte-identical stamps across a double-run)", () => {
@@ -69,11 +75,13 @@ describe("stub compaction behavior fires the real precompact seam", () => {
       const dir = mkdtempSync(join(tmpdir(), "stub-compaction-det-"));
       const home = join(dir, ".openrig");
       const jsonl = writeFixtureJsonl(dir);
+      vi.stubEnv("OPENRIG_COMPACTION_OUT_ROOT", join(dir, "packets"));
       const result = fireCompaction({
         hookScriptPath: HOOK_SCRIPT, sessionName: SEAT, openrigHome: home, cwd: dir,
         transcriptPath: jsonl, injectClockNow: INJECTED_ISO,
       });
       const marker = JSON.parse(readFileSync(result.markerPath, "utf8"));
+      expect(dirname(marker.outputDir)).toBe(join(dir, "packets"));
       const out = { createdAt: marker.createdAt, outStamp: String(marker.outputDir).split("/").pop() };
       rmSync(dir, { recursive: true, force: true });
       return out;

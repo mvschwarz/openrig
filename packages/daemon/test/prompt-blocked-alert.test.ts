@@ -7,7 +7,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
+import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX, RESERVE_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
 import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
@@ -286,6 +286,65 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(result.outcome).not.toBe("failed");
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     expect(log).not.toHaveBeenCalled();
+  });
+
+  // A closed disposition is a terminal row whose valid JSON tags hold the alert tag and this exact episode tag as
+  // values. It keeps the episode final; anything short of that leaves the episode free to alert again.
+  function episodeKey(id: string) {
+    return notes(id).find(n => n.startsWith(REFUSED_PREFIX))!.slice(REFUSED_PREFIX.length).trim().split(";")[0]!.trim();
+  }
+  async function disposition(tagsText: string, rowState: string) {
+    const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: "archive@fixture", body: "earlier disposition", nudge: false });
+    db.prepare("UPDATE queue_items SET tags = ?, state = ? WHERE qitem_id = ?").run(tagsText, rowState, row.qitemId);
+    return row.qitemId;
+  }
+  const exact = (key: string) => JSON.stringify(["wake-prompt-refusal", `prompt-episode:${key}`]);
+  const escaped = (tags: string[]) => `[${tags.map(t => `"${[...t].map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")}"`).join(",")}]`;
+
+  it.each([
+    ["exact tags on a done row", exact, "done", false],
+    ["exact tags on a canceled row", exact, "canceled", false],
+    ["exact tags on a handed-off row", exact, "handed-off", false],
+    ["exact tags on a failed row", exact, "failed", false],
+    ["exact tags on a denied row", exact, "denied", false],
+    ["fully escaped tags", (k: string) => escaped(["wake-prompt-refusal", `prompt-episode:${k}`]), "done", false],
+    ["object-form tags", (k: string) => JSON.stringify({ alert: "wake-prompt-refusal", episode: `prompt-episode:${k}` }), "done", false],
+    ["both tags among others, with no recovery-for tag", (k: string) => JSON.stringify(["review", "wake-prompt-refusal", "prompt-destination:x@fixture", `prompt-episode:${k}`]), "done", false],
+    ["exact tags on a pending row", exact, "pending", true],
+    ["exact tags on an in-progress row", exact, "in-progress", true],
+    ["exact tags on a blocked row", exact, "blocked", true],
+    ["invalid JSON holding both strings", (k: string) => `["wake-prompt-refusal","prompt-episode:${k}"`, "done", true],
+    ["the episode tag without the alert tag", (k: string) => JSON.stringify(["review", `prompt-episode:${k}`]), "done", true],
+    ["a longer key sharing this key as a prefix", (k: string) => exact(`${k}0`), "done", true],
+    ["the next ordinal of the same obligation set", (k: string) => exact(k.replace(/#1$/, "#2")), "done", true],
+    ["the episode tag in another case", (k: string) => exact(k.toUpperCase()), "done", true],
+    ["the alert tag as an object key, not a value", (k: string) => JSON.stringify({ "wake-prompt-refusal": `prompt-episode:${k}` }), "done", true],
+    ["both tags nested one level down", (k: string) => JSON.stringify([["wake-prompt-refusal", `prompt-episode:${k}`]]), "done", true],
+  ])("closed-episode lookup: %s -> alerts again: %s", async (_label, tags, rowState, alertsAgain) => {
+    const row = await refusal();
+    const decoy = await disposition(tags(episodeKey(row.qitemId)), rowState);
+    await tick(engine([], false));
+    expect(alerts().filter(a => a.qitemId !== decoy)).toHaveLength(alertsAgain ? 1 : 0);
+  });
+
+  it("one closed-episode read per tick serves every open episode, and only the closed episode stays final", async () => {
+    const keys = [0, 1, 2].map(i => `${seat}|fixture${i}#1`);
+    for (const [i, key] of keys.entries()) {
+      const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: seat, body: `episode work ${i}`, nudge: false });
+      repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: `${RESERVE_PREFIX} ${key}; obligations ${row.qitemId}` });
+      repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: `${REFUSED_PREFIX} ${key}; Refused: '${seat}' is at an interactive prompt` });
+    }
+    await disposition(exact(keys[0]!), "done");
+    const prepare = vi.spyOn(db, "prepare");
+    let lookups = -1;
+    try {
+      await tick(engine([], false));
+      lookups = prepare.mock.calls.filter(([sql]) => String(sql).includes("state NOT IN ('pending','in-progress','blocked')")).length;
+    } finally { prepare.mockRestore(); }
+    expect(lookups).toBe(1); // one per tick; the per-episode lookup ran once per open episode (3 here)
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.tags).toEqual(expect.arrayContaining([`prompt-episode:${keys[1]}`, `prompt-episode:${keys[2]}`]));
+    expect(alerts()[0]!.tags).not.toContain(`prompt-episode:${keys[0]}`);
   });
 
   it("an open prompt recovery owns the shared failed-class escalation", async () => {

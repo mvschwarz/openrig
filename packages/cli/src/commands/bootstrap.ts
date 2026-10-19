@@ -28,10 +28,11 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("bootstrap").description("Bootstrap a rig from a spec file or bundle");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
-  async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
+  async function getTarget(deps: StatusDeps) {
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (!daemonStatusGuard(status)) return null;
-    return deps.clientFactory(getDaemonUrl(status));
+    // Only the recorded local-daemon branch has a PID; URL/config targets may be remote.
+    return { client: deps.clientFactory(getDaemonUrl(status)), local: status.pid !== undefined };
   }
 
   cmd
@@ -45,12 +46,15 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "Output as parseable JSON")
     .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean }) => {
       const deps = getDeps();
-      const client = await getClient(deps);
-      if (!client) { process.exitCode = 1; return; }
+      const target = await getTarget(deps);
+      if (!target) { process.exitCode = 1; return; }
+      const { client, local } = target;
 
       // Library name resolution: if spec looks like a name (not a path), check library
-      let sourceRef = spec;
       const isPath = spec.includes("/") || /\.(ya?ml|rigbundle)$/i.test(spec);
+      // Resolve caller paths only for the local daemon. Explicit URLs (even loopback
+      // tunnels), stateless targets and catalog sources keep daemon-side addressing.
+      let sourceRef = isPath && local ? nodePath.resolve(spec) : spec;
       if (!isPath) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");

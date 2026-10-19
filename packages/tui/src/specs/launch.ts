@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { helperCwd } from "../helper-cwd.js";
 import type { CopyTerminal } from "../print-for-copy.js";
 import { ALT_SCREEN_OFF, ALT_SCREEN_ON, MOUSE_DISABLE, MOUSE_ENABLE, PASTE_DISABLE, PASTE_ENABLE } from "../input.js";
 
@@ -24,7 +25,7 @@ export function launchProcess(launch: SpecLaunch, endpoint: string, env: NodeJS.
 
 export function spawnLaunch(command: LaunchProcess): Promise<number | null> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command.executable, command.args, { env: command.env, stdio: "inherit" });
+    const child = spawn(command.executable, command.args, { cwd: helperCwd(), env: command.env, stdio: "inherit" });
     child.once("error", reject);
     child.once("close", resolve);
   });
