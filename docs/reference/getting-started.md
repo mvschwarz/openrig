@@ -24,9 +24,11 @@ with Apple silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
 you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
-[nvm](https://github.com/nvm-sh/nvm): run the install command on nvm's page,
-open a new terminal, then run `nvm install 22`. That needs no administrator
-password, and `npm install -g` then installs into your nvm folder. Native
+[nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account
+has none, and nvm's installer only adds itself to a profile file that already
+exists), then the install command on nvm's page, open a new terminal, and run
+`nvm install 22`. That needs no administrator password, and `npm install -g`
+then installs into your nvm folder. Native
 Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
 supports, though OpenRig's automated tests don't run on it yet. One user's
 [working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
