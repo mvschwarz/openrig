@@ -129,12 +129,14 @@ it("a reply that landed live and again in the thread scan lands once; coverage i
 
 it("scans open threads and threads closed within seven days, never older closed or untracked threads", async () => {
   const f = fixture();
-  const open = ts(-12 * DAY), staleClosed = ts(-11 * DAY), recentClosed = ts(-10 * DAY), untracked = ts(-9 * DAY);
+  const offsets = { open: -12 * DAY, staleClosed: -11 * DAY, recentClosed: -10 * DAY, untracked: -9 * DAY };
+  const open = ts(offsets.open), staleClosed = ts(offsets.staleClosed), recentClosed = ts(offsets.recentClosed), untracked = ts(offsets.untracked);
   f.track(open, "a@test");
   f.time(at(100 - 8 * DAY)); f.track(staleClosed, "b@test"); f.map.close(staleClosed, "C1");
   f.time(at(100 - DAY)); f.track(recentClosed, "c@test"); f.map.close(recentClosed, "C1");
   f.time(at(100));
-  for (const root of [open, staleClosed, recentClosed, untracked]) f.replies[`C1:${root}`] = [f.reply(-9 * DAY + 10, root)];
+  // Each reply follows its own root: a Slack ts is unique in its channel.
+  for (const offset of Object.values(offsets)) f.replies[`C1:${ts(offset)}`] = [f.reply(offset + 10, ts(offset))];
   const r = f.recovery();
 
   await r.run();
