@@ -102,7 +102,7 @@ Keys:
   launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   output.compact         short default output for queue writes, queue show, queue transitions and whoami peers (default off)
-                         --full opts out: queue show returns the complete record; whoami returns the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer
+                         --full opts out: queue transitions returns the full log, queue show the complete record, and whoami the complete payload, not its usual identity projection. whoami --all-peers keeps that projection with every peer
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
   bundle.services_enabled Service-backed bundle packing, preview and target installs (default off)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)
