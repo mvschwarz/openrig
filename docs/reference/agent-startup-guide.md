@@ -628,6 +628,28 @@ Existing user files and legacy role blocks are left intact; this is not a cleanu
 of already-installed shared blocks. General user-authored guidance projection is
 unchanged.
 
+The other shipped agent specs that start a seat with `guidance/role.md` mark that
+file `orientation: role` too, so `rig queue whoami --json` reports their role and
+refocus names it. They never projected a role into shared guidance; their startup
+delivery is unchanged.
+
+**Removing a leftover shared role block by hand.** A kernel installed before 0.6.5
+may still hold one seat's old role in its working directory's `CLAUDE.md` (or the
+rig's configured `managed_blocks` file) or `AGENTS.md`. Upgrading doesn't remove it.
+`rig down` removes OpenRig's managed blocks from that file when no other running
+rig uses it, so it stays until then. To remove it sooner, by hand:
+
+1. Find the exact block: the lines from `<!-- BEGIN OpenRig MANAGED BLOCK: role -->`
+   through `<!-- END OpenRig MANAGED BLOCK: role -->` (in older files, `RIGGED`
+   instead of `OpenRig`). Only the block whose id is exactly `role`; leave
+   `rig-role`, other ids and everything outside the markers alone.
+2. Confirm each seat that shares that directory has its per-seat replacement:
+   `rig queue whoami --json` run in the seat reports `role.state` as `present`.
+   A seat started before it was upgraded still has the old content in its
+   conversation; restart it fresh if you want it to start from the per-seat role.
+3. Keep a copy of the file, remove only those lines, and compare the result with
+   the copy: nothing else in the file should differ.
+
 **Separate project context from role**
 
 Don't put project documentation inside the role guidance. The role is about the agent's function; project context is about what the agent is working on. Use rig-level or pod-level startup files for project context.
