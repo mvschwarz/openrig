@@ -14,7 +14,7 @@ import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
-import { listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { claudeCommandSessionToken, listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
@@ -421,7 +421,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // Missing process evidence is unknown, not a conflicting recipient. Reuse the launch observer's
     // positive conflict distinction without requiring process proof for ordinary ready frames.
     let occupant: "own" | "another" | "unknown" = "unknown";
-    try { occupant = await this.paneOccupant(binding, false); } catch { /* unavailable */ }
+    try { occupant = await this.paneOccupant(binding, false, { positiveConflictOnly: true }); } catch { /* unavailable */ }
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
       status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
     };
@@ -434,9 +434,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
       status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
     };
-    // A headerless auto-mode frame can be working while its process listing is unavailable. Keep
-    // today's ready fallback only for that missing proof, never for a trust/MCP/consent/error gate.
-    return current.code === "claude_auto_identity_required" ? historyProbe : current;
+    // Any headerless composer can lack only launch identity proof, regardless of permission mode.
+    // Use the existing qualified predicate so missing proof keeps admission, but gates never do.
+    const withIdentity = assessNativeResumeProbe({ runtime: "claude-code", paneCommand, paneContent: screen,
+      claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
+    return withIdentity.status === "resumed" ? historyProbe : current;
   }
 
   private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
@@ -500,7 +502,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *  another conversation, or a stable Codex. Waiting won't make any of them this launch's, and its token is not recorded
    *  as an attempt. "own": this launch's Claude. "unknown": nothing seen yet (the launch script is starting it) or a
    *  process list that can't be read, whatever the screen shows. One process listing serves the Claude observations. */
-  private async paneOccupant(binding: NodeBinding, looksReady: boolean): Promise<"own" | "another" | "unknown"> {
+  private async paneOccupant(binding: NodeBinding, looksReady: boolean,
+    options: { positiveConflictOnly?: boolean } = {}): Promise<"own" | "another" | "unknown"> {
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!binding.tmuxPane || !launch) return looksReady ? "another" : "unknown";
     let rows: Awaited<ReturnType<NativeProcessLister>>;
@@ -509,7 +512,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable,
       scriptLaunch: launch.scriptLaunch };
     if (await observeClaudePaneProcess({ ...observation, expectedToken: launch.token })) return "own";
-    if (await observeClaudePaneRuntime(observation)) return "another";
+    const native = await observeClaudePaneRuntime(observation);
+    if (native) {
+      if (!options.positiveConflictOnly) return "another";
+      // Fresh readiness keeps unidentified Claude processes unknown; strict resume callers above
+      // retain their existing rule. Reuse the exact argv parser, not a best-effort token search.
+      const named = claudeCommandSessionToken(native.process.command);
+      return named !== null && named !== launch.token ? "another" : "unknown";
+    }
     return await observeCodexPaneProcess(observation) && await verifyCodexPaneProcess({ ...observation, listProcesses: this.listProcesses })
       ? "another" : "unknown";
   }
