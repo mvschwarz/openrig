@@ -178,6 +178,16 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (saved) console.log(`  ${saved["note"]}: ${((saved["names"] as string[]) ?? []).join(", ")}`);
   }
 
+  /** The row's retained history: last observed exhaustion, the account link, and an inactive account's profile. */
+  function historyLines(r: Record<string, unknown>): string[] {
+    const out: string[] = [];
+    const ex = r["lastObservedExhausted"] as Record<string, unknown> | null | undefined;
+    if (ex) out.push(`last observed exhausted at ${ex["at"]} (${ex["window"] ?? "account-level"}: ${ex["evidence"]})`);
+    if (r["accountHistory"] === "unknown") out.push("account history unknown");
+    if (r["savedProfile"] === "not linked") out.push("saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
+    return out;
+  }
+
   function renderUsageRow(r: Record<string, unknown>, pad = "  "): void {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
@@ -190,6 +200,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // Not from the latest read: say only that. A later read proves no other account (an unresolved read
     // may be this same login), so the label names the read, not an account.
     const earlier = r["latestFromSource"] ? ""
+      : r["retained"] === "before_restart" ? "  [kept from before the daemon restarted; not a current reading]"
       : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
         : "  [from an earlier read; the latest read didn't match this row]";
     console.log(`${pad}${r["provider"]}  ${labels.join(" · ")}${earlier}`);
@@ -208,7 +219,10 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
         console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
       }
+      const expect = w["expectation"] as Record<string, unknown> | undefined;
+      if (expect) console.log(`${pad}    expected full since ${expect["expectedFullSince"]}, not yet observed (${expect["note"]})`);
     }
+    for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
     if (r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
     if (r["limitEvidence"]) console.log(`${pad}  limit evidence: ${r["limitEvidence"]}`);
     const last = r["lastRefresh"] as Record<string, unknown> | null;

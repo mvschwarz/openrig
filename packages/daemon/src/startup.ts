@@ -45,6 +45,7 @@ import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
+import { ProviderAccountReadingsStore } from "./domain/provider/provider-account-readings.js";
 import { claudeAuthStatusReader } from "./domain/provider/claude-auth-status-reader.js";
 import { ClaudeUsageWindows, latestClaudeWindowSamples } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
@@ -1306,7 +1307,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // samples (usage_samples), read on every view.
       usageWindows: {
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
-        windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }) }),
+        windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }),
+          store: new ProviderAccountReadingsStore(db) }),
         claude: new ClaudeUsageWindows({
           readIdentity: claudeAuthStatusReader({ launchPath: process.env.PATH, home: daemonHome, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
           listSamples: () => latestClaudeWindowSamples(db),

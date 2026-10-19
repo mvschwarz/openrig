@@ -217,6 +217,9 @@ export interface UsageWindowRow {
   levelReason?: string;
   freshness: "fresh" | "stale" | "unavailable";
   freshnessReason?: string;
+  /** Present when this window's reset has passed since its reading: planning, never a reading. It changes nothing
+   *  measured (used %, level, freshness, availability), and a newer reading replaces it. */
+  expectation?: { expectedFullSince: string; note: string };
 }
 
 export interface UsageRefreshOutcome {
@@ -243,6 +246,14 @@ export interface ProviderUsageAllowance {
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";
   unavailableReason?: string;
+  /** Present on a row kept from before the daemon restarted: historical, never current. */
+  retained?: "before_restart";
+  /** Whether this row's readings are linked to an account: a resolved provider identity, or unknown. */
+  accountHistory?: "linked" | "unknown";
+  /** The most recent time this allowance was observed exhausted (stored, so it survives a restart), or null. */
+  lastObservedExhausted?: { at: string; window: string | null; evidence: string } | null;
+  /** On an inactive account's row: OpenRig doesn't record which saved profile was active at its read. */
+  savedProfile?: "not linked";
   /** Claude: how the identity and the windows were joined (identity as of a refresh; windows from seats' samples at
    *  their own times; not proven to be the same login). */
   identityNote?: string;

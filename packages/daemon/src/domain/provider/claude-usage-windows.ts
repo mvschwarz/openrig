@@ -259,6 +259,8 @@ export class ClaudeUsageWindows {
         latestFromSource: true,
         lastRefresh: this.lastRefresh,
         currentAvailability: "unknown",
+        // No sample-time link from a seat's reading to an account: each window is its seat's own.
+        accountHistory: "unknown",
         unavailableReason: unreadable ?? NO_SEAT,
       });
     } else {
@@ -276,6 +278,8 @@ export class ClaudeUsageWindows {
         lastRefresh: this.lastRefresh,
         // Never "known" from this join: see CLAUDE_NO_SAMPLE_BINDING. The windows below are each seat's own readings.
         currentAvailability: "unknown",
+        // No sample-time link from a seat's reading to an account: each window is its seat's own.
+        accountHistory: "unknown",
         unavailableReason: CLAUDE_NO_SAMPLE_BINDING,
         identityNote: current
           ? `identity: the daemon's Claude login (claude auth status) as of the refresh at ${current.at}; windows: status-line readings from ${seatsOf(live)} at their own times; not proven to be the same login`
@@ -304,6 +308,8 @@ export class ClaudeUsageWindows {
         latestFromSource: false,
         lastRefresh: this.lastRefresh,
         currentAvailability: "unknown",
+        // No sample-time link from a seat's reading to an account: each window is its seat's own.
+        accountHistory: "unknown",
         identityNote: `identity: the daemon's Claude login as of the refresh at ${s.at}; a refresh at ${s.supersededAt} reported another login; windows as they were at ${s.at}${s.picks.length > 0 ? ` (from ${seatsOf(s.picks)})` : " (none reported then)"}`,
         ...(s.identity.source === "unresolved" ? {
           unresolved: { note: UNRESOLVED_EARLIER_NOTE, keptReads: UNRESOLVED_READS_KEPT, droppedReads: this.unresolvedDropped },

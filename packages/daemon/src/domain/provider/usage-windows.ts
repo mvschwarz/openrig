@@ -2,8 +2,8 @@
 // reader. Holds each provider's last reading in memory, refreshes it only on request (one bounded read;
 // matching overlapping requests share it), and projects rows keyed by allowance identity with freshness
 // kept separate from level. A failed refresh never replaces a reading: the reading stays, with its own
-// time, marked old beside the failure. A row a later read superseded ages to stale. A daemon restart
-// starts empty.
+// time, marked old beside the failure. A row a later read superseded ages to stale. With a store, each resolved
+// reading is kept on disk, so a daemon restart starts from the last readings, marked as from before the restart.
 
 import { NEARING_THRESHOLD_PERCENT } from "./host-usage-rollup.js";
 import type {
@@ -58,7 +58,20 @@ export interface UsageWindowsSpec<I extends { source: string }, R> {
   /** The replacement key of a resolved identity; null when unresolved (never matched or replaced). */
   key: (identity: I) => string | null;
   now?: () => string;
+  /** Durable readings, keyed by `key`. Absent: memory only (a restart starts empty). */
+  store?: UsageReadingStore<I>;
 }
+
+/** The durable half: what a restart reloads, and each allowance's last observed exhaustion. */
+export interface UsageReadingStore<I> {
+  record(key: string, reading: UsageReading<I>): void;
+  latestAll(): Array<{ key: string; reading: UsageReading<I> }>;
+  lastExhaustion(key: string): { at: string; window: string | null; evidence: string } | null;
+}
+
+/** The planning fact for a window whose reset has passed. */
+export const EXPECTED_FULL_NOTE =
+  "planning, not a reading: expected to have been replenished at its reset; current remaining isn't observed, and use since the reset is unknown";
 
 export interface UsageRefreshResult {
   refresh: UsageRefreshOutcome & { coalesced: boolean };
@@ -99,10 +112,21 @@ export function usageLevel(window: UsageReadWindow, limitEvidence: string | null
   return { level: "ok" };
 }
 
+/** Whether a window's known reset has passed. No reset, no expectation: one is never invented. */
+function resetPassed(resetsAt: string | null, now: string): boolean {
+  if (resetsAt === null) return false;
+  const reset = Date.parse(resetsAt), at = Date.parse(now);
+  return Number.isFinite(reset) && Number.isFinite(at) && at >= reset;
+}
+
+function safeLastExhaustion<I>(store: UsageReadingStore<I>, key: string): { at: string; window: string | null; evidence: string } | null {
+  try { return store.lastExhaustion(key); } catch { return null; }
+}
+
 export const UNRESOLVED_NOTE = "identity unresolved: not matched to, merged with or replacing any other row";
 export const UNRESOLVED_EARLIER_NOTE = "identity unresolved: from an earlier read, possibly this same login; not matched to, merged with or replacing any other row";
 
-type Held<I> = UsageReading<I> & { latest: boolean };
+type Held<I> = UsageReading<I> & { latest: boolean; retained?: true };
 
 export class UsageWindows<I extends { source: string }, R> {
   private readonly now: () => string;
@@ -117,6 +141,10 @@ export class UsageWindows<I extends { source: string }, R> {
   constructor(private readonly spec: UsageWindowsSpec<I, R>) {
     this.now = spec.now ?? (() => new Date().toISOString());
     this.startedAt = this.now();
+    // The last stored reading of each allowance, as history: never current until a fresh read.
+    try {
+      for (const { key, reading } of spec.store?.latestAll() ?? []) this.readings.set(key, { ...reading, latest: false, retained: true });
+    } catch { /* an unreadable store starts empty, as before */ }
   }
 
   /** One bounded read. A refresh asked for while one runs joins it; one asked for after it ends reads again. */
@@ -146,7 +174,11 @@ export class UsageWindows<I extends { source: string }, R> {
     for (const reading of normalized.readings) {
       const key = this.spec.key(reading.identity);
       if (key === null) unresolvedNow.push({ ...reading, latest: true });
-      else this.readings.set(key, { ...reading, latest: true });
+      else {
+        this.readings.set(key, { ...reading, latest: true });
+        // A storage failure never fails the read: the reading is still served from memory.
+        try { this.spec.store?.record(key, reading); } catch { /* kept in memory */ }
+      }
     }
     if (unresolvedNow.length > 0) {
       this.unresolved.push(unresolvedNow);
@@ -190,6 +222,9 @@ export class UsageWindows<I extends { source: string }, R> {
     const resolved = [...this.readings.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, reading]) => reading);
     for (const reading of [...resolved, ...this.unresolved.flat()]) {
       const failedAfter = failure && Date.parse(failure.at) >= Date.parse(reading.observedAt) ? failure : null;
+      const key = this.spec.key(reading.identity);
+      // Every keyed reading is its allowance's latest known one; an unresolved earlier read may be a duplicate.
+      const expects = key !== null || reading.latest;
       const windows: UsageWindowRow[] = reading.windows.map((w) => ({
         window: w.window,
         durationMins: w.durationMins,
@@ -198,7 +233,10 @@ export class UsageWindows<I extends { source: string }, R> {
         resetsAt: w.resetsAt,
         observedAt: reading.observedAt,
         ...usageLevel(w, reading.limitEvidence, now),
-        ...usageFreshness(reading.observedAt, now, failedAfter, !reading.latest),
+        ...(reading.retained
+          ? { freshness: "stale" as const, freshnessReason: `read at ${reading.observedAt}, before the daemon restarted at ${this.startedAt}` }
+          : usageFreshness(reading.observedAt, now, failedAfter, !reading.latest)),
+        ...(expects && resetPassed(w.resetsAt, now) ? { expectation: { expectedFullSince: w.resetsAt!, note: EXPECTED_FULL_NOTE } } : {}),
       }));
       const known = reading.latest && failedAfter === null && windows.length > 0
         && windows.every((w) => w.freshness === "fresh" && w.level !== "unknown");
@@ -213,6 +251,10 @@ export class UsageWindows<I extends { source: string }, R> {
         latestFromSource: reading.latest,
         lastRefresh: this.lastRefresh,
         currentAvailability: known ? "known" : "unknown",
+        ...(reading.retained ? { retained: "before_restart" as const } : {}),
+        accountHistory: key !== null ? "linked" as const : "unknown" as const,
+        ...(this.spec.store && key !== null ? { lastObservedExhausted: safeLastExhaustion(this.spec.store, key) } : {}),
+        ...(!reading.latest && key !== null ? { savedProfile: "not linked" as const } : {}),
         ...(reading.identity.source === "unresolved" ? {
           unresolved: {
             note: reading.latest ? UNRESOLVED_NOTE : UNRESOLVED_EARLIER_NOTE,

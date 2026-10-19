@@ -115,6 +115,22 @@ describe("rig provider status — usage windows", () => {
     ].join("\n"));
   });
 
+  it("reading history: a retained row's label, a window's expectation, the last exhaustion, the account link and the profile", async () => {
+    const win = { ...READING.windows[0], level: "unknown", levelReason: "reset passed at R; a new reading is needed",
+      expectation: { expectedFullSince: "R", note: "planning, not a reading: expected to have been replenished at its reset; current remaining isn't observed, and use since the reset is unknown" } };
+    model = { ...MODEL, usage: [
+      { ...READING, windows: [win], latestFromSource: false, retained: "before_restart", accountHistory: "linked",
+        lastObservedExhausted: { at: "E", window: "primary", evidence: "rate_limit_reached" }, savedProfile: "not linked" },
+      { ...READING, provider: "claude", accountHistory: "unknown" },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  [kept from before the daemon restarted; not a current reading]");
+    expect(out).toContain("      expected full since R, not yet observed (planning, not a reading: expected to have been replenished at its reset; current remaining isn't observed, and use since the reset is unknown)");
+    expect(out).toContain("    last observed exhausted at E (primary: rate_limit_reached)");
+    expect(out).toContain("    saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
+    expect(out).toContain("    account history unknown");
+  });
+
   it("an unavailable row and a last-seen row say so", async () => {
     model = { ...MODEL, usage: [
       { provider: "codex", identity: null, windows: [], unavailableReason: "no reading since the daemon started at T; refresh with rig provider status --refresh" },
