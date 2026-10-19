@@ -855,9 +855,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
   `OPENRIG_URL=<that daemon's URL>`, with the same `--window` and no `--top`, and `--json` for
   exact fields. Show the results side by side in tokens. For each machine, give its host, the
   window, how many seats were ranked and over what span, the unknown seats and their reasons, and
-  each seat's runtime and declared model (`rig ps --nodes` on that machine). Don't add machines
-  into one total unless they cover the same seats over the same span; where coverage differs, say
-  so instead.
+  each seat's runtime and declared model (`runtime` and `model` in `rig ps --nodes --json` on that
+  machine; the plain table doesn't show them). Don't add machines into one total unless they cover
+  the same seats over the same span; where coverage differs, say so instead.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. `rig` and `rig tui` open
   the status dashboard, not a conversation with an agent: talk to the operator through
   `rig terminal open saved:kernel --window`, which opens the dashboard and conversations together.
