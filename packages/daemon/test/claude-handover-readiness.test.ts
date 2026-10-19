@@ -134,9 +134,16 @@ describe("Claude fresh in-place handover readiness", () => {
   }
 
 
-  it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable", "working-headerless-bypass-unavailable"])("1544 %s", async mode => {
+  it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable", "working-headerless-bypass-unavailable",
+    ...["shell", "script"].flatMap(process => ["prompt", "command"].flatMap(frame =>
+      ["readable", "unreadable"].map(listing => `classic-chevron-${process}-${frame}-${listing}`))),
+  ])("1544 %s", async mode => {
     const { node } = seedSeat({ runtime: "claude-code" });
     let elapsed = 0, requested = false, packetPasted = false;
+    const chevron = mode.startsWith("classic-chevron-");
+    const script = chevron && mode.includes("-script-");
+    const unreadable = chevron && mode.endsWith("-unreadable");
+    const shellPrompt = chevron ? mode.includes("-command-") ? "❯ /bin/sh fixture-launch.txt" : "❯ " : "operator@host$ ";
     const headerless = mode.startsWith("working-headerless-");
     const auto = mode.startsWith("working-headerless-auto");
     const bypass = mode === "working-headerless-bypass-unavailable";
@@ -150,10 +157,10 @@ describe("Claude fresh in-place handover readiness", () => {
     const freshFrame = "Claude Code v2.1.303\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const trace: unknown[] = [];
     const pane = () => headerless ? identicalFrame + "\n" + headerlessFrame : unavailable ? identicalFrame : requested && elapsed >= nativeAt ? freshFrame
-      : mode === "classic-predecessor-history" ? oldFrame + "\noperator@host$ " : "operator@host$ ";
-    getPaneCommand.mockImplementation(async () => (unavailable || headerless) && requested ? "sh" : requested && elapsed >= nativeAt ? "claude" : "zsh");
+      : mode === "classic-predecessor-history" || chevron ? oldFrame + "\n" + shellPrompt : shellPrompt;
+    getPaneCommand.mockImplementation(async () => (unavailable || headerless) && requested ? "sh" : requested && elapsed >= nativeAt ? "claude" : requested && script ? "sh" : "zsh");
     capturePaneScreen.mockImplementation(async (target: string) => {
-      const returnedPane = unavailable ? null : headerless ? headerlessFrame : requested && elapsed < nativeAt ? "operator@host$ " : pane();
+      const returnedPane = unavailable ? null : headerless ? headerlessFrame : requested && elapsed < nativeAt ? shellPrompt : pane();
       trace.push({ kind: "current-frame", target, elapsed, returnedPane });
       return returnedPane;
     });
@@ -165,9 +172,20 @@ describe("Claude fresh in-place handover readiness", () => {
       sendShellCommand: async (session: string, text: string) => sendText(session, text) } as unknown as TmuxAdapter;
     const fsError = () => { throw new Error("unexpected filesystem access"); };
     const listProcesses = vi.fn(() => {
-      if (unavailable || mode.endsWith("-unavailable")) throw new Error("fixture ps unavailable");
-      if (mode !== "working-headerless-auto-proof") return [];
+      if (unavailable || unreadable || mode.endsWith("-unavailable")) {
+        trace.push({ kind: "process-read", elapsed, available: false });
+        throw new Error("fixture ps unavailable");
+      }
       const startedAt = "Mon Oct 19 21:30:00 2026";
+      if (chevron) {
+        const rows = [{ pid: 100, ppid: 1, pgid: 100, tpgid: script ? 101 : 100,
+          command: "-zsh", executableName: "zsh", startedAt },
+          ...(script ? [{ pid: 101, ppid: 100, pgid: 101, tpgid: 101,
+            command: "/bin/sh fixture-launch.txt", executableName: "sh", startedAt }] : [])];
+        trace.push({ kind: "process-read", elapsed, available: true, rows });
+        return rows;
+      }
+      if (mode !== "working-headerless-auto-proof") return [];
       return [
         { pid: 100, ppid: 1, pgid: 100, tpgid: 101, command: "-bash", executableName: "bash", startedAt },
         { pid: 101, ppid: 100, pgid: 101, tpgid: 101, command: "/bin/sh fixture-launch.txt", executableName: "sh", startedAt },
@@ -213,7 +231,15 @@ describe("Claude fresh in-place handover readiness", () => {
     expect(result.ok).toBe(true);
     expect(reads.length).toBeGreaterThan(0);
     const first = reads[0] as any;
-    if (mode === "classic-predecessor-history") {
+    if (chevron) {
+      expect(first.result.ready).toBe(unreadable);
+      expect(first.successorRuntimeStarted).toBe(false);
+      const packet = trace.find((x: any) => x.kind === "packet-paste") as any;
+      expect(packet.elapsed).toBe(unreadable ? 0 : 1000);
+      expect(packet.successorRuntimeStarted).toBe(!unreadable);
+      expect(trace).toContainEqual({ kind: "current-frame", target: "%9", elapsed: 0, returnedPane: shellPrompt });
+      expect(trace.some((x: any) => x.kind === "process-read" && x.available === !unreadable)).toBe(true);
+    } else if (mode === "classic-predecessor-history") {
       expect(first.result.ready).toBe(false);
       expect(first.successorRuntimeStarted).toBe(false);
       expect((trace.find((x: any) => x.kind === "packet-paste") as any).elapsed).toBeGreaterThanOrEqual(nativeAt);
