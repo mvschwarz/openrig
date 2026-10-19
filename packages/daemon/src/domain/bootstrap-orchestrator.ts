@@ -163,7 +163,8 @@ export class BootstrapOrchestrator {
       let bundleSchemaVersion = 1;
       const peekDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-peek-"));
       try {
-        await unpack(sourceRef, peekDir);
+        const unpacked = await unpack(sourceRef, peekDir);
+        warnings.push(...(unpacked?.warnings ?? []));
         const manifestPath = nodePath.join(peekDir, "bundle.yaml");
         if (fs.existsSync(manifestPath)) {
           const manifestYaml = fs.readFileSync(manifestPath, "utf-8");

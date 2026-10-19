@@ -109,6 +109,11 @@ When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT
 
 **Rule:** ignore ghost/autosuggest text entirely. Only *committed/rendered* pane output is real. When it matters, verify at source (git, the queue, the actual event) — never off a capture's ghost line.
 
+A plain capture loses the grey, so `rig capture` reads it for you. For a Claude Code or Codex seat, a
+`[rig capture: <seat>: input box: ...]` note on stderr (and `inputBox` in `--json`) says whether the input box's text
+is likely a harness suggestion or typed, from where the cursor is and whether the text is drawn faint. Don't act on
+`likely-suggestion` text as anyone's intent, and treat `unknown` as unknown: verify at source.
+
 ## Moment-of-truth checklist
 
 - **Starting a slice?** → do you know what it's for and what done looks like? mockups attached (UI slices)? **Are you on the light path?** (You are, unless the mission owner assigned the overlay.)

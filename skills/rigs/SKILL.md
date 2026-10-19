@@ -82,6 +82,26 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 
   For any other failure, the table under "What can interrupt installation and the OpenRig view" in
   `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
+- **Offer to join this session before the first send:** if this session hasn't already joined, recommend joining
+  OpenRig in a plain shell so the operator sees a named teammate instead of "unknown sender". Inside tmux, offer
+  joining as optional, with the effects below. Ask the person yes or no after this short explanation:
+  - This adds me as a named member of the team, with my name on messages.
+  - In a plain shell, joining writes no files in your project or personal settings.
+  - Inside tmux on 0.6.11, my sender and reply address is your existing tmux session name, even a number like `0`.
+    `rig attach --self` returns that address and `rig whoami` confirms it; `--display-name` does not change it.
+  - Inside tmux, other agents can type into this window, and stopping the team (`rig down`) also closes this tmux
+    session (both from source, not hand-tested). Transcript recording and, for Claude Code, writing
+    `.openrig/context-collector.cjs` and `.claude/settings.local.json` for the status line were hand-tested on 0.6.11.
+    Updating an existing `.claude/settings.local.json`, keeping its custom status line, is from source.
+  - In a plain shell, other agents reply through the task queue because they can't type into this window, and
+    stopping the team leaves this session running.
+
+  Attach only on their yes; if they decline, continue the operator handoff. For this first contact, use the kernel's
+  rig ID (the `rigId` of the `kernel` row in `rig ps --json`) and its `operator` pod:
+  `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex> --print-env`.
+  `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
+  (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
+  later `rig` command. Check with `rig whoami --json`.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
   (never the logical ID or a guessed name) and send:
@@ -103,12 +123,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
   read it with `rig capture <seat>@<rig>` and answer with the key that screen shows (`rig send --help` says how to
   send a digit, a letter or Escape), or ask the person. Capture it again before sending anything more.
-- **Join this session to the team, if that helps:**
-  `rig attach --self --rig <rigId> --pod <pod> --member <name> --runtime <claude-code|codex> --print-env` adds this
-  session as a new member of a pod. `--node <logicalId>` binds it to an existing seat instead. Attach once, and keep
-  the variables it prints (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put
-  them in front of every later `rig` command. Check with `rig whoami --json`.
-- **Replies:** other agents can't type into this session. Read work sent to you with
+- **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with
   `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
   `rig capture <seat>@<rig>`.
 

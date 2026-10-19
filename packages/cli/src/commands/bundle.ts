@@ -78,6 +78,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .requiredOption("-o, --output <path>", "Output path for .rigbundle")
     .option("--name <name>", "Bundle name (default: the rig's name in rig.yaml)")
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
+    .option("--include-login-files", "Include harness login files only if recipients should have them and their owner agrees (for example, an internal test bundle); record exact paths in the manifest")
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--context-pack <dir>", "Carry the context pack in <dir> (its manifest.yaml and declared files), which may sit outside the rig folder; repeatable", (dir: string, dirs: string[]) => [...dirs, dir], [] as string[])
@@ -89,7 +90,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
     .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name?: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name?: string; bundleVersion: string; includePackages?: string[]; includeLoginFiles?: boolean; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       if (isGitHubBundleLink(spec)) {
         try {
@@ -152,6 +153,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
         specPath, bundleName, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
         includePackages: opts.includePackages,
+        ...(opts.includeLoginFiles ? { includeLoginFiles: true } : {}),
         rigRoot,
         ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map((dir) => nodePath.resolve(dir)) } : {}),
         ...(opts.projectDir ? { projectDir: nodePath.resolve(opts.projectDir) } : {}),
@@ -257,6 +259,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       console.log(`Digest valid: ${res.data["digestValid"]}`);
       const ir = res.data["integrityResult"] as Record<string, unknown>;
       console.log(`Integrity: ${ir["passed"] ? "PASS" : "FAIL"}`);
+      for (const error of (ir["errors"] as string[] | undefined) ?? []) console.error(error);
       // What install will add before any seat launches
       const packs = m["contextPacks"] as string[] | undefined;
       if (packs?.length) console.log(`Context packs: ${packs.join(", ")}`);

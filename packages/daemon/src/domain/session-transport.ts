@@ -1668,6 +1668,9 @@ export interface CaptureResult {
   lines?: number;
   error?: string;
   reason?: string;
+  /** Claude Code and Codex seats, when the caller asked: what the live input box holds, and which part is likely a
+   *  harness suggestion. */
+  inputBox?: InputBoxAnnotation;
 }
 
 export interface BroadcastResult {
@@ -3418,7 +3421,10 @@ export class SessionTransport {
     }
   }
 
-  async capture(sessionName: string, opts?: { lines?: number }): Promise<CaptureResult> {
+  /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads), for callers that
+   *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
+   *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
+  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget }): Promise<CaptureResult> {
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -3474,7 +3480,46 @@ export class SessionTransport {
 
     await this.reconcileStartupReadiness(sessionName).catch(() => {});
 
-    return { ok: true, sessionName, content, lines };
+    const runtime = sessionMeta.runtime;
+    const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex")
+      ? await this.captureInputBox(sessionName, runtime, opts.inputBoxBudget ?? { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS })
+      : undefined;
+    return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
+  }
+
+  /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the
+   *  pane text is already in hand, so a slow read never holds the capture. The time spent comes off the budget. A read
+   *  still pending then settles on its own, unused. */
+  private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex", budget: InputBoxBudget): Promise<InputBoxAnnotation> {
+    if (budget.remainingMs <= 0) return annotateInputBox(null, null, runtime, { budgetSpent: true });
+    const started = this.now().getTime();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<InputBoxAnnotation>((resolve) => {
+      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), budget.remainingMs);
+    });
+    try {
+      return await Promise.race([this.readInputBoxAnnotation(sessionName, runtime), late]);
+    } finally {
+      clearTimeout(timer);
+      budget.remainingMs -= this.now().getTime() - started;
+    }
+  }
+
+  /** One styled read of the visible screen with the cursor read before and after it: a cursor that moved, or a pane
+   *  that resized, in between is reported as moved; when only one read succeeds, its reading is passed on as seen once.
+   *  Never throws. */
+  private async readInputBoxAnnotation(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
+    try {
+      const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
+      const screen = await this.tmuxAdapter.capturePaneContent(sessionName, 0, { escapeSequences: true });
+      const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
+      const steady = before && after && before.x === after.x && before.y === after.y
+        && before.width === after.width && before.height === after.height ? after : null;
+      const cursorSeenOnce = (before === null) !== (after === null) ? before ?? after : null;
+      return annotateInputBox(screen, steady, runtime, { cursorMoved: before !== null && after !== null && steady === null, cursorSeenOnce });
+    } catch {
+      return annotateInputBox(null, null, runtime);
+    }
   }
 
   async broadcast(target: TargetSpec, text: string, opts?: BroadcastOpts): Promise<BroadcastResult> {
@@ -3684,4 +3729,209 @@ export class SessionTransport {
 
     return false;
   }
+}
+
+/** A region of the visible screen: zero-based rows and columns as tmux reports the cursor, end column exclusive. */
+export interface InputBoxSpan {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  /** The region's text, one line per screen row (a soft-wrapped line spans rows). */
+  text: string;
+}
+
+/**
+ * What a capture says about a Claude Code or Codex seat's live input box: its text, where it is, and which part is
+ * likely a harness suggestion (ghost text) rather than something the person typed. Read from one styled capture of
+ * the visible screen and the cursor, never from scrollback or the terminal output above the box. A heuristic: a
+ * person can move the cursor, text wraps, and harness versions differ, so conflicting or missing evidence reads
+ * `unknown` rather than a guess.
+ */
+export interface InputBoxAnnotation {
+  status: "empty" | "typed" | "likely-suggestion" | "typed-with-suggestion" | "unknown" | "no-input-box";
+  confidence: "high" | "medium" | "low" | "unknown";
+  /** tmux's cursor on the visible screen (zero-based), or null when it couldn't be read or moved during the read. */
+  cursor: { x: number; y: number; width: number; height: number } | null;
+  /** All the text in the input box. */
+  input: InputBoxSpan | null;
+  /** The part of `input` that is likely a harness suggestion. */
+  suggestion: InputBoxSpan | null;
+  evidence: string[];
+  /** One sentence for the reader: what the box holds and how much to trust it. */
+  hint: string;
+}
+
+const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's later rows by two cells
+// How long a capture's input-box reads may take in all before the box reports unknown: one seat's three reads, or a
+// whole fan-out's (the send path's INPUT_BOX_READ_DEADLINE_MS bounds one read each).
+export const CAPTURE_INPUT_BOX_DEADLINE_MS = 1_000;
+
+/** The time a capture's input-box reads may still take; the capture route shares one across a fan-out. */
+export interface InputBoxBudget {
+  remainingMs: number;
+}
+// Claude Code's input frame rule, as findClaudeComposer and the composer-boundary reader match it (a label may sit in it).
+const CLAUDE_FRAME_RULE = /^─{3,}(?: .+ ─+)?$/;
+
+/** The input box's rows on the screen: Claude Code's prompt row inside its frame (the opening rule directly above it,
+ *  through the row before the closing rule), or Codex's box as codexInputBox reads it. A committed prompt row in the
+ *  transcript, or a prompt-looking line in output, has no opening rule above it. Null when no input box is recognized
+ *  (a selector, a menu instead of a box, busy output with no box, another layout). */
+function inputBoxRows(lines: string[], runtime: "claude-code" | "codex"): { first: number; last: number; empty?: boolean } | null {
+  if (runtime === "codex") {
+    const box = codexInputBox(lines.join("\n"));
+    if (!box) return null;
+    return { first: box.inputAt, last: box.inputAt + Math.max(box.rows.length, 1) - 1, empty: box.text === "" };
+  }
+  const promptClass = composerPromptClassForRuntime("claude-code");
+  const first = findComposerInputLineIndex(lines, promptClass);
+  if (first < 1 || composerNumberedChoicePattern(promptClass).test(lines[first]!.trimStart())) return null;
+  // A rule at the prompt's own indent: an input's later rows are indented, so a rule typed inside it never closes it.
+  const indent = /^[ \t]*/.exec(lines[first]!)![0];
+  const frame = (line: string) => line.startsWith(indent) && CLAUDE_FRAME_RULE.test(line.slice(indent.length).trimEnd());
+  if (!frame(lines[first - 1]!)) return null;
+  let close = first + 1;
+  while (close < lines.length && !frame(lines[close]!)) close++;
+  return close < lines.length ? { first, last: close - 1 } : null;
+}
+
+export function annotateInputBox(
+  styledScreen: string | null,
+  cursor: { x: number; y: number; width: number; height: number } | null,
+  runtime: "claude-code" | "codex",
+  opts: {
+    cursorMoved?: boolean;
+    timedOut?: boolean;
+    budgetSpent?: boolean;
+    /** The cursor as the one successful read of two saw it; it can show the cursor outside the box, never confirm it in. */
+    cursorSeenOnce?: { x: number; y: number } | null;
+  } = {},
+): InputBoxAnnotation {
+  const harness = runtime === "codex" ? "Codex" : "Claude Code";
+  const result = (status: InputBoxAnnotation["status"], confidence: InputBoxAnnotation["confidence"], hint: string,
+    input: InputBoxSpan | null = null, suggestion: InputBoxSpan | null = null, evidence: string[] = []): InputBoxAnnotation =>
+    ({ status, confidence, cursor, input, suggestion, evidence, hint });
+  const budget = `${CAPTURE_INPUT_BOX_DEADLINE_MS / 1000} s`;
+  if (opts.timedOut) {
+    return result("unknown", "unknown", `The input box's reads didn't finish within this capture's ${budget} budget, so it wasn't checked.`,
+      null, null, ["input box reads timed out"]);
+  }
+  if (opts.budgetSpent) {
+    return result("unknown", "unknown", `The input box wasn't read: this capture's ${budget} budget for input-box reads was spent on earlier seats.`,
+      null, null, ["input box budget spent"]);
+  }
+  if (!styledScreen?.trim()) return result("unknown", "unknown", "The screen couldn't be read, so the input box wasn't checked.");
+  const cells = styledLines(styledScreen);
+  const lines = cells.map((row) => row.map((cell) => cell.ch).join(""));
+  const box = inputBoxRows(lines, runtime);
+  if (!box) return result("no-input-box", "unknown", `No ${harness} input box was recognized on the screen.`);
+
+  // Each box row's text cells with their screen columns. The first row's text starts after the prompt glyph and its
+  // space, a later row's after its two-cell indent.
+  const rows: Array<{ row: number; cells: Array<{ ch: string; faint: boolean; col: number }> }> = [];
+  for (let row = box.first; row <= box.last; row++) {
+    let col = 0;
+    const placed = (cells[row] ?? []).map((cell) => { const at = col; col += stringWidth(cell.ch); return { ...cell, col: at }; });
+    const glyphAt = row === box.first ? placed.findIndex((cell) => cell.ch === "❯" || cell.ch === "›") : -1;
+    const startCol = row === box.first ? (glyphAt >= 0 ? placed[glyphAt]!.col + 2 : INPUT_CONTINUATION_COLUMN) : INPUT_CONTINUATION_COLUMN;
+    let text = placed.filter((cell) => cell.col >= startCol);
+    while (text.length && !text[text.length - 1]!.ch.trim()) text = text.slice(0, -1);
+    rows.push({ row, cells: text });
+  }
+  const startCol = rows[0]!.cells[0]?.col ?? (lines[box.first]!.search(/[❯›]/) + 2);
+  const spanOf = (from: { row: number; col: number }, to: { row: number; col: number }): InputBoxSpan => ({
+    startRow: from.row, startCol: from.col, endRow: to.row, endCol: to.col,
+    text: rows.filter((r) => r.row >= from.row && r.row <= to.row)
+      .map((r) => r.cells.filter((cell) => (r.row > from.row || cell.col >= from.col) && (r.row < to.row || cell.col < to.col)).map((cell) => cell.ch).join(""))
+      .join("\n"),
+  });
+  const textRows = rows.filter((r) => r.cells.length > 0);
+  const outsideBox = (at: { y: number }) => at.y < box.first || at.y > box.last;
+  // A cursor seen outside the box by the one read that worked still contradicts the box being the live one.
+  const seenOutside = cursor === null && !opts.cursorMoved && opts.cursorSeenOnce != null && outsideBox(opts.cursorSeenOnce);
+  const seenOutsideEvidence = "cursor outside the input box (the other cursor read failed)";
+  if (box.empty || textRows.length === 0) {
+    // Only a steady cursor in the box shows it's the live one: an empty frame drawn in output has the cursor below it, a
+    // moved cursor means the box may have changed, and a missing cursor shows nothing either way.
+    if (cursor !== null && !outsideBox(cursor)) return result("empty", "high", "The input box is empty.", null, null, ["no text in the input box"]);
+    if (cursor !== null || seenOutside) {
+      return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor is outside it, so it may not be the live box.`,
+        null, null, ["no text in the input box", cursor !== null ? "cursor outside the input box" : seenOutsideEvidence]);
+    }
+    if (opts.cursorMoved) {
+      return result("unknown", "unknown", `The ${harness} input box read empty, but the cursor moved during the capture, so it may have changed.`,
+        null, null, ["no text in the input box", "cursor moved during the capture"]);
+    }
+    return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor couldn't be read, so it may not be the live box.`,
+      null, null, ["no text in the input box", "cursor unavailable"]);
+  }
+  const lastRow = textRows[textRows.length - 1]!;
+  const lastCell = lastRow.cells[lastRow.cells.length - 1]!;
+  const end = { row: lastRow.row, col: lastCell.col + stringWidth(lastCell.ch) };
+  const input = spanOf({ row: box.first, col: startCol }, end);
+  const quote = (text: string) => {
+    const flat = text.replace(/\s*\n\s*/g, " ").trim();
+    return `"${flat.length > 60 ? `${flat.slice(0, 57)}...` : flat}"`;
+  };
+
+  const styled = /\x1b\[/.test(styledScreen);
+  const textCells = rows.flatMap((r) => r.cells.filter((cell) => cell.ch.trim()).map((cell) => ({ ...cell, row: r.row })));
+  const allFaint = styled && textCells.every((cell) => cell.faint);
+  const noneFaint = styled && textCells.every((cell) => !cell.faint);
+  // Claude Code's `Try "…"` words are a person's possible words too, so they count only where there's no styling to go
+  // on, and at most as a possible (medium) suggestion. With styling, the faint text decides.
+  const tryShape = runtime === "claude-code" && CLAUDE_TRY_SUGGESTION.test(input.text.replace(/\s+/g, ""));
+  const trySuggestion = tryShape && !styled;
+  const evidence: string[] = [];
+  if (tryShape) evidence.push("Claude Code's Try \"...\" words");
+  evidence.push(!styled ? "no styling in the capture" : allFaint ? "text drawn faint" : noneFaint ? "text not faint" : "part of the text drawn faint");
+
+  const inBox = cursor !== null && cursor.y >= box.first && cursor.y <= box.last;
+  const atStart = inBox && cursor!.y === box.first && cursor!.x === startCol;
+  const atEnd = inBox && cursor!.y === end.row && cursor!.x === end.col;
+  if (cursor === null) evidence.unshift(opts.cursorMoved ? "cursor moved during the capture" : seenOutside ? seenOutsideEvidence : "cursor unavailable");
+  else evidence.unshift(!inBox ? "cursor outside the input box" : atStart ? "cursor at the input's start" : atEnd ? "cursor after the text" : "cursor inside the text");
+  const why = evidence.join("; ");
+
+  const likelySuggestion = (confidence: "high" | "medium") => result("likely-suggestion", confidence, confidence === "high"
+    ? `The input box shows ${quote(input.text)}, likely a ${harness} suggestion (${why}), not something the person typed: it isn't their intent, a draft or a staged command.`
+    : `The input box shows ${quote(input.text)}, possibly a ${harness} suggestion (${why}; medium confidence): don't take it as the person's intent, and don't assume it isn't their draft.`,
+    input, input, evidence);
+  const typed = (confidence: InputBoxAnnotation["confidence"]) => result("typed", confidence,
+    `The input box holds ${quote(input.text)}, likely typed by the person and not yet sent (${why}).`, input, null, evidence);
+  const unknown = () => result("unknown", "unknown",
+    `The input box shows ${quote(input.text)}; whether the person typed it or it's a ${harness} suggestion is unknown (${why}).`, input, null, evidence);
+
+  // A moved cursor or one seen outside the box contradicts any reading; only an unavailable cursor leaves the styling or
+  // the Try words to go on, at medium confidence.
+  if (cursor === null || !inBox) {
+    if (cursor === null && !opts.cursorMoved && !seenOutside && (allFaint || trySuggestion)) return likelySuggestion("medium");
+    return unknown();
+  }
+  if (atStart) {
+    if (allFaint) return likelySuggestion("high");
+    if (!styled) return likelySuggestion("medium");
+    // Claude Code draws its suggestion faint (Codex draws its placeholder faint too); unfaint text with the cursor at its
+    // start may be a draft the person moved the cursor back through, in either harness.
+    return unknown();
+  }
+  if (atEnd) {
+    if (noneFaint) return typed("high");
+    if (!styled) return typed("medium");
+    return unknown();
+  }
+  // The cursor is inside the text: the person moved it, or typed a prefix and the harness suggests the rest after it.
+  const split = textCells.findIndex((cell) => cell.row > cursor.y || (cell.row === cursor.y && cell.col >= cursor.x));
+  const before = split < 0 ? textCells : textCells.slice(0, split);
+  const after = split < 0 ? [] : textCells.slice(split);
+  if (styled && before.length > 0 && after.length > 0 && before.every((cell) => !cell.faint) && after.every((cell) => cell.faint)) {
+    const suggestion = spanOf({ row: cursor.y, col: cursor.x }, end);
+    const typedPart = spanOf({ row: box.first, col: startCol }, { row: cursor.y, col: cursor.x });
+    return result("typed-with-suggestion", "high",
+      `The input box holds ${quote(typedPart.text)}, likely typed by the person, then ${quote(suggestion.text)}, likely a ${harness} suggestion after the cursor (${why}; the text after the cursor is faint): the suggestion isn't their intent.`,
+      input, suggestion, [...evidence, "the text after the cursor is faint"]);
+  }
+  if (noneFaint) return typed("medium");
+  return unknown();
 }

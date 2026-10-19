@@ -300,7 +300,7 @@ rig specs ls
 
 ## How It Works
 
-OpenRig is a local daemon + CLI + terminal UI + MCP server, built on tmux. The older React web UI remains in maintenance mode with best-effort support.
+OpenRig is a local daemon + CLI + terminal UI + MCP server, built on tmux. OpenRig itself is under active development; only the older React web UI is in maintenance mode, with best-effort support.
 
 ```
 CLI / TUI / MCP

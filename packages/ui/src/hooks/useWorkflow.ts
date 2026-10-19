@@ -14,7 +14,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed";
+export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed" | "aborted";
 export type WorkflowExitKind = "handoff" | "waiting" | "done" | "failed";
 
 export interface WorkflowStepDeadlineEvidence {

@@ -118,7 +118,7 @@ export class LegacyBundleSourceResolver {
 
 // -- Pod-aware bundle source resolver (AgentSpec reboot) --
 
-import { parsePodBundleManifest, validatePodBundleManifest, type PodBundleManifest } from "./bundle-types.js";
+import { parsePodBundleManifest, validatePodBundleManifest, normalizeIncludedLoginFiles, type PodBundleManifest } from "./bundle-types.js";
 
 /** Result of resolving a pod-aware bundle */
 export interface PodBundleResolvedSource {
@@ -174,6 +174,7 @@ export class PodBundleSourceResolver {
             : [],
         })),
         cultureFile: m["culture_file"] as string | undefined,
+        includedLoginFiles: normalizeIncludedLoginFiles(m["included_login_files"]),
       };
 
       const specPath = nodePath.join(tempDir, manifest.rigSpec);

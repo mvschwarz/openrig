@@ -93,6 +93,13 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     nodeKind: "agent" as const,
     runtime: "claude-code",
     sessionStatus: opts?.sessionStatus ?? "running",
+    modelObservation: opts?.sessionStatus && opts.sessionStatus !== "running" ? {
+      status: "unknown", model: null, source: null, observedAt: null,
+      generation: "11111111-1111-4111-8111-111111111111", reason: "seat-not-running",
+    } : {
+      status: "observed", model: "claude-opus-4-20250514", source: "claude-assistant-response",
+      observedAt: "2026-06-19T12:00:00.000Z", generation: "11111111-1111-4111-8111-111111111111", reason: null,
+    },
     startupStatus: opts?.startupStatus ?? "ready",
     restoreOutcome: "n-a",
     lifecycleState: opts?.lifecycleState ?? "running",
@@ -229,7 +236,13 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   }
 
   // -- AC-1: token-safe default (the regression) --
-  it("AC-1: default --nodes --json is an order of magnitude smaller than --full", async () => {
+  it.each(["observed", "unknown"])("r2: AC-1 compact stays below full /2.8 with real %s observations on every row", async status => {
+    const originals = ALL_NODES.map(n => n.modelObservation);
+    if (status === "unknown") for (const n of ALL_NODES) n.modelObservation = {
+      status: "unknown", model: null, source: null, observedAt: null,
+      generation: "11111111-1111-4111-8111-111111111111", reason: n.sessionStatus === "running" ? "record-identity-missing-or-ambiguous" : "seat-not-running",
+    } as unknown as typeof n.modelObservation;
+    try {
     const { logs: defaultLogs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
@@ -249,6 +262,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.8);
     // Sanity: full output exists and is nontrivial
     expect(fullOutput.length).toBeGreaterThan(1000);
+    } finally { ALL_NODES.forEach((n, i) => n.modelObservation = originals[i]!); }
   });
 
   // -- AC-2: same breadth (no node dropped) --

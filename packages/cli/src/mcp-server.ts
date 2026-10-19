@@ -353,6 +353,7 @@ export function createMcpServer(client: DaemonClient): McpServer {
         if (rig) body.rig = rig;
         if (pod) body.pod = pod;
         if (lines) body.lines = lines;
+        body.inputBox = true; // what the live input box holds, in the result's inputBox
         const res = await client.post("/api/transport/capture", body);
         return mapResult(res);
       } catch (err) {

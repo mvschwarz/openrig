@@ -13,7 +13,7 @@ interface Check {
 
 /** Advisory filesystem reads only. No daemon, bundler, preflight, provider or launch. */
 export async function checkBundleFolder(folder: string) {
-  const { validateRigSpecImport, validateAgentSpecFromYaml, isSensitivePath } = await import("@openrig/daemon/spec-validation");
+  const { validateRigSpecImport, validateAgentSpecFromYaml, isSensitivePath, isHarnessLoginPath, harnessLoginMessage } = await import("@openrig/daemon/spec-validation");
   const checks: Check[] = [];
   const add = (ruleId: string, status: Check["status"], reason: string, file?: string) => checks.push({ ruleId, status, reason, ...(file ? { path: file } : {}) });
   const result = { standardVersion: "openrig.bundle-standard/v1", checks };
@@ -126,7 +126,7 @@ export async function checkBundleFolder(folder: string) {
         const file = path.join(dir, entry.name);
         if (entry.isSymbolicLink()) { add("credential_paths", "not_checked", "Symlink content was not scanned.", path.relative(root, file)); continue; }
         if (entry.isDirectory()) walk(file);
-        else if (isSensitivePath(path.relative(root, file))) { sensitive++; add("credential_paths", "finding", "Known sensitive filename; exclude credentials from the published folder.", path.relative(root, file)); }
+        else if (isSensitivePath(path.relative(root, file))) { sensitive++; add("credential_paths", "finding", isHarnessLoginPath(path.relative(root, file)) ? harnessLoginMessage(path.relative(root, file)) : "Known sensitive filename; exclude credentials from the published folder.", path.relative(root, file)); }
       }
     };
     walk(root);

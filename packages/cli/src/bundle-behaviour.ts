@@ -72,6 +72,8 @@ export async function showBundleBehaviourBeforeAction(
 ): Promise<BundleBehaviour | undefined> {
   try {
     const response = await inspect();
+    const integrity = response.data.integrityResult as { warnings?: string[] } | undefined;
+    for (const warning of integrity?.warnings ?? []) output(plain(warning));
     const view = response.data.behaviour as BundleBehaviour | undefined;
     if (response.status < 400 && view?.schema === "openrig.bundle-behaviour/v1") {
       for (const line of formatBundleBehaviour(view)) output(line);

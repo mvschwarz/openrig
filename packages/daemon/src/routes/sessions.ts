@@ -1,3 +1,4 @@
+import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
 import { observeInventoryHandler } from "../domain/request-phase-observer.js";
@@ -168,7 +169,12 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   // always present, so "not yet known" is a value, never an absence a consumer can misread.
   // selfHostId ONLY — never host.name (display-only; the DP4 conflation healthz already refuses).
   const hostSelfId = getSelfHostId();
-  return c.json(withTerminalAndWork.map((n) => ({ ...n, hostSelfId })));
+  const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
+  const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
+  const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
+    modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
+  }));
+  return c.json(nodes);
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail

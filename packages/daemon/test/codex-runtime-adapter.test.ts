@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 // Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
 // 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
 
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
@@ -1203,6 +1204,47 @@ describe("Codex runtime adapter", () => {
       expect(result.recovery).toBe("attention_required");
       expect(result.error.toLowerCase()).toContain("trust");
     }
+  });
+
+  it.each([
+    ["panel alone", currentTrustPrompt],
+    ["trailing heading fragment", `› Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}\n  Trust this folder?`],
+    ["earlier default footer", `› Earlier conversation prompt\n  gpt-5.6-sol high · ~/work\n${currentTrustPrompt}`],
+    ["earlier Codex header", `OpenAI Codex (v0.156.1)\n› Earlier conversation prompt\n${currentTrustPrompt}`],
+  ])("classifies current folder trust consistently in readiness and resume without answering it: %s", async (_label, paneContent) => {
+    let pollCount = 0;
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => { pollCount++; return "codex"; }),
+      capturePaneContent: vi.fn(async () => paneContent),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    expect(await adapter.checkReady(makeBinding())).toMatchObject({ ready: false, code: "trust_gate" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    pollCount = 0;
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.recovery).toBe("attention_required");
+      expect(result.error).toContain("workspace trust approval");
+    }
+    expect(pollCount).toBeLessThanOrEqual(7);
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledWith(makeBinding().tmuxSession, ["Enter"]);
+  });
+
+  it("accepts readiness and resume after a current-format panel is superseded by a headerless composer", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "node"),
+      capturePaneContent: vi.fn(async () => `${currentTrustPrompt}\n› Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
+    expect(await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" }))
+      .toMatchObject({ ok: true, resumeToken: "sess-456" });
   });
 
   it("FR-2: resume on an unresolved Codex model-selection gate returns attention_required, not ok:true", async () => {

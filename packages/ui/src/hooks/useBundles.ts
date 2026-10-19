@@ -33,7 +33,7 @@ export interface InspectResult {
     compatibility?: InspectCompatibility;
   };
   digestValid: boolean;
-  integrityResult: { passed: boolean; mismatches: string[]; missing: string[]; extra: string[]; errors: string[] };
+  integrityResult: { passed: boolean; mismatches: string[]; missing: string[]; extra: string[]; errors: string[]; warnings?: string[] };
 }
 
 export interface BundleInstallResult {
