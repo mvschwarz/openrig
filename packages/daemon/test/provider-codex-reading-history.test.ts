@@ -185,3 +185,48 @@ describe("Claude: account history unknown; each window stays its seat's own", ()
     expect(row).not.toHaveProperty("lastObservedExhausted");
   });
 });
+
+describe("a malformed stored row is skipped on its own, never wiping the rest", () => {
+  const A = "codex:account:acct-1:codex";
+  const B = "codex:account:acct-2:codex";
+  /** Account A read at T0 (exhausted), then a login switch to B at +5; then rows for A whose windows JSON is unreadable,
+   *  newer than A's good one, written past the store (the store itself never writes one). */
+  async function withMalformed() {
+    const d = db();
+    const { w, setNow } = windows(d, [
+      read(T0, { primaryUsed: 100, primaryResets: epoch(at(300)) }),
+      read(at(5), { primaryUsed: 30, accountId: "acct-2" }),
+    ]);
+    await w.refresh();
+    setNow(at(5)); await w.refresh();
+    const insert = d.prepare(`INSERT INTO provider_account_readings
+        (provider, identity_key, account_id, workspace_id, limit_id, email, plan_type, identity_source, observed_at, limit_evidence, windows_json)
+        VALUES ('codex', ?, 'acct-1', NULL, 'codex', NULL, NULL, 'account/rateLimits/read accountId', ?, NULL, ?)`);
+    for (const [i, bad] of ["{not json", "{\"window\":\"primary\"}", "[null]"].entries()) insert.run(A, at(6 + i), bad);
+    return d;
+  }
+
+  it("after a restart, the other account is fully restored and the bad row's account keeps its good rows", async () => {
+    const d = await withMalformed();
+    const restarted = windows(d, [], at(10)).w.project(at(10)).filter((r) => r.identity !== null);
+    const byAccount = new Map(restarted.map((r) => [r.identity!.accountId, r]));
+    expect(byAccount.get("acct-2")).toMatchObject({ observedAt: at(5), retained: "before_restart" });
+    expect(byAccount.get("acct-2")!.windows[0]).toMatchObject({ usedPercent: 30 });
+    expect(byAccount.get("acct-1")).toMatchObject({ observedAt: T0, retained: "before_restart", lastObservedExhausted: { at: T0, window: "primary" } });
+    expect(byAccount.get("acct-1")!.windows[0]).toMatchObject({ usedPercent: 100 });
+    const store = new ProviderAccountReadingsStore(d);
+    expect(store.latest(A)!.observedAt).toBe(T0);
+    expect(store.exhaustionEpisodes(A)).toHaveLength(1);
+  });
+
+  it("a new reading still persists, pruning doesn't throw, and the bad rows aren't rewritten or removed", async () => {
+    const d = await withMalformed();
+    const before = rows(d).filter((r) => r.observed_at !== T0 && r.identity_key === A);
+    const store = new ProviderAccountReadingsStore(d);
+    store.record(A, { identity: { accountId: "acct-1", workspaceId: null, limitId: "codex", email: null, planType: null, source: "account/rateLimits/read accountId" },
+      windows: [{ window: "primary", durationMins: 300, usedPercent: 12, resetsAt: at(600) }], limitEvidence: null, observedAt: at(20) } as never);
+    expect(store.latest(A)).toMatchObject({ observedAt: at(20), windows: [{ usedPercent: 12 }] });
+    expect(rows(d).filter((r) => r.observed_at !== T0 && r.observed_at !== at(20) && r.identity_key === A)).toEqual(before);
+    expect(store.latest(B)!.observedAt).toBe(at(5));
+  });
+});

@@ -44,18 +44,26 @@ function selectWindow(w: UsageReadWindow): UsageReadWindow {
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
-function toReading(row: Row): UsageReading<UsageAllowanceIdentity> {
+/** A row's stored windows, or null when its JSON isn't a list of window objects. Such a row is skipped where it's read,
+ *  never repaired or deleted, so one bad row can't take the other rows (or other keys) down with it. */
+function windowsOf(row: Row): UsageReadWindow[] | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(row.windows_json); } catch { return null; }
+  if (!Array.isArray(parsed) || !parsed.every((w) => w !== null && typeof w === "object" && typeof w.window === "string")) return null;
+  return (parsed as UsageReadWindow[]).map(selectWindow);
+}
+
+function toReading(row: Row, windows: UsageReadWindow[]): UsageReading<UsageAllowanceIdentity> {
   return {
     identity: { accountId: row.account_id, workspaceId: row.workspace_id, limitId: row.limit_id, email: row.email, planType: row.plan_type, source: row.identity_source as UsageAllowanceIdentity["source"] },
-    windows: (JSON.parse(row.windows_json) as UsageReadWindow[]).map(selectWindow),
+    windows,
     limitEvidence: row.limit_evidence,
     observedAt: row.observed_at,
   };
 }
 
 /** The episodes one stored reading shows: each exhausted window under its reset, or the limit evidence alone. */
-function episodesOf(row: Row): Array<Omit<ExhaustionEpisode, "lastObservedAt"> & { id: string }> {
-  const windows = (JSON.parse(row.windows_json) as UsageReadWindow[]).map(selectWindow);
+function episodesOf(row: Row, windows: UsageReadWindow[]): Array<Omit<ExhaustionEpisode, "lastObservedAt"> & { id: string }> {
   const exhausted = windows.filter((w) => w.usedPercent !== null && w.usedPercent >= 100);
   if (exhausted.length > 0) {
     return exhausted.map((w) => ({ id: `${w.window}|${w.resetsAt ?? ""}`, window: w.window, resetsAt: w.resetsAt, evidence: row.limit_evidence ?? "at the limit" }));
@@ -88,53 +96,52 @@ export class ProviderAccountReadingsStore {
   }
 
   /** Keep the key's latest reading, its latest reading per window, and the latest reading of each of its newest
-   *  EXHAUSTION_EPISODES_KEPT episodes; delete its other rows. */
+   *  EXHAUSTION_EPISODES_KEPT episodes; delete its other readable rows. An unreadable row is left as it is. */
   private prune(key: string): void {
-    const rows = this.rows(key);
+    const rows = this.readable(key);
     if (rows.length === 0) return;
-    const keep = new Set<number>([rows[0]!.id]);
+    const keep = new Set<number>([rows[0]!.row.id]);
     const seenWindow = new Set<string>();
-    for (const row of rows) {
-      for (const w of JSON.parse(row.windows_json) as UsageReadWindow[]) {
+    for (const { row, windows } of rows) {
+      for (const w of windows) {
         if (!seenWindow.has(w.window)) { seenWindow.add(w.window); keep.add(row.id); }
       }
     }
     const seenEpisode = new Set<string>();
-    for (const row of rows) {
-      for (const e of episodesOf(row)) {
+    for (const { row, windows } of rows) {
+      for (const e of episodesOf(row, windows)) {
         if (seenEpisode.has(e.id)) continue;
         if (seenEpisode.size >= EXHAUSTION_EPISODES_KEPT) break;
         seenEpisode.add(e.id); keep.add(row.id);
       }
     }
-    const drop = rows.filter((r) => !keep.has(r.id)).map((r) => r.id);
+    const drop = rows.filter(({ row }) => !keep.has(row.id)).map(({ row }) => row.id);
     if (drop.length > 0) this.db.prepare(`DELETE FROM provider_account_readings WHERE id IN (${drop.map(() => "?").join(",")})`).run(...drop);
   }
 
-  /** The key's rows, newest observation first. */
-  private rows(key: string): Row[] {
-    return this.db.prepare("SELECT * FROM provider_account_readings WHERE identity_key = ? ORDER BY observed_at DESC, id DESC").all(key) as Row[];
+  /** The key's readable rows with their windows, newest observation first. */
+  private readable(key: string): Array<{ row: Row; windows: UsageReadWindow[] }> {
+    const rows = this.db.prepare("SELECT * FROM provider_account_readings WHERE identity_key = ? ORDER BY observed_at DESC, id DESC").all(key) as Row[];
+    return rows.flatMap((row) => { const windows = windowsOf(row); return windows ? [{ row, windows }] : []; });
   }
 
-  /** The key's latest stored reading, or null. */
+  /** The key's latest readable stored reading, or null. */
   latest(key: string): UsageReading<UsageAllowanceIdentity> | null {
-    const row = this.rows(key)[0];
-    return row ? toReading(row) : null;
+    const first = this.readable(key)[0];
+    return first ? toReading(first.row, first.windows) : null;
   }
 
-  /** Every stored key's latest reading, as the projection held it. */
+  /** Every stored key's latest readable reading, as the projection held it. Retention bounds each key's rows. */
   latestAll(): Array<{ key: string; reading: UsageReading<UsageAllowanceIdentity> }> {
-    const rows = this.db.prepare(`SELECT * FROM provider_account_readings r WHERE id = (
-        SELECT id FROM provider_account_readings WHERE identity_key = r.identity_key ORDER BY observed_at DESC, id DESC LIMIT 1)
-      ORDER BY identity_key`).all() as Row[];
-    return rows.map((row) => ({ key: row.identity_key, reading: toReading(row) }));
+    const keys = this.db.prepare("SELECT DISTINCT identity_key FROM provider_account_readings ORDER BY identity_key").pluck().all() as string[];
+    return keys.flatMap((key) => { const reading = this.latest(key); return reading ? [{ key, reading }] : []; });
   }
 
   /** The key's exhaustion episodes, newest first, each with its most recent observation. */
   exhaustionEpisodes(key: string): ExhaustionEpisode[] {
     const out = new Map<string, ExhaustionEpisode>();
-    for (const row of this.rows(key)) {
-      for (const e of episodesOf(row)) {
+    for (const { row, windows } of this.readable(key)) {
+      for (const e of episodesOf(row, windows)) {
         if (!out.has(e.id)) out.set(e.id, { window: e.window, resetsAt: e.resetsAt, evidence: e.evidence, lastObservedAt: row.observed_at });
       }
     }
