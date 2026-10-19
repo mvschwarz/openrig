@@ -122,6 +122,19 @@ describe("readProcTable", () => {
     expect(await verifyPaneIdleShell({ target: "s:0.0", tmux })).toBe(true);
   });
 
+  it("leaves out a process whose stat is gone, and fails the whole read when a stat cannot be read for another reason", async () => {
+    const root = fakeProc(0, {
+      7: { stat: stat(7, "node", "S", 1, 7, 7, 0), cmdline: "node\0" },
+      8: { stat: stat(8, "node", "S", 1, 8, 8, 0), cmdline: "node\0" },
+    });
+    // Exited between the listing and its stat.
+    fs.rmSync(path.join(root, "8", "stat"));
+    expect((await readProcTable(root)).map((row) => row.pid)).toEqual([7]);
+    // A stat that cannot be read while its process runs (EISDIR here, as EMFILE would be): a shorter table would look whole.
+    fs.mkdirSync(path.join(root, "8", "stat"));
+    await expect(readProcTable(root)).rejects.toThrow(/8\/stat: EISDIR/);
+  });
+
   it("rejects when there is no process table to read", async () => {
     await expect(readProcTable(path.join(os.tmpdir(), "openrig-no-proc-here"))).rejects.toThrow();
   });

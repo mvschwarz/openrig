@@ -78,7 +78,8 @@ function printable(bytes: string): string {
 type ProcFile = string | { code: string };
 
 /** Part of a /proc's table, as the reader sends it: the boot time, then pids with their stat and cmdline (null once
- *  the stat could not be read). The last part is `done`; a read that failed whole sends its error instead. */
+ *  the stat could not be read, its process gone or hidden). The last part is `done`; a read that failed whole sends
+ *  its error instead. */
 type ProcPart =
   | { id: number; bootTime: number; files: Array<[pid: string, stat: ProcFile, cmdline: ProcFile | null]>; done: boolean }
   | { id: number; error: string };
@@ -86,11 +87,15 @@ type ProcPart =
 // The reader's thread. It reads every file synchronously, the cheapest way: as many asynchronous reads cost ten times
 // that in the thread pool, as much CPU as the `ps` they replace. A file is read as UTF-8, Node's one native call, and
 // read again one character a byte only when it holds a byte that is no UTF-8 (rare). The table is sent in parts of
-// PIDS_PER_PART pids, so the event loop parses it a part at a time.
+// PIDS_PER_PART pids, so the event loop parses it a part at a time. A pid whose stat cannot be read is left out only
+// when ps leaves it out too: its process is gone (ENOENT, ESRCH), or hidden from this user by /proc's hidepid (EPERM,
+// EACCES). Any other failure (out of file descriptors, say) fails the read whole, as a `ps` that cannot run does,
+// rather than giving a shorter table that looks complete.
 const READER_SOURCE = String.raw`
   const fs = require("node:fs");
   const { parentPort } = require("node:worker_threads");
   const PIDS_PER_PART = 100;
+  const STAT_LEFT_OUT = new Set(["ENOENT", "ESRCH", "EPERM", "EACCES"]);
 
   function read(file) {
     try {
@@ -110,7 +115,9 @@ const READER_SOURCE = String.raw`
       for (let start = 0; start === 0 || start < pids.length; start += PIDS_PER_PART) {
         const files = pids.slice(start, start + PIDS_PER_PART).map((pid) => {
           const stat = read(root + "/" + pid + "/stat");
-          return [pid, stat, typeof stat === "string" ? read(root + "/" + pid + "/cmdline") : null];
+          if (typeof stat === "string") return [pid, stat, read(root + "/" + pid + "/cmdline")];
+          if (!STAT_LEFT_OUT.has(stat.code)) throw new Error("cannot read " + root + "/" + pid + "/stat: " + stat.code);
+          return [pid, stat, null];
         });
         parentPort.postMessage({ id, bootTime, files, done: start + PIDS_PER_PART >= pids.length });
       }
@@ -171,7 +178,7 @@ function startReader(): Worker {
 const PROCESS_GONE = new Set(["ENOENT", "ESRCH"]);
 
 function procRow(pid: string, stat: ProcFile, cmdlineFile: ProcFile | null, bootTime: number): ProcessTableRow | null {
-  // Exited between the listing and the read; without its stat ps lists nothing of it either.
+  // Exited between the listing and the read, or hidden; without its stat ps lists nothing of it either.
   if (typeof stat !== "string" || cmdlineFile === null) return null;
   // Only a process that is gone is dropped. One whose command line cannot be read (denied, say) is still running, and
   // its foreground still counts: ps lists it by its name in brackets.
