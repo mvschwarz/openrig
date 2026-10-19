@@ -149,3 +149,31 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
     records.push({ id: frame.id, pane: frame.pane, assessments, readiness, classifier: classifyPaneActivity(frame.pane, { runtime: "claude-code" }), sends });
   });
 });
+
+// The menu stays current when selection moves, but prose/partial structures do not acquire a veto.
+describe("MCP menu structure and history boundaries", () => {
+  const variants = [
+    ["old unchecked", oldMenu.replaceAll("[✔]", "[ ]"), true],
+    ["new unchecked", newMenu.replaceAll("[✔]", "[ ]"), true],
+    ["second checkbox", newMenu.replace("❯ [✔] dummy1", "  [✔] dummy1").replace("[✔] dummy2", "❯ [ ] dummy2"), true],
+    ["enable action", newMenu.replace("❯ [✔] dummy1", "  [✔] dummy1").replace("Enable selected", "❯ Enable selected"), true],
+    ["CRLF and trailing blanks", newMenu.replaceAll("\n", "\r\n") + "\r\n ", true],
+    ["single server", newMenu.replace("2 new", "1 new").replace("    [✔] dummy2\n", ""), true],
+    ["wrong heading", newMenu.replace("new MCP servers", "new plugins"), false],
+    ["missing instruction", newMenu.replace("Select any you wish to enable.", ""), false],
+    ["missing warning", newMenu.replace("MCP servers may execute code or access system resources. All tool calls\n  require approval. Learn more in the MCP documentation.", ""), false],
+    ["no checkbox items", newMenu.replace(/.*\[✔\].*\n/g, ""), false],
+    ["unknown footer", newMenu.replace("Space to select · Esc to reject all", "Enter to continue"), false],
+    ["no footer", newMenu.split("\n").slice(0, -1).join("\n"), false],
+    ["menu followed by composer", newMenu + "\n" + composer, false],
+    ["menu followed by composer draft", newMenu + "\n" + composer.replace("❯ ", "❯ a draft"), false],
+  ] as const;
+  it.each(variants)("%s", (_name, pane, current) => {
+    const classification = classifyPaneActivity(pane, { runtime: "claude-code" });
+    const noRuntime = classifyPaneActivity(pane); // Full inventory's structural poller omits a runtime.
+    expect(classification.reason === "selection_prompt").toBe(current);
+    expect(noRuntime.reason === "selection_prompt").toBe(current);
+    const assessment = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: pane, claudeResumeIdentityVerified: true });
+    expect(assessment.code).toBe(current ? "mcp_gate" : "active_runtime");
+  });
+});
