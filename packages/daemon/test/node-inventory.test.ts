@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../src/domain/node-inventory.js";
+import { getNodeInventory, getNodeInventoryForAllRigs, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../src/domain/node-inventory.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { ContextUsage } from "../src/domain/types.js";
@@ -779,6 +779,162 @@ describe("Node Inventory Projection", () => {
 
       const entries = getNodeInventory(db, "rig-1");
       expect(entries.find((e) => e.logicalId === "dev.impl")?.restoreOutcome).toBe("failed");
+    });
+  });
+
+  // #116 — a ready fresh launch of the node's current occupant generation means
+  // a restore attempt that started before it describes the retired occupant.
+  describe("restore outcomes fenced by a ready current-generation fresh launch (#116)", () => {
+    beforeEach(() => {
+      seedPodAwareRig(db);
+      seedSession(db, "node-1", "dev-impl@test-rig", { id: "sess-fresh", status: "running" });
+      seedTenure(1, "gen-old", "initial");
+    });
+
+    function seedTenure(ordinal: number, generation: string, kind: string) {
+      db.prepare("INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind) VALUES (?, ?, ?, ?, ?)")
+        .run(`tenure-${generation}`, "node-1", ordinal, generation, kind);
+    }
+
+    // Restore events are rig-scoped in production (node_id NULL).
+    function seedRigEvent(type: string, payload: Record<string, unknown>): number {
+      return Number(db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, NULL, ?, ?)")
+        .run("rig-1", type, JSON.stringify({ ...payload, type, rigId: "rig-1" })).lastInsertRowid);
+    }
+
+    function startRestore(snapshotId: string): number {
+      return seedRigEvent("restore.started", { snapshotId, intendedRoster: [{ nodeId: "node-1", logicalId: "dev.impl" }] });
+    }
+
+    function completeRestore(snapshotId: string, status: string, type = "restore.completed") {
+      seedRigEvent(type, { snapshotId, result: { snapshotId, nodes: [{ nodeId: "node-1", logicalId: "dev.impl", status }], warnings: [] } });
+    }
+
+    function freshLaunch(generation: string, opts?: { status?: string; sessionId?: string; type?: string }) {
+      seedEvent(db, "rig-1", "node-1", opts?.type ?? "seat.fresh_launched", {
+        rigId: "rig-1", nodeId: "node-1", sessionId: opts?.sessionId ?? "sess-fresh",
+        newGeneration: generation, status: opts?.status ?? "ready",
+      });
+    }
+
+    function launchFreshOccupant(opts?: { status?: string }) {
+      seedTenure(2, "gen-new", "fresh");
+      freshLaunch("gen-new", opts);
+    }
+
+    function agent() {
+      return getNodeInventory(db, "rig-1").find((e) => e.logicalId === "dev.impl");
+    }
+
+    function eventCount(): number {
+      return (db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
+    }
+
+    it("a failed full restore followed by a ready fresh launch reads from the live session", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      launchFreshOccupant();
+      db.prepare("UPDATE nodes SET continuity_outcome = 'fresh', occupant_lifecycle = 'active' WHERE id = 'node-1'").run();
+      const before = eventCount();
+
+      expect(agent()).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running", continuityOutcome: "fresh" });
+      expect(eventCount()).toBe(before);
+    });
+
+    it("the fleet inventory applies the same fence", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      launchFreshOccupant();
+
+      const entry = getNodeInventoryForAllRigs(db).get("rig-1")?.find((e) => e.logicalId === "dev.impl");
+      expect(entry).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running" });
+    });
+
+    it("the same occupant keeps the failed outcome", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("a restore attempt started after the fresh launch describes the new occupant", () => {
+      launchFreshOccupant();
+      startRestore("snap-2");
+      completeRestore("snap-2", "failed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("a fresh launch that needed attention leaves the failed outcome", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      launchFreshOccupant({ status: "attention_required" });
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("a failed fresh launch leaves the failed outcome", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      seedTenure(2, "gen-new", "fresh");
+      freshLaunch("gen-new", { type: "seat.fresh_launch_failed" });
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("a fresh launch of an earlier generation leaves the failed outcome", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      launchFreshOccupant();
+      seedTenure(3, "gen-later", "handover");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("contradictory fresh launches of the current generation leave the failed outcome", () => {
+      startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      launchFreshOccupant();
+      freshLaunch("gen-new", { sessionId: "sess-other" });
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
+    });
+
+    it("a full restore that completes after the fresh launch, for an attempt started before it, is fenced", () => {
+      startRestore("snap-1");
+      launchFreshOccupant();
+      completeRestore("snap-1", "failed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running" });
+    });
+
+    it("a reconciliation of the old attempt cannot make the fresh occupant resumed", () => {
+      const attemptId = startRestore("snap-1");
+      completeRestore("snap-1", "failed");
+      launchFreshOccupant();
+      seedEvent(db, "rig-1", "node-1", "restore.outcome_reconciled", {
+        rigId: "rig-1", nodeId: "node-1", attemptId, from: "failed", to: "operator_recovered",
+        evidence: { tmux: true, fgProcess: "claude", resumeTokenUsed: true, paneState: "usable" },
+      });
+
+      // The continuity column is left unset so a derived resume would show.
+      expect(agent()).toMatchObject({ restoreOutcome: "n-a", continuityOutcome: null });
+    });
+
+    it("a subset completion before the fresh launch is fenced", () => {
+      completeRestore("snap-3", "failed", "restore.subset_completed");
+      launchFreshOccupant();
+
+      expect(agent()).toMatchObject({ restoreOutcome: "n-a", lifecycleState: "running" });
+    });
+
+    // A subset restore records no start, so a completion after the fresh launch
+    // may have started before or after it. It stays current, unresolved.
+    it("a subset completion after the fresh launch stays current", () => {
+      launchFreshOccupant();
+      completeRestore("snap-3", "failed", "restore.subset_completed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
     });
   });
 });
