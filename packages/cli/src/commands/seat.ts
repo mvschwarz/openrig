@@ -663,9 +663,9 @@ Examples:
 Read-only. The launch value is the flag on the running process's own command line.
 The native value is the effort the session recorded for a turn since that process
 started (Claude's transcript, Codex's rollout, Pi's thinkingLevel on its latest
-assistant turn: the level after Pi's own cap, recorded by Pi 0.99.0 or later); until
-the seat takes a turn, or where it can't be read, it is NOT VERIFIED, never assumed
-from the flag.
+successful assistant turn: the level after Pi's own cap, recorded by Pi 0.99.0 or
+later); until the seat takes a turn, or where it can't be read, it is NOT VERIFIED,
+never assumed from the flag.
 Examples:
   rig seat effort dev-impl@my-rig
   rig seat effort dev.impl --json`)
