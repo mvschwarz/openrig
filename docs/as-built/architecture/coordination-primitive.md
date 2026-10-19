@@ -193,8 +193,8 @@ routing and repaired findings still close. Such a finding still needs the
 registry to admit it when it's saved, so during an outage a pass that must save
 one fails at that finding, as it did before this routing. Findings not yet
 created in that pass, and the closing of repaired findings, wait for the next
-pass that completes. After the repair, the next pass creates the finding and
-routes it to the closer. Registry recovery restores owner refinement
+pass that completes. Once the registry can be read again, the next pass creates
+the finding and routes it to the closer. Registry recovery restores owner refinement
 for new findings; existing findings keep their established route. Reserved human
 references and legacy agent names keep their known classifications without a
 registry read.
