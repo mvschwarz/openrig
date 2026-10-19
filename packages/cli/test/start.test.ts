@@ -532,6 +532,22 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(applyBodies.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("a seat left awaiting-decision is pointed at `rig seat launch <session> --fresh --reason`, not `rig up --existing`", async () => {
+    setupCandidateRig("openrig-build");
+    const plan = routes["/api/rigs/:id/up"]!;
+    routes["/api/rigs/:id/up"] = (req, body) => body.plan === true ? plan(req, body) : {
+      status: "restored", rigId: "rig-1", rigName: "openrig-build", rigResult: "partially_restored",
+      nodes: [{ logicalId: "orch.lead", status: "resumed" }, { logicalId: "dev.codex", status: "awaiting-decision" }],
+      warnings: [],
+    };
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "start", "--last"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain(`rig seat launch dev-codex@openrig-build --fresh --reason "fresh-prime after restore"`);
+    expect(output).not.toContain("rig up --existing");
+  });
+
   // ---- KERNEL INVARIANT ----
 
   it("kernel failure -> honest hard-fail, restore NOT attempted", async () => {
