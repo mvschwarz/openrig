@@ -947,13 +947,13 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"])("checks usable selected activity-hook matcher %s", (matcher) => {
+  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"].flatMap(matcher => ["node", "'/runtime/node'"].map(executable => ({ matcher, executable }))))("checks usable selected activity-hook matcher $matcher / $executable", ({ matcher, executable }) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
     const relayPath = RELAY_PATH;
     const events = ["SessionStart", "UserPromptSubmit"];
     const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ matcher, hooks: [
-      { type: "command", command: `node '${relayPath}'` },
+      { type: "command", command: `${executable} '${relayPath}'` },
     ] }]])) });
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],

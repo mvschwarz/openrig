@@ -678,6 +678,32 @@ describe("the plugin's activity relay", () => {
     expect(posts.map((p) => p.url)).toEqual(["/api/activity/hooks"]);
   });
 
+  it("deduplicates a pinned settings interpreter with no Node on PATH", async () => {
+    const quote = (value: string) => "'" + value.replace(/'/g, `'"'"'`) + "'";
+    writeFileSync(join(project, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
+      type: "command", command: `${quote(process.execPath)} ${quote(settingsRelay)}`,
+    }] }] } }));
+    await run({ hook_event_name: "Stop" }, ["--from-plugin"], { PATH: "" });
+    expect(posts).toEqual([]);
+  });
+
+  it.each(["missing", "nonexecutable", "directory"])("reports from the plugin when the pinned settings interpreter is %s", async kind => {
+    const executable = join(project, "node");
+    if (kind === "nonexecutable") { writeFileSync(executable, "not executable"); chmodSync(executable, 0o600); }
+    if (kind === "directory") mkdirSync(executable);
+    writeFileSync(join(project, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
+      type: "command", command: `'${executable}' '${settingsRelay}'`,
+    }] }] } }));
+    await run({ hook_event_name: "Stop" }, ["--from-plugin"], { PATH: "" });
+    expect(posts.map(p => JSON.parse(p.body))).toEqual([expect.objectContaining({ hookEvent: "Stop" })]);
+  });
+
+  it("does not suppress the plugin for a legacy bare-node command under a PATH without Node", async () => {
+    writeFileSync(join(project, ".claude", "settings.local.json"), settingsWithRelay(["Stop"]));
+    await run({ hook_event_name: "Stop" }, ["--from-plugin"], { PATH: "" });
+    expect(posts.map(p => JSON.parse(p.body))).toEqual([expect.objectContaining({ hookEvent: "Stop" })]);
+  });
+
   it("reports when the settings relay's group has a matcher, since that group may not run for this event", async () => {
     const withMatcher = (matcher: string) => JSON.stringify({ hooks: { SessionStart: [{ matcher, hooks: [{ type: "command", command: `node '${settingsRelay}'` }] }] } });
     writeFileSync(join(project, ".claude", "settings.local.json"), withMatcher("resume"));

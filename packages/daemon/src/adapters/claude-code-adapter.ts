@@ -18,7 +18,7 @@ import { listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, o
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -57,6 +57,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private stateDir: string | null;
   private collectorAssetPath: string | null;
+  private nodeExecutable: string;
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
@@ -76,6 +77,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     sleep?: (ms: number) => Promise<void>;
     stateDir?: string;
     collectorAssetPath?: string;
+    /** Interpreter used to write generated Claude commands; defaults to this daemon runtime. */
+    nodeExecutable?: string;
     autoDriveProviderPrompts?: boolean;
     listProcesses?: NativeProcessLister;
     /** Bound on a slow resume's wait, from the launch (default: runtime.readiness_timeout_seconds). */
@@ -97,6 +100,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
+    this.nodeExecutable = deps.nodeExecutable ?? process.execPath;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
     this.listProcesses = deps.listProcesses;
     this.readinessTimeoutMs = deps.readinessTimeoutMs;
@@ -937,7 +941,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
     // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
     // seats holding it will never be refreshed.
-    const collectorCmd = `node ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
+    const collectorCmd = `${shellQuote(this.nodeExecutable)} ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
     // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a
@@ -960,14 +964,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * commands) and report `sourceMissing` so the caller can surface a warning + not claim
    * projection. DISABLE: strip owned entries and prune emptied containers.
    *
-   * Ownership is the EXACT `node <quoted relay path>` command shape, so a stale/changed
+   * Ownership is the exact generated Node-command shape (legacy or pinned interpreter), so a stale/changed
    * absolute prefix is replaced (never duplicated) while a user command that merely CONTAINS
    * the path is preserved. Fail-closed: a settings file we cannot parse is left byte-for-byte
    * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
     const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
-    const ownedCmd = `node ${shellQuote(relayDest)}`;
+    const ownedCmd = `${shellQuote(this.nodeExecutable)} ${shellQuote(relayDest)}`;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
     // PREVALIDATE BEFORE ANY MUTATION using the SHARED delivery validation (same gate
@@ -1063,7 +1067,7 @@ interface ActivityHookOutcome {
   settingsUnparseable: boolean;
 }
 
-// OpenRig-owned relay path suffix. Ownership is the EXACT `node <arg>` command whose single
+// OpenRig-owned relay path suffix. Ownership is the generated Node command whose single
 // argument ends with this path — a changed prefix still matches (replace, not duplicate); a
 // user command that merely contains the path (echo, or node with extra args) does NOT.
 const LEGACY_OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
@@ -1079,12 +1083,9 @@ const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context
 
 function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
-  const quoted = /^node ('(?:[^']|'"'"')*') ('(?:[^']|'"'"')*')(?: ('(?:[^']|'"'"')*'))?$/.exec(cmd.trim());
-  if (quoted) {
-    const tokens = quoted.slice(1).filter((token): token is string => token !== undefined);
-    const decoded = tokens.map(unquoteSingleShellToken);
-    if (decoded.some((value, index) => value === null || shellQuote(value) !== tokens[index])) return false;
-    return decoded[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+  const parsed = parseManagedClaudeNodeCommand(cmd);
+  if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)) {
+    return parsed.args[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
   }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
@@ -1094,28 +1095,11 @@ function isOwnedCollectorCommand(cmd: string): boolean {
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {
   if (!cmd) return false;
-  const m = /^node\s+(.+)$/.exec(cmd.trim());
-  if (!m) return false;
-  const arg = m[1]!;
-  const decoded = unquoteSingleShellToken(arg);
-  if (decoded === null) return false;
-  // Canonical ONE-TOKEN round-trip: the argument must be EXACTLY one shellQuote token — re-encoding
-  // the decoded path must reproduce the argument VERBATIM. This is the ownership test's core: the
-  // command is `node ${shellQuote(relayDest)}`, so any owned entry re-encodes to itself (including
-  // an apostrophe cwd O'Brien via the '"'"' escape). It REJECTS a user command whose multiple quoted
-  // args merely concatenate to text ending in the relay suffix (e.g. `node 'x' '<relay>'`), which
-  // must never be recognised as owned and deleted.
-  if (shellQuote(decoded) !== arg) return false;
-  return decoded.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
-    || decoded.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
-}
-
-/** Decode ONE POSIX single-quoted shell token as produced by shellQuote (outer `'…'` with an
- *  embedded `'` escaped as `'"'"'`). Returns null when the token is not single-quote wrapped. The
- *  caller re-encodes to confirm the token is canonical/single — this decode alone does not. */
-function unquoteSingleShellToken(token: string): string | null {
-  if (token.length < 2 || !token.startsWith("'") || !token.endsWith("'")) return null;
-  return token.slice(1, -1).split(`'"'"'`).join("'");
+  const parsed = parseManagedClaudeNodeCommand(cmd);
+  if (!parsed || parsed.args.length !== 1) return false;
+  const relay = parsed.args[0]!;
+  return relay.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
+    || relay.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
 }
 
 function hashContent(content: string): string {

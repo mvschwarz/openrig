@@ -214,15 +214,30 @@ function uid() {
 // each event once either way. Anything unreadable, missing or different counts as "not registered": a seat is never silent.
 const SETTINGS_RELAY_TAIL = "state/claude-activity-hooks/activity-relay.cjs";
 
-// The adapter's own test for the entry it writes (isOwnedRelayCommand): `node` and one single-quoted token, in the form
-// shellQuote produces, naming the relay copy. A wrapper that only mentions the path is not that entry. Returns the path.
+// Keep this finite generated-command grammar in parity with parseManagedClaudeNodeCommand.
+// Bare-node legacy commands and a canonical quoted absolute Node path are recognised;
+// extra arguments and user wrappers are not the settings relay.
 function settingsRelayPath(command) {
-  const m = /^node\s+(.+)$/.exec(command.trim());
-  const arg = m && m[1];
-  if (!arg || arg.length < 2 || !arg.startsWith("'") || !arg.endsWith("'")) return null;
-  const decoded = arg.slice(1, -1).split(`'"'"'`).join("'");
-  if ("'" + decoded.replace(/'/g, `'"'"'`) + "'" !== arg) return null;
-  return path.isAbsolute(decoded) && decoded.endsWith(`/${SETTINGS_RELAY_TAIL}`) ? decoded : null;
+  if (/[\r\n]/.test(command)) return null;
+  const m = /^(node|'(?:[^']|'"'"')*')[ \t]+('(?:[^']|'"'"')*')$/.exec(command.trim());
+  if (!m) return null;
+  const decode = token => token.slice(1, -1).split(`'"'"'`).join("'");
+  const quote = value => "'" + value.replace(/'/g, `'"'"'`) + "'";
+  const executable = m[1] === "node" ? "node" : decode(m[1]);
+  const relay = decode(m[2]);
+  if (quote(relay) !== m[2] || !path.isAbsolute(relay) || !relay.endsWith(`/${SETTINGS_RELAY_TAIL}`)) return null;
+  if (m[1] !== "node" && (quote(executable) !== m[1] || !path.isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(path.basename(executable)))) return null;
+  return { executable, relay };
+}
+
+function interpreterAvailable(executable, env) {
+  const candidates = executable === "node"
+    ? typeof env.PATH === "string" ? env.PATH.split(path.delimiter).map(dir => path.resolve(dir || ".", "node")) : []
+    : [executable];
+  return candidates.some(candidate => {
+    try { fs.accessSync(candidate, fs.constants.X_OK); return fs.statSync(candidate).isFile(); }
+    catch { return false; }
+  });
 }
 
 // A settings entry only silences this run if it would really report: the file it names is there and is this very script.
@@ -243,7 +258,7 @@ function settingsRelayReports(hookEvent, providerPayload, env = process.env) {
     return Array.isArray(groups) && groups.some((group) => group && unrestricted(group) && Array.isArray(group.hooks)
       && group.hooks.some((hook) => {
         const relay = hook && typeof hook.command === "string" ? settingsRelayPath(hook.command) : null;
-        return relay !== null && isThisScript(relay);
+        return relay !== null && interpreterAvailable(relay.executable, env) && isThisScript(relay.relay);
       }));
   } catch {
     return false;
@@ -306,4 +321,5 @@ module.exports = {
   resolveEndpoint,
   pluginRunIsRedundant,
   settingsRelayReports,
+  settingsRelayPath,
 };

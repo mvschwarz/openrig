@@ -266,14 +266,14 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /old/ctx /old/prov", padding: 2 } });
       await deliver();
       const statusLine = JSON.parse(written[settingsPath]!).statusLine;
-      expect(statusLine.command).toBe(`node ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
       expect(statusLine.padding).toBe(2);
     });
 
     it("refreshes the three-token collector command OpenRig wrote before provider usage", async () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /project/.openrig/context-collector.cjs /old/state/context" } });
       await deliver();
-      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`node ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
     });
 
     it("installs the collector into a status line that has no command", async () => {
@@ -301,6 +301,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       "node /old/.openrig/context-collector.cjs /old/ctx\n~/bin/my-status.sh",
       "node /old/.openrig/context-collector.cjs /old/ctx\r\n~/bin/my-status.sh",
       "node /tools/.openrig/context-collector.cjs.backup",
+      `${shellQuote(process.execPath)} '/old/.openrig/context-collector.cjs' '/old/ctx' '/old/prov' 'extra'`,
+      "'/custom/wrapper' '/old/.openrig/context-collector.cjs' '/old/ctx' '/old/prov'",
     ])("keeps a user command that only contains the collector path: %j", async (command) => {
       const original = JSON.stringify({ statusLine: { type: "command", command, padding: 1 } }, null, 2);
       written[settingsPath] = original;
@@ -314,7 +316,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       expect(written[settingsPath]).toContain("/project/.openrig/context-collector.cjs");
       expect(JSON.parse(written[settingsPath]!).statusLine).toEqual({
         type: "command",
-        command: `node ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
+        command: `${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
       });
     });
   });
