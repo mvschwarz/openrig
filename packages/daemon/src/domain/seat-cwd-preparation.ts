@@ -14,8 +14,8 @@ interface PlannedCopy {
 }
 
 export interface CwdPreparationPlan {
-  /** Destination files the seat's next launch would refuse to overwrite: operator-edited, unrecorded with different
-   *  content, or claimed by two different sources. */
+  /** Destination files set-cwd's preflight policy protects: operator-edited, unrecorded with different content, or
+   *  claimed by two different sources. (Launch itself overwrites an unrecorded differing file with a warning.) */
   conflicts: PlannedCopy[];
   warnings: string[];
 }

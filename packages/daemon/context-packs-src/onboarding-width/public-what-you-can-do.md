@@ -511,11 +511,14 @@ version, from checking the environment to a useful report to the OpenRig team.
   divergence.
 - **`rig seat set-cwd <seat> --cwd <absolute-path> --reason <text>`** — save an existing seat's
   launch directory, audited, for its next fresh launch or rebuild handover. Its node, address, queue
-  and history stay intact. It writes no startup files: launch does, as today. It first checks, read-only,
-  that the new directory holds nothing the next launch would refuse to overwrite, and names any such
-  paths. The running occupant keeps its directory: adopt the new one with `rig seat launch --fresh
-  --stop` or a rebuild handover before any `rig down`/`rig up`, fork handover or `restart
-  --keep-conversation`. `rig seat status` shows the saved `launch_cwd`. Old-directory files are left.
+  and history stay intact. It creates the folder and writes nothing else there: launch writes the
+  startup files, as today. Its preflight policy refuses, naming the paths, when the new directory
+  holds an edited, unrecorded-and-different or doubly sourced copy that launch would place. The
+  running process keeps its directory: adopt the new one with `rig seat launch --fresh --stop
+  --reason <text>` or a rebuild handover, promptly (background work, such as a Claude seat's
+  managed compaction, can use the saved directory before then; that's guidance, not a guard), and
+  before any `rig down`/`rig up` or fork handover. In-place Codex restart isn't adoption. `rig seat status` shows the
+  saved `launch_cwd`. Old-directory files are left.
 - **`rig seat set-permissions <seat> --mode <mode> --reason <text>`** — select one seat's native
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the

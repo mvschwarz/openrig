@@ -224,7 +224,7 @@ describe("changing an existing seat's launch directory", () => {
     expect(cwdEvents()).toHaveLength(1);
   });
 
-  it.each(["", "relative/workspace", path.parse(process.cwd()).root])("refuses an invalid destination %j and changes nothing", async cwd => {
+  it.each(["", "relative/workspace", path.parse(process.cwd()).root])("refuses an invalid destination %j, with no seat, custody or startup-file change", async cwd => {
     const seat = seed();
     const result = await service.setCwd({ seatRef: seat.sessionName, cwd, reason: "isolate workspace" });
     expect(result).toMatchObject({ ok: false });
@@ -267,7 +267,7 @@ describe("changing an existing seat's launch directory", () => {
     ["claude-code", "plugin"], ["codex", "plugin"],
     ["claude-code", "runtime_resource"], ["codex", "runtime_resource"],
     ["pi", "startup-skill"], ["omp", "startup-skill"], ["stub", "startup-skill"],
-  ] as const)("refuses an operator-edited %s %s in the new directory, naming it, and changes nothing", async (runtime, kind) => {
+  ] as const)("refuses an operator-edited %s %s in the new directory, naming it, with no seat, custody or startup-file change", async (runtime, kind) => {
     const { seat, targetPath } = copiedResource(runtime, kind);
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     const operatorContent = "Operator's local edit must survive directory selection\n";
@@ -343,18 +343,28 @@ describe("changing an existing seat's launch directory", () => {
     expect(cwdEvents()).toEqual([]);
   });
 
-  it("resolves a community agent app's adapter the way launch does", async () => {
+  it("resolves a community agent app's adapter the way launch does, and checks none of the startup files it never takes", async () => {
     const seat = seed();
     const presets = path.join(root, "agent-apps");
     fs.mkdirSync(presets);
     fs.writeFileSync(path.join(presets, "synth.yaml"), "format: 1\nname: synth\ncommand: synth-app --serve\nmaintainer: Example Maintainer\nlimits: [resume unsupported]\n");
     db.prepare("UPDATE nodes SET runtime = 'synth' WHERE id = ?").run(seat.node.id);
     db.prepare("UPDATE node_startup_context SET runtime = 'synth' WHERE node_id = ?").run(seat.node.id);
+    // A required startup skill the app would never take (an agent app takes no startup files).
+    const skill = path.join(root, "app-skill", "review", "SKILL.md");
+    fs.mkdirSync(path.dirname(skill), { recursive: true });
+    fs.writeFileSync(skill, "# Review\n");
+    db.prepare("UPDATE node_startup_context SET resolved_files_json = ? WHERE node_id = ?").run(JSON.stringify([
+      ...seat.files, { path: "SKILL.md", absolutePath: skill, ownerRoot: path.dirname(skill), deliveryHint: "skill_install", required: true, appliesOn: ["fresh_start"] },
+    ]), seat.node.id);
     const sessionId = (db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string }).id;
     registry.recordAgentAppSelection(sessionId, "synth");
     service = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: tmux,
       runtimeAdapters: withAgentAppResolver({ "claude-code": adapter } as Record<string, RuntimeAdapter>, { tmux, presetsDir: () => presets }) });
-    expect(await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" })).toMatchObject({ ok: true, changed: true });
+    const result = await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" });
+    // No refusal code, named first so a failure shows which one.
+    expect((result as { code?: string }).code).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, changed: true });
     expect(savedCwd(seat.node.id)).toBe(fs.realpathSync(newCwd));
   });
 

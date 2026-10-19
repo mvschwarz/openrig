@@ -301,27 +301,39 @@ transaction. The seat's node, canonical address, queue, session history and skil
 `rig seat status` shows **Working directory for future launches** (`launch_cwd` in JSON). That's saved configuration,
 not where the running process is.
 
-**What it writes:** nothing in the new directory but the folder itself. The seat's next fresh launch or rebuild
-handover writes its startup files there, as launch does today.
+**What it writes:** it creates the folder if it's missing, and writes nothing else there. The seat's next fresh launch or
+rebuild handover writes its startup files there, as launch does today.
 
-**The check before saving:** it reads, without writing, the files that next launch would copy (resources, nested
-plugin files and startup skills) at their actual destinations.
+**`set-cwd`'s preflight policy:** before saving, it reads, without writing, the enumerated resource copies (including
+nested plugin files) and startup skills that launch would place in the new directory, at their actual destinations.
 - **Refused, with the protected paths named (`cwd_destination_conflict`):** a file there that an operator edited, an
-  unrecorded file with different content, or two sources for one destination.
+  unrecorded file with different content, or two sources for one destination. That's stricter than launch, which
+  overwrites an unrecorded differing file with a warning; the refusal is deliberate, while the occupant still runs.
 - **What to do:** use a clean destination, or move or merge those files, then retry.
-- **Not checked:** managed guidance blocks and native configuration merges keep the adapter's policy at launch.
+- **Not checked:** managed guidance blocks and native configuration merges keep the adapter's policy at launch, and
+  launch-owned files such as `.openrig/context-collector.cjs` are written by launch as always.
+- **An agent app** takes no startup files, so none are checked for it.
 
 **The running occupant keeps its current directory.** Adopt the new one with:
 - `rig seat launch <seat> --fresh --stop --reason <text>`, which starts a blank conversation; or
 - `rig handover <seat> --source rebuild --reason <text>`, which carries durable context.
 
-**Adopt it first.** Before any `rig down`/`rig up`, fork-based handover, or `rig seat restart --keep-conversation`,
-adopt the new directory one of those two ways. Those other paths resume the existing conversation in the saved
-directory, and Claude keeps conversations per project directory, so a resume there may not find it. That hasn't been
-tested in a real session; this is the order to follow.
+**Adopt it promptly.** The saved directory doesn't move the running process, but background work can use it before
+adoption. Saved configuration isn't the live process's directory, and these examples aren't the only consumers. For a
+running Claude seat:
+- **The status-line collector** is written to the saved directory.
+- **Managed compaction,** manual (`POST /api/compaction/trigger`) or automatic, asks the seat to write its restore map
+  under it. That's outside the seat's current workspace, so a seat without bypass permissions may meet a write prompt.
+
+Adopting promptly is guidance. It doesn't protect against a poll or a compaction that runs before your next command.
+
+**Before adopting,** don't `rig down`/`rig up` or hand over by fork. Those resume the existing conversation in the
+saved directory, and Claude keeps conversations per project directory, so a resume there may not find it.
+Cross-directory resume hasn't been run natively; this is the order to follow. `rig seat restart --keep-conversation`
+(Codex) isn't adoption: it respawns in the directory it observes from the running process.
 
 **Failures:** a refusal, missing or malformed saved startup context, or an audit-write failure leaves the prior
-directory saved. A concurrent configuration change is reported, not overwritten. A CLI timeout means the outcome is
+directory saved, and changes no seat, custody or startup file (a refusal may leave the new folder created). A concurrent configuration change is reported, not overwritten. A CLI timeout means the outcome is
 unknown; check `rig seat status` before retrying. Choosing the same directory again records no second event.
 
 **The old directory:** files there are left as they are, since other seats may still use them. The source RigSpec

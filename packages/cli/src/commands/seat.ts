@@ -719,18 +719,28 @@ resume/successor launch reads it at call time. Examples:
     .description("Save an existing seat's working directory for its next fresh launch or rebuild handover")
     .addHelpText("after", `
 Saves the directory (and an audit event) for this seat's next launch. The seat's
-identity, address, queue and history are kept. Nothing is written into the new
-directory except the folder itself: the next launch writes the startup files
-there, as it does today. If the new directory already holds files that launch
-would refuse to overwrite, the change is refused and those paths are named.
+identity, address, queue and history are kept. set-cwd creates the folder if it's
+missing and writes nothing else there: the next launch writes the startup files,
+as it does today. Its preflight policy checks the resource copies and startup
+skills that launch would place there: an operator-edited file, an unrecorded file
+with different content, or two sources for one destination refuses the change,
+naming those paths. (A refusal may leave the new folder created; nothing else
+changes.)
 
-The running process keeps its current directory. Adopt the new one with
-  rig seat launch <seat> --fresh --stop      or
-  rig seat handover <seat> --source rebuild
-before any rig down/rig up, fork-based handover, or
-rig seat restart --keep-conversation: those resume the existing conversation in
-the saved directory, and Claude keeps conversations per project directory, so a
-resume there may not find it.
+The saved directory doesn't move the running process. Adopt it with
+  rig seat launch <seat> --fresh --stop --reason <text>   (a blank conversation) or
+  rig seat handover <seat> --source rebuild --reason <text>   (carries durable context)
+Until then, background work can already use the saved directory. For a running
+Claude seat, for example, the status-line collector is written there, and managed
+compaction, manual or automatic, asks the seat to write its restore map there,
+outside its current workspace, where a seat without bypass permissions may meet a
+write prompt. Adopting promptly is guidance; it doesn't protect against a poll or
+a compaction that runs before your next command.
+Before adopting, don't rig down/rig up or hand over by fork: those resume the
+existing conversation in the saved directory, and Claude keeps conversations per
+project directory, so a resume there may not find it (not run natively).
+rig seat restart --keep-conversation (Codex) isn't adoption: it respawns in the
+directory it observes from the running process.
 
 Files in the old directory are left as they are; other seats may still use them.
 Example:
@@ -739,8 +749,9 @@ Example:
       await runLifecycleVerb("set-cwd", seat, { cwd: opts.cwd, reason: opts.reason, operator: opts.operator }, opts, data => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         console.log(`Launch directory for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])}${data["changed"] === false ? " (already selected)" : " (audited)"}.`);
-        console.log("Nothing was written there yet: the next fresh launch or rebuild handover writes its startup files.");
-        console.log(`The running process keeps its current directory. Adopt the new one with: rig seat launch ${seat} --fresh --stop`);
+        console.log("set-cwd wrote nothing there but the folder: the next fresh launch or rebuild handover writes its startup files.");
+        console.log(`The running process keeps its current directory. Adopt the new one promptly with: rig seat launch ${seat} --fresh --stop --reason <text>`);
+        console.log("Until then, background work can already use the saved directory, such as a Claude seat's managed compaction (see rig seat set-cwd --help).");
         console.log("Files in the previous directory are left as they are; other seats may still use them.");
       });
     });

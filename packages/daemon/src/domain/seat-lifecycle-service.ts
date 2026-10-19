@@ -42,7 +42,7 @@ import {
   CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
-import { seatAdapter } from "../adapters/agent-app-runtime-adapter.js";
+import { AgentAppRuntimeAdapter, seatAdapter } from "../adapters/agent-app-runtime-adapter.js";
 import { sessionAgentAppSelect } from "./session-registry.js";
 
 /**
@@ -337,9 +337,10 @@ export class SeatLifecycleService {
   /**
    * Save an existing seat's launch directory for its next fresh launch or rebuild handover, keeping its identity,
    * address, queue and history. Like set-model it validates, then persists the cwd and an audited event in one
-   * transaction. Before that, a read-only check refuses the change when the new directory already holds files the
-   * next launch would refuse to overwrite. It writes no startup files: launch does that, as it does today. The running
-   * occupant keeps its directory until it's relaunched.
+   * transaction. Before that, set-cwd's read-only preflight policy refuses the change when the new directory holds an
+   * operator-edited, unrecorded-and-different or doubly sourced copy that launch would place there. It creates the
+   * folder and writes no startup files: launch does that, as it does today. The running occupant keeps its directory
+   * until it's relaunched.
    */
   async setCwd(input: SetCwdInput): Promise<SetCwdResult> {
     const required = this.requireReason(input.reason);
@@ -378,7 +379,9 @@ export class SeatLifecycleService {
     // The filesystem startup files the next fresh launch would deliver (never send_text or actions), with legacy auto
     // hints resolved, for the read-only destination check.
     const files: ResolvedStartupFile[] = [];
-    for (const file of startup.context.resolvedStartupFiles) {
+    // A community agent app takes no startup files at launch (its adapter delivers none), so there's nothing to check.
+    const takesStartupFiles = !(adapter instanceof AgentAppRuntimeAdapter);
+    for (const file of takesStartupFiles ? startup.context.resolvedStartupFiles : []) {
       if (!file.appliesOn.includes("fresh_start") || file.deliveryHint === "send_text") continue;
       try {
         const hint = file.deliveryHint === "auto"
@@ -405,7 +408,7 @@ export class SeatLifecycleService {
       if (check.conflicts.length) {
         warnings.push(...check.conflicts.map(copy => `Protected destination file: ${copy.targetPath}`));
         return { ok: false, code: "cwd_destination_conflict", warnings,
-          message: "The new directory holds files the seat's next launch would refuse to overwrite; nothing was written and the cwd was not changed.",
+          message: "The new directory holds files set-cwd's preflight policy protects; no startup file was written and the cwd was not changed.",
           guidance: "Use a clean destination, or inspect and move or merge the reported files before retrying." };
       }
     } catch (error) {
