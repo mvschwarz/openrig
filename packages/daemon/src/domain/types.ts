@@ -868,7 +868,7 @@ export interface NodeDetailEntry extends NodeInventoryEntry {
   startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
   startupActions: Array<{ type: string; value: string }>;
   /** `targetPath` is where a resource is known to be installed, or "" when that isn't shown. For guidance, it is the
-   *  file the runtime merges into, and only while that file holds the block; `declaredTarget` is the spec's `target`
+   *  file the runtime merges into, and only while that file holds a complete block with this id; `declaredTarget` is the spec's `target`
    *  (parsed, never used to write), and `effectiveTarget` the file the runtime would merge into. */
   installedResources: Array<{ id: string; category: string; targetPath: string; declaredTarget?: string; effectiveTarget?: string }>;
   recentEvents: Array<{ type: string; createdAt: string; payload: Record<string, unknown> }>;

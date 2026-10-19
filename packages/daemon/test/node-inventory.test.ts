@@ -968,4 +968,24 @@ describe("node detail reports a guidance block's installed file only from eviden
     fs.writeFileSync(path.join(cwd, "CLAUDE.md"), "<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nrole text\n");
     expect(installed()[0]).toMatchObject({ targetPath: "" });
   });
+
+  it.each(["OpenRig", "RIGGED"])("claims nothing for a reversed %s pair or an orphan END, which no writer produces", (marker) => {
+    const begin = `<!-- BEGIN ${marker} MANAGED BLOCK: role -->`, end = `<!-- END ${marker} MANAGED BLOCK: role -->`;
+    for (const text of [`${end}\n${begin}\npartial role text\n`, `# Mine\n${end}\n`]) {
+      db.prepare("DELETE FROM node_startup_context WHERE node_id = 'node-1'").run();
+      fs.writeFileSync(path.join(cwd, "CLAUDE.md"), text);
+      expect(installed()[0]).toEqual({ id: "role", category: "guidance", targetPath: "",
+        declaredTarget: "AGENTS.md", effectiveTarget: path.join(cwd, "CLAUDE.md") });
+    }
+  });
+
+  it("reads the runtime's file at the node's current cwd: a changed cwd whose file lacks the block shows no installed path", () => {
+    fs.writeFileSync(path.join(cwd, "CLAUDE.md"), block("role"));
+    const moved = fs.mkdtempSync(path.join(os.tmpdir(), "inventory-guidance-moved-"));
+    try {
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = 'node-1'").run(moved);
+      expect(installed()[0]).toEqual({ id: "role", category: "guidance", targetPath: "",
+        declaredTarget: "AGENTS.md", effectiveTarget: path.join(moved, "CLAUDE.md") });
+    } finally { fs.rmSync(moved, { recursive: true, force: true }); }
+  });
 });

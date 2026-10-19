@@ -58,9 +58,15 @@ export function seatGuidanceFile(
   return fileName ? nodePath.join(cwd, fileName) : null;
 }
 
-/** Whether guidance text holds a complete managed block with this id, in the current or legacy form. */
+/** Whether guidance text holds this id's block as it is written: a BEGIN marker followed later by its END, in the
+ *  current or legacy form. For reporting an installed file; restore's own `blockState` is unchanged. */
 export function hasCompleteGuidanceBlock(content: string, blockId: string): boolean {
-  return blockState(content, blockId) === "complete";
+  const ordered = (start: string, end: string): boolean => {
+    const begin = content.indexOf(start);
+    return begin >= 0 && content.indexOf(end, begin + start.length) >= 0;
+  };
+  return ordered(MANAGED_BLOCK_START(blockId), MANAGED_BLOCK_END(blockId))
+    || ordered(LEGACY_BLOCK_START(blockId), LEGACY_BLOCK_END(blockId));
 }
 
 /** The guidance file a seat's managed blocks live in, and the blocks it should hold on restore. */
