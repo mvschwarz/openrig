@@ -1,6 +1,5 @@
 import type { NativeProcessLister } from "./native-process-lineage.js";
 import type { CurrentModelReader } from "./model-divergence/current-model-reader.js";
-import { readPiModelObservation } from "./model-divergence/effective-model-readers.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -576,19 +575,26 @@ export class SeatLifecycleService {
         observed: { state: "not_verified", detail: `No verified Pi runner for this seat, so no turn can be tied to its launch: ${selection.reason}.` },
       };
     }
-    const flag = emittedEffortFromArgv("pi", processArgv(selection.command));
+    const tokens = processArgv(selection.command);
+    const flag = emittedEffortFromArgv("pi", tokens);
     const value = flag.flag === "present" ? flag.value : null;
-    const emitted = { state: "observed" as const, value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === saved.effective };
-    const read = readPiModelObservation(selection.path, { notBeforeMs: selection.notBeforeMs });
+    // ps joins argv with spaces: a bare word after the value may be the rest of a value with whitespace.
+    let at = -1;
+    tokens.forEach((t, i) => { if (t === "--thinking" || t.startsWith("--thinking=")) at = i; });
+    const after = at < 0 ? undefined : tokens[at + (tokens[at] === "--thinking" ? 2 : 1)];
+    const emitted: EffortReport["emitted"] = value !== null && after !== undefined && !after.startsWith("--")
+      ? { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." }
+      : { state: "observed", value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === saved.effective };
+    const read = selection.observation;
     if (!read.ok) return { emitted, observed: { state: "not_verified", detail: `No Pi turn from this launch can be read: ${read.reason}.` } };
     if (!read.thinkingLevel) {
       return { emitted, observed: { state: "not_verified", detail: "This Pi doesn't record the thinking level on its turns (Pi 0.99.0 and later do), so the level it ran at can't be shown." } };
     }
     // No flag sent: Pi's level comes from the model suffix or its default, so there is nothing to mismatch.
     return { emitted, observed: {
-      state: "observed", value: read.thinkingLevel, at: read.observedAt ?? "unknown time", source: "Pi session (latest assistant turn)", outcome: "recorded",
+      state: "observed", value: read.thinkingLevel, at: read.observedAt ?? "unknown time", source: "Pi session (latest successful assistant turn; error and aborted turns are skipped)", outcome: "recorded",
       detail: "Pi recorded this level with the turn's request: the session's level after Pi's own cap, not proof the provider applied it.",
-      ...(value !== null ? { matchesEmitted: read.thinkingLevel === value } : {}),
+      ...(emitted.state === "observed" && value !== null ? { matchesEmitted: read.thinkingLevel === value } : {}),
     } };
   }
 

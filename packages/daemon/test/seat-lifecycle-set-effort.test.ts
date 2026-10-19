@@ -13,6 +13,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { PiRecordSelection } from "../src/domain/model-divergence/current-generation-record.js";
+import { readPiModelObservation } from "../src/domain/model-divergence/effective-model-readers.js";
 
 function fakeTmux() {
   const alive = new Map<string, boolean>();
@@ -199,7 +200,9 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     selection = { ok: false, reason: "no managed Pi runner under registered pane %1" };
     service = new SeatLifecycleService({
       db, rigRepo, sessionRegistry, eventBus: new EventBus(db), tmuxAdapter: tmux.adapter,
-      piRecords: { currentPiRecord: async () => selection },
+      // The reader reads the runner's newest own turn within its occupant recheck.
+      piRecords: { currentPiRecord: async () => selection.ok
+        ? { ...selection, observation: readPiModelObservation(selection.path, { notBeforeMs: selection.notBeforeMs }) } : selection },
     });
   });
   afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -270,7 +273,7 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     expect(report).toMatchObject({
       ok: true, runtime: "pi",
       emitted: { state: "observed", value: "high", pid: 4101, startedAt: "Mon Oct 19 10:00:00 2026", matchesSaved: true },
-      observed: { state: "observed", value: "high", at: at(5), source: "Pi session (latest assistant turn)", outcome: "recorded", matchesEmitted: true },
+      observed: { state: "observed", value: "high", at: at(5), source: "Pi session (latest successful assistant turn; error and aborted turns are skipped)", outcome: "recorded", matchesEmitted: true },
     });
     const { summary, observed } = report as { summary: string; observed: { detail: string } };
     expect(observed.detail).toBe("Pi recorded this level with the turn's request: the session's level after Pi's own cap, not proof the provider applied it.");
@@ -295,6 +298,17 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     expect(report).toMatchObject({ emitted: { state: "observed", value: null, matchesSaved: true }, observed: { state: "observed", value: "medium" } });
     expect((report as { observed: object }).observed).not.toHaveProperty("matchesEmitted");
     expect((report as { summary: string }).summary).not.toContain("not the");
+  });
+
+  it("a --thinking value that ps shows with whitespace is unknown, not its first word", async () => {
+    const { sessionName } = piSeat("pi", "high");
+    runner("very high --session x", [turn(5, "high")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({
+      emitted: { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." },
+      observed: { state: "observed", value: "high" },
+    });
+    expect((report as { observed: object }).observed).not.toHaveProperty("matchesEmitted");
   });
 
   it("a Pi that doesn't record the level (0.87.1) is NOT VERIFIED and says why", async () => {
