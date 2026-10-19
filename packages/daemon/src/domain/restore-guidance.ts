@@ -45,6 +45,24 @@ export interface SeatGuidance {
   items: GuidanceItem[];
 }
 
+/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the rig's
+ *  Claude file for Claude, `AGENTS.md` for Codex, or null for a runtime this doesn't know. */
+export function seatGuidanceFile(
+  runtime: string | null | undefined,
+  cwd: string,
+  claudeManagedBlockFile: string | null | undefined,
+): string | null {
+  const fileName = runtime === "claude-code"
+    ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
+    : runtime === "codex" ? "AGENTS.md" : null;
+  return fileName ? nodePath.join(cwd, fileName) : null;
+}
+
+/** Whether guidance text holds a complete managed block with this id, in the current or legacy form. */
+export function hasCompleteGuidanceBlock(content: string, blockId: string): boolean {
+  return blockState(content, blockId) === "complete";
+}
+
 /** The guidance file a seat's managed blocks live in, and the blocks it should hold on restore. */
 export function seatGuidance(
   startupCtx: NodeStartupSnapshot | null,
@@ -54,10 +72,8 @@ export function seatGuidance(
   readFile: (path: string) => string,
 ): SeatGuidance | null {
   if (!startupCtx || !cwd) return null;
-  const fileName = startupCtx.runtime === "claude-code"
-    ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
-    : startupCtx.runtime === "codex" ? "AGENTS.md" : null;
-  if (!fileName) return null;
+  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile);
+  if (!targetPath) return null;
   const items = new Map<string, GuidanceItem>();
   for (const saved of startupCtx.projectionEntries) {
     if (saved.category !== "guidance" || saved.mergeStrategy !== "managed_block") continue;
@@ -86,7 +102,7 @@ export function seatGuidance(
     items.set(f.path, { blockId: f.path, sourcePath: f.absolutePath });
   }
   for (const id of NEVER_MERGED) items.delete(id);
-  return { targetPath: nodePath.join(cwd, fileName), items: [...items.values()] };
+  return { targetPath, items: [...items.values()] };
 }
 
 type BlockState = "complete" | "absent" | "incomplete";

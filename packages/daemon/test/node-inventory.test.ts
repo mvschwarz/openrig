@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { RigRepository } from "../src/domain/rig-repository.js";
 import { getNodeInventory, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../src/domain/node-inventory.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -907,5 +911,61 @@ describe("OPR.0.4.0.26 — node-list payload source dedupe", () => {
     // The full data remains retrievable on the single-node DETAIL path.
     expect(detailJson).toContain(HEAVY_BLOB_MARKER);
     expect(detailJson).toContain("Choose the full conversation option");
+  });
+});
+
+describe("node detail reports a guidance block's installed file only from evidence (#64)", () => {
+  let db: Database.Database;
+  let cwd: string;
+  const block = (id: string, marker = "OpenRig") => `<!-- BEGIN ${marker} MANAGED BLOCK: ${id} -->\nrole text\n<!-- END ${marker} MANAGED BLOCK: ${id} -->\n`;
+  const guidance = (target?: string, mergeStrategy = "managed_block") => ({
+    effectiveId: "role", category: "guidance", sourceSpec: "impl", sourcePath: "guidance/role.md", resourcePath: "guidance/role.md",
+    absolutePath: "/project/agents/impl/guidance/role.md", mergeStrategy, ...(target ? { target } : {}),
+  });
+  const installed = (runtime = "claude-code", entries: Array<Record<string, string>> = [guidance("AGENTS.md")]) => {
+    seedStartupContext(db, "node-1", { runtime, projectionEntries: entries });
+    return getNodeDetail(db, "rig-1", "dev.impl")!.installedResources;
+  };
+  beforeEach(() => {
+    db = createFullTestDb();
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig");
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "inventory-guidance-"));
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = 'node-1'").run(cwd);
+  });
+  afterEach(() => { db.close(); fs.rmSync(cwd, { recursive: true, force: true }); });
+
+  it("reports the file the runtime merged into, not the spec's declared target, while that file holds the block", () => {
+    fs.writeFileSync(path.join(cwd, "CLAUDE.md"), `# Mine\n\n${block("role")}`);
+    expect(installed()).toEqual([{ id: "role", category: "guidance", targetPath: path.join(cwd, "CLAUDE.md"),
+      declaredTarget: "AGENTS.md", effectiveTarget: path.join(cwd, "CLAUDE.md") }]);
+  });
+
+  it("shows no installed path when the runtime's file lacks the block, even where the declared target holds one", () => {
+    fs.writeFileSync(path.join(cwd, "CLAUDE.md"), "# Mine\n");
+    fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role"));
+    expect(installed()).toEqual([{ id: "role", category: "guidance", targetPath: "",
+      declaredTarget: "AGENTS.md", effectiveTarget: path.join(cwd, "CLAUDE.md") }]);
+  });
+
+  it("follows the rig's Claude managed-blocks file, Codex's AGENTS.md, and the older block markers", () => {
+    new RigRepository(db).setRigClaudeManagedBlockFile("rig-1", "CLAUDE.local.md");
+    fs.writeFileSync(path.join(cwd, "CLAUDE.local.md"), block("role", "RIGGED"));
+    expect(installed()[0]).toMatchObject({ targetPath: path.join(cwd, "CLAUDE.local.md"), effectiveTarget: path.join(cwd, "CLAUDE.local.md") });
+    db.prepare("DELETE FROM node_startup_context WHERE node_id = 'node-1'").run();
+    fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role"));
+    expect(installed("codex", [guidance("CLAUDE.md")])[0]).toMatchObject({ targetPath: path.join(cwd, "AGENTS.md"),
+      declaredTarget: "CLAUDE.md", effectiveTarget: path.join(cwd, "AGENTS.md") });
+  });
+
+  it("claims nothing for a runtime with no known guidance file, a merge that writes nothing, or a half-written block", () => {
+    fs.writeFileSync(path.join(cwd, "AGENTS.md"), block("role"));
+    expect(installed("pi")[0]).toEqual({ id: "role", category: "guidance", targetPath: "", declaredTarget: "AGENTS.md" });
+    db.prepare("DELETE FROM node_startup_context WHERE node_id = 'node-1'").run();
+    fs.writeFileSync(path.join(cwd, "CLAUDE.md"), block("role"));
+    expect(installed("claude-code", [guidance(undefined, "append")])[0]).toMatchObject({ targetPath: "" });
+    db.prepare("DELETE FROM node_startup_context WHERE node_id = 'node-1'").run();
+    fs.writeFileSync(path.join(cwd, "CLAUDE.md"), "<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nrole text\n");
+    expect(installed()[0]).toMatchObject({ targetPath: "" });
   });
 });

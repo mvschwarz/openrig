@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
@@ -15,7 +16,8 @@ import { deriveDisplayActivity } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity, mapPaneState } from "./session-transport.js";
 import type { StructuralObservation } from "./seat-structural-activity-service.js";
-import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
+import { RigRepository, findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
+import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
@@ -455,9 +457,26 @@ function getLatestError(db: Database.Database, rigId: string, nodeId: string): s
  * The startup-orchestrator persists: { category, effectiveId, sourceSpec, sourcePath, resourcePath, absolutePath, mergeStrategy, target }
  * We normalize to: { id, category, targetPath }
  */
-function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category: string; targetPath: string }> {
+function mapProjectionEntries(
+  entries: unknown[],
+  guidance?: { file: string | null; content: string | null },
+): NodeDetailEntry["installedResources"] {
   return entries.map((e: unknown) => {
     const entry = e as Record<string, string>;
+    if (entry.category === "guidance") {
+      // The runtime decides the file a guidance block goes into; a spec's `target` is only declared. An installed path
+      // is shown only while that file holds the block, never inferred from the declaration.
+      const id = entry.effectiveId ?? entry.id ?? "";
+      const installed = entry.mergeStrategy === "managed_block" && guidance?.file && guidance.content !== null
+        && hasCompleteGuidanceBlock(guidance.content, id);
+      return {
+        id,
+        category: "guidance",
+        targetPath: installed ? guidance!.file! : "",
+        ...(entry.target ? { declaredTarget: entry.target } : {}),
+        ...(guidance?.file ? { effectiveTarget: guidance.file } : {}),
+      };
+    }
     return {
       id: entry.effectiveId ?? entry.id ?? "",
       category: entry.category ?? "",
@@ -893,6 +912,16 @@ export function getNodeDetail(
   const startupFiles = ctxRow ? JSON.parse(ctxRow.resolved_files_json) : [];
   const startupActions = ctxRow ? JSON.parse(ctxRow.startup_actions_json) : [];
   const projectionEntries = ctxRow ? JSON.parse(ctxRow.projection_entries_json) : [];
+  // The seat's guidance file as its runtime resolves it now, and what it holds, read once for the guidance entries.
+  const guidanceEvidence = (): { file: string | null; content: string | null } => {
+    const runtime = (ctxRow as { runtime?: string | null } | undefined)?.runtime ?? entry.runtime;
+    const file = entry.cwd ? seatGuidanceFile(runtime, entry.cwd, new RigRepository(db).getRigClaudeManagedBlockFile(rigId)) : null;
+    let content: string | null = null;
+    if (file) {
+      try { content = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null; } catch { content = null; }
+    }
+    return { file, content };
+  };
 
   // Installed resources: override (from async adapter call) > projection fallback
   let installedResources: NodeDetailEntry["installedResources"];
@@ -914,14 +943,14 @@ export function getNodeDetail(
         }));
       } else {
         // Async — fall through to projection
-        installedResources = mapProjectionEntries(projectionEntries);
+        installedResources = mapProjectionEntries(projectionEntries, guidanceEvidence());
       }
     } catch {
-      installedResources = mapProjectionEntries(projectionEntries);
+      installedResources = mapProjectionEntries(projectionEntries, guidanceEvidence());
     }
   } else {
     // Projection fallback
-    installedResources = mapProjectionEntries(projectionEntries);
+    installedResources = mapProjectionEntries(projectionEntries, guidanceEvidence());
   }
 
   // Recent events (last 20 for this node)
