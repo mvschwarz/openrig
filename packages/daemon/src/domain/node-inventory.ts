@@ -1423,26 +1423,25 @@ export async function attachAgentActivity(
       now: sampledAt,
     });
     // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
-    // target and no older than the motion observation, can distinguish idle redraw from resumed work.
-    // window_activity has second precision; a later read must not be hidden by an earlier frame.
+    // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
+    // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.
     const structural = entry.canonicalSessionName
       ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName) ?? null
       : null;
-    const capturedMs = Date.parse(structural?.observedAt ?? "");
+    const capturedMs = Date.parse(structural?.idleFrame?.captureStartedAt ?? "");
     const motionMs = Date.parse(motion?.lastActivityAt ?? "");
-    const motionObservedMs = Date.parse(motion?.lastObservedAt ?? "");
     const currentIdleFrame = structural?.state === "agent_idle"
       && structural.idleFrame?.sessionName === entry.canonicalSessionName
       && structural.idleFrame?.runtime === entry.runtime
       && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
       && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
-      && (!motionRunning || (Number.isFinite(motionMs) && Number.isFinite(motionObservedMs)
-        && capturedMs >= motionMs && capturedMs >= motionObservedMs));
+      && (!motionRunning || (Number.isFinite(motionMs)
+        && Math.floor(capturedMs / 1000) > Math.floor(motionMs / 1000)));
 
     // Running/needs_input hooks keep their meaning. An idle hook alone still yields to motion
     // (D2); when a current complete idle frame exists, report that frame's provenance instead.
     if (hookActivity && hookActivity.state !== "unknown"
-      && !(hookActivity.state === "idle" && currentIdleFrame)) {
+      && !(hookActivity.state === "idle" && motionRunning && currentIdleFrame)) {
       return {
         ...entry,
         agentActivity: withMotion(hookActivity),

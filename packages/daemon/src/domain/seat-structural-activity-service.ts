@@ -15,7 +15,7 @@ export interface StructuralObservation {
   evidence: string | null;
   observedAt: string;
   /** A complete idle frame read for this capture's target, not a generic footer or hook. */
-  idleFrame?: { sessionName: string; runtime: "claude-code" | "codex" };
+  idleFrame?: { sessionName: string; runtime: "claude-code" | "codex"; captureStartedAt: string };
   /** Set when a later sweep found the pane unchanged since observedAt without capturing it. Freshness counts from it;
    *  observedAt stays the capture. */
   checkedAt?: string;
@@ -93,9 +93,11 @@ export class SeatStructuralActivityService {
    *  null or failed capture INVALIDATES the prior row (never leaves a stale positive verdict) and
    *  returns null (MUST-FIX 1). `prefetched` (#308) is the sweep's batched capture: a session it holds (null = gone or
    *  empty) is used as is; one it lacks is captured here, per seat. */
-  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, agentApp?: string | null): Promise<StructuralObservation | null> {
+  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null, agentApp?: string | null, prefetchedStartedAt?: Date): Promise<StructuralObservation | null> {
     let content: string | null;
     let observedAt: Date | null = null;
+    // Completion can lag the bytes: use a lower bound taken before the actual read.
+    const captureStartedAt = prefetched?.has(sessionName) ? prefetchedStartedAt : this.now();
     if (prefetched?.has(sessionName)) {
       const capture = prefetched.get(sessionName)!;
       content = capture.text;
@@ -119,9 +121,9 @@ export class SeatStructuralActivityService {
       reason: c.reason,
       evidence: c.evidence,
       observedAt: at.toISOString(),
-      ...(c.state === "agent_idle" && (runtime === "claude-code" || runtime === "codex")
+      ...(captureStartedAt && c.state === "agent_idle" && (runtime === "claude-code" || runtime === "codex")
         && readSeatBeforePaste(content, runtime, sessionName) === "idle"
-        ? { idleFrame: { sessionName, runtime } } : {}),
+        ? { idleFrame: { sessionName, runtime, captureStartedAt: captureStartedAt.toISOString() } } : {}),
     };
     this.latestBySession.set(sessionName, obs);
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
@@ -185,12 +187,13 @@ export class SeatStructuralActivityService {
       });
       // #308: one batched capture for the whole fleet (a few tmux calls) instead of a fork per seat; anything the batch
       // didn't cover (no listing, a failed chunk) is read per seat inside pollSeat, as before.
+      const captureStartedAt = this.now();
       const prefetched = this.tmuxAdapter.capturePanesContent && due.length > 0
         ? await this.tmuxAdapter.capturePanesContent(due.map((r) => r.session_name), this.captureLines, this.now).catch(() => null)
         : null;
       await Promise.all(due.map(async (r) => {
         try {
-          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null, agentAppBySession.get(r.session_name));
+          const obs = await this.pollSeat(r.session_name, prefetched, runtimeBySession.get(r.session_name) ?? null, agentAppBySession.get(r.session_name), captureStartedAt);
           const seen = activity?.get(r.session_name);
           if (obs && seen !== undefined) this.capturedActivity.set(r.session_name, { activity: seen.activity, size: seen.size, startSec, fullAt: sweepAt.getTime() });
           else this.capturedActivity.delete(r.session_name);
