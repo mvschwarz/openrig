@@ -14,10 +14,11 @@ import { migrate } from "../src/db/migrate.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
+import { attachAgentActivity, getNodeInventory } from "../src/domain/node-inventory.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, mapPaneState, probeSessionActivity, SessionTransport } from "../src/domain/session-transport.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { transportRoutes } from "../src/routes/transport.js";
 
@@ -115,7 +116,13 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
     }
     const classified = classifyPaneActivity(frame.pane, { runtime: "claude-code" });
     const structural = await new SeatStructuralActivityService(tmux).pollSeat("worker@test");
-    records.push({ id: frame.id, pane: frame.pane, assessments, readiness, classifier: classified, structural, sends });
+    // startup.ts's existing permission reader calls this seam with runtime codex.
+    const startupActivity = await probeSessionActivity({ sessionName: "worker@test", runtime: "codex", attachmentType: "tmux", tmuxAdapter: tmux, now });
+    const startupPermission = startupActivity.state === "unknown" ? null
+      : startupActivity.state === "needs_input" && ["permission_prompt", "selection_prompt"].includes(startupActivity.reason);
+    const inventory = await attachAgentActivity(getNodeInventory(db, "rig"), { tmuxAdapter: tmux, captureFallback: true, now });
+    records.push({ id: frame.id, pane: frame.pane, assessments, readiness, classifier: classified, structural, startupPermission,
+      inventory: inventory.map(x => x.agentActivity), sends });
     const currentMcp = frame.id === "old-current-MCP" || frame.id === "2.1.303-current-MCP";
     for (const { hook, status, body, effects } of sends) {
       const blocked = hook === "permission" || (hook === "none" && (currentMcp || frame.id === "ordinary-current-permission"));
@@ -146,6 +153,10 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
       : ["ordinary-current-permission", "clipped-new-MCP", "current-checkbox-cursor-without-normal-composer"].includes(frame.id) ? [false, true] : [true, true]);
     if (currentMcp) expect(classified).toMatchObject({ state: "attention", reason: "selection_prompt" });
     expect(structural).toMatchObject({ state: classified.state, reason: classified.reason });
+    expect(inventory).toHaveLength(1);
+    expect(inventory[0]?.agentActivity).toMatchObject({ state: mapPaneState(classified.state), reason: classified.reason });
+    expect(startupPermission).toBe(currentMcp || frame.id === "ordinary-current-permission" ? true
+      : ["clipped-new-MCP", "current-checkbox-cursor-without-normal-composer"].includes(frame.id) ? null : false);
   });
 });
 
@@ -173,6 +184,7 @@ describe("MCP menu structure and history boundaries", () => {
     expect(classification.reason === "selection_prompt").toBe(current);
     expect(noRuntime.reason === "selection_prompt").toBe(current);
     const assessment = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: pane, claudeResumeIdentityVerified: true });
-    expect(assessment.code).toBe(current ? "mcp_gate" : "active_runtime");
+    expect(assessment.status).toBe(current ? "inconclusive" : "resumed");
+    if (current) expect(assessment.code).toBe("mcp_gate");
   });
 });
