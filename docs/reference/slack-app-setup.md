@@ -359,11 +359,12 @@ When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.
 Missing bot credentials, history scope, membership, retention limits and API
 failures appear as recovery limitations. A tracked thread Slack can't find stays incomplete in
-status, with no further call, until its thread mapping changes; that isn't proof the thread was
-deleted. No additional scope is required to keep live delivery working. Threads nobody tracks,
-older open threads, threads closed more than seven days ago and other
-channels remain outside this recovery scope; global chronological order is not promised. This
-change does not replay intervals already checkpointed before broadcast-reply recovery was added.
+status, with no further call, until its thread mapping changes or the daemon restarts or rewires
+the connector; that isn't proof the thread was deleted. No additional scope is required to keep
+live delivery working. Threads nobody tracks, older open threads, threads closed more than seven
+days ago and other channels remain outside this recovery scope; global chronological order is
+not promised. This change does not replay intervals already checkpointed before broadcast-reply
+recovery was added.
 
 `rig slack status` retains local configuration checks and adds a bounded daemon
 snapshot: socket state/generation, last event, recovery interval/state/reason for each
