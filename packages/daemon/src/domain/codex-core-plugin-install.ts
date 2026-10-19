@@ -87,6 +87,16 @@ export function recordedMarketplaceSource(userConfig: string | null): string | n
   return isTable(entry) && typeof entry["source"] === "string" ? entry["source"] : null;
 }
 
+/** Whether the user config sets an explicit `enabled = true` for the plugin (what Codex's install writes there). */
+export function userLayerEnablesCorePlugin(userConfig: string | null): boolean {
+  if (userConfig === null) return false;
+  let doc: Record<string, unknown>;
+  try { doc = parseToml(userConfig) as Record<string, unknown>; } catch { return false; }
+  const plugins = doc["plugins"];
+  const entry = isTable(plugins) ? plugins[CODEX_CORE_PLUGIN_KEY] : undefined;
+  return isTable(entry) && entry["enabled"] === true;
+}
+
 /** The local marketplace manifest that lists the vendored plugin, in a layout Codex reads (`.agents/plugins/marketplace.json`). */
 export function codexCoreMarketplaceManifest(): string {
   return `${JSON.stringify({

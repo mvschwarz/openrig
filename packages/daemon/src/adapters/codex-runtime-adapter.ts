@@ -41,7 +41,7 @@ import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import {
   CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN, CODEX_CORE_PLUGIN_KEY, CODEX_MARKETPLACE_MANIFEST_PATH,
-  codexCoreMarketplaceManifest, codexCorePluginEnablement, codexReadableConfigLayers, recordedMarketplaceSource,
+  codexCoreMarketplaceManifest, codexCorePluginEnablement, codexReadableConfigLayers, recordedMarketplaceSource, userLayerEnablesCorePlugin,
   type CodexConfigLayerRead,
 } from "../domain/codex-core-plugin-install.js";
 
@@ -304,17 +304,22 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const enablement = codexCorePluginEnablement(layers);
     if (enablement.decision !== "allow") return report("skipped", enablement.reason);
 
-    if (this.fs.exists(nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN, version))) {
-      return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed`);
-    }
-
     const pluginsDir = nodePath.dirname(pluginDir);
     const userLayer = layers.find((layer) => layer.name === "user config");
-    const recorded = recordedMarketplaceSource(userLayer?.state === "read" ? userLayer.content : null);
+    const userConfig = userLayer?.state === "read" ? userLayer.content : null;
+    const recorded = recordedMarketplaceSource(userConfig);
     // Compared as real paths, so a marketplace recorded through a symlink to the plugins folder is the same source.
     const canonical = (p: string) => { try { return fs.realpathSync.native(nodePath.resolve(p)); } catch { return nodePath.resolve(p); } };
     if (recorded !== undefined && (recorded === null || canonical(recorded) !== canonical(pluginsDir))) {
       return report("skipped", `a marketplace named ${CODEX_CORE_MARKETPLACE} is already configured with another source; it's left alone`);
+    }
+
+    // Current only when Codex would load it: the vendored version is in its store AND the user config still registers it
+    // (our marketplace, and an explicit enabled = true, which Codex's install writes). Codex loads only configured
+    // plugins, so a cache left behind after the entry or the marketplace was removed is installed again.
+    const cached = this.fs.exists(nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN, version));
+    if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
+      return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
     }
     const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
     const manifest = codexCoreMarketplaceManifest();
