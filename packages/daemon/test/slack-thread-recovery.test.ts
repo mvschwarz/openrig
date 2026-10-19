@@ -232,6 +232,19 @@ it("channels and threads take turns under one budget: every thread is reached an
   expect(f.rows().filter(row => row.destinationSession === "owner@test")).toHaveLength(4);
 });
 
+it("a channel backlog and waiting threads alternate call by call, so each kind keeps half a pass", async () => {
+  const f = fixture();
+  for (let i = 1; i <= 5; i++) { f.track(ts(i), `s${i}@test`); f.replies[`C1:${ts(i)}`] = [f.reply(i + 20, ts(i))]; }
+  f.history.C1 = Array.from({ length: 60 }, (_, i) => f.message(101 + i));
+  const r = f.recovery(); f.time(at(170));
+
+  await r.run();
+
+  expect(f.calls("conversations.history")).toHaveLength(2);
+  expect(f.calls("conversations.replies")).toHaveLength(2);
+  expect(r.status()).toMatchObject({ state: "incomplete", reason: "pass-budget" }); // the channel has more, next pass
+});
+
 it("a newly mapped channel starts at adoption, not at a landing, and recovers into its inbound seat", async () => {
   const f = fixture();
   f.seen.mark(`C2:${ts(90)}`, "landed");

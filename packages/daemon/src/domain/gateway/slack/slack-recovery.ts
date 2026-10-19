@@ -91,22 +91,17 @@ export class SlackRecovery {
   }
 
   private async scan(): Promise<void> {
-    const channels = rotate(this.channels, this.lastChannel);
-    const threads = rotate(this.trackedThreadSources(), this.lastThread);
-    let ring: RecoverySource[] = [];
-    for (let i = 0; i < Math.max(channels.length, threads.length); i++) {
-      if (channels[i]) ring.push(channels[i]!);
-      if (threads[i]) ring.push(threads[i]!);
-    }
+    // Channels and threads take turns one step at a time, each kind in its own rotation. A source with
+    // more to scan rejoins the back of its kind's queue; a kind with nothing left gives its turns away.
+    const queues: RecoverySource[][] = [rotate(this.channels, this.lastChannel), rotate(this.trackedThreadSources(), this.lastThread)];
     const budget = newRecoveryBudget(this.now());
-    while (ring.length && !this.stopped && budgetLeft(budget, this.now())) {
-      const again: RecoverySource[] = [];
-      for (const source of ring) {
-        if (this.stopped || !budgetLeft(budget, this.now())) break;
-        if (source instanceof ThreadRecovery) this.lastThread = source.key; else this.lastChannel = source.key;
-        if (await source.step(budget, this.backoff) === "more") again.push(source);
-      }
-      ring = again;
+    let kind = 0;
+    while (!this.stopped && budgetLeft(budget, this.now()) && (queues[0]!.length || queues[1]!.length)) {
+      if (!queues[kind]!.length) kind = 1 - kind;
+      const source = queues[kind]!.shift()!;
+      if (source instanceof ThreadRecovery) this.lastThread = source.key; else this.lastChannel = source.key;
+      if (await source.step(budget, this.backoff) === "more") queues[kind]!.push(source);
+      kind = 1 - kind;
     }
   }
 
