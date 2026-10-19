@@ -55,7 +55,7 @@ describe("Codex: the sign-in fact from the existing refresh", () => {
     expect(w.project(at(11))[0]!.signIn).toMatchObject({ state: "unknown", at: at(10) });
   });
 
-  it("a row a later read superseded is not the current login: unknown", async () => {
+  it("a row a later read superseded is not the latest read: unknown", async () => {
     const other = { account: { type: "chatgpt", email: "other@example.test", planType: "pro" }, requiresOpenaiAuth: true };
     let n = 0;
     const answers = [okCodex(), { ok: true as const, observedAt: at(10), account: other, rateLimits: rateLimitsAnswer({ accountId: "acct-2" }) }];
@@ -161,6 +161,8 @@ describe("superseded rows don't claim another login (round 2)", () => {
     await w.refresh(); await w.refresh();
     const earlier = w.project(NOW).find((r) => !r.latestFromSource && r.unresolved === undefined)!;
     expect(earlier.signIn!.evidence).toContain("or one it couldn't identify");
+    // The current login is unknown and may be this same one, so the row never claims it isn't.
+    expect(earlier.signIn!.evidence).not.toContain("not the current login");
     expect(earlier.identityNote).toContain("reported another login, or one it couldn't identify");
   });
 });
@@ -241,11 +243,11 @@ describe("Claude: earlier rows", () => {
     expect(earlier.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("possibly this same login") });
     expect(earlier.signIn!.evidence).not.toMatch(/another/);
   });
-  it("an earlier resolved login another refresh replaced keeps 'not the current login'", async () => {
+  it("an earlier resolved login another refresh replaced reads 'not the latest read'", async () => {
     const other: UsageReadOutcome<ClaudeAuthAnswer> = { ok: true, observedAt: NOW, auth: { loggedIn: true, authMethod: "claude.ai", email: "o***@example.test", orgId: "org-2", orgName: "Other", subscriptionType: "team" } as ClaudeAuthAnswer["auth"] };
     const w = claude([authOk(), other]);
     await w.refresh(); await w.refresh();
-    expect(w.project(NOW).find((r) => !r.latestFromSource)!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("not the current login") });
+    expect(w.project(NOW).find((r) => !r.latestFromSource)!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("not the latest read") });
   });
 });
 

@@ -331,7 +331,8 @@ export class ClaudeUsageWindows {
         signIn: { state: "unknown", at: null, evidence: s.identity.source === "unresolved"
           // An unresolved earlier identity can't be matched, so it may be this same login.
           ? "an earlier read not matched to the latest one (possibly this same login)"
-          : "not the current login: a later refresh reported another login, or one it couldn't identify" },
+          // The current login is unknown after an unidentified read and may be this one, so never "not the current login".
+          : "not the latest read: a later refresh reported another login, or one it couldn't identify" },
         identityNote: `identity: the daemon's Claude login as of the refresh at ${s.at}; a refresh at ${s.supersededAt} reported another login, or one it couldn't identify; windows as they were at ${s.at}${s.picks.length > 0 ? ` (from ${seatsOf(s.picks)})` : " (none reported then)"}`,
         ...(s.identity.source === "unresolved" ? {
           unresolved: { note: UNRESOLVED_EARLIER_NOTE, keptReads: UNRESOLVED_READS_KEPT, droppedReads: this.unresolvedDropped },
