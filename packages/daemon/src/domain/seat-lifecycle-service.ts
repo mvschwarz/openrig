@@ -25,7 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveConcreteHint, type NodeBinding } from "./runtime-adapter.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
-import { planCwdPreparation, recordCwdPreparation } from "./seat-cwd-preparation.js";
+import { planCwdPreparation } from "./seat-cwd-preparation.js";
 import { resolvePermissionPolicyAttachment, validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import type { PaneCutoverTiming } from "./pane-cutover.js";
@@ -99,7 +99,7 @@ export interface SeatRefusal {
     | "missing_model"
     | "missing_cwd"
     | "invalid_cwd"
-    | "cwd_preparation_failed"
+    | "cwd_check_failed"
     | "cwd_persistence_failed"
     | "cwd_configuration_changed"
     | "cwd_destination_conflict"
@@ -151,7 +151,7 @@ export type SetModelResult =
 export type SetCwdResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean;
       effect: "next_launch"; warnings: string[] }
-  | (SeatRefusal & { preparedCwd?: string; warnings?: string[] });
+  | (SeatRefusal & { warnings?: string[] });
 
 interface SetCwdInput {
   seatRef: string;
@@ -334,40 +334,37 @@ export class SeatLifecycleService {
     return { ok: true, seat, from, to: model, changed: true };
   }
 
-  /** Prepare a future launch directory without moving or replacing the current occupant.
-   * Filesystem preparation precedes the atomic cwd + audit write. A failed preparation
-   * may leave files in the destination; it never commits a partly prepared launch cwd.
+  /**
+   * Save an existing seat's launch directory for its next fresh launch or rebuild handover, keeping its identity,
+   * address, queue and history. Like set-model it validates, then persists the cwd and an audited event in one
+   * transaction. Before that, a read-only check refuses the change when the new directory already holds files the
+   * next launch would refuse to overwrite. It writes no startup files: launch does that, as it does today. The running
+   * occupant keeps its directory until it's relaunched.
    */
   async setCwd(input: SetCwdInput): Promise<SetCwdResult> {
-    input = { ...input };
     const required = this.requireReason(input.reason);
     if (required) return required;
     if (!input.cwd?.trim()) return { ok: false, code: "missing_cwd", message: "An absolute working directory is required (--cwd)." };
     if (!path.isAbsolute(input.cwd) || input.cwd.includes("\0")) {
       return { ok: false, code: "invalid_cwd", message: "The working directory must be an absolute path on the daemon's host." };
     }
-    const to = path.resolve(input.cwd);
+    let to = path.resolve(input.cwd);
     if (to === path.parse(to).root) {
       return { ok: false, code: "invalid_cwd", message: "Choose a project directory, not a filesystem root, for managed startup files." };
     }
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
-    const guard = this.tmuxAdapter.deliveryGuard;
-    const prepare = () => this.prepareCwd({ ...input, cwd: to }, resolved.nodeId);
-    return guard ? guard.configure(resolved.nodeId, prepare) : prepare();
-  }
-
-  private async prepareCwd(input: SetCwdInput, expectedNodeId: string): Promise<SetCwdResult> {
-    let to = input.cwd;
-    const resolved = this.resolveSeat(input.seatRef);
-    if ("code" in resolved) return resolved;
-    if (resolved.nodeId !== expectedNodeId) {
-      return { ok: false, code: "cwd_configuration_changed", message: "The seat reference changed while waiting to prepare its directory." };
-    }
     const seat = this.describe(resolved);
     const node = this.rigRepo.getRig(seat.rigId)?.nodes.find(candidate => candidate.id === seat.nodeId);
     if (!node) return { ok: false, code: "seat_not_found", message: "The seat no longer exists.", guidance: SEAT_LOOKUP_GUIDANCE };
     const from = node.cwd;
+    try {
+      fs.mkdirSync(to, { recursive: true });
+      to = fs.realpathSync(to);
+      if (to === path.parse(to).root || !fs.statSync(to).isDirectory()) throw new Error("Destination must be a project directory.");
+    } catch (error) {
+      return { ok: false, code: "invalid_cwd", message: `Cannot use the requested working directory: ${(error as Error).message}` };
+    }
     const startup = this.readStartupContext(node.id, to);
     if (!startup.ok) return startup.refusal;
     if (!node.runtime || startup.context.runtime !== node.runtime) {
@@ -377,8 +374,8 @@ export class SeatLifecycleService {
     if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
 
     const warnings: string[] = [];
-    // Resolve legacy auto hints once, then pass concrete hints to the adapter. No
-    // send_text file or startup action can enter this filesystem-only operation.
+    // The filesystem startup files the next fresh launch would deliver (never send_text or actions), with legacy auto
+    // hints resolved, for the read-only destination check.
     const files: ResolvedStartupFile[] = [];
     for (const file of startup.context.resolvedStartupFiles) {
       if (!file.appliesOn.includes("fresh_start") || file.deliveryHint === "send_text") continue;
@@ -388,68 +385,42 @@ export class SeatLifecycleService {
         if (hint !== "send_text") files.push({ ...file, deliveryHint: hint });
       } catch (error) {
         const detail = `Startup file ${file.path}: ${(error as Error).message}`;
-        if (file.required) return { ok: false, code: "cwd_preparation_failed", message: detail, warnings };
+        if (file.required) return { ok: false, code: "cwd_check_failed", message: detail, warnings };
         warnings.push(detail);
       }
     }
-
-    try {
-      fs.mkdirSync(to, { recursive: true });
-      to = fs.realpathSync(to);
-      if (to === path.parse(to).root || !fs.statSync(to).isDirectory()) throw new Error("Destination must be a project directory.");
-    } catch (error) {
-      return { ok: false, code: "invalid_cwd", message: `Cannot use the requested working directory: ${(error as Error).message}` };
-    }
     const oldBinding = this.sessionRegistry.getBindingForNode(node.id);
-    const managedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(seat.rigId);
-    let binding: NodeBinding = {
+    const binding: NodeBinding = {
       id: oldBinding?.id ?? `cwd:${node.id}`, nodeId: node.id,
       attachmentType: oldBinding?.attachmentType ?? "tmux",
       tmuxSession: oldBinding?.tmuxSession ?? deriveCanonicalFromEntry(resolved.entry),
       tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null,
-      updatedAt: oldBinding?.updatedAt ?? new Date().toISOString(),
-      cwd: to, model: node.model ?? undefined, effort: node.effort ?? undefined,
-      codexConfigProfile: node.codexConfigProfile ?? undefined,
-      launchPosture: this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
-        ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture ?? "floor",
-      ...(managedBlockFile ? { claudeManagedBlockFile: managedBlockFile } : {}),
+      updatedAt: oldBinding?.updatedAt ?? new Date().toISOString(), cwd: to,
     };
     const inspect = `Inspect the configured directory with: rig seat status ${input.seatRef}`;
-    const preparationGuidance = `Startup preparation may have written files in the requested directory or runtime-managed state directories. ${inspect} The previous directory's files are not cleaned up.`;
     try {
-      binding = new NativePermissionStore(this.db).apply(binding, node.runtime);
-      const manifest = new ProjectionManifestStore(this.db);
-      const preparation = planCwdPreparation({ ...startup.context.plan, cwd: to }, files, binding, adapter, manifest);
-      warnings.push(...preparation.warnings);
-      if (preparation.conflicts.length) {
-        warnings.push(...preparation.conflicts.map(copy => `Protected destination file: ${copy.targetPath}`));
-        return { ok: false, code: "cwd_destination_conflict", preparedCwd: to, warnings,
-          message: "Destination resource files conflict with the saved startup context; no startup files were written and the cwd was not committed.",
-          guidance: "Use a clean destination, or inspect and move/merge the reported files before retrying." };
+      const check = planCwdPreparation({ ...startup.context.plan, cwd: to }, files, binding, adapter, new ProjectionManifestStore(this.db));
+      warnings.push(...check.warnings);
+      if (check.conflicts.length) {
+        warnings.push(...check.conflicts.map(copy => `Protected destination file: ${copy.targetPath}`));
+        return { ok: false, code: "cwd_destination_conflict", warnings,
+          message: "The new directory holds files the seat's next launch would refuse to overwrite; nothing was written and the cwd was not changed.",
+          guidance: "Use a clean destination, or inspect and move or merge the reported files before retrying." };
       }
-      const projection = await adapter.project(preparation.plan, binding);
-      warnings.push(...(projection.warnings ?? []));
-      if (projection.failed.length) throw new Error(projection.failed.map(f => `${f.effectiveId}: ${f.error}`).join("; "));
-      const delivery = await adapter.deliverStartup(preparation.files, binding, async () => { throw new Error("Interactive startup is deferred until launch."); });
-      warnings.push(...(delivery.warnings ?? []));
-      if (delivery.failed.length) throw new Error(delivery.failed.map(f => `${f.path}: ${f.error}`).join("; "));
-      warnings.push(...this.db.transaction(() => recordCwdPreparation(preparation, manifest))());
     } catch (error) {
-      return { ok: false, code: "cwd_preparation_failed", message: `Working directory selection was not committed: ${(error as Error).message}`,
-        guidance: preparationGuidance, preparedCwd: to, warnings };
+      return { ok: false, code: "cwd_check_failed", message: `The new directory couldn't be checked; the cwd was not changed: ${(error as Error).message}`, warnings };
     }
 
     let persisted: PersistedEvent | null = null;
     const changed = from !== to;
     try {
       const refusal = this.db.transaction((): SeatRefusal | null => {
-        // The shared guard serializes normal writers. Check persisted configuration
-        // as well: an import or another connection must not be silently overwritten.
+        // Another writer (an import, another connection) must not be silently overwritten.
         const current = this.resolveSeat(input.seatRef);
         const currentStartup = this.readStartupContext(node.id, to);
         if ("code" in current || current.nodeId !== node.id || current.entry.cwd !== from
           || current.entry.runtime !== node.runtime || !currentStartup.ok || currentStartup.context.hash !== startup.context.hash) {
-          return { ok: false, code: "cwd_configuration_changed", message: "Seat configuration changed while preparing its directory; the new cwd was not committed.", guidance: inspect };
+          return { ok: false, code: "cwd_configuration_changed", message: "The seat's configuration changed while its new directory was checked; the cwd was not changed.", guidance: inspect };
         }
         if (changed) {
           if (!this.rigRepo.setNodeCwd(node.id, to, from)) throw new Error("The seat's saved working directory changed.");
@@ -458,10 +429,9 @@ export class SeatLifecycleService {
         }
         return null;
       })();
-      if (refusal) return { ...refusal, preparedCwd: to, warnings };
+      if (refusal) return { ...refusal, warnings };
     } catch (error) {
-      return { ok: false, code: "cwd_persistence_failed", message: `Working directory was not committed: ${(error as Error).message}`,
-        guidance: preparationGuidance, preparedCwd: to, warnings };
+      return { ok: false, code: "cwd_persistence_failed", message: `The working directory was not changed: ${(error as Error).message}`, guidance: inspect, warnings };
     }
     if (persisted) this.eventBus.notifySubscribers(persisted);
     return { ok: true, seat, from, to, changed, effect: "next_launch", warnings };

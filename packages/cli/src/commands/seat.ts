@@ -541,7 +541,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch" || path === "continue" || path === "restart" || path === "set-cwd"
+      res = path === "launch" || path === "continue" || path === "restart"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
@@ -560,7 +560,7 @@ identity remains unverified; a version number alone cannot clear it.
         ok: false as const,
         code: path === "launch-plan" ? "launch_plan_timeout" : `${path.replaceAll("-", "_")}_outcome_unknown`,
         status: "unknown",
-        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "set-cwd" ? "directory preparation" : path === "continue" ? "continuation" : "launch"} may still be in progress.`,
+        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "set-cwd" ? "directory change" : path === "continue" ? "continuation" : "launch"} may still be in progress.`,
         guidance: path === "launch-plan" ? "Retry the preview when the daemon responds." : `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
@@ -716,22 +716,32 @@ resume/successor launch reads it at call time. Examples:
     .requiredOption("--reason <text>", "Audit reason for the future launch directory")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
-    .description("Prepare startup files and save an existing seat's working directory for future launches")
+    .description("Save an existing seat's working directory for its next fresh launch or rebuild handover")
     .addHelpText("after", `
-Prepares filesystem startup material before saving the directory. Interactive
-startup messages and actions run at launch. An existing process keeps its cwd
-until you relaunch it. The seat's identity, queue and session history are retained.
-Conflicting copied destination files are refused before startup writes; inspect
-the reported paths or choose a clean destination before retrying.
-Files in the old directory are left for explicit cleanup after checking other users.
+Saves the directory (and an audit event) for this seat's next launch. The seat's
+identity, address, queue and history are kept. Nothing is written into the new
+directory except the folder itself: the next launch writes the startup files
+there, as it does today. If the new directory already holds files that launch
+would refuse to overwrite, the change is refused and those paths are named.
+
+The running process keeps its current directory. Adopt the new one with
+  rig seat launch <seat> --fresh --stop      or
+  rig seat handover <seat> --source rebuild
+before any rig down/rig up, fork-based handover, or
+rig seat restart --keep-conversation: those resume the existing conversation in
+the saved directory, and Claude keeps conversations per project directory, so a
+resume there may not find it.
+
+Files in the old directory are left as they are; other seats may still use them.
 Example:
   rig seat set-cwd planning-lead@project --cwd /work/project/seats/planning-lead --reason "isolate planning"`)
     .action(async (seat: string, opts: { cwd: string; reason: string; operator?: string; json?: boolean }) => {
       await runLifecycleVerb("set-cwd", seat, { cwd: opts.cwd, reason: opts.reason, operator: opts.operator }, opts, data => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         console.log(`Launch directory for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])}${data["changed"] === false ? " (already selected)" : " (audited)"}.`);
-        console.log("Startup files prepared. An existing process keeps its current directory until a normal relaunch.");
-        console.log("Review shared use before cleaning up files in the previous directory.");
+        console.log("Nothing was written there yet: the next fresh launch or rebuild handover writes its startup files.");
+        console.log(`The running process keeps its current directory. Adopt the new one with: rig seat launch ${seat} --fresh --stop`);
+        console.log("Files in the previous directory are left as they are; other seats may still use them.");
       });
     });
 

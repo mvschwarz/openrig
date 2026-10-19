@@ -265,7 +265,7 @@ function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_preparation_failed" || code === "cwd_persistence_failed") return 500;
+    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;

@@ -73,11 +73,11 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect(await res.json()).toMatchObject({ ok: false });
   });
 
-  it.each([["cwd_configuration_changed", 409], ["cwd_destination_conflict", 409], ["cwd_preparation_failed", 500]] as const)("set-cwd exposes %s with its recovery details", async (code, status) => {
-    const result = { ok: false as const, code, message: "Directory selection was not committed", preparedCwd: "/prepared",
-      guidance: "Inspect prepared files and seat status", warnings: ["Destination may contain files"] };
+  it.each([["cwd_configuration_changed", 409], ["cwd_destination_conflict", 409], ["cwd_check_failed", 500], ["cwd_persistence_failed", 500]] as const)("set-cwd exposes %s with its recovery details", async (code, status) => {
+    const result = { ok: false as const, code, message: "The working directory was not changed",
+      guidance: "Inspect the reported files and seat status", warnings: ["Protected destination file: /work/seat/.claude/agents/reviewer.md"] };
     vi.spyOn(SeatLifecycleService.prototype, "setCwd").mockResolvedValue(result);
-    const res = await post("set-cwd", "planner@project", { cwd: "/prepared", reason: "isolate" });
+    const res = await post("set-cwd", "planner@project", { cwd: "/work/seat", reason: "isolate" });
     expect(res.status).toBe(status);
     expect(await res.json()).toEqual(result);
   });

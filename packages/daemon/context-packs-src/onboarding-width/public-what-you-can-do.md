@@ -509,15 +509,13 @@ version, from checking the environment to a useful report to the OpenRig team.
   Effective-model detection follows the identity-verified current occupant, not a retained
   predecessor; a `<synthetic>` transcript record is skipped, so a PENDING model check is not a
   divergence.
-- **`rig seat set-cwd <seat> --cwd <absolute-path> --reason <text>`** — prepare filesystem startup
-  material and save an existing seat's future launch directory on the daemon's host. Its node,
-  address, queue and history stay intact; a running occupant keeps its current directory until a
-  deliberate fresh launch or rebuild handover. `rig seat status` shows the saved `launch_cwd`.
-  Copied destination resources are checked before startup writes: conflicting local edits or unrecorded
-  differing files refuse the change and report protected paths. Inspect and move/merge those files or use
-  a clean destination. Managed guidance and native configuration merges keep their runtime policy.
-  Failed preparation does not commit the selection, though the destination may contain prepared
-  files. Inspect status after an unknown outcome. Old shared-directory files need explicit cleanup.
+- **`rig seat set-cwd <seat> --cwd <absolute-path> --reason <text>`** — save an existing seat's
+  launch directory, audited, for its next fresh launch or rebuild handover. Its node, address, queue
+  and history stay intact. It writes no startup files: launch does, as today. It first checks, read-only,
+  that the new directory holds nothing the next launch would refuse to overwrite, and names any such
+  paths. The running occupant keeps its directory: adopt the new one with `rig seat launch --fresh
+  --stop` or a rebuild handover before any `rig down`/`rig up`, fork handover or `restart
+  --keep-conversation`. `rig seat status` shows the saved `launch_cwd`. Old-directory files are left.
 - **`rig seat set-permissions <seat> --mode <mode> --reason <text>`** — select one seat's native
   permission mode for its future managed launches; it relaunches nothing, and `inherit` clears the
   selection. `rig seat status` reports the selection, but a status read does not prove the

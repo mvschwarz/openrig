@@ -232,13 +232,6 @@ export class SeatDeliveryGuard {
     return true;
   }
 
-  /** Serialize filesystem/configuration work with launches and delivery, without
-   * granting an input lease or requiring the seat's typing guard to be disabled. */
-  async configure<T>(nodeId: string, fn: () => Promise<T>): Promise<T> {
-    if (this.ownsLifecycle(nodeId)) return fn();
-    return this.serial(nodeId, fn);
-  }
-
   /** Custody cleanup can join a writing lifecycle lease without granting input permission. */
   ownsCustody(nodeId: string): boolean {
     const lease = this.scope.getStore()?.get(nodeId);

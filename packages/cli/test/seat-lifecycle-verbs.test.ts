@@ -171,15 +171,16 @@ describe("rig seat set-cwd", () => {
       cwd: "/srv/remote/space dir/../planner", reason: "isolate planning", operator: "operator@project",
     } }]);
     expect(logs.join("\n")).toContain("/srv/remote/planner");
-    expect(logs.join("\n")).toContain("existing process keeps its current directory");
+    expect(logs.join("\n")).toContain("The running process keeps its current directory");
+    expect(logs.join("\n")).toContain("rig seat launch planner@project --fresh --stop");
     expect(warn).toHaveBeenCalledWith("Warning: Retained local guidance");
     expect(exitCode).toBeUndefined();
   });
 
-  it.each([200, 409, 500])("preserves the daemon response in JSON, including failed preparation (HTTP %s)", async status => {
+  it.each([200, 409, 500])("preserves the daemon response in JSON, including a refused change (HTTP %s)", async status => {
     const data = status === 200
       ? { ok: true, changed: false, to: "/srv/remote/planner", effect: "next_launch", warnings: [] }
-      : { ok: false, code: "cwd_preparation_failed", message: "Selection was not committed", preparedCwd: "/srv/remote/planner", warnings: ["Inspect prepared files"] };
+      : { ok: false, code: status === 500 ? "cwd_check_failed" : "cwd_destination_conflict", message: "The working directory was not changed", warnings: ["Protected destination file: /srv/remote/planner/.claude/agents/reviewer.md"] };
     const calls: Array<{ path: string; body: unknown }> = [];
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status, data }, calls)).parseAsync([...args, "--json"]).then(() => {}));
@@ -190,10 +191,11 @@ describe("rig seat set-cwd", () => {
   });
 
   it("treats a timeout as an unknown outcome and directs the caller to status", async () => {
-    const post = vi.fn(async () => { throw new DaemonTimeoutError("directory preparation timed out"); });
+    const post = vi.fn(async () => { throw new DaemonTimeoutError("directory change timed out"); });
     const deps = { ...makeDeps({ status: 200, data: {} }, []), clientFactory: () => ({ post }) as never };
     const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([...args, "--json"]).then(() => {}));
-    expect(post).toHaveBeenCalledExactlyOnceWith("/api/seat/set-cwd/planner%40project", expect.any(Object), { timeoutMs: 120_000 });
+    // set-cwd writes no startup files now, so it uses the default request deadline.
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/seat/set-cwd/planner%40project", expect.any(Object));
     expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, code: "set_cwd_outcome_unknown", status: "unknown",
       guidance: expect.stringContaining("rig seat status planner@project") });
     expect(exitCode).toBe(1);

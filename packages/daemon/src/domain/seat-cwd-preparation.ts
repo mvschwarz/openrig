@@ -14,15 +14,15 @@ interface PlannedCopy {
 }
 
 export interface CwdPreparationPlan {
-  plan: ProjectionPlan;
-  files: ResolvedStartupFile[];
-  copies: PlannedCopy[];
+  /** Destination files the seat's next launch would refuse to overwrite: operator-edited, unrecorded with different
+   *  content, or claimed by two different sources. */
   conflicts: PlannedCopy[];
   warnings: string[];
 }
 
-/** Inspect standalone copies at their actual destinations before either adapter
- * writes. Managed guidance and native configuration merges retain adapter policy. */
+/** Read-only: inspect the copies the seat's next launch would make, at their actual destinations in the new
+ * directory, without writing anything. Launch writes the startup files as it does today. Managed guidance and native
+ * configuration merges keep the adapter's own policy, so they aren't inspected here. */
 export function planCwdPreparation(
   plan: ProjectionPlan, files: ResolvedStartupFile[], binding: NodeBinding,
   adapter: RuntimeAdapter, manifest: ProjectionManifestStore,
@@ -38,36 +38,22 @@ export function planCwdPreparation(
     return { sourcePath, targetPath, sourceHash: hashContent(content), classification, required };
   };
 
-  const entries = plan.entries.map(entry => {
+  for (const entry of plan.entries) {
     const targetDir = projectionCopyDirectory(entry, plan.runtime, binding, adapter);
-    if (!targetDir) return { ...entry };
-    const entryCopies = copyFiles(entry.absolutePath, targetDir).map(([source, target]) => inspect(source, target));
-    copies.push(...entryCopies);
-    const classification = entryCopies.find(copy => copy.classification === "operator_conflict")?.classification
-      ?? entryCopies.find(copy => copy.classification === "hash_conflict")?.classification
-      ?? (entryCopies.length && entryCopies.every(copy => copy.classification === "no_op") ? "no_op" : "safe_projection");
-    return { ...entry, classification };
-  });
+    if (targetDir) copies.push(...copyFiles(entry.absolutePath, targetDir).map(([source, target]) => inspect(source, target)));
+  }
 
-  const deliverable: ResolvedStartupFile[] = [];
   for (const file of files) {
     // Terminal startup delivery deliberately writes no filesystem resources.
-    if (file.deliveryHint === "skill_install" && plan.runtime !== "terminal") {
-      try {
-        const targetDir = skillDirectory(plan.runtime, binding, adapter, path.basename(path.dirname(file.absolutePath)));
-        if (!targetDir) throw new Error(`No skill destination for runtime ${plan.runtime}`);
-        const copy = inspect(file.absolutePath, path.join(targetDir, path.basename(file.path)), file.required);
-        copies.push(copy);
-        // Some adapters record every startup write. Do not turn an identical
-        // operator-owned file into an OpenRig-owned projection by replaying it.
-        if (copy.classification === "no_op") continue;
-      } catch (error) {
-        if (file.required) throw error;
-        warnings.push(`Startup file ${file.path} was skipped: ${(error as Error).message}`);
-        continue;
-      }
+    if (file.deliveryHint !== "skill_install" || plan.runtime === "terminal") continue;
+    try {
+      const targetDir = skillDirectory(plan.runtime, binding, adapter, path.basename(path.dirname(file.absolutePath)));
+      if (!targetDir) throw new Error(`No skill destination for runtime ${plan.runtime}`);
+      copies.push(inspect(file.absolutePath, path.join(targetDir, path.basename(file.path)), file.required));
+    } catch (error) {
+      if (file.required) throw error;
+      warnings.push(`Startup file ${file.path} couldn't be checked: ${(error as Error).message}`);
     }
-    deliverable.push(file);
   }
 
   const conflicts = copies.filter(copy => copy.classification === "operator_conflict" || copy.classification === "hash_conflict");
@@ -78,33 +64,7 @@ export function planCwdPreparation(
     if (earlier && earlier.sourceHash !== copy.sourceHash && !conflicts.includes(copy)) conflicts.push(copy);
     selected.set(copy.targetPath, copy);
   }
-  return {
-    plan: { ...plan, cwd: binding.cwd, entries,
-      conflicts: entries.filter(entry => entry.classification === "operator_conflict" || entry.classification === "hash_conflict"),
-      noOps: entries.filter(entry => entry.classification === "no_op") },
-    files: deliverable, copies, conflicts, warnings,
-  };
-}
-
-/** Record only verified writes. An identical pre-existing file is not evidence
- * that OpenRig owns it, so a no-op must not acquire a projection manifest entry. */
-export function recordCwdPreparation(preparation: CwdPreparationPlan, manifest: ProjectionManifestStore): string[] {
-  const warnings: string[] = [];
-  const writtenAt = new Date().toISOString();
-  for (const copy of preparation.copies) {
-    try {
-      if (hashContent(fs.readFileSync(copy.targetPath, "utf8")) !== copy.sourceHash) {
-        throw new Error(`Prepared content changed or was not written: ${copy.targetPath}`);
-      }
-      if (copy.classification === "safe_projection" || copy.classification === "stale_overwrite") {
-        manifest.record({ targetPath: copy.targetPath, lastHash: copy.sourceHash, writtenAt });
-      }
-    } catch (error) {
-      if (copy.required) throw error;
-      warnings.push(`Optional startup copy ${copy.targetPath}: ${(error as Error).message}`);
-    }
-  }
-  return warnings;
+  return { conflicts, warnings };
 }
 
 function skillDirectory(runtime: string, binding: NodeBinding, adapter: RuntimeAdapter, id: string): string | null {
