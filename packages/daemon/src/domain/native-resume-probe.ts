@@ -430,8 +430,11 @@ function looksLikeCodexAuthRefusal(paneContent: string): boolean {
 }
 
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
-  return paneContent.includes("Do you trust the contents of this directory?")
-    && paneContent.includes("Yes, continue");
+  // Keep legacy wording unchanged; the newer panel has a different heading and choice.
+  return (paneContent.includes("Do you trust the contents of this directory?")
+    && paneContent.includes("Yes, continue"))
+    || (/^[ \t]*Trust this folder\?/m.test(paneContent)
+      && /^[ \t]*(?:[›»]\s*)?\d+\.\s+Trust and continue[ \t]*$/m.test(paneContent));
 }
 
 function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
