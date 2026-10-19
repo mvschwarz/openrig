@@ -51,7 +51,9 @@ export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise
 const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
   execFile("codex", args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
     const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
-    resolve({ status, stdout: String(stdout ?? ""), stderr: String(stderr ?? (error ? error.message : "")) });
+    // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
+    const err = String(stderr ?? "");
+    resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
   });
 });
 

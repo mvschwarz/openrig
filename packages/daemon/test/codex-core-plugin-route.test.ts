@@ -214,6 +214,19 @@ describe("read before install: the person's choice is never overridden", () => {
     }
   });
 
+  it("a codex that can't be started is reported with the reason, not as an exit status", async () => {
+    const pluginsDir = join(root, "plugins"); const dir = join(pluginsDir, "openrig-core");
+    mkdirSync(join(dir, ".codex-plugin"), { recursive: true });
+    writeFileSync(join(dir, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version: "0.1.15" }));
+    const codexHome = join(root, "codex-home"); mkdirSync(codexHome, { recursive: true });
+    const noCodex = join(root, "no-codex-bin"); mkdirSync(noCodex, { recursive: true });
+    const adapter = new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, fsOps: realFs, codexHome, launchPath: noCodex,
+      resolveCorePluginDir: () => dir, codexSystemConfigDir: join(root, "etc") });
+    const result = await adapter.ensureCodexCorePlugin();
+    expect(result.outcome).toBe("skipped");
+    expect(result.reason).toMatch(/codex plugin marketplace add failed: .*ENOENT/);
+  });
+
   it("the current version is left alone, and another marketplace named openrig is never replaced", async () => {
     let s = setup("0.1.14", null, { installed: "0.1.14" });
     expect((await s.adapter.ensureCodexCorePlugin()).outcome).toBe("current");
