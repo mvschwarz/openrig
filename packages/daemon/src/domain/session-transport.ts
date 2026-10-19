@@ -3466,7 +3466,8 @@ export class SessionTransport {
   }
 
   /** One styled read of the visible screen with the cursor read before and after it: a cursor that moved, or a pane
-   *  that resized, in between is reported as moved. Never throws. */
+   *  that resized, in between is reported as moved; when only one read succeeds, its reading is passed on as seen once.
+   *  Never throws. */
   private async readInputBoxAnnotation(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
     try {
       const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
@@ -3474,7 +3475,8 @@ export class SessionTransport {
       const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
       const steady = before && after && before.x === after.x && before.y === after.y
         && before.width === after.width && before.height === after.height ? after : null;
-      return annotateInputBox(screen, steady, runtime, { cursorMoved: before !== null && after !== null && steady === null });
+      const cursorSeenOnce = (before === null) !== (after === null) ? before ?? after : null;
+      return annotateInputBox(screen, steady, runtime, { cursorMoved: before !== null && after !== null && steady === null, cursorSeenOnce });
     } catch {
       return annotateInputBox(null, null, runtime);
     }
@@ -3758,7 +3760,13 @@ export function annotateInputBox(
   styledScreen: string | null,
   cursor: { x: number; y: number; width: number; height: number } | null,
   runtime: "claude-code" | "codex",
-  opts: { cursorMoved?: boolean; timedOut?: boolean; budgetSpent?: boolean } = {},
+  opts: {
+    cursorMoved?: boolean;
+    timedOut?: boolean;
+    budgetSpent?: boolean;
+    /** The cursor as the one successful read of two saw it; it can show the cursor outside the box, never confirm it in. */
+    cursorSeenOnce?: { x: number; y: number } | null;
+  } = {},
 ): InputBoxAnnotation {
   const harness = runtime === "codex" ? "Codex" : "Claude Code";
   const result = (status: InputBoxAnnotation["status"], confidence: InputBoxAnnotation["confidence"], hint: string,
@@ -3799,18 +3807,24 @@ export function annotateInputBox(
       .join("\n"),
   });
   const textRows = rows.filter((r) => r.cells.length > 0);
+  const outsideBox = (at: { y: number }) => at.y < box.first || at.y > box.last;
+  // A cursor seen outside the box by the one read that worked still contradicts the box being the live one.
+  const seenOutside = cursor === null && !opts.cursorMoved && opts.cursorSeenOnce != null && outsideBox(opts.cursorSeenOnce);
+  const seenOutsideEvidence = "cursor outside the input box (the other cursor read failed)";
   if (box.empty || textRows.length === 0) {
-    // An empty frame drawn in output has the live cursor below it; a moved cursor means the box may have changed.
-    const outside = cursor !== null && (cursor.y < box.first || cursor.y > box.last);
-    if (outside) {
+    // Only a steady cursor in the box shows it's the live one: an empty frame drawn in output has the cursor below it, a
+    // moved cursor means the box may have changed, and a missing cursor shows nothing either way.
+    if (cursor !== null && !outsideBox(cursor)) return result("empty", "high", "The input box is empty.", null, null, ["no text in the input box"]);
+    if (cursor !== null || seenOutside) {
       return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor is outside it, so it may not be the live box.`,
-        null, null, ["no text in the input box", "cursor outside the input box"]);
+        null, null, ["no text in the input box", cursor !== null ? "cursor outside the input box" : seenOutsideEvidence]);
     }
-    if (cursor === null && opts.cursorMoved) {
+    if (opts.cursorMoved) {
       return result("unknown", "unknown", `The ${harness} input box read empty, but the cursor moved during the capture, so it may have changed.`,
         null, null, ["no text in the input box", "cursor moved during the capture"]);
     }
-    return result("empty", "high", "The input box is empty.", null, null, ["no text in the input box"]);
+    return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor couldn't be read, so it may not be the live box.`,
+      null, null, ["no text in the input box", "cursor unavailable"]);
   }
   const lastRow = textRows[textRows.length - 1]!;
   const lastCell = lastRow.cells[lastRow.cells.length - 1]!;
@@ -3836,7 +3850,7 @@ export function annotateInputBox(
   const inBox = cursor !== null && cursor.y >= box.first && cursor.y <= box.last;
   const atStart = inBox && cursor!.y === box.first && cursor!.x === startCol;
   const atEnd = inBox && cursor!.y === end.row && cursor!.x === end.col;
-  if (cursor === null) evidence.unshift(opts.cursorMoved ? "cursor moved during the capture" : "cursor unavailable");
+  if (cursor === null) evidence.unshift(opts.cursorMoved ? "cursor moved during the capture" : seenOutside ? seenOutsideEvidence : "cursor unavailable");
   else evidence.unshift(!inBox ? "cursor outside the input box" : atStart ? "cursor at the input's start" : atEnd ? "cursor after the text" : "cursor inside the text");
   const why = evidence.join("; ");
 
@@ -3849,10 +3863,10 @@ export function annotateInputBox(
   const unknown = () => result("unknown", "unknown",
     `The input box shows ${quote(input.text)}; whether the person typed it or it's a ${harness} suggestion is unknown (${why}).`, input, null, evidence);
 
-  // A moved cursor or one outside the box contradicts any reading; only an unavailable cursor leaves the styling or the
-  // Try words to go on, at medium confidence.
+  // A moved cursor or one seen outside the box contradicts any reading; only an unavailable cursor leaves the styling or
+  // the Try words to go on, at medium confidence.
   if (cursor === null || !inBox) {
-    if (cursor === null && !opts.cursorMoved && (allFaint || trySuggestion)) return likelySuggestion("medium");
+    if (cursor === null && !opts.cursorMoved && !seenOutside && (allFaint || trySuggestion)) return likelySuggestion("medium");
     return unknown();
   }
   if (atStart) {
