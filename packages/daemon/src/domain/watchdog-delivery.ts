@@ -21,6 +21,11 @@ export function watchdogDeliveryId(occurrenceId: string): string {
  * when no digest attempted it. An attempt whose outcome never came back reads as failed, not as permission to send
  * again.
  */
+/** Whether this occurrence already has a delivery record of any kind: a lone send's or a digest member's. */
+export function occurrenceAttempted(outbox: Pick<OutboxHandler, "getById">, occurrenceId: string): boolean {
+  return outbox.getById(watchdogDeliveryId(occurrenceId)) !== null;
+}
+
 export function priorDigestAttempt(outbox: Pick<OutboxHandler, "getById">, occurrenceId: string): DeliveryOutcome | null {
   const entry = outbox.getById(watchdogDeliveryId(occurrenceId));
   if (!entry || !entry.tags?.includes(WATCHDOG_DIGEST_TAG)) return null;
@@ -52,7 +57,7 @@ export function makeWatchdogDeliver(deps: {
         await deps.createContinuityAction?.(continuityAction);
         continuityActionCompleted = true;
       }
-      if (source.members) return await sendDigest(deps, targetSession, message, source);
+      if (source.members) return await sendDigest(deps, targetSession, message, source, bindDigest(deps, targetSession, message, source));
       const prior = priorDigestAttempt(outbox, source.occurrenceId ?? source.jobId);
       if (prior) return prior;
       const deliveryId = watchdogDeliveryId(source.occurrenceId ?? source.jobId);
@@ -65,6 +70,7 @@ export function makeWatchdogDeliver(deps: {
         ? { status: "ok", continuityActionCompleted }
         : { status: "failed", error: result.error, continuityActionCompleted };
     } catch (err) {
+      if (err instanceof DigestBindingRefused) throw err;
       return {
         status: "failed",
         error: err instanceof Error ? err.message : String(err),
@@ -74,26 +80,37 @@ export function makeWatchdogDeliver(deps: {
   };
 }
 
+/** Bind every member to this attempt before any input: one claimed outbox entry each, in one transaction. A member
+ *  that already has a delivery record refuses the whole digest here, before any input, and the refusal is thrown to the
+ *  caller rather than reported as a failed attempt, so no member is accounted as attempted. */
+class DigestBindingRefused extends Error {}
+
+function bindDigest(deps: Parameters<typeof makeWatchdogDeliver>[0], targetSession: string, message: string, source: WatchdogDeliverySource): string[] {
+  const { outbox } = deps;
+  const payload = formatWatchdogDeliveryMessage(source, message);
+  const ids = source.members!.map((member) => watchdogDeliveryId(member.occurrenceId));
+  deps.db.transaction(() => {
+    source.members!.forEach((member, i) => {
+      if (outbox.getById(ids[i]!)) throw new DigestBindingRefused(`watchdog occurrence ${member.occurrenceId} already has a delivery record; the digest is not sent`);
+      outbox.record({
+        outboxId: ids[i]!, senderSession: "watchdog@system", destinationSession: targetSession, body: payload,
+        tags: [WATCHDOG_DIGEST_TAG, `${WATCHDOG_DIGEST_TAG}:${source.occurrenceId}`], auditPointer: member.jobId,
+      });
+      if (!outbox.claimForDelivery(ids[i]!)) throw new DigestBindingRefused(`watchdog occurrence ${member.occurrenceId} could not be claimed`);
+    });
+  })();
+  return ids;
+}
+
 async function sendDigest(
   deps: Parameters<typeof makeWatchdogDeliver>[0],
   targetSession: string,
   message: string,
   source: WatchdogDeliverySource,
+  ids: string[],
 ): Promise<DeliveryOutcome> {
   const { sessionTransport, outbox } = deps;
   const payload = formatWatchdogDeliveryMessage(source, message);
-  const ids = source.members!.map((member) => watchdogDeliveryId(member.occurrenceId));
-  // Bind every member to this attempt before any input. A member already bound to an earlier attempt stops the send.
-  deps.db.transaction(() => {
-    source.members!.forEach((member, i) => {
-      if (outbox.getById(ids[i]!)) throw new Error(`watchdog occurrence ${member.occurrenceId} was already attempted; the digest is not sent`);
-      outbox.record({
-        outboxId: ids[i]!, senderSession: "watchdog@system", destinationSession: targetSession, body: payload,
-        tags: [WATCHDOG_DIGEST_TAG, `${WATCHDOG_DIGEST_TAG}:${source.occurrenceId}`], auditPointer: member.jobId,
-      });
-      if (!outbox.claimForDelivery(ids[i]!)) throw new Error(`watchdog occurrence ${member.occurrenceId} could not be claimed`);
-    });
-  })();
   let outcome: DeliveryOutcome;
   let state: "delivered" | "failed" | "indeterminate";
   try {

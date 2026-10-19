@@ -132,6 +132,9 @@ interface WatchdogPolicyEngineDeps {
   /** The recorded outcome when a due occurrence was already attempted inside an earlier digest, so it is accounted
    *  from that attempt and never sent again; null when it wasn't. */
   priorDigestAttempt?: (occurrenceId: string) => DeliveryOutcome | null;
+  /** Whether a due occurrence already has a delivery record of any kind, alone or in a digest. Such an occurrence
+   *  goes only through its own delivery id, which reads its earlier receipt back and never joins a new digest. */
+  occurrenceAttempted?: (occurrenceId: string) => boolean;
 }
 
 /** A due reminder whose send waits for the end of its scheduler pass, so reminders for one seat go as one message. */
@@ -231,6 +234,7 @@ export class WatchdogPolicyEngine {
   private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
   private readonly resolveDigestEntry?: WatchdogPolicyEngineDeps["resolveDigestEntry"];
   private readonly priorDigestAttempt?: WatchdogPolicyEngineDeps["priorDigestAttempt"];
+  private readonly occurrenceAttempted?: WatchdogPolicyEngineDeps["occurrenceAttempted"];
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
@@ -243,6 +247,7 @@ export class WatchdogPolicyEngine {
     this.resolveQueueWait = deps.resolveQueueWait;
     this.resolveDigestEntry = deps.resolveDigestEntry;
     this.priorDigestAttempt = deps.priorDigestAttempt;
+    this.occurrenceAttempted = deps.occurrenceAttempted;
     this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
     this.policies = new Map();
@@ -610,35 +615,57 @@ export class WatchdogPolicyEngine {
       // A stop leaves every seat not yet started untouched, and still due.
       if (shouldStop()) return;
       try {
-        await this.deliverHeldGroup(seat, group);
+        await this.deliverHeldGroup(seat, group, shouldStop);
       } catch (err) {
         onError(err);
       }
     }
   }
 
-  private async deliverHeldGroup(seat: string, group: HeldReminder[]): Promise<void> {
-    const digest: HeldReminder[] = [];
-    for (const held of group) {
-      // A previous send in this pass may have yielded while a member was retired, its park ended or its timer became
-      // shared; each is re-checked here, at the send.
-      if (this.inactiveJobResult(held.job.jobId) || this.terminalBeforeDelivery(held.job, held.evaluatedAt)) continue;
-      const schedule = this.jobsRepo.getByIdOrThrow(held.job.jobId);
-      const prior = this.priorDigestAttempt?.(held.occurrenceId);
-      if (prior) {
-        // Attempted inside an earlier digest whose accounting didn't finish: account it from that attempt.
-        this.recordAttempt({ ...held, deliverySchedule: schedule, delivery: prior, isContextUsageThreshold: false });
+  /**
+   * One seat's held reminders. Before every transport call the remaining members are re-checked against current
+   * state, with nothing awaited in between: a retired or ended one is dropped, one an earlier digest attempted is
+   * accounted from that attempt, and one that is no longer eligible, or already has a delivery record of its own, goes
+   * alone through its own delivery id. Only then are the rest sent as one digest. A stop is honoured before each call;
+   * the call in flight finishes and is accounted, and every member not yet sent stays due.
+   */
+  private async deliverHeldGroup(seat: string, group: HeldReminder[], shouldStop: () => boolean): Promise<void> {
+    const finished = new Set<HeldReminder>();
+    for (;;) {
+      if (shouldStop()) return;
+      const digest: Array<HeldReminder & { entry: { qitemId: string; summary: string | null } }> = [];
+      let alone: HeldReminder | null = null;
+      for (const held of group) {
+        if (finished.has(held)) continue;
+        if (this.inactiveJobResult(held.job.jobId) || this.terminalBeforeDelivery(held.job, held.evaluatedAt)) {
+          finished.add(held);
+          continue;
+        }
+        const prior = this.priorDigestAttempt?.(held.occurrenceId);
+        if (prior) {
+          // Attempted inside an earlier digest whose accounting didn't finish: account it from that attempt.
+          this.recordAttempt({ ...held, deliverySchedule: this.jobsRepo.getByIdOrThrow(held.job.jobId), delivery: prior, isContextUsageThreshold: false });
+          finished.add(held);
+          continue;
+        }
+        const entry = this.occurrenceAttempted?.(held.occurrenceId)
+          ? null
+          : this.resolveDigestEntry?.({ jobId: held.job.jobId, message: held.outcome.message }) ?? null;
+        if (entry) digest.push({ ...held, entry });
+        else alone ??= held;
+      }
+      if (alone) {
+        finished.add(alone);
+        await this.deliverAlone(seat, alone);
         continue;
       }
-      const entry = this.resolveDigestEntry?.({ jobId: held.job.jobId, message: held.outcome.message }) ?? null;
-      if (entry) digest.push({ ...held, entry });
-      else await this.deliverAlone(seat, held);
-    }
-    if (digest.length === 1) {
-      await this.deliverAlone(seat, digest[0]!);
+      if (digest.length === 1) await this.deliverAlone(seat, digest[0]!);
+      else if (digest.length > 1) await this.deliverDigest(seat, digest);
       return;
     }
-    if (digest.length === 0) return;
+  }
+
+  private async deliverDigest(seat: string, digest: Array<HeldReminder & { entry: { qitemId: string; summary: string | null } }>): Promise<void> {
     const schedules = digest.map((held) => this.jobsRepo.getByIdOrThrow(held.job.jobId));
     const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
     const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
@@ -647,6 +674,8 @@ export class WatchdogPolicyEngine {
       `Wake timers fired for ${digest.length} parked rows. Resume each row's recorded continuation and update it:`,
       ...lines,
     ].join("\n");
+    // A digest whose members can't all be bound throws here, before any input, and leaves every member unaccounted
+    // and due.
     const delivery = await this.deliver(
       { targetSession: seat, message },
       { jobId: digestId, policy: "periodic-reminder", occurrenceId: digestId, members },

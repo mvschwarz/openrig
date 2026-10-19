@@ -308,4 +308,64 @@ describe("due parked-row reminders for one seat", () => {
       expect(deps.watchdogHistoryLog!.listForJob(r.jobId, 1)).toEqual([]);
     }
   });
+
+  /** Attach another parked row to a timer, which makes it shared and no longer eligible for a digest. */
+  async function attachTo(owner: string, jobId: string) {
+    const other = await deps.queueRepo.create({ sourceSession: "orch@rig", destinationSession: owner, body: "attached", nudge: false } as never) as unknown as { qitemId: string };
+    deps.queueRepo.update({ qitemId: other.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+      transitionNote: "attach", wakeWatchdogId: jobId } as never);
+  }
+
+  it("re-checks the remaining members after each lone send in a seat's group, before the next send", async () => {
+    const owner = seat();
+    const [a, b, c] = [await park(owner, "a"), await park(owner, "b"), await park(owner, "c")];
+    for (const r of [a, b, c]) due(r.jobId);
+    const engine = deps.watchdogPolicyEngine!;
+    const flush = engine.deliverHeldReminders.bind(engine);
+    vi.spyOn(engine, "deliverHeldReminders").mockImplementationOnce(async (...args) => {
+      await attachTo(owner, b.jobId); // B is shared before the flush, so it goes alone first.
+      return flush(...args);
+    });
+    let firstSend = true;
+    reply = async () => {
+      // A is shared while this seat's first send (B's) is in flight. Other seats' due reminders may go first.
+      if (firstSend && sends.at(-1)?.session === owner) { firstSend = false; await attachTo(owner, a.jobId); }
+      return { ok: true, verified: true };
+    };
+    await deps.watchdogScheduler!.runTickNow();
+    const texts = sends.filter((s) => s.session === owner).map((s) => s.text);
+    const lone = (r: { jobId: string; qitemId: string }) => `[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${r.jobId}]\n`
+      + `Wake timer fired for parked qitem ${r.qitemId}. Resume the recorded continuation and update the row.`;
+    expect(texts).toEqual([lone(b), lone(a), lone(c)]);
+  });
+
+  it("honours a stop at every send within a seat: the send in flight is accounted, the rest stay due", async () => {
+    const owner = seat();
+    const [a, b, c] = [await park(owner, "a"), await park(owner, "b"), await park(owner, "c")];
+    for (const r of [a, b, c]) due(r.jobId);
+    const engine = deps.watchdogPolicyEngine!;
+    const flush = engine.deliverHeldReminders.bind(engine);
+    vi.spyOn(engine, "deliverHeldReminders").mockImplementationOnce(async (...args) => {
+      await attachTo(owner, b.jobId);
+      return flush(...args);
+    });
+    const scheduler = new WatchdogScheduler({ jobsRepo: deps.watchdogJobsRepo!, policyEngine: engine,
+      setTimer: () => ({}) as NodeJS.Timeout, clearTimer: () => {} });
+    scheduler.start();
+    let release!: () => void;
+    reply = () => new Promise((done) => { release = () => done({ ok: true, verified: true }); });
+    const pass = scheduler.runTickNow();
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    const stopping = scheduler.stop();
+    release();
+    await pass;
+    await stopping;
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.text).toContain(`job: ${b.jobId}]`);
+    expect(deps.watchdogJobsRepo!.getByIdOrThrow(b.jobId).state).toBe("terminal");
+    for (const r of [a, c]) {
+      expect(deps.watchdogJobsRepo!.getByIdOrThrow(r.jobId).state).toBe("active");
+      expect(deps.watchdogHistoryLog!.listForJob(r.jobId, 1)).toEqual([]);
+    }
+  });
 });

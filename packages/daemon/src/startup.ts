@@ -1,4 +1,4 @@
-import { makeWatchdogDeliver, priorDigestAttempt } from "./domain/watchdog-delivery.js";
+import { makeWatchdogDeliver, occurrenceAttempted, priorDigestAttempt } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
@@ -2105,6 +2105,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // Due parked-row reminders for one seat in one scheduler pass go as one message.
       resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),
       priorDigestAttempt: (occurrenceId) => priorDigestAttempt(outboxHandlerInstance, occurrenceId),
+      occurrenceAttempted: (occurrenceId) => occurrenceAttempted(outboxHandlerInstance, occurrenceId),
       // PL-004 Phase D: register workflow-keepalive policy alongside
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables
