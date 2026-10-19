@@ -50,6 +50,7 @@ import { seatIdentityVerdictsSchema } from "../../src/db/migrations/046_seat_ide
 // this fixture must be production-migration-faithful for the D2 latency budget.
 import { eventsNodeTypeIndexSchema } from "../../src/db/migrations/047_events_node_type_index.js";      // idx_events_node_type_seq
 import { sessionsNodeIdIndexSchema } from "../../src/db/migrations/053_sessions_node_id_index.js";       // idx_sessions_node_created_id
+import { occupantTenuresSchema } from "../../src/db/migrations/060_occupant_tenures.js";                // the inventory reads current tenures
 import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_stop_intent.js";
 
 // Vitest-free migrated in-memory DB — the same base migration list as
@@ -60,7 +61,7 @@ import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_sto
 // index-independent).
 export function createMigratedDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema, sessionStopIntentSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema, occupantTenuresSchema, sessionStopIntentSchema]);
   return db;
 }
 

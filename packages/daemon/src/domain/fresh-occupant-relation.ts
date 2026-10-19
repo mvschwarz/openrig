@@ -1,22 +1,18 @@
 import type Database from "better-sqlite3";
 
-function readCurrentGenerations(db: Database.Database, rigId?: string): Map<string, string> {
-  const generations = db.prepare(`
-    SELECT t.node_id AS nodeId, t.generation_uuid AS generation
-    FROM occupant_tenures t JOIN nodes n ON n.id = t.node_id
-    WHERE t.generation_ordinal =
-      (SELECT MAX(t2.generation_ordinal) FROM occupant_tenures t2 WHERE t2.node_id = t.node_id)${rigId ? " AND n.rig_id = ?" : ""}
-  `).all(...(rigId ? [rigId] : [])) as Array<{ nodeId: string; generation: string }>;
-  return new Map(generations.map((row) => [row.nodeId, row.generation]));
-}
-
 /** Read an existing fresh-launch effect, fenced by the current generation.
  * Older builds could leave a detached predecessor unsuperseded. The owning
  * event still names the deliberate successor: timestamps and newest-row
  * guesses are unnecessary. No history or native identity is rewritten here.
  */
 export function readFreshOccupantRelations(db: Database.Database, rigId: string): Record<string, string | null> {
-  const current = readCurrentGenerations(db, rigId);
+  const generations = db.prepare(`
+    SELECT t.node_id AS nodeId, t.generation_uuid AS generation
+    FROM occupant_tenures t JOIN nodes n ON n.id = t.node_id
+    WHERE n.rig_id = ? AND t.generation_ordinal =
+      (SELECT MAX(t2.generation_ordinal) FROM occupant_tenures t2 WHERE t2.node_id = t.node_id)
+  `).all(rigId) as Array<{ nodeId: string; generation: string }>;
+  const current = new Map(generations.map((row) => [row.nodeId, row.generation]));
   const events = db.prepare("SELECT payload FROM events WHERE rig_id = ? AND type = 'seat.fresh_launched' ORDER BY seq")
     .all(rigId) as Array<{ payload: string }>;
   const relation: Record<string, string | null> = {};
@@ -39,19 +35,26 @@ export function readFreshOccupantRelations(db: Database.Database, rigId: string)
  * the recorded restore outcome stands.
  */
 export function readReadyFreshLaunchFences(db: Database.Database, rigId?: string): Map<string, number> {
-  const current = readCurrentGenerations(db, rigId);
-  const events = db.prepare(`SELECT seq, payload FROM events WHERE type = 'seat.fresh_launched'${rigId ? " AND rig_id = ?" : ""} ORDER BY seq`)
-    .all(...(rigId ? [rigId] : [])) as Array<{ seq: number; payload: string }>;
+  // From each node's current tenure into its own fresh-launch events (idx_events_node_type_seq),
+  // never a scan of the whole event history: `rig ps` runs this on every call.
+  const events = db.prepare(`
+    SELECT e.seq AS seq, e.payload AS payload, t.node_id AS nodeId, t.generation_uuid AS generation
+    FROM occupant_tenures t
+    JOIN nodes n ON n.id = t.node_id
+    JOIN events e ON e.node_id = t.node_id AND e.type = 'seat.fresh_launched'
+    WHERE t.generation_ordinal =
+      (SELECT MAX(t2.generation_ordinal) FROM occupant_tenures t2 WHERE t2.node_id = t.node_id)${rigId ? " AND n.rig_id = ?" : ""}
+    ORDER BY e.seq
+  `).all(...(rigId ? [rigId] : [])) as Array<{ seq: number; payload: string; nodeId: string; generation: string }>;
   const launches = new Map<string, { seq: number; sessionId: string | null; ready: boolean } | null>();
   for (const row of events) {
     let event: Record<string, unknown>;
     try { event = JSON.parse(row.payload) as Record<string, unknown>; } catch { continue; }
-    if (typeof event.nodeId !== "string" || !current.has(event.nodeId)
-      || event.newGeneration !== current.get(event.nodeId)) continue;
+    if (event.nodeId !== row.nodeId || event.newGeneration !== row.generation) continue;
     const sessionId = typeof event.sessionId === "string" && event.sessionId ? event.sessionId : null;
-    const prior = launches.get(event.nodeId);
+    const prior = launches.get(row.nodeId);
     if (prior === null) continue;
-    launches.set(event.nodeId, prior && prior.sessionId !== sessionId
+    launches.set(row.nodeId, prior && prior.sessionId !== sessionId
       ? null // contradictory current effects give no fence
       : { seq: row.seq, sessionId, ready: event.status === "ready" && (prior?.ready ?? true) });
   }
