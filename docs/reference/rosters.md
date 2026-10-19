@@ -49,8 +49,21 @@ Authored files contain recommendations, not runtime facts. Extra fields are igno
 any authored runtime, model or activity. At read time the command joins by exact host self-id
 and seat. Unmatched or conflicting observations are `unknown`; a seat not reported running is
 `stale`, with current runtime/model unknown. The configured model is the registry declaration.
-The observed native model remains unknown: these commands do not open native histories or verify
-what model the provider is running. Activity includes its sample time when the daemon supplies it;
+`rig ps --nodes` and roster members also carry `modelObservation`: `status`, `model`, `source`,
+`observedAt`, `generation` and `reason` (null in compact JSON when an older daemon supplies no observation). The configured `model` stays separate; roster's
+`live.observedModel` is the observation's model or null. Human output says **last observed**.
+Claude (`claude-assistant-response`) and Pi (`pi-assistant-response`) name response evidence;
+Codex (`codex-turn-context` or `codex-world-state`) names recorded turn configuration, not a
+verified backend response. The timestamp is the native record's time, never file mtime or inventory
+read time. None promises the model that will answer the next turn.
+
+The daemon reuses the current-occupant record selectors and bounded readers used by divergence
+monitoring, sharing a process census. Reporting does not need a configured model or comparator.
+A changed or unverified occupant, a record predating its tenure, missing or invalid record time,
+unreadable or ambiguous records, unsupported runtimes and older daemons report **UNKNOWN** with
+a reason, never the configured value as a fallback. An older record from the same verified occupant
+remains labelled last observed at its original time; this is not a freshness guarantee. No record
+contents, transcript paths or credentials are returned. Activity includes its own sample time;
 activity and running status do not promise that someone is available for new work.
 
 The JSON `observations.readAt` is when the inventory read completed, not a native observation

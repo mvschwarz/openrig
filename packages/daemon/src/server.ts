@@ -331,6 +331,7 @@ export interface AppDeps {
   whoamiService?: WhoamiService;
   /** W3 single-seat, read-only runtime-policy observer. */
   permissionDriftObserver?: PermissionDriftReader;
+  currentModelReader?: import("./domain/model-divergence/current-model-reader.js").CurrentModelReader;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   /** 0.5.10 S04 — one on-demand, read-only health projection shared by consumers. */
   healthProjection?: import("./domain/health-detectors.js").HealthProjectionService;
@@ -602,6 +603,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("whoamiService" as never, deps.whoamiService);
     c.set("permissionDriftObserver" as never, permissionDriftObserver);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
+    c.set("currentModelReader" as never, deps.currentModelReader);
     c.set("healthProjection" as never, deps.healthProjection);
     c.set("healthDiagnosis" as never, deps.healthDiagnosis);
     c.set("healthPolicy" as never, deps.healthPolicy);

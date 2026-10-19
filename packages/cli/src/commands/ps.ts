@@ -1,3 +1,4 @@
+import { modelObservation, formatModelObservation, type ModelObservation } from "../lib/model-observation.js";
 import { Command } from "commander";
 import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
@@ -55,6 +56,7 @@ interface NodeEntry {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   model: string | null;
+  modelObservation?: ModelObservation;
   sessionStatus: string | null;
   intentionallyStopped?: boolean;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -207,6 +209,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "runtime",
   "agentApp",
   "model",
+  "modelObservation",
   "sessionStatus",
   "intentionallyStopped",
   "startupStatus",
@@ -647,7 +650,7 @@ function missingSessionGuidance(node: NodeEntry): string | null {
 //
 // SCOPE, stated because the column invites a wider reading: this is the
 // SPEC-DECLARED model (nodes.model), NOT the model the seat is running. The
-// running model has no producer today — it is the ACTIVITY-umbrella rider.
+// last observed native model is reported separately, with its provenance and time.
 export function formatDeclaredModel(model: string | null | undefined): string {
   const m = (model ?? "").trim();
   return m.length > 0 ? m : "not-declared";
@@ -673,6 +676,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       runtime: n.runtime ?? null,
       ...(n.agentApp ? { agentApp: n.agentApp } : {}),
       model: n.model ?? null,
+      modelObservation: n.modelObservation == null ? null : modelObservation(n.modelObservation, n.sessionStatus === "running"),
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
       startupStatus: n.startupStatus,
@@ -1292,6 +1296,9 @@ async function handleNodes(
         missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—"),
       ));
     }
+  }
+  for (const n of humanList as NodeEntry[]) {
+    console.log(`Model (${n.canonicalSessionName ?? n.logicalId}): configured ${formatDeclaredModel(n.model)}; last observed ${formatModelObservation(modelObservation(n.modelObservation, n.sessionStatus === "running"))}`);
   }
   // Keep an actionable startup continuation outside the table's clipped cells.
   for (const n of humanList as NodeEntry[]) {

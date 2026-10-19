@@ -65,3 +65,10 @@ describe("rig ps — runtime + declared model", () => {
     expect(compact.model).toBeNull();
   });
 });
+
+it("preserves last model observation and provenance in compact node JSON", () => {
+  const observation = { status: "observed", model: "model-response", source: "claude-assistant-response", observedAt: "2026-10-18T23:00:00Z", generation: "current", reason: null };
+  const [row] = compactNodeProjection([{ model: "model-configured", sessionStatus: "running", modelObservation: observation }] as never);
+  expect(row?.model).toBe("model-configured");
+  expect(row?.modelObservation).toEqual(observation);
+});

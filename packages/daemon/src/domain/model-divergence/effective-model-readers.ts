@@ -53,15 +53,30 @@ export function readTailLines(path: string, tailBytes = TAIL_BYTES): string[] {
 /** The model from the seat's newest determinate, non-synthetic model-bearing assistant record, or
  *  null when no such record is in the tail window (a just-launched or synthetic-only seat has none
  *  — the detector treats null as PENDING, not as a match). */
+export interface NativeModelObservation {
+  model: string;
+  source: "claude-assistant-response" | "codex-turn-context" | "codex-world-state" | "pi-assistant-response";
+  /** Native record time, not file mtime or the time this reader ran. */
+  observedAt: string | null;
+}
+
+function recordTime(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+}
+
 export function readClaudeEffectiveModel(transcriptPath: string): string | null {
+  return readClaudeModelObservation(transcriptPath)?.model ?? null;
+}
+
+export function readClaudeModelObservation(transcriptPath: string): NativeModelObservation | null {
   const lines = readTailLines(transcriptPath);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (!line.includes('"assistant"') || !line.includes('"model"')) continue;
     try {
-      const obj = JSON.parse(line) as { type?: unknown; message?: { role?: unknown; model?: unknown } };
+      const obj = JSON.parse(line) as { type?: unknown; timestamp?: unknown; message?: { role?: unknown; model?: unknown } };
       if (obj.message?.role === "assistant" && typeof obj.message.model === "string" && obj.message.model.length > 0 && obj.message.model !== "<synthetic>") {
-        return obj.message.model;
+        return { model: obj.message.model, source: "claude-assistant-response", observedAt: recordTime(obj.timestamp) };
       }
     } catch {
       /* corrupt line — keep scanning */
@@ -70,7 +85,7 @@ export function readClaudeEffectiveModel(transcriptPath: string): string | null 
   return null;
 }
 
-function newestCodexModel(lines: string[]): string | null {
+function newestCodexModel(lines: string[]): NativeModelObservation | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     // PRIMARY: turn_context.payload.model — preferred for DENSITY, not existence. (~~"old July-era
@@ -81,10 +96,10 @@ function newestCodexModel(lines: string[]): string | null {
     // signals are real, turn_context is just denser.)
     if (line.includes('"turn_context"')) {
       try {
-        const obj = JSON.parse(line) as { type?: unknown; payload?: { model?: unknown } };
+        const obj = JSON.parse(line) as { type?: unknown; timestamp?: unknown; payload?: { model?: unknown } };
         if (obj.type === "turn_context") {
           const model = obj.payload?.model;
-          if (typeof model === "string" && model.length > 0) return model;
+          if (typeof model === "string" && model.length > 0) return { model, source: "codex-turn-context", observedAt: recordTime(obj.timestamp) };
         }
       } catch {
         /* corrupt line — keep scanning */
@@ -95,11 +110,12 @@ function newestCodexModel(lines: string[]): string | null {
       try {
         const obj = JSON.parse(line) as {
           type?: unknown;
+          timestamp?: unknown;
           payload?: { state?: { collaboration_mode?: { model?: unknown } } };
         };
         if (obj.type === "world_state") {
           const model = obj.payload?.state?.collaboration_mode?.model;
-          if (typeof model === "string" && model.length > 0) return model;
+          if (typeof model === "string" && model.length > 0) return { model, source: "codex-world-state", observedAt: recordTime(obj.timestamp) };
         }
       } catch {
         /* corrupt line — keep scanning */
@@ -115,6 +131,10 @@ function newestCodexModel(lines: string[]): string | null {
  *  census put records 0.4-0.8MB from EOF on the big rollouts), so one tail window is not always
  *  enough, but 8MB bounds the read far under the loop-stall class. */
 export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_SCAN_BYTES): string | null {
+  return readCodexModelObservation(rolloutPath, maxScanBytes)?.model ?? null;
+}
+
+export function readCodexModelObservation(rolloutPath: string, maxScanBytes = MAX_SCAN_BYTES): NativeModelObservation | null {
   return scanBackward(rolloutPath, newestCodexModel, maxScanBytes);
 }
 
@@ -247,6 +267,15 @@ export function readPiEffectiveModel(
   scope: PiOccupantScope,
   maxScanBytes = MAX_SCAN_BYTES,
 ): { ok: true; model: string } | { ok: false; reason: string } {
+  const result = readPiModelObservation(sessionFile, scope, maxScanBytes);
+  return result.ok ? { ok: true, model: result.model } : result;
+}
+
+export function readPiModelObservation(
+  sessionFile: string,
+  scope: PiOccupantScope,
+  maxScanBytes = MAX_SCAN_BYTES,
+): ({ ok: true } & NativeModelObservation) | { ok: false; reason: string } {
   const header = readFirstLine(sessionFile);
   if (header === null) return { ok: false, reason: `Pi session file ${sessionFile} is unreadable` };
   const boundary = parsePiSessionHeader(header);
@@ -259,7 +288,7 @@ function newestPiModel(
   lines: string[],
   boundary: PiSessionBoundary,
   scope: PiOccupantScope,
-): { ok: true; model: string } | { ok: false; reason: string } | null {
+): ({ ok: true } & NativeModelObservation) | { ok: false; reason: string } | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (!line.includes('"assistant"')) continue;
@@ -282,7 +311,7 @@ function newestPiModel(
     if (origin !== "own") return { ok: false, reason: `newest Pi assistant record ${id} is ${origin === "inherited" ? "inherited from the fork parent" : "of undecidable fork origin"}` };
     if (at <= scope.notBeforeMs) return { ok: false, reason: `newest Pi assistant record ${id} predates the current runner` };
     if (!fields.provider || !fields.model) return { ok: false, reason: `newest Pi assistant record ${id} names no provider and model` };
-    return { ok: true, model: `${fields.provider}/${fields.model}` };
+    return { ok: true, model: `${fields.provider}/${fields.model}`, source: "pi-assistant-response", observedAt: recordTime(timestamp) };
   }
   return null;
 }
