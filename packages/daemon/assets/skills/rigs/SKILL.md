@@ -16,10 +16,12 @@ building it yourself.
 Tell the person what you're about to run and why before you run it. Don't install system packages or change their
 machine without a yes. Starting OpenRig and a team writes files: Codex hooks and settings in
 `~/.codex/config.toml`, Claude Code workspace trust in `~/.claude.json`, discovery skills in `~/.claude/skills` and
-`~/.agents/skills`, and, in the repository, managed guidance in `AGENTS.md` or `CLAUDE.md`, the status line and activity
-hooks in `.claude/settings.local.json`, plus the team's skills and plugins. The kernel's own Codex seats run with
-`-s danger-full-access -a never`. Say so before you start OpenRig
-([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
+`~/.agents/skills`, and, in the repository, managed guidance in `AGENTS.md` or `CLAUDE.md`, activity hooks in
+`.claude/settings.local.json` and a status line there unless the project already has its own, plus the team's skills
+and plugins. Unless a permission policy, a per-seat choice or (for Codex) a named profile applies, the kernel's own
+seats run with an operational default: Codex with `-s danger-full-access -a never`, and Claude Code with its file
+tools, web fetches and operational commands, including reads under the home folder, allowed without asking. Say so
+before you start OpenRig ([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
 
 ## 1. Install OpenRig, if it isn't installed
 
