@@ -203,15 +203,42 @@ it.each([
   // Checkpoints as an older daemon saved them: a 429 on the default channel kept only its nextRetryAt.
   const covered = { coverageStart: `${BASE}.000000`, coveredThrough: `${BASE}.000000`, seedBasis: "feature-adoption" };
   f.files.set("/s/coverage", JSON.stringify({ C1: { ...covered, nextRetryAt: at(700), ...marker }, C2: covered }) + "\n");
+  f.track(ts(1));
   const r = f.recovery({ channels: [{ channel: "C1" }, { channel: "C2", seed: "adoption" }] });
 
   await r.run();
   expect(f.calls("conversations.history").map(u => u.searchParams.get("channel"))).toEqual(otherChannelCalls ? ["C2"] : []);
+  expect(f.calls("conversations.replies")).toHaveLength(1); // a history hold never holds thread replies
 
   f.time(at(699)); await r.run();
   expect(f.calls("conversations.history")).toHaveLength(otherChannelCalls ? 2 : 0);
+  // The saved deadline is honoured as it is: never refreshed or extended by a pass or a restart.
+  expect(JSON.parse(f.files.get("/s/coverage")!).C1.nextRetryAt).toBe(at(700));
   f.time(at(701)); await r.run();
   expect(f.calls("conversations.history").map(u => u.searchParams.get("channel"))).toContain("C1");
+});
+
+it.each(["channel", "thread"])("a known non-429 error on one %s is saved as not a rate limit, and after a restart doesn't hold its peers", async kind => {
+  const f = fixture();
+  const covered = { coverageStart: `${BASE}.000000`, coveredThrough: `${BASE}.000000`, seedBasis: "feature-adoption" };
+  const channels = kind === "channel" ? [{ channel: "C1" }, { channel: "C2", seed: "adoption" as const }] : [{ channel: "C1" }];
+  if (kind === "channel") f.files.set("/s/coverage", JSON.stringify({ C1: covered, C2: covered }) + "\n");
+  else { f.track(ts(1), "a@test"); f.track(ts(2), "b@test"); }
+  const failing = (u: URL) => kind === "channel" ? u.searchParams.get("channel") === "C1" && u.pathname.endsWith("conversations.history")
+    : u.searchParams.get("ts") === ts(1);
+  f.respond(u => failing(u) ? Response.json({ ok: false, error: "missing_scope" }) : undefined);
+  const first = f.recovery({ channels });
+  await first.run();
+  first.stop(); f.respond();
+  const file = kind === "channel" ? "/s/coverage" : "/s/thread-coverage", key = kind === "channel" ? "C1" : `C1:${ts(1)}`;
+  expect(JSON.parse(f.files.get(file)!)[key]).toMatchObject({ rateLimited: false, nextRetryAt: at(400) });
+  const peerCalls = () => f.queries.filter(u => !failing(u) && u.pathname.endsWith(kind === "channel" ? "conversations.history" : "conversations.replies")).length;
+  const before = peerCalls();
+
+  f.time(at(200)); await f.recovery({ channels }).run();
+
+  expect(peerCalls()).toBeGreaterThan(before); // the peer scans again before the failed source's deadline
+  expect(f.queries.filter(failing)).toHaveLength(1); // the failed source waits for its own deadline
 });
 
 it("recovers a thread longer than a page in order across calls and passes, without a skip", async () => {
