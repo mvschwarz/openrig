@@ -88,6 +88,19 @@ describe("rig provider moves", () => {
     expect(JSON.parse(recorded.stdout)).toMatchObject({ move: { recordedBy: "alex (terminal)", recordedVia: "claimed:v1" } });
   }, 30_000);
 
+  it("explains how to name an actor when recording from an unmanaged shell", async () => {
+    const file = path.join(root, "actor-missing.json");
+    fs.writeFileSync(file, JSON.stringify({
+      home: "/home/test/.codex", from: "A", to: "B", reason: "fixture move",
+      readings: [{ subject: "A", observedAt: "2026-10-18T09:56:00Z", summary: "near limit" }],
+      seats: [{ seat: "dev@team", result: "unconfirmed", missing: "not observed" }],
+    }));
+    const result = await rig(["provider", "moves", "record", "--file", file], null);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("name one, or run from a managed seat");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'subscription.move_recorded'").get()).toEqual({ n: 0 });
+  }, 30_000);
+
   it("reports a malformed move and records nothing", async () => {
     const file = path.join(root, "bad.json");
     fs.writeFileSync(file, JSON.stringify({ home: "h", from: "A", to: "B", reason: "r", seats: [],
