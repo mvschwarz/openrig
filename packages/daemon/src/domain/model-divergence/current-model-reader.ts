@@ -43,7 +43,7 @@ interface Deps {
   now?: () => number;
 }
 type InventoryNode = { nodeId: string; canonicalSessionName: string | null; runtime: string | null; sessionStatus: string | null };
-type PendingObservation = { pane: string; finish: (pid: number | null) => ModelObservation };
+type PendingObservation = { pane: string; finish: (pid: number | null, unavailableReason?: string) => ModelObservation };
 type Selection = { ok: true; path: string; notBeforeMs?: number } | { ok: false; reason: string };
 
 /** One current-record path for reporting and the existing divergence monitor. Reporting never
@@ -135,15 +135,16 @@ export class CurrentModelReader {
     if (!prepared.some(p => "finish" in p)) return prepared as ModelObservation[];
     let after: Map<string, { pid: number }> | null = null;
     try { after = await this.deps.readAllPaneProcesses(); } catch { /* UNKNOWN, never a fallback subprocess storm. */ }
-    return prepared.map(p => "finish" in p ? p.finish(after?.get(p.pane)?.pid ?? null) : p);
+    return prepared.map(p => "finish" in p ? p.finish(after?.get(p.pane)?.pid ?? null, after === null ? "native-read-unavailable" : "pane-unavailable") : p);
   }
 
   async observe(node: InventoryNode, listProcesses = this.processCensus.cycleLister()): Promise<ModelObservation> {
     const prepared = await this.prepare(node, { ...this.deps.native, listProcesses });
     if (!("finish" in prepared)) return prepared;
     let finalPid: number | null = null;
-    try { finalPid = await this.deps.native.getPanePid(prepared.pane); } catch { /* Fail closed. */ }
-    return prepared.finish(finalPid);
+    let unavailableReason = "pane-unavailable";
+    try { finalPid = await this.deps.native.getPanePid(prepared.pane); } catch { unavailableReason = "native-read-unavailable"; }
+    return prepared.finish(finalPid, unavailableReason);
   }
 
   private async prepare(node: InventoryNode, native: CurrentGenerationDeps): Promise<ModelObservation | PendingObservation> {
@@ -171,12 +172,13 @@ export class CurrentModelReader {
       const selected = await this.select(seat, reportingNative, binding.tmuxPane, true);
       if (!selected.ok) return unknown("record-identity-missing-or-ambiguous");
       const fact = this.readFact(node, generation, pid, selected);
-      return { pane: binding.tmuxPane, finish: finalPid => {
+      return { pane: binding.tmuxPane, finish: (finalPid, unavailableReason = "pane-unavailable") => {
         // No await after this point: tenure/name/binding are sampled AFTER the final PID lookup.
         const current = this.deps.sessions.currentOccupantTenure(node.nodeId);
         const currentBinding = this.deps.sessions.getBindingForNode(node.nodeId);
         if (current?.generationUuid !== generation || this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation || currentBinding?.tmuxPane !== binding.tmuxPane
-          || currentBinding?.tmuxSession !== binding.tmuxSession || finalPid !== pid) return unknown("occupant-changed-during-read");
+          || currentBinding?.tmuxSession !== binding.tmuxSession || (finalPid !== null && finalPid !== pid)) return unknown("occupant-changed-during-read");
+        if (finalPid === null) return unknown(unavailableReason);
         if (!fact || !("model" in fact)) return unknown("model-record-unavailable");
         // Copy only a model identifier, never arbitrary record text or a diagnostic containing paths.
         if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/@+\-]{0,199}$/.test(fact.model)) return unknown("model-identifier-unreadable");
