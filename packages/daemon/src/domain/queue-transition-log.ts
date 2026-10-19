@@ -438,7 +438,7 @@ export class QueueTransitionLog {
     const rows = this.db
       .prepare(
         `SELECT transition_note FROM ${this.historySource}
-          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'`,
+          WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %' OR transition_note LIKE 'matrix-owner-notification-posted %')`,
       )
       .all(qitemId) as Array<{ transition_note: string }>;
     return rows.some((row) => row.transition_note.split(/\s+/).includes(`notification_key=${notificationKey}`));

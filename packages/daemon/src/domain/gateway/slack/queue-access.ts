@@ -132,7 +132,7 @@ export async function seedBacklogAsHistory(opts: {
  *  no `-A` scope trap (list() here is repository-wide), no bounded-body N+1 (rows carry bodies). */
 export function makeQueuePorts(
   queueRepo: QueueRepository,
-  opts: { loadHumanRegistry?: () => LoadResult } = {},
+  opts: { loadHumanRegistry?: () => LoadResult; connectorKind?: "slack" | "matrix" } = {},
 ): InboundQueuePort & OutboundQueuePort {
   return {
     async createQitem(input: CreateQitemInput): Promise<string> {
@@ -167,6 +167,8 @@ export function makeQueuePorts(
         const row = queueRepo.getById(qitemId);
         if (!row) return [];
         const item = project(row, transition, registry.entities);
+        const human = registry.entities.find((h) => h.address === item?.destinationSession);
+        if (opts.connectorKind && human?.connectorBindings.find((b) => b.role === "primary")?.kind !== opts.connectorKind) return [];
         return item ? [item] : [];
       });
       return filterHumanAlerts(projected, filter);

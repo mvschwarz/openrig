@@ -62,6 +62,7 @@ const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
 
 export interface SlackWireOpts {
+  acceptsDecision?: (ref: string) => boolean;
   home: string;
   queueRepo: QueueRepository;
   log?: (msg: string) => void;
@@ -229,6 +230,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     log(`slack delivery not configured (${missing}) — wire is inert; dispatches would be refused honestly`);
     const inert = buildInProcessWire({
       home: opts.home,
+      acceptsDecision: opts.acceptsDecision,
       ops: [],
       deliver: async () => ({ ok: false, class: "slack-not-configured", detail: missing }),
       log,
@@ -239,6 +241,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const registrySurface: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
   const ports = makeQueuePorts(opts.queueRepo, {
     loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home),
+    connectorKind: "slack",
   });
   // OPR.0.5.6.1 — the one engine consult (AM-F5: the gateway consults the
   // engine BEFORE dispatch). Null = destination is not a registered human;
@@ -689,6 +692,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   const wire = buildInProcessWire({
     home: opts.home,
+    acceptsDecision: opts.acceptsDecision,
     ops: outboundReady ? [OUTBOUND_OP] : [],
     deliver: outboundReady ? engineDeliver : deliver,
     log,

@@ -129,6 +129,11 @@ export async function healthHumanReadiness(home: string, address: string, gatewa
   const registry = loadHumanRegistry(home);
   const human = registry.ok ? registry.entities.find((h) => h.address === address) : undefined;
   if (!human) return { ready: false, reason: "registered human primary connector unavailable" };
+  if (human.connectorBindings.find((b) => b.role === "primary")?.kind === "matrix") {
+    const { matrixHumanReadiness } = await import("./gateway/matrix/readiness.js");
+    const readiness = matrixHumanReadiness(home, human, gatewayActive ? "active" : "inactive");
+    return { ready: readiness.ready, reason: readiness.reason };
+  }
   const cfg = loadConfig(home);
   const token = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined });
   const readiness = await resolveHumanDeliveryReadiness({

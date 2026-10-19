@@ -23,6 +23,8 @@ import { resolveSecret } from "../domain/gateway/slack/secrets.js";
 import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../domain/gateway/human-readiness.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
+import { matrixHumanReadiness } from "../domain/gateway/matrix/readiness.js";
+import { loadConfig as loadMatrixConfig, saveConfig as saveMatrixConfig } from "../domain/gateway/matrix/config.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 
@@ -71,6 +73,53 @@ export function gatewayRoutes(opts: {
     return c.json({ observedAt: new Date().toISOString(), ...(snapshot ?? { state: "unavailable", connector: null }) });
   });
 
+  app.get("/matrix/status", (c) => {
+    const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+    const snapshot = subsystem?.connectorStatus?.();
+    const connector = snapshot?.connector as { connectors?: Record<string, unknown> } | undefined;
+    return c.json({ observedAt: new Date().toISOString(), state: snapshot?.state ?? "unavailable", connector: connector?.connectors?.matrix ?? null });
+  });
+
+  app.post("/matrix/:operation", async (c) => {
+    const operation = c.req.param("operation");
+    if (operation !== "enable" && operation !== "disable") return c.notFound();
+    const body = await c.req.json<{ actor?: string; reason?: string }>().catch(() => ({} as { actor?: string; reason?: string }));
+    const actor = requireSenderIdentity(c, { verb: `matrix ${operation}`, bodyClaim: typeof body.actor === "string" ? body.actor : null });
+    if (!actor.ok) return actor.response;
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (operation === "disable" && !reason) return c.json({ error: "reason_required", message: "Disabling human delivery requires --reason describing the shutdown." }, 400);
+    const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    if (!subsystem || (operation === "enable" && !queueRepo)) return c.json({ error: "gateway_admin_unavailable" }, 503);
+    const home = opts.home ?? OPENRIG_HOME;
+    const pending = adminTail.then(async () => {
+      const cfg = loadMatrixConfig(home);
+      const enabled = operation === "enable";
+      return runChannelOperation({ action: operation, subject: "matrix", actor: actor.session, provenance: actor.provenance,
+        reason: reason || "enable Matrix human delivery", before: { enabled: cfg.enabled },
+        run: async () => {
+          let seeded = 0;
+          if (enabled && !cfg.enabled) {
+            const registry = loadHumanRegistry(home);
+            if (!registry.ok) throw new HTTPException(503, { res: c.json({ error: "human_registry_unavailable", message: `Cannot seed Matrix delivery backlog: ${registry.error}` }, 503) });
+            const ports = makeQueuePorts(queueRepo!, { loadHumanRegistry: () => registry, connectorKind: "matrix" });
+            const alerts = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
+            const seen = new SeenStore(path.join(home, "state", "matrix-outbound-seen.jsonl"));
+            seeded = seen.seed(alerts.map((a) => a.notificationKey ?? a.qitemId), "seeded-at-enable");
+          }
+          if (cfg.enabled !== enabled) saveMatrixConfig({ ...cfg, enabled }, home);
+          // Re-enabling reloads setup changes without marking undelivered alerts as history.
+          const rewired = enabled || cfg.enabled !== enabled;
+          if (rewired) subsystem.restart();
+          return { value: { seeded, onlineStatus: `matrix connector ${enabled ? "enabled" : "disabled"}; ${seeded} existing alert(s) seeded as history` },
+            after: { enabled, active: subsystem.status().state === "active" }, effect: rewired ? "applied" : "no-op" };
+        } }, home);
+    });
+    adminTail = pending.catch(() => undefined);
+    const result = await pending;
+    return c.json({ ok: true, ...result.value, receipt: result.receipt });
+  });
+
   app.get("/slack/manifest", (c) => c.json(buildSlackAppManifest()));
 
   app.get("/human/:entityId/readiness", async (c) => {
@@ -86,6 +135,7 @@ export function gatewayRoutes(opts: {
     if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: registry.error }, 503);
     const human = registry.entities.find((candidate) => candidate.entityId === entityId);
     if (!human) return c.json({ error: "human_not_found", entityId }, 404);
+    if (human.connectorBindings.find((b) => b.role === "primary")?.kind === "matrix") return c.json({ ok: true, readiness: matrixHumanReadiness(home, human, gatewayState) });
     const cfg = loadConfig(home);
     const botToken = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined });
     const readiness = await resolveHumanDeliveryReadiness({ human, config: cfg, gatewayState, botToken });

@@ -2503,16 +2503,30 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // start() never throws: a wiring failure surfaces as state=failed on the health surface and
   // boot proceeds. An unconfigured connector is an INERT wire (honest refusal class, no ops,
   // no drivers) — `rig slack status` names what is missing.
-  const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
+  const { GatewaySubsystem, combineGatewayWires } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { buildMatrixGatewayWire } = await import("./domain/gateway/matrix/matrix-subsystem.js");
+  const { loadHumanRegistry: loadGatewayHumans } = await import("./domain/gateway/human-registry.js");
+  const connectorKindFor = (ref: string): string => {
+    if (ref.startsWith("matrix:")) return "matrix";
+    const registry = loadGatewayHumans(OPENRIG_HOME);
+    const human = registry.ok ? registry.entities.find((h) => h.address === ref || h.entityId === ref) : undefined;
+    return human?.connectorBindings.find((b) => b.role === "primary")?.kind ?? "slack";
+  };
   const gatewaySubsystem = new GatewaySubsystem({
     home: OPENRIG_HOME,
-    wire: () => buildSlackGatewayWire({
-      home: OPENRIG_HOME,
-      queueRepo: queueRepoInstance,
-      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
-      log: (m) => console.log(`[gateway] ${m}`),
-    }),
+    wire: () => combineGatewayWires({
+      slack: buildSlackGatewayWire({
+        acceptsDecision: (ref) => connectorKindFor(ref) === "slack",
+        home: OPENRIG_HOME,
+        queueRepo: queueRepoInstance,
+        resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
+        log: (m) => console.log(`[gateway] ${m}`),
+      }),
+      matrix: buildMatrixGatewayWire({ home: OPENRIG_HOME, queueRepo: queueRepoInstance,
+        resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
+        log: (m) => console.log(`[gateway] ${m}`) }),
+    }, connectorKindFor),
     log: (m) => console.log(`[gateway] ${m}`),
   });
   gatewaySubsystem.start();

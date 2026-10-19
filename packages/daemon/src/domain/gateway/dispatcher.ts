@@ -14,6 +14,7 @@ import { isAdvertisedOp, type CapabilityDescriptor, type OutboundDecision } from
 
 export interface DispatcherDeps {
   buffer: DispatchBuffer;
+  acceptsDecision?: (entityBindingRef: string) => boolean;
   /** The transport write (a framed unix-socket send in prod; an in-memory sink in tests). */
   send: (decision: OutboundDecision) => void;
   /** Injectable id source (tests pin decisionIds; prod = a UUID). */
@@ -40,6 +41,7 @@ export class GatewayDispatcher {
   /** Dispatch an outbound decision. proof-9: pre-handshake OR an unadvertised op is REFUSED,
    *  never attempted. Durable-first: persisted to the buffer BEFORE the transport send. */
   dispatch(op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }): DispatchResult {
+    if (this.deps.acceptsDecision && !this.deps.acceptsDecision(entityBindingRef)) return { ok: false, error: "dispatch refused: binding belongs to another connector" };
     if (!this.descriptor) {
       return { ok: false, error: "dispatch refused: no capability descriptor yet (handshake incomplete)" };
     }
@@ -67,6 +69,8 @@ export class GatewayDispatcher {
 
   /** On (re)connect: re-send every un-Acked decision (no-loss across a connector outage). */
   replayPending(): void {
-    for (const decision of this.deps.buffer.pending()) this.deps.send(decision);
+    for (const decision of this.deps.buffer.pending()) {
+      if (!this.deps.acceptsDecision || this.deps.acceptsDecision(decision.entityBindingRef)) this.deps.send(decision);
+    }
   }
 }

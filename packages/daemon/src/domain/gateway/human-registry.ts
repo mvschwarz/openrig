@@ -20,11 +20,12 @@ import { join, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
+import { parseMatrixBinding, ROOM_PATTERN, USER_PATTERN } from "./matrix/config.js";
 import { parseSessionName } from "../session-name.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
-export const HUMAN_CONNECTOR_KINDS = new Set(["slack"]);          // M1's only kind
+export const HUMAN_CONNECTOR_KINDS = new Set(["slack", "matrix"]);
 export const HUMAN_BINDING_ROLES = new Set(["primary", "secondary"]);
 export const HUMAN_DELIVERY_CLASSES = new Set(["A", "B", "C", "D"]);
 // entityId is the fragment key + filename: a stable slug that survives platform
@@ -54,7 +55,7 @@ function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string 
 }
 
 export interface HumanConnectorBinding {
-  kind: "slack";
+  kind: "slack" | "matrix";
   connectorRef: string;
   /** POINTER at the connector's vault (secrets-on-connector) — NEVER the secret. */
   secretsRef: string;
@@ -151,11 +152,12 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
     // A6 v3: handle is OPTIONAL; when present it must be a clean platform id (ref-forgery-safe).
     let handle: string | undefined;
     if (b.handle !== undefined) {
-      if (typeof b.handle !== "string" || !HANDLE_PATTERN.test(b.handle)) {
-        return { ok: false, error: `connectorBindings[${i}].handle "${String(b.handle)}" must match ${HANDLE_PATTERN} (a platform id — no ':' '@' or whitespace, which could forge a ref)` };
+      if (typeof b.handle !== "string" || !(b.kind === "matrix" ? USER_PATTERN : HANDLE_PATTERN).test(b.handle)) {
+        return { ok: false, error: b.kind === "matrix" ? `connectorBindings[${i}].handle must be @user:server (Matrix user ID)` : `connectorBindings[${i}].handle "${String(b.handle)}" must match ${HANDLE_PATTERN} (a platform id — no ':' '@' or whitespace, which could forge a ref)` };
       }
     }
-    const binding: HumanConnectorBinding = { kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
+    if (b.kind === "matrix" && !ROOM_PATTERN.test(b.connectorRef)) return { ok: false, error: "Matrix connectorRef must be !room:server or #alias:server" };
+    const binding: HumanConnectorBinding = { kind: b.kind as HumanConnectorBinding["kind"], connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
     if (b.handle !== undefined) { handle = b.handle as string; binding.handle = handle; }
     bindings.push(binding);
   }
@@ -463,6 +465,10 @@ export type RemoveHumanResult =
 export function parseBindingSpec(spec: string):
   | { ok: true; binding: { kind: string; connectorRef: string; secretsRef: string; role: string; handle?: string } }
   | { ok: false; error: string } {
+  if (spec.startsWith("matrix:")) {
+    try { return { ok: true, binding: parseMatrixBinding(spec) }; }
+    catch (error) { return { ok: false, error: (error as Error).message }; }
+  }
   const all = spec.split(":");
   const handleTokens = all.filter((p) => p.startsWith("handle="));
   if (handleTokens.length > 1) return { ok: false, error: `binding spec must carry at most one handle= token (got "${spec}")` };

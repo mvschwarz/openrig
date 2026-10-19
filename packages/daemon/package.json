@@ -38,6 +38,10 @@
       "types": "./dist/seat-recap-store-surface.d.ts",
       "import": "./dist/seat-recap-store-surface.js"
     },
+    "./gateway-matrix": {
+      "types": "./dist/gateway-matrix-surface.d.ts",
+      "import": "./dist/gateway-matrix-surface.js"
+    },
     "./gateway-slack": {
       "types": "./dist/gateway-slack-surface.d.ts",
       "import": "./dist/gateway-slack-surface.js"

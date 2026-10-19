@@ -28,7 +28,7 @@ export type SubsystemDeliverFn = (decision: OutboundDecision) => Promise<Subsyst
  *  startServices() — invoked POST-BIND from index.ts (the contextMonitor pattern), so a
  *  test-built daemon (createDaemon without serve) composes the wire but never dials out. */
 export interface GatewayWire {
-  dispatcher: GatewayDispatcher;
+  dispatcher: Pick<GatewayDispatcher, "dispatch" | "replayPending">;
   stop(): void;
   startServices?(): void;
   status?(): Record<string, unknown>;
@@ -38,6 +38,7 @@ export interface GatewayWire {
 
 export interface InProcessWireOpts {
   home: string;
+  acceptsDecision?: (entityBindingRef: string) => boolean;
   /** The platform delivery seam. Until the relay cutover wires Slack, startup passes an
    *  honest unwired refusal — dispatches are retained durably, never silently dropped. */
   deliver: SubsystemDeliverFn;
@@ -71,6 +72,7 @@ export function buildInProcessWire(opts: InProcessWireOpts): GatewayWire {
   };
   const dispatcher: GatewayDispatcher = new GatewayDispatcher({
     buffer,
+    acceptsDecision: opts.acceptsDecision,
     send: (decision) => { void deliverAndAck(decision); },
   });
   dispatcher.onCapability({
@@ -210,4 +212,24 @@ export class GatewaySubsystem {
     if (this.state !== "failed") this.state = "stopped";
     this.deps.log?.("gateway subsystem stopped");
   }
+}
+
+/** Compose peer connectors without sharing their delivery or inbound state. The
+ * primary binding selects one wire; retired IPC transports remain untouched. */
+export function combineGatewayWires(wires: Record<string, GatewayWire>, kindFor: (ref: string) => string): GatewayWire {
+  const slack = wires.slack!;
+  return {
+    dispatcher: {
+      dispatch: (op, ref, payload, opts) => {
+        const kind = kindFor(ref);
+        return wires[kind]?.dispatcher.dispatch(op, ref, payload, opts)
+          ?? { ok: false, error: `dispatch refused: connector ${kind} unavailable` };
+      },
+      replayPending: () => { for (const wire of Object.values(wires)) wire.dispatcher.replayPending(); },
+    },
+    startServices: () => { for (const wire of Object.values(wires)) wire.startServices?.(); },
+    stop: () => { for (const wire of Object.values(wires)) wire.stop(); },
+    // Keep the existing Slack health shape; peer snapshots are additive.
+    status: () => ({ ...slack.status?.(), connectors: Object.fromEntries(Object.entries(wires).map(([kind, wire]) => [kind, wire.status?.()])) }),
+  };
 }

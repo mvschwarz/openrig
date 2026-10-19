@@ -3584,10 +3584,20 @@ export class QueueRepository {
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
-        AND r.transition_note LIKE 'slack-owner-notification-posted %'
+        AND (r.transition_note LIKE 'slack-owner-notification-posted %'
+          OR r.transition_note LIKE 'matrix-owner-notification-posted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
     `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
-    return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
+    return rows.map((row) => {
+      return {
+        ...this.rowToItem(row),
+        // This historical entry is selected by its posted receipt, including
+        // archived receipts. A current-episode ledger cannot describe it.
+        deliveryOutcome: "posted" as const,
+        deliveredAt: row.delivered_at,
+        deliveryReceipt: row.delivery_receipt,
+      };
+    });
   }
 
   /** Current explicit human FYIs; delivery receipts are not required for local visibility.
@@ -4013,7 +4023,9 @@ export class QueueRepository {
     this.receiptNotesStatement ??= this.db.prepare(
       `SELECT qitem_id, transition_note FROM queue_transitions
         WHERE qitem_id IN (SELECT value FROM json_each(?)) AND (transition_note LIKE 'slack-owner-notification-posted %'
-                             OR transition_note LIKE 'slack-owner-notification-transport-failed %')
+                             OR transition_note LIKE 'slack-owner-notification-transport-failed %'
+                             OR transition_note LIKE 'matrix-owner-notification-posted %'
+                             OR transition_note LIKE 'matrix-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
     );
     const notes = new Map<string, string[]>();
@@ -4030,9 +4042,9 @@ export class QueueRepository {
     const currentNotes = episode
       ? notes.filter((note) => note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
       : notes;
-    const posted = currentNotes.find((note) => note.startsWith("slack-owner-notification-posted "));
+    const posted = currentNotes.find((note) => note.startsWith("slack-owner-notification-posted ") || note.startsWith("matrix-owner-notification-posted "));
     if (posted) return { outcome: "posted", detail: posted, episode };
-    const failed = currentNotes.find((note) => note.startsWith("slack-owner-notification-transport-failed "));
+    const failed = currentNotes.find((note) => note.startsWith("slack-owner-notification-transport-failed ") || note.startsWith("matrix-owner-notification-transport-failed "));
     if (failed) return { outcome: "transport-failed", detail: failed, episode };
     const startedAt = episode?.startedAt ?? item.tsCreated;
     const gatewayRouted = episode !== null || item.lastNudgeResult?.startsWith("gateway-owned") === true;

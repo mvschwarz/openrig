@@ -134,7 +134,7 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .requiredOption("--display-name <name>", "Human-readable display name")
     .requiredOption(
       "--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>",
-      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
+      "Connector binding (repeatable); Matrix: matrix:!room:server[;role=primary|secondary][;handle=@user:server]. role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
       (v: string, acc: string[] = []) => { acc.push(v); return acc; },
     )
     .requiredOption("--delivery-class <A|B|C|D>", "Notification loudness class (the notifications register selection)")
@@ -202,7 +202,13 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .addHelpText("after", `
 Binding specification details:
   Format: <kind:connectorRef:secretsRef:role[:handle=<id>]>
-  - kind: Connector kind (e.g. "slack")
+  Matrix short form (uses rig matrix setup's secret store):
+    --binding "matrix:!abc123:example.org;handle=@alice:example.org"
+    --binding "matrix:#room:example.org;role=secondary;handle=@alice:example.org"
+  Omit ;handle for outbound-only; role defaults to primary. Room IDs/aliases
+  include their server name (and optional port). Exactly one binding is primary.
+
+  - kind: Connector kind ("slack" or "matrix")
   - connectorRef: Configuration label identifying the connector instance (e.g. "openrig-personal" or "main")
   - secretsRef: Pointer or label identifying where secrets are resolved (e.g. "file:/path/to/slack.env" or "vault://slack/user").
     NOTE: Never pass credentials or tokens inline here; credentials (like SLACK_BOT_TOKEN) are loaded from the connector's secrets env file (configured via 'rig slack setup --secrets-env-file').

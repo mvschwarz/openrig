@@ -150,7 +150,7 @@ describe("complete human notifications", () => {
     expect(act).not.toHaveBeenCalled();
     // Receipt retention remains queryable without keeping terminal transitions hot.
     archiveAgedTerminalTransitions(db, { nowIso: "2099-01-02T00:00:00Z", batchSize: 10 });
-    expect(repo.listDeliveredHumanUpdates({ limit: 1 })[0]?.qitemId).toBe(item.qitemId);
+    expect(repo.listDeliveredHumanUpdates({ limit: 1 })[0]).toMatchObject({ qitemId: item.qitemId, deliveryOutcome: "posted" });
   });
 
   it("repairs the final receipt after all parts landed without repeating any part", async () => {
