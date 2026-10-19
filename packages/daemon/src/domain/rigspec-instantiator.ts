@@ -2150,8 +2150,8 @@ export class PodRigInstantiator {
     );
     const managedDedupedFiles = this.dedupeProjectedManagedStartupFiles(planResult.plan, resolvedFiles);
     // P20 atom-4 PROTECT: hold back operator-edited skill targets (operator_conflict)
-    // so the adapter never overwrites an operator's edit — unless the operator forces
-    // it (input.force). The per-conflict warning already tells the operator this.
+    // so the adapter never overwrites an operator's edit unless an internal caller sets
+    // input.force. The warning names the source-edit/move-aside remedies available to users.
     const dedupedResolvedFiles = filterProtectedProjections(
       managedDedupedFiles,
       planResult.plan,

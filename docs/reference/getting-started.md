@@ -544,6 +544,16 @@ views. If the provider cannot open, each labelled fallback command joins a diffe
 seat. Keep all returned commands
 complete when sharing them; a created workspace alone does not confirm visibility.
 
+### Built by the community
+
+Tools built around OpenRig are maintained by their authors. We have not tested them;
+this list does not promise support or compatibility with your OpenRig version.
+
+- **[Rig HQ](https://github.com/dmelo/rig-hq)**, by [dmelo](https://github.com/dmelo):
+  a read-only pixel-office viewer for rigs, seats, attention and queue handoffs, as
+  described in the [author's introduction](https://github.com/mvschwarz/openrig/discussions/879).
+  The author reports testing it with OpenRig 0.6.5. See its repository for setup and support.
+
 ## Continue real project work
 
 Return to the same owner with the next outcome, citing the earlier result.

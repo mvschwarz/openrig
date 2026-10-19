@@ -842,6 +842,11 @@ never launches fresh, forks or retries. Peers sharing the Codex home are reporte
 not restarted.
 Mid-turn activity and child processes are shown in --plan and the result; deciding
 whether to interrupt them is the operator's call.
+An adopted seat (origin=claimed) refuses with claimed_session. The stored conversation
+must match the one the running Codex's command line names (or, when it names none, the
+only one Codex has logged since it started); OpenRig can't tell which conversation
+Codex is on now. If it was changed inside the running Codex, the restart may refuse or
+resume the earlier one: check the pane with rig capture <seat> first.
 --plan starts no Codex process: the network override, --no-daemon and add-dirs are
 taken from the running Codex's own command line, not probed again. Building the
 command can create OpenRig's own seat-bin link, as every managed launch does.
@@ -1146,9 +1151,13 @@ function printRestartReport(data: Record<string, unknown>): void {
   if (settings?.note) console.log(`Settings: ${settings.note}`);
   console.log(`Codex home: ${String(data["codexHome"])}.`);
   console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
-  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null };
+  const noDaemon = data["codexNoDaemonFlag"] as { detail: string } | undefined;
+  if (noDaemon) console.log(noDaemon.detail);
+  const processMode = data["processMode"] as { detail: string } | undefined;
+  if (processMode) console.log(processMode.detail);
+  const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null; startupGateKind?: string | null };
   console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
-  if (account.startupGate) console.log(`Codex startup gate: ${account.startupGate}`);
+  if (account.startupGate) console.log(`Codex startup gate${account.startupGateKind ? ` (${account.startupGateKind})` : ""}: ${account.startupGate}`);
   const stale = data["staleRestart"] as { startedAt: string; detail: string } | undefined;
   if (stale) console.log(`Stale restart from ${stale.startedAt}: ${stale.detail}`);
   const last = data["lastRestart"] as { outcome: string; finishedAt: string } | undefined;

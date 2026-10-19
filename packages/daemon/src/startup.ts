@@ -1,3 +1,4 @@
+import { makeWatchdogDeliver, occurrenceAttempted, priorDigestAttempt } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
@@ -2084,30 +2085,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,
-      deliver: async ({ targetSession, message, continuityAction }, source) => {
-        let continuityActionCompleted = false;
-        try {
-          if (continuityAction) {
-            await createContinuityCutoverBaton(continuityAction, queueRepoInstance);
-            continuityActionCompleted = true;
-          }
-          const deliveryId = `guard-watchdog-${source.occurrenceId ?? source.jobId}`;
-          const previous = outboxHandlerInstance.getById(deliveryId);
-          const payload = previous?.guardBinding ? previous.body : formatWatchdogDeliveryMessage(source, message);
-          const result = await sessionTransport.send(targetSession, payload,
-            { deliveryId, actorSession: "watchdog@system", auditPointer: source.jobId });
-          if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
-          return result.ok
-            ? { status: "ok", continuityActionCompleted }
-            : { status: "failed", error: result.error, continuityActionCompleted };
-        } catch (err) {
-          return {
-            status: "failed",
-            error: err instanceof Error ? err.message : String(err),
-            continuityActionCompleted,
-          };
-        }
-      },
+      deliver: makeWatchdogDeliver({
+        sessionTransport,
+        outbox: outboxHandlerInstance,
+        db,
+        createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
+      }),
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
       // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
@@ -2119,6 +2102,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       onWakeAttempt: ({ jobId, deliveryStatus }) => {
         queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus);
       },
+      // Due parked-row reminders for one seat in one scheduler pass go as one message.
+      resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),
+      priorDigestAttempt: (occurrenceId) => priorDigestAttempt(outboxHandlerInstance, occurrenceId),
+      occurrenceAttempted: (occurrenceId) => occurrenceAttempted(outboxHandlerInstance, occurrenceId),
       // PL-004 Phase D: register workflow-keepalive policy alongside
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables

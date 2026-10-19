@@ -393,7 +393,11 @@ export class WorkflowInstanceStore {
            ${setVersion}${setHop}${setResume}${currentStepClause}status = ?, current_frontier_json = ?,
            last_continuation_decision_json = COALESCE(?, last_continuation_decision_json),
            fallback_synthesis = COALESCE(?, fallback_synthesis),
-           completed_at = COALESCE(?, completed_at)
+           -- Reopening a terminal run must clear its old completion marker;
+           -- otherwise active redrives still render as completed. Terminal
+           -- states retain their existing marker when no new timestamp is
+           -- supplied.
+           completed_at = CASE WHEN ? IN ('active', 'waiting') THEN NULL ELSE COALESCE(?, completed_at) END
          WHERE instance_id = ?${versionWhere}`;
     const stmt = this.db.prepare(sql);
     const params: unknown[] = [];
@@ -403,6 +407,7 @@ export class WorkflowInstanceStore {
       JSON.stringify(nextFrontier),
       opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
       opts.fallbackSynthesis ?? null,
+      nextStatus,
       opts.completedAt ?? null,
       instanceId,
     );

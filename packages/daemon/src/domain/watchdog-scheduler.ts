@@ -1,5 +1,5 @@
 import type { WatchdogJob, WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
-import type { WatchdogPolicyEngine } from "./watchdog-policy-engine.js";
+import type { ReminderPass, WatchdogPolicyEngine } from "./watchdog-policy-engine.js";
 import { nextDueAt } from "./watchdog-due.js";
 
 /**
@@ -133,15 +133,19 @@ export class WatchdogScheduler {
     const nowMs = passStartedAt.getTime();
     this.beforeTick?.();
     const active = this.jobsRepo.listActive();
+    // Parked-row reminders due in this pass are held and sent at its end, one message per seat.
+    const pass: ReminderPass = { held: [] };
     for (const job of active) {
       if (this.shuttingDown) return;
       if (!isDue(job, nowMs)) continue;
       try {
-        await this.policyEngine.evaluate(job, passStartedAt.toISOString());
+        await this.policyEngine.evaluate(job, passStartedAt.toISOString(), pass);
       } catch (err) {
         this.onTickError(err);
       }
     }
+    if (this.shuttingDown) return;
+    await this.policyEngine.deliverHeldReminders(pass, (err) => this.onTickError(err), () => this.shuttingDown);
   }
 }
 

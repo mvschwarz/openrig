@@ -14,6 +14,7 @@ import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-ada
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
 import { accountLineNames, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 
 const LSTART = "Mon Oct 12 21:00:00 2026";
 const LATER = "Mon Oct 12 21:05:00 2026";
@@ -401,6 +402,165 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(result).toMatchObject({ ok: true, outcome: "incomplete", remainingStep: expect.stringContaining(`signs in to Codex in ${HOME}`),
       recoveryCommand: `codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`, account: { startupGate: expect.stringContaining("sign in") } });
     expect(w.launches).toHaveLength(1);
+  });
+
+  it.each([
+    ["hook_trust_gate", "Codex is waiting for hook trust approval before the session can become interactive.", "Codex is waiting for a hook review decision in the pane"],
+    ["trust_gate", "Codex is waiting for the folder trust prompt to be answered.", "Codex is waiting for a folder trust decision in the pane"],
+    ["model_selection_gate", "Codex is waiting for model selection before the session can become interactive.", "Codex is waiting for a model choice in the pane"],
+    ["update_gate", "Codex is showing an update prompt.", "Codex is waiting for an update decision OpenRig could not skip in the pane"],
+  ])("incomplete names the %s startup gate and its native decision; it says what was typed and that nothing was retried", async (gate, error, step) => {
+    const w = world({ launch: { ok: false, error, recovery: "attention_required", gate, verifierInput: "none", ...(gate === "update_gate" ? { gateChoice: true } : {}) } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    const recovery = `codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`;
+    expect(result).toMatchObject({ ok: true, outcome: "incomplete", recoveryCommand: recovery,
+      account: { startupGate: error, startupGateKind: gate } });
+    const remaining = (result as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain(step);
+    expect(remaining).toContain(`(${SEAT}, pane %1)`);
+    expect(remaining).toContain(recovery);
+    expect(remaining).toContain("That decision is for the person or an authorised operator");
+    expect(remaining).toContain(`see it with \`rig capture ${SEAT}\``);
+    expect(remaining).toContain("OpenRig typed nothing into this screen; nothing was retried or relaunched.");
+    expect(remaining).not.toContain("answered");
+    expect(remaining).not.toMatch(/\b(approve|trust all|choose|select|install)\b/i); // names the decision, never makes or prescribes it
+    expect(w.launches).toHaveLength(1); // the one resume; no second launch
+  });
+
+  it("through the adapter: a skip key sent to an update prompt that stays on screen is reported as sent, never as nothing answered", async () => {
+    const prompt = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
+    const keys: string[][] = [];
+    const tmux = { getPaneCommand: async () => "codex", capturePaneScreen: async () => prompt, capturePaneContent: async () => prompt,
+      getPanePid: async () => 901, sendKeys: async (_: string, k: string[]) => { keys.push(k); return { ok: true }; } } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: {} as never, sleep: async () => {},
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }] });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    expect(keys).toEqual([["3"]]);
+    const w = world({ launch });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain("Codex is waiting for an update decision OpenRig could not skip");
+    expect(remaining).toContain("OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched.");
+    expect(remaining).not.toMatch(/typed nothing|answered/);
+  });
+
+  // Round 4: the report's message, startupGate and step all describe the newest moment, through the real adapter.
+  const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n");
+  const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
+  const RESUMED = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const BOOTING = "Loading conversation...";
+  const CODEX_ROW = [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }];
+  function scriptedAdapter(screen: (n: number, keysSent: number) => string, sendResult: TmuxResult = { ok: true }) {
+    let n = 0; let keysSent = 0;
+    const tmux = { getPaneCommand: async () => "codex", getPanePid: async () => 901,
+      capturePaneScreen: async () => screen(++n, keysSent), capturePaneContent: async () => screen(++n, keysSent),
+      sendKeys: async () => { keysSent++; return sendResult; } } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: {} as never, sleep: async () => {}, listProcesses: () => CODEX_ROW });
+    return { adapter, captures: () => n, keys: () => keysSent };
+  }
+  async function updatingCaptures(): Promise<number> {
+    const a = scriptedAdapter(() => UPDATING); await a.adapter.verifyResumeInPane("impl", "tok"); return a.captures();
+  }
+  async function report(launch: HarnessLaunchResult) {
+    const w = world({ launch });
+    return await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { message: string; remainingStep: string; account: { startupGate: string | null; startupGateKind: string | null } };
+  }
+
+  it.each([["resumed", RESUMED], ["booting", BOOTING]] as const)(
+    "a final-poll recheck showing a %s screen leaves no older update text in the message, startupGate or step",
+    async (_label, last) => {
+      const total = await updatingCaptures() + 1;
+      const a = scriptedAdapter((n) => (n === total ? last : n === total - 1 ? SKIPPABLE : UPDATING));
+      const launch = await a.adapter.verifyResumeInPane("impl", "tok");
+      expect(a.captures()).toBe(total);
+      expect(launch).not.toHaveProperty("gate");
+      const r = await report(launch);
+      for (const text of [r.message, r.account.startupGate ?? "", r.remainingStep]) expect(text).not.toMatch(/update/i);
+      expect(r.account.startupGateKind).toBeNull();
+    });
+
+  it("a skip key sent with only booting screens after it: the generic step says the key was sent", async () => {
+    const a = scriptedAdapter((_n, keys) => (keys > 0 ? BOOTING : SKIPPABLE));
+    const launch = await a.adapter.verifyResumeInPane("impl", "tok");
+    expect(a.keys()).toBe(1);
+    expect(launch).toMatchObject({ ok: false, verifierInput: "update_skip_key_sent" });
+    expect(launch).not.toHaveProperty("gate");
+    const r = await report(launch);
+    expect(r.remainingStep).toContain("OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched.");
+    expect(r.message).not.toMatch(/update/i);
+    expect(r.account.startupGate ?? "").not.toMatch(/update/i);
+  });
+
+  it("a failed skip-key send, through the adapter: no 'could not skip'; the effect is unknown in the message, startupGate and step", async () => {
+    const total = await updatingCaptures() + 1;
+    const a = scriptedAdapter((n) => (n >= total - 2 ? SKIPPABLE : UPDATING), { ok: false, code: "unknown", message: "injected send failure" } as TmuxResult);
+    const launch = await a.adapter.verifyResumeInPane("impl", "tok");
+    const r = await report(launch);
+    expect(r.message).toContain("Could not send the update prompt's skip key (3): injected send failure; its effect is unknown.");
+    expect(r.account.startupGate).toContain("Could not send the update prompt's skip key (3)");
+    expect(r.remainingStep).toContain("The send failed, so the key's effect is unknown.");
+    for (const text of [r.message, r.account.startupGate ?? "", r.remainingStep]) expect(text).not.toMatch(/could not skip/i);
+  });
+
+  it("an update screen without the recognised skip option is described neutrally: neither progress nor a waiting decision", async () => {
+    const w = world({ launch: { ok: false, error: "Codex is showing an update prompt.", recovery: "attention_required", gate: "update_gate", gateChoice: false, verifierInput: "none" } });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain(`Codex is showing an update screen in the pane (${SEAT}, pane %1); see it with \`rig capture ${SEAT}\`. Check it before you run the recovery command`);
+    expect(remaining).not.toMatch(/decision|in progress|waiting/);
+  });
+
+  it.each([
+    ["sent", "update_skip_key_sent", "The last screen OpenRig saw, before it sent the update prompt's skip key (3), offered an update choice. What Codex showed after the key wasn't observed."],
+    ["failed", "update_skip_key_failed", "The last screen OpenRig saw, before it tried to send the update prompt's skip key (3), offered an update choice. The send failed, so the key's effect is unknown."],
+  ] as const)("a screen OpenRig acted on afterwards (skip key %s) is reported as the screen before that input", async (_label, verifierInput, opening) => {
+    const w = world({ launch: { ok: false, error: "Codex is showing an update prompt.", recovery: "attention_required", gate: "update_gate", gateChoice: true, screenBeforeInput: true, verifierInput } });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining.startsWith(opening)).toBe(true);
+    expect(remaining).toContain(`See it with \`rig capture ${SEAT}\` (pane %1), then run the recovery command`);
+    expect(remaining).toMatch(/nothing was retried or relaunched\.$/i);
+    expect(remaining).not.toMatch(/is waiting|could not skip/);
+  });
+
+  it("a launch result that doesn't say what was typed claims nothing about input", async () => {
+    const w = world({ launch: { ok: false, error: "Codex is waiting for hook trust approval.", recovery: "attention_required", gate: "hook_trust_gate" } });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining).toMatch(/Nothing was retried or relaunched\.$/);
+    expect(remaining).not.toMatch(/typed nothing|answered/);
+  });
+
+  it("the sign-in and generic steps are unchanged; an unnamed gate still says what kind it is", async () => {
+    const signIn = world({ launch: { ok: false, error: "Codex could not refresh the stored access token; an operator must sign in again before the session can resume.", recovery: "attention_required", gate: "codex_auth_refusal" } });
+    expect(await signIn.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({
+      remainingStep: `Whoever owns the sign-in signs in to Codex in ${HOME}, then the conversation resumes with the recovery command.`,
+      account: { startupGateKind: "codex_auth_refusal" } });
+    const generic = world({ launch: { ok: false, error: "Codex is waiting for an MCP server decision.", recovery: "attention_required", gate: "mcp_gate" } });
+    expect(await generic.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({
+      remainingStep: "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
+      account: { startupGateKind: "mcp_gate" } });
+    const unknown = world({ launch: { ok: false, error: "Codex resume could not be confirmed.", recovery: "attention_required" } });
+    expect(await unknown.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({
+      remainingStep: "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
+      account: { startupGateKind: null } });
+  });
+
+  it("--plan and the report show the --no-daemon launch flag as launch evidence only", async () => {
+    const daemon = world();
+    const absent = await daemon.service.restartInPlace({ seatRef: SEAT, plan: true }) as { codexNoDaemonFlag: { present: boolean; detail: string } };
+    expect(absent.codexNoDaemonFlag).toEqual({ present: false,
+      detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." });
+    const optOut = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}` });
+    expect(await optOut.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({
+      codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." } });
+    const restarted = await optOut.service.restartInPlace({ seatRef: SEAT, reason: "x" });
+    expect(restarted).toMatchObject({ outcome: "restarted_account_unverified", codexNoDaemonFlag: { present: true } });
+  });
+
+  it("--plan and the report give the process mode as unknown, with the reason: nothing observes app-server attachment", async () => {
+    const detail = "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only.";
+    for (const runningArgs of [undefined, `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}`]) {
+      const w = world(runningArgs ? { runningArgs } : {});
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ processMode: { state: "unknown", detail } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ processMode: { state: "unknown", detail } });
+    }
   });
 
   it("incomplete, never fresh, when Codex has no saved session for the conversation", async () => {

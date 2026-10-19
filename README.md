@@ -161,7 +161,7 @@ using a published package, since repository guidance can be ahead of npm.
 | --- | --- |
 | **npm installation** | Installs the CLI (`rig` and `openrig-tui`), bundled components and dependencies under your npm prefix (with Bun, under Bun's global directory). OpenRig's postinstall checks the Node.js version and that the SQLite module loads; Bun may block this script. It does not run daemon or provider setup. |
 | **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. Installs herdr by default on macOS and Linux unless declined with `--no-herdr`; an unavailable herdr install is a warning. On macOS the installing agent offers Ghostty, and `--ghostty` attempts it after acceptance. Existing cmux settings are left unchanged. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
-| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill, the `refocusing` skill and the person-facing `rigs` skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
+| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill, the `refocusing` skill and the person-facing `rigs` skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. When a Codex seat is already recorded and `runtime.codex.hooks_enabled` is enabled (the default), ensures its hook configuration and trust records as described below. With no recorded Codex seat, enabled hooks wait for its first launch; disabled hooks still remove a stale OpenRig-managed hook block, if present. |
 | **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. In a Git repository, newly created files under `.codex/plugins/shared:openrig-core/` (or the unqualified `.codex/plugins/openrig-core/`) are added to the repository's Git `info/exclude` inside an `# BEGIN OpenRig generated files` block; new `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` files stay visible with a warning. |
 | **Bundle install** (`rig bundle install`, or `rig up` with a `.rigbundle` or GitHub link) | Writes the bundle's files into the install target: `--target`, or the current directory for `rig up` and for a GitHub link. `rig bundle install` with a local archive needs `--target`. Routes its declared skills, plugins and context packs into your libraries. A GitHub link's archive is kept under `OPENRIG_HOME/bundle-imports/`, and installs are recorded in `OPENRIG_HOME/bundle-audit.jsonl`. A bundle that carries a project creates it under `workspace.projects_root` and records it, with the rig's association, in the workspace catalog. |
 | **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules to your settings files; a team seat with no permission policy, per-seat choice or (for Codex) named profile gets the per-launch [team default](docs/reference/rig-spec.md#team-launch-defaults) instead. Agent-guided setup recommends keeping it and requires your actual answer before the agent [adds remembered rules at your chosen scope](docs/reference/getting-started.md#have-your-agent-configure-permissions). No/no answer keeps the team default and preserves settings; existing choices and stricter rules remain relevant. Broader access is separate. |
@@ -175,7 +175,9 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   writes `HOME/.claude.json`, and also `<CLAUDE_CONFIG_DIR>/.claude.json` when the
   daemon has that variable set. In the workspace, `.claude/settings.local.json` receives
   the context collector's `statusLine` command and selected activity hooks;
-  the collector script lives under `.openrig/`, and the activity-hook relay under
+  a user's own status-line command is preserved, so it can prevent collector
+  installation. Selected settings resources can still replace overlapping keys.
+  The collector script lives under `.openrig/`, and the activity-hook relay under
   the instance's `state/claude-activity-hooks/`. Selected settings/MCP resources can also
   change that settings file and `.mcp.json`. The shared settings resource sets
   `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
@@ -185,8 +187,10 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   To keep your own status line alongside the collector, see
   [Custom Claude status line](docs/reference/claude-status-line.md).
 - **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
-  `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
-  commands and pre-writes trust hashes for those commands. Seat startup adds
+  `~/.codex/config.toml`). With hooks enabled, daemon startup ensures the OpenRig
+  activity relay commands and their trust hashes when a Codex seat is already
+  recorded; otherwise the first Codex launch does so. With hooks disabled, startup
+  can remove a stale OpenRig-managed hook block even without a Codex seat. Seat startup adds
   `trust_level = "trusted"` for the workspace; selected config resources can
   add MCP settings. Managed launches pass `-c check_for_update_on_startup=false`,
   which writes no config; a recognized update notice that still appears can be
@@ -252,9 +256,12 @@ separates the desired selection from the last launch arguments; neither proves
 native enforcement. See the [permission guide](docs/reference/getting-started.md#per-seat-permission-mode).
 
 Managed hook blocks target OpenRig's entries and retain unrelated hooks, but
-trust entries, selected resource keys and Claude's existing status-line command
-can be replaced. Some writers recover unreadable settings as empty objects;
-this is not a complete preservation or rollback guarantee. Back up relevant
+trust entries and selected resource keys can be replaced. Claude's collector,
+activity-hook and JSON resource writers leave unreadable or malformed settings
+untouched; this is not a product-wide preservation guarantee. Codex's workspace
+trust writer can treat an unreadable `config.toml` as empty and write a new trust
+configuration. Read-modify-write operations can also race other writers; there
+is no complete preservation or rollback guarantee. Back up relevant
 files before first use. Daemon/bootstrap writes are automatic and do not each
 have an interactive preview; `rig setup --dry-run` does not preview every later
 startup effect.

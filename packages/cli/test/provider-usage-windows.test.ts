@@ -90,6 +90,17 @@ describe("rig provider status — usage windows", () => {
     expect(out).not.toContain("USAGE");
   });
 
+  it("shows why current availability is unknown even when a Claude row has windows", async () => {
+    model = { ...MODEL, usage: [{ ...READING, provider: "claude", unavailableReason: "Windows are seat samples, not a current availability check." }] };
+    const { out, exitCode } = await run(["status"], port);
+    expect(exitCode).toBeFalsy();
+    expect(out).toContain("5h (primary)");
+    expect(out).toContain("current availability: unknown");
+    expect(out).toContain("Windows are seat samples, not a current availability check.");
+    const json = await run(["status", "--json"], port);
+    expect(JSON.parse(json.out)).toEqual(model);
+  });
+
   it("an allowance row: identity labels, each window's level and freshness with its own time, limit evidence, the failure beside the reading", async () => {
     model = { ...MODEL, usage: [READING] };
     const { out } = await run(["status"], port);

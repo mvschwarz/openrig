@@ -95,4 +95,68 @@ describe("#174 remove/shrink human output names a kept session", () => {
     expect(exitCode).toBeUndefined();
     expect(output).toContain("kept.lead: session kept, owned by kept.lead@live-rig");
   });
+
+  describe("rig name or id resolution", () => {
+    const RIG_SUMMARY = [
+      { id: "01J00000000000000000000001", name: "my-rig", archivedAt: null },
+      { id: "01J00000000000000000000002", name: "dup-rig", archivedAt: null },
+      { id: "01J00000000000000000000003", name: "dup-rig", archivedAt: null },
+    ];
+
+    function mockClient(overrides: { get?: (path: string) => Promise<{ status: number; data: unknown }>; delete?: (path: string) => Promise<{ status: number; data: unknown }> } = {}) {
+      return {
+        lifecycleDeps: deps().lifecycleDeps,
+        clientFactory: () => ({
+          get: vi.fn(overrides.get ?? (async (path: string) => {
+            if (path.includes("/api/rigs/summary")) return { status: 200, data: RIG_SUMMARY };
+            return { status: 404, data: { error: "not found" } };
+          })),
+          delete: vi.fn(overrides.delete ?? (async () => ({
+            status: 200,
+            data: {
+              ok: true,
+              rigId: "01J00000000000000000000001",
+              logicalId: "dev.impl",
+              sessionsKilled: 1,
+              reroutedQitemIds: [],
+            },
+          }))),
+        } as unknown as DaemonClient),
+      };
+    }
+
+    it("resolves a unique rig name to its id", async () => {
+      const clientDeps = mockClient();
+      const { output, exitCode } = await run(removeCommand(clientDeps), ["remove", "my-rig", "dev.impl"]);
+      expect(exitCode).toBeUndefined();
+      expect(output).toContain("Removed node dev.impl from rig 01J00000000000000000000001");
+    });
+
+    it("resolves an exact id", async () => {
+      const clientDeps = mockClient();
+      const { output, exitCode } = await run(removeCommand(clientDeps), ["remove", "01J00000000000000000000001", "dev.impl"]);
+      expect(exitCode).toBeUndefined();
+      expect(output).toContain("Removed node dev.impl from rig 01J00000000000000000000001");
+    });
+
+    it("warns to use rig id when summary lookup fails (HTTP 500) and node deletion fails", async () => {
+      const clientDeps = mockClient({
+        get: async () => ({ status: 500, data: { error: "daemon error" } }),
+        delete: async () => ({ status: 404, data: { ok: false, code: "rig_not_found", error: "Rig 'my-rig' not found." } }),
+      });
+      const { output, exitCode } = await run(removeCommand(clientDeps), ["remove", "my-rig", "dev.impl"]);
+      expect(exitCode).toBe(1);
+      expect(output).toContain("Rig 'my-rig' not found.");
+      expect(output).toContain("Could not list rigs to resolve a name. If this is a rig name, pass the rig id instead (rig ps --json).");
+    });
+
+    it("refuses an ambiguous rig name and reports candidate ids", async () => {
+      const clientDeps = mockClient();
+      const { output, exitCode } = await run(removeCommand(clientDeps), ["remove", "dup-rig", "dev.impl"]);
+      expect(exitCode).toBe(1);
+      expect(output).toContain("'dup-rig' matches 2 rigs");
+      expect(output).toContain("01J00000000000000000000002");
+      expect(output).toContain("01J00000000000000000000003");
+    });
+  });
 });
