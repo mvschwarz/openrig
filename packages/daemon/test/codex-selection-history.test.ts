@@ -4,6 +4,7 @@
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -119,7 +120,7 @@ async function fixture(frame: Frame, hook: "none" | "running" | "permission") {
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("sessionTransport" as never, transport); await next(); });
   app.route("/api/transport", transportRoutes());
-  const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
+  const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }) as Server;
   cleanup.push(() => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }));
   await new Promise<void>(resolve => server.once("listening", resolve));
   const { port } = server.address() as AddressInfo;
