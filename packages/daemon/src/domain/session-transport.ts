@@ -32,7 +32,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
-import type { GuardTarget, SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { DeliveryGuardError, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -1528,6 +1528,10 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
+  /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
+   *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
+   *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
+  signal?: AbortSignal;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -1578,6 +1582,18 @@ export interface SendOpts {
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
   expectedStagedLineCount?: number;
+}
+
+const CALLER_CANCELLED = "caller_cancelled";
+
+/** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
+function callerSignal(opts?: SendOpts): AbortSignal | undefined {
+  return opts?.queueWake || opts?.committedOutboxIds ? undefined : opts?.signal;
+}
+
+function callerCancelled(sessionName: string): SendResult {
+  return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: CALLER_CANCELLED,
+    error: `The request was cancelled before any input started. Nothing was typed into '${sessionName}', and nothing will be.` };
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
@@ -2097,6 +2113,7 @@ export class SessionTransport {
    * With verification requested, compare rendered message counts, excluding
    * agent input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) {
       const result = await this.sendUnguarded(sessionName, text, opts);
@@ -2170,7 +2187,8 @@ export class SessionTransport {
       }
       const result = await guard.operation(sessionName, async () => {
         if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
-          return this.guardedDelivery.send(sessionName, text, sendOpts ?? {}, ids);
+          // Draft-aware delivery commits its record before it writes; a caller going away doesn't cancel it.
+          return this.guardedDelivery.send(sessionName, text, { ...sendOpts, signal: undefined }, ids);
         }
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
         return prior ?? this.sendUnguarded(sessionName, text, sendOpts);
@@ -2345,6 +2363,7 @@ export class SessionTransport {
       timeoutMs,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+      signal: callerSignal(opts), cancelledBy: "caller",
     });
     if (!preWait.ok) {
       return { ok: false, failure: {
@@ -2575,6 +2594,7 @@ export class SessionTransport {
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
+        signal: callerSignal(opts), cancelledBy: "caller",
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -2802,6 +2822,8 @@ export class SessionTransport {
       text = appendDeliveredSegment(text, this.now().getTime() - Date.parse(opts.stampISO));
     }
 
+    // A caller that went away while this send waited: nothing has been written, so nothing ever is.
+    if (callerSignal(opts)?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     // Recheck the selected recipient after readiness/capture awaits, at the input boundary.
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
@@ -2810,6 +2832,11 @@ export class SessionTransport {
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
+    // The caller's cancellation is checked once more at the adapter's last step before the paste (after its buffer
+    // setup). A refusal there is proven pre-input and returns caller_cancelled; Enter below never checks it.
+    const cancel = callerSignal(opts);
+    if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
+    const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
     // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
     let writeIssued = false;
     const tagIssued = (error: unknown): never => {
@@ -2821,11 +2848,14 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
-        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false });
+        return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
     ).catch(tagIssued);
+    if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
+      return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
+    }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
       const policyRefusal = typeof textResult.code === "string" && textResult.code.startsWith("draft_");
@@ -3014,6 +3044,8 @@ export class SessionTransport {
     attachmentType: string | null;
     timeoutMs: number;
     signal?: AbortSignal;
+    /** Whose cancellation the signal carries: managed preparation (the default) or the send's caller. */
+    cancelledBy?: "caller";
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3056,12 +3088,15 @@ export class SessionTransport {
         };
     };
 
+    const cancelReason = input.cancelledBy === "caller" ? CALLER_CANCELLED : "preparation_cancelled";
     const cancelled = () => ({
       ok: false as const,
-      reason: "preparation_cancelled",
-      error: "Managed preparation ended; no compact authorized.",
+      reason: cancelReason,
+      error: input.cancelledBy === "caller"
+        ? "The request was cancelled while it waited for the seat to be idle. No text was sent, and none will be."
+        : "Managed preparation ended; no compact authorized.",
       activity: last ?? {
-        state: "unknown" as const, reason: "preparation_cancelled", evidenceSource: "pane_heuristic" as const,
+        state: "unknown" as const, reason: cancelReason, evidenceSource: "pane_heuristic" as const,
         sampledAt: this.now().toISOString(), evidence: null,
       },
       waitedMs: Math.max(0, Math.min(input.timeoutMs, input.timeoutMs - (deadline - Date.now()))),
