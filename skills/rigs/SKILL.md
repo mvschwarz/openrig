@@ -89,8 +89,8 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   - In a plain shell, joining writes no files in your project or personal settings.
   - Inside tmux, other agents can type into this window, and stopping the team (`rig down`) also closes this tmux
     session (both from source, not hand-tested). Transcript recording and, for Claude Code, writing
-    `.openrig/context-collector.cjs` and updating `.claude/settings.local.json` were hand-tested on 0.6.11.
-    An existing custom status line is kept (from source).
+    `.openrig/context-collector.cjs` and `.claude/settings.local.json` for the status line were hand-tested on 0.6.11.
+    Updating an existing `.claude/settings.local.json`, keeping its custom status line, is from source.
   - In a plain shell, other agents reply through the task queue because they can't type into this window, and
     stopping the team leaves this session running.
 
