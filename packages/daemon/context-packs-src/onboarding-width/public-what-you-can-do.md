@@ -848,6 +848,16 @@ your circumstances is configuration, and the ones that are not, another agent ca
   `both` sets which harnesses it installs and checks; one not chosen reads `skipped`, never failed.
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
+- **`rig usage top`** — which of this machine's seats used the most tokens over a window (`--window
+  90m`, `1h`, `2d`; `--top <n>` caps the list). Each ranked seat shows its token delta and samples;
+  a seat with no usable samples is listed as unknown with its reason, never as zero.
+  To compare machines, run it on each machine, or against each machine's daemon with
+  `OPENRIG_URL=<that daemon's URL>`, with the same `--window` and no `--top`, and `--json` for
+  exact fields. Show the results side by side in tokens. For each machine, give its host, the
+  window, how many seats were ranked and over what span, the unknown seats and their reasons, and
+  each seat's runtime and declared model (`rig ps --nodes` on that machine). Don't add machines
+  into one total unless they cover the same seats over the same span; where coverage differs, say
+  so instead.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. `rig` and `rig tui` open
   the status dashboard, not a conversation with an agent: talk to the operator through
   `rig terminal open saved:kernel --window`, which opens the dashboard and conversations together.
