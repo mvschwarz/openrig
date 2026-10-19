@@ -78,7 +78,8 @@ test('requires the actual runner ledger to agree with the returned result', () =
 test('a passing-only case admits only a clean PASS of its own scenario', () => {
   for (const [caseName, { scenario }] of Object.entries(PASSING_CASES)) {
     const result = { scenario, verdict: 'PASS' };
-    const pass = { mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
+    const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: 'Trace the exact held work' } }), additionalContext: 'Trace the exact held work' };
+    const pass = { ...(PASSING_CASES[caseName].kind === 'hook' ? { hook } : {}), mode: 'healthy', caseName, scenarioSha256: 'a'.repeat(64), result, records: [result], fault: null };
     verifyPassingRun(0, pass, caseName);
     const fail = { ...result, verdict: 'FAIL', failedStep: 2 };
     for (const [exitCode, bad] of [
@@ -105,4 +106,20 @@ test('only one structured outcome is allowed amid human-readable logs', () => {
   assert.throws(() => readReport('no result'));
   assert.throws(() => readReport(line + '\n' + line));
   assert.throws(() => readReport(RESULT_PREFIX + '{'));
+});
+
+test('refocus admission requires the exact emitted hook context and seeded missing-label observation', () => {
+  const context = '## WORK TRACE\nKeep the test product useful';
+  const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context } }), additionalContext: context };
+  const result = { scenario: 'refocus-parked-baton', verdict: 'FAIL', failedStep: 3,
+    observation: { surface: 'hook_context', value: { rawOutput: hook.rawOutput, content: context } } };
+  const red = { mode: 'seeded', caseName: 'refocus-parked', scenarioSha256: 'a'.repeat(64),
+    result, records: [result], hook, seed: { class: 'parked-baton-as-current', enabled: true },
+    fault: { class: 'parked-baton-as-current', removedLines: 1 } };
+  verifyRun('seeded', 1, red, 'refocus-parked');
+  for (const bad of [ { ...red, fault: null }, { ...red, hook: { ...hook, rawOutput: '{}' } },
+    { ...red, result: { ...result, failedStep: 2 }, records: [{ ...result, failedStep: 2 }] },
+    { ...red, result: { ...result, observation: { surface: 'pane', value: context } }, records: [{ ...result, observation: { surface: 'pane', value: context } }] },
+    { ...red, hook: { ...hook, additionalContext: 'tokens only in unrelated text' } },
+  ]) assert.throws(() => verifyRun('seeded', 1, bad, 'refocus-parked'));
 });

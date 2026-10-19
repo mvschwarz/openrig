@@ -129,3 +129,11 @@ The script removes only its named containers. If SSH becomes unavailable, it
 reports incomplete cleanup with the exact name for later reconciliation; no remote
 cleanup can be guaranteed through a broken connection. It never prunes shared
 images or other agents' containers.
+
+## Refocus context regression controls
+
+`refocus-parked` runs the real typed blocked-row setup, daemon `queue whoami`, shipped refocus hook and trace. The `hook_context` observation carries the hook's exact raw JSON stdout and its parsed `additionalContext`; pane text is not evidence. The same fresh scenario runs healthy, seeded, healthy. Its fault substitutes a scratch Python launcher for this hook's trace child, verifies a real fallback label was present, then removes exactly that label line. The hook's own emitted context must then fail step3 with an unlabelled work-root trace. An unrelated timeout/action failure or mere exit1 is rejected. `refocus-active` claims the equivalent typed row and requires that work node's intent with no fallback.
+
+These are controlled hook invocations against the actual scenario daemon, not native Claude/Codex hook scheduling or agent consumption. Fixtures and fault launchers stay under the scenario scaffold; installed hooks are unchanged. The pre-existing queue-durability and passing-only cases are retained.
+
+Managed-compaction coverage uses `managed-compaction-effect.test.ts` in ordinary daemon CI instead: the shipped compact route deliberately refuses `runtime:stub`, and the precompact seam exposes a keyed marker rather than a daemon stream event. The bounded helper fallback drives the real enforcer's command through a stub input model (recorded Claude2.1.282 success792/paste850-851) into the real precompact hook. Healthy and851-character seeded controls assert marker presence/absence, rather than a submit receipt or pane token. This is not native compaction or an installed `rig compact` journey. No runtime filter or ordinary-send behavior changes.

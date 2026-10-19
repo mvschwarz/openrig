@@ -1,0 +1,20 @@
+# Controlled hook invocation: real queue/current-work and real raw additionalContext, not native scheduling.
+scenario: refocus-active-baton
+topology: ./solo-stub.yaml
+env:
+  work_fixture: ./refocus-work
+  queue:
+    - id: refocus-baton
+      source: work-worker@solo-stub
+      destination: work-worker@solo-stub
+      tags: [mission:regression, slice:SCN.1]
+      claim: true
+steps:
+  - up: {}
+  - emit: {seat: work-worker@solo-stub, behavior: refocus}
+  - expect:
+      surface: hook_context
+      seat: work-worker@solo-stub
+      within: 0ms
+      contains: "Trace the exact held work"
+  - down: {}
