@@ -22,6 +22,7 @@ import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
@@ -335,6 +336,8 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
     type: string; payload: string; seq: number; rig_id: string; node_id: string | null;
   }[];
   const map = new Map<string, RestoreProjection>();
+  // Each entry's attempt, by its start seq; a subset restore records no start.
+  const attemptOf = new Map<string, { nodeId: string; seq: number }>();
   const attempts = new Map<string, {
     seq: number;
     start?: Record<string, any>;
@@ -378,18 +381,31 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         && !!attempt && attempt.seq === event.attemptId && attempt.outcomes.get(event.nodeId) === event.from
         && evidence?.tmux === true && evidence.resumeTokenUsed === true && evidence.paneState === "usable"
         && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex");
-      map.set(restoreKey(row.rig_id, event.nodeId), {
+      const key = restoreKey(row.rig_id, event.nodeId);
+      map.set(key, {
         outcome: mapStatus(event.to),
         ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
       });
+      attemptOf.set(key, { nodeId: event.nodeId, seq: typeof event.attemptId === "number" ? event.attemptId : 0 });
       continue;
     }
     if (!Array.isArray(event.result?.nodes)) continue;
+    const attemptSeq = row.type === "restore.completed" && attempt ? attempt.seq : row.seq;
     for (const node of [...event.result.nodes].reverse()) {
       if (typeof node?.nodeId === "string") {
-        map.set(restoreKey(row.rig_id, node.nodeId), { outcome: mapStatus(node.status) });
+        const key = restoreKey(row.rig_id, node.nodeId);
+        map.set(key, { outcome: mapStatus(node.status) });
+        attemptOf.set(key, { nodeId: node.nodeId, seq: attemptSeq });
       }
     }
+  }
+  // An attempt that started before the node's ready fresh launch describes the
+  // retired occupant: no restore outcome applies to the current one. History
+  // is unchanged; a subset completion after the launch stays current.
+  const fences = readReadyFreshLaunchFences(db, rigId);
+  for (const [key, entry] of attemptOf) {
+    const fence = fences.get(entry.nodeId);
+    if (fence !== undefined && entry.seq < fence) map.delete(key);
   }
   return map;
 }

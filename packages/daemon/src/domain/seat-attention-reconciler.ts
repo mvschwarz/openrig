@@ -13,6 +13,7 @@ import { explainNativeRejection, subtreeNamesClaudeExecutable, observeClaudeDeli
 import { isShellForeground } from "./shell-classifier.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = NativeProcessRow;
@@ -738,15 +739,21 @@ export class SeatAttentionReconciler {
     if (!this.deps.db) return null;
 
     const rows = this.deps.db.prepare(
-      "SELECT type, payload FROM events WHERE rig_id = ? AND type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled') ORDER BY seq DESC"
-    ).all(session.rigId) as { type: string; payload: string }[];
+      "SELECT seq, type, payload FROM events WHERE rig_id = ? AND type IN ('restore.started', 'restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled') ORDER BY seq DESC"
+    ).all(session.rigId) as { seq: number; type: string; payload: string }[];
+    // As in the inventory projection: an attempt that started before the
+    // node's ready fresh launch describes the retired occupant.
+    const fence = readReadyFreshLaunchFences(this.deps.db, session.rigId).get(session.nodeId);
+    const fenced = (attemptSeq: number) => fence !== undefined && attemptSeq < fence;
 
     let sawLegacyReconciliation = false;
     for (const row of rows) {
+      if (row.type === "restore.started") continue;
       try {
         if (row.type === "restore.outcome_reconciled") {
           const ev = JSON.parse(row.payload) as { nodeId: string; attemptId?: number; to: "operator_recovered" };
           if (ev.nodeId !== session.nodeId) continue;
+          if (fenced(typeof ev.attemptId === "number" ? ev.attemptId : 0)) return null;
           // Before restore receipts, both whole and subset clears used the
           // unscoped attemptId 0. It remains terminal for a subset, but cannot
           // settle a whole restore whose exact attempt still needs proof.
@@ -759,6 +766,12 @@ export class SeatAttentionReconciler {
         const ev = JSON.parse(row.payload) as { result: { nodes: Array<{ nodeId: string; status: string }> } };
         const n = ev.result.nodes.find((nd) => nd.nodeId === session.nodeId);
         if (!n) continue;
+        // A full restore's attempt starts at its restore.started; a subset
+        // restore records no start, so its completion is all there is.
+        const attemptSeq = row.type === "restore.completed"
+          ? rows.find((r) => r.type === "restore.started" && r.seq < row.seq)?.seq ?? row.seq
+          : row.seq;
+        if (fenced(attemptSeq)) return null;
         if (sawLegacyReconciliation && row.type === "restore.subset_completed") return null;
         // Mirror deriveNodeLifecycleState: attention_required regardless of
         // sessionStatus; failed only when sessionStatus=running.
