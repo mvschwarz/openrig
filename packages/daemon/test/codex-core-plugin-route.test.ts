@@ -350,6 +350,20 @@ describe("the install runs only for a seat that selected the plugin", () => {
     expect(s.calls.map((c) => c.slice(0, 2))).toEqual([["plugin", "marketplace"], ["plugin", "add"]]);
   });
 
+  it("concurrent launches run the Codex config setup and the install one after the other", async () => {
+    const s = launchable(() => true);
+    const events: string[] = [];
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const internals = s.adapter as unknown as Record<string, unknown>;
+    internals.resolveManagedConfigSettings = async () => { events.push("config"); await wait(20); return { enabled: true, codexVersion: "0.163.0" }; };
+    internals.runCodexCli = async (args: string[]) => { events.push(`cli:${args[1]}:start`); await wait(30); events.push(`cli:${args[1]}:end`); return { status: 0, stdout: "", stderr: "" }; };
+    const launch = (id: string) => s.adapter.launchHarness({ nodeId: id, tmuxSession: `${id}@rig`, cwd: s.cwd } as never, { name: id });
+    const results = await Promise.all([launch("a"), launch("b")]);
+    expect(results.every((r) => r.ok)).toBe(true);
+    const section = ["config", "cli:marketplace:start", "cli:marketplace:end", "cli:add:start", "cli:add:end"];
+    expect(events).toEqual([...section, ...section]);
+  });
+
   it("ensureManagedConfig alone (boot, resume) never installs", async () => {
     const s = launchable(() => true);
     await s.adapter.ensureManagedConfig();

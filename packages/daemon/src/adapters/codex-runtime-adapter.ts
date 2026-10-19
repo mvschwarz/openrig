@@ -162,6 +162,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_SEAT_PROJECT_DIR).
   private resolveCorePluginSelected?: (nodeId: string) => boolean;
   private runCodexCli: CodexCliRunner;
+  // One Codex config.toml per adapter: launches, the boot step and resume all write it (and Codex's install writes it too),
+  // so each of those runs its whole setup under this one lock, one after another.
+  private configLock: Promise<unknown> = Promise.resolve();
   private codexSystemConfigDir: string;
 
   constructor(deps: {
@@ -233,6 +236,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * not block the launch.
    */
   async ensureManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+    return this.withConfigLock(() => this.applyManagedConfig());
+  }
+
+  /** Run `task` after every earlier config setup on this adapter has finished, whatever its outcome. */
+  private withConfigLock<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.configLock.then(task, task);
+    this.configLock = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
     if (!this.resolveManagedConfigSettings) return undefined;
     try {
       const { enabled, codexVersion } = await this.resolveManagedConfigSettings();
@@ -252,11 +266,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    */
   async ensureCodexCorePluginAtBoot(anySeatSelected: boolean): Promise<void> {
     if (!anySeatSelected || !this.resolveHooksEnabled) return;
-    try {
-      if (await this.resolveHooksEnabled()) await this.ensureCodexCorePlugin();
-    } catch (err) {
-      console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
-    }
+    const resolveHooksEnabled = this.resolveHooksEnabled;
+    await this.withConfigLock(async () => {
+      try {
+        if (await resolveHooksEnabled()) await this.ensureCodexCorePlugin();
+      } catch (err) {
+        console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+      }
+    });
   }
 
   /**
@@ -671,12 +688,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running?: RunningCodexLaunch): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
-    const managed = await this.ensureManagedConfig();
-    // Only a seat that selected openrig-core installs it into Codex; an unselected seat's launch never does.
-    if (managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
-      try { await this.ensureCodexCorePlugin(); }
-      catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
-    }
+    // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
+    // concurrent launches never interleave them. An unselected seat's launch never installs.
+    await this.withConfigLock(async () => {
+      const managed = await this.applyManagedConfig();
+      if (managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
+        try { await this.ensureCodexCorePlugin(); }
+        catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
+      }
+    });
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
     const effort = binding.effort?.trim();
