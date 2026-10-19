@@ -162,9 +162,14 @@ const FIXTURES: Record<string, unknown> = {
   "/api/queue/recent-transitions?scope=rig&rig=myrig&limit=20": [],
 };
 
-function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
+function fixtureClient(
+  overrides: Record<string, { status: number } | undefined> = {},
+  responses: Record<string, unknown> = {},
+  calls?: string[],
+): DaemonClient {
   const fetchImpl = (async (url: unknown) => {
     const route = String(url).replace("http://x", "");
+    calls?.push(route);
     const failure = overrides[route];
     if (failure) return { ok: false, status: failure.status, json: async () => ({}) } as Response;
     if (route in responses) return { ok: true, json: async () => responses[route] } as Response;
@@ -422,12 +427,59 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       { ...base, logicalId: "dev.choice", effort: "high", effortSource: "seat_choice" },
       { ...base, logicalId: "dev.authored", effort: "medium", effortSource: "authored" },
       { ...base, logicalId: "dev.default", effort: null, effortSource: "runtime_default" },
+      // An older daemon omits both fields: that is unknown, not a runtime default.
+      { ...base, logicalId: "dev.old" },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
     const byName = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent]));
     expect(byName["dev.choice"]).toMatchObject({ effort: "high", effortSource: "seat_choice" });
     expect(byName["dev.authored"]).toMatchObject({ effort: "medium", effortSource: "authored" });
     expect(byName["dev.default"]).toMatchObject({ effort: null, effortSource: "runtime_default" });
+    expect(byName["dev.old"]).toMatchObject({ effort: null, effortSource: null });
+  });
+
+  it("reads seat effort once on agent detail and not at all on the rig table", async () => {
+    const calls: string[] = [];
+    const rigContext = { section: "topology" as const, viewTab: "table" as const, drill: [{ kind: "rig" as const, name: "myrig" }] };
+    const tableSnap = await hydrateSnapshot(fixtureClient({}, {}, calls), undefined, undefined, undefined, "myrig", rigContext);
+    expect(tableSnap.seatEffort).toBeUndefined();
+    expect(calls.filter((route) => route.startsWith("/api/seat/effort/"))).toEqual([]);
+
+    calls.length = 0;
+    const detailContext = {
+      section: "topology" as const, viewTab: "table" as const,
+      drill: [
+        { kind: "host" as const, name: "local" },
+        { kind: "rig" as const, name: "myrig" },
+        { kind: "pod" as const, name: "dev" },
+        { kind: "agent" as const, name: "dev.impl" },
+      ],
+    };
+    const report = { ok: true, saved: { effective: "high", source: "seat_choice" } };
+    const detailSnap = await hydrateSnapshot(
+      fixtureClient({}, { "/api/seat/effort/dev.impl%40myrig": report }, calls),
+      undefined, undefined, undefined, "myrig", detailContext,
+    );
+    expect(detailSnap.seatEffort).toEqual({ seatRef: "dev.impl@myrig", report });
+    expect(calls.filter((route) => route.startsWith("/api/seat/effort/"))).toHaveLength(1);
+  });
+
+  it("keeps the agent detail usable when the seat-effort read fails", async () => {
+    const detailContext = {
+      section: "topology" as const, viewTab: "table" as const,
+      drill: [
+        { kind: "host" as const, name: "local" },
+        { kind: "rig" as const, name: "myrig" },
+        { kind: "pod" as const, name: "dev" },
+        { kind: "agent" as const, name: "dev.impl" },
+      ],
+    };
+    const snap = await hydrateSnapshot(
+      fixtureClient({ "/api/seat/effort/dev.impl%40myrig": { status: 404 } }),
+      undefined, undefined, undefined, "myrig", detailContext,
+    );
+    expect(snap.seatEffort).toEqual({ seatRef: "dev.impl@myrig", report: null });
+    expect(snap.readErrors.some((error) => error.startsWith("seat-effort"))).toBe(true);
   });
 
   it("gives failed, attention, and needs-input truth precedence over terminal active/idle", async () => {

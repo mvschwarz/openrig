@@ -361,6 +361,8 @@ export interface SeatEffortRead {
   code?: string;
   message?: string;
   runtime?: string;
+  /** The last `rig seat set-effort` for this seat; null = never set. `value: null` = cleared. */
+  requested?: { value?: string | null; at?: string; reason?: string; operator?: string | null } | null;
   saved?: { effective?: string | null; source?: string | null; authored?: string | null; choice?: string | null };
   emitted?: {
     state?: "observed" | "unknown";
@@ -385,8 +387,9 @@ export interface SeatEffortRead {
 export interface FleetSnapshot {
   attentionRead?: import("@openrig/daemon/attention").AttentionRead | null;
   /** Present only while an agent detail page is open; fetched from the existing
-   *  seat-effort route. Absent = not read, never a claim that no effort exists. */
-  seatEffort?: { seatRef: string; report: SeatEffortRead } | null;
+   *  seat-effort route. A null report = the read did not answer; never a claim that
+   *  no effort exists. */
+  seatEffort?: { seatRef: string; report: SeatEffortRead | null } | null;
   projects?: { catalogPath: string; projects: ProjectEntry[] } | null;
   projectRead?: ProjectSelection | null;
   projectSources?: Record<string, string>;

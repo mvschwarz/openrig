@@ -73,13 +73,13 @@ function columnsWidth(columns: AgentColumn[]): number {
 function agentColumns(contentWidth: number): AgentColumn[] {
   if (contentWidth >= 110) return [
     ["pod", "POD", 8, "left"], ["seat", "SEAT", 15, "left"], ["runtime", "RT", 4, "left"],
-    ["model", "MODEL", 12, "left"], ["effort", "EFFORT", 7, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
+    ["model", "MODEL", 12, "left"], ["effort", "CFG EFF", 7, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
     ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 19, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
   if (contentWidth >= 88) return [
     ["pod", "POD", 5, "left"], ["seat", "SEAT", 10, "left"], ["runtime", "RT", 3, "left"],
-    ["model", "MODEL", 8, "left"], ["effort", "EFF", 4, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
+    ["model", "MODEL", 8, "left"], ["effort", "CFG", 4, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
     ["queue", "Q", 2, "right"], ["work", "WORK", 6, "left"], ["now", "NOW", 11, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
@@ -129,35 +129,103 @@ function tableModel(model: string | null | undefined): string {
   return model?.replace(/^claude-/i, "") || "—";
 }
 
-/** The configured launch effort only. "—" means no configured level is known.
- *  The compact form keeps the medium table inside its width; detail renders the exact value. */
-const COMPACT_EFFORT: Record<string, string> = { medium: "med", xhigh: "xhi", minimal: "min" };
+/** Table cell for the CONFIGURED value only. A trailing mark names its source:
+ *  `*` the seat's saved choice, `+` the authored value. `—` = no configured level
+ *  (runtime default); `?` = the daemon did not report one (older daemon / read gap).
+ *  A value compacts only when the mark would otherwise overflow the cell. */
+const CONFIGURED_MARK: Record<string, string> = { seat_choice: "*", authored: "+" };
+const COMPACT_EFFORT: Record<string, string> = { high: "hi", medium: "med", xhigh: "xhi", minimal: "min", none: "no" };
 
-function tableEffort(effort: string | null | undefined, compact: boolean): string {
+function tableEffort(
+  effort: string | null | undefined,
+  source: "seat_choice" | "authored" | "runtime_default" | null | undefined,
+  width: number,
+): string {
   const value = effort?.trim();
-  if (!value) return "—";
-  return compact ? (COMPACT_EFFORT[value] ?? value) : value;
+  if (!value) return source === "runtime_default" ? "—" : "?";
+  const mark = source ? CONFIGURED_MARK[source] ?? "" : "";
+  if (value.length + mark.length <= width) return `${value}${mark}`;
+  const compact = COMPACT_EFFORT[value] ?? value;
+  return `${compact.slice(0, Math.max(0, width - mark.length))}${mark}`;
 }
 
-function effortConfigured(agent: { effort?: string | null; effortSource?: "seat_choice" | "authored" | "runtime_default" | null }): string {
-  if (!agent.effort) return "— (runtime default; no configured level)";
-  const source = agent.effortSource === "seat_choice" ? "this seat's choice"
-    : agent.effortSource === "authored" ? "authored"
-    : "configured";
-  return `${agent.effort} (${source})`;
+/** The report-level reason when the whole read is unavailable; null when it answered. */
+function effortReportStatus(report: SeatEffortRead | null): string | null {
+  if (!report) return "report not read";
+  if (report.ok !== true) return `report refused ${report.code ?? "unknown_code"}`;
+  return null;
 }
 
-/** What the native session recorded, in the table-independent detail line. The full
- *  four-way report stays on `rig seat effort`; here the value and outcome are the point. */
-function effortObserved(report: SeatEffortRead | null): string {
-  if (!report) return "not read";
-  if (!report.ok) return `not read · ${report.message ?? report.code ?? "report unavailable"}`;
-  const observed = report.observed;
-  if (observed?.state === "observed") {
-    return `${observed.value ?? "—"}${observed.outcome ? ` (${observed.outcome})` : ""}`;
+/** requested: the last saved choice request. null (no event) and an explicit clear differ. */
+function effortRequestedText(report: SeatEffortRead | null): string {
+  if (!report || report.ok !== true) return "unknown";
+  if (!report.requested) return "never set";
+  return report.requested.value == null ? "cleared" : report.requested.value;
+}
+
+/** The configured side. The report's saved resolution is authoritative; the node
+ *  inventory (same resolver) fills in when the report was not read. */
+function effortSavedText(
+  report: SeatEffortRead | null,
+  agent: { effort?: string | null; effortSource?: "seat_choice" | "authored" | "runtime_default" | null },
+): string {
+  const saved = report?.ok === true ? report.saved : undefined;
+  if (saved?.effective) {
+    if (saved.source === "seat_choice") {
+      const authored = saved.authored && saved.authored !== saved.effective ? `; authored ${saved.authored}` : "";
+      return `${saved.effective} (seat choice${authored})`;
+    }
+    if (saved.source === "authored") return `${saved.effective} (authored)`;
+    return `${saved.effective} (source ${saved.source ?? "not reported"})`;
   }
-  return `not verified${observed?.detail ? ` · ${observed.detail}` : ""}`;
+  if (saved?.source === "runtime_default") return "none (runtime default)";
+  if (agent.effort) {
+    const source = agent.effortSource === "seat_choice" ? "seat choice"
+      : agent.effortSource === "authored" ? "authored"
+      : "source not reported";
+    return `${agent.effort} (${source}; node inventory)`;
+  }
+  if (agent.effortSource === "runtime_default") return "none (runtime default; node inventory)";
+  return "unknown";
 }
+
+/** emitted: the flag the running process was launched with, never a saved value. */
+function effortEmittedText(report: SeatEffortRead | null): string {
+  if (!report || report.ok !== true) return "unknown";
+  const emitted = report.emitted;
+  if (!emitted || emitted.state !== "observed") return "unknown";
+  const value = emitted.value == null ? "no flag" : emitted.value;
+  return emitted.matchesSaved === false ? `${value} (differs from saved)` : value;
+}
+
+/** The native side. "applied" appears only for outcome `accepted`: every other
+ *  outcome leaves the applied level unproven or judged not taken. */
+function effortObservedText(report: SeatEffortRead | null): string {
+  if (!report || report.ok !== true) return "unknown";
+  const observed = report.observed;
+  if (!observed || observed.state !== "observed") return "unknown";
+  const value = observed.value ?? "—";
+  const outcome = observed.outcome ?? "not reported";
+  const wording = outcome === "accepted" ? "accepted — applied"
+    : outcome === "recorded" ? "recorded; applied not proven"
+    : outcome === "rejected" ? "rejected — not taken"
+    : outcome === "failed" || outcome === "interrupted" || outcome === "pending" ? `${outcome} — not judged`
+    : `outcome ${outcome}`;
+  const differs = observed.matchesEmitted === false ? "; differs from launch" : "";
+  return `${value} (${wording}${differs})`;
+}
+
+/** One wrapped row: the four values stay labelled and distinguishable. */
+function effortDetailText(
+  report: SeatEffortRead | null,
+  agent: { effort?: string | null; effortSource?: "seat_choice" | "authored" | "runtime_default" | null },
+): string {
+  const status = effortReportStatus(report);
+  return `requested ${effortRequestedText(report)} · saved ${effortSavedText(report, agent)} · emitted ${effortEmittedText(report)} · observed ${effortObservedText(report)}${status ? ` · ${status}` : ""}`;
+}
+
+/** One line under the table naming what the column holds: configured, never observed. */
+const EFFORT_LEGEND = "CFG EFF = * seat choice · + authored · — none · ? unknown; observed on drill";
 
 function contextCompact(value: number | null, narrow: boolean): string {
   if (value == null) return "—";
@@ -307,7 +375,6 @@ function agentDetailLines(
   const effortReport = snap.seatEffort && snap.seatEffort.seatRef === `${agent.name}@${rig.name}`
     ? snap.seatEffort.report
     : null;
-  const effortText = `${effortConfigured(agent)} · observed ${effortObserved(effortReport)}`;
   const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
   const needsRows = needs.length > 0
     ? needs.flatMap((item) => [
@@ -328,7 +395,9 @@ function agentDetailLines(
           fieldLine({ label: "meter", value: context == null ? "— (not yet known)" : `${context}% used  ${barCells(context / 100, meterWidth)}` }),
           fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
           runtimeLine,
-          ...wrapDetailValue("effort", effortText, contentWidth),
+          // #1347 — four values stay distinguishable on one wrapped row. "applied"
+          // appears only for outcome `accepted`; unknowns stay unknown.
+          ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
           fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
         ],
@@ -914,14 +983,14 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     lines.push(...queueSampleLines(snap, contentWidth));
     const narrowFactory = !agentCols.some(([key]) => key === "model");
     const effortCol = agentCols.find(([key]) => key === "effort");
-    const compactEffort = !!effortCol && effortCol[2] <= 4;
     if (narrowFactory) lines.push({ text: "MODEL/EFFORT/NOW/ACTIONS on drill (enter)" });
     lines.push({
       text: tableRow(agentCols, {
-        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: compactEffort ? "EFF" : "EFFORT", context: "CTX",
+        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", effort: effortCol?.[1] ?? "CFG EFF", context: "CTX",
         status: "STATE", queue: "Q", work: "WORK", now: "NOW", actions: "ACTIONS",
       }),
     });
+    if (effortCol) lines.push({ text: EFFORT_LEGEND });
     lines.push({ text: "━".repeat(columnsWidth(agentCols)) });
     const actionsIndex = agentCols.findIndex(([key]) => key === "actions");
     const actionsColStart = actionsIndex < 0 ? -1 : agentCols.slice(0, actionsIndex).reduce((n, [, , width]) => n + width + 1, 0);
@@ -957,7 +1026,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           seat: `${stateCell.mark} ${seatName(a.pod, a.name)}`,
           runtime: runtimeShort(a.runtime),
           model: tableModel(a.model),
-          effort: tableEffort(a.effort, compactEffort),
+          effort: tableEffort(a.effort, a.effortSource, effortCol?.[2] ?? 0),
           context: contextCompact(a.context, narrowFactory),
           status: stateCell.word,
           queue: queueCount(snap, queue.count),

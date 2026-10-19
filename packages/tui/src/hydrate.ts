@@ -764,7 +764,9 @@ export async function hydrateSnapshot(
 
   return {
     connections: connectionsRead,
-    ...(seatEffortRef && seatEffortRead ? { seatEffort: { seatRef: seatEffortRef, report: seatEffortRead } } : {}),
+    // Keep the address even when the read failed: the detail page then says the
+    // report was not read instead of silently omitting the effort section.
+    ...(seatEffortRef ? { seatEffort: { seatRef: seatEffortRef, report: seatEffortRead } } : {}),
     controlPlane: instanceHealth,
     slackManifest,
     daemonTarget: (() => { try { const u = new URL(client.baseUrl); return `${u.protocol}//${u.host}${u.pathname}`; } catch { return "unreported"; } })(),

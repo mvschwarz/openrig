@@ -69,6 +69,18 @@ describe("node inventory: the configured effort and its provenance", () => {
     expect(byId["dev.default"]).toMatchObject({ effort: null, effortSource: "runtime_default" });
     db.close();
   });
+
+  it("resolves an older database without the choice column from the authored value", () => {
+    const db = createFullTestDb();
+    const repo = new RigRepository(db);
+    const rig = repo.createRig("eff-inventory-old");
+    repo.addNode(rig.id, "dev.a", { runtime: "codex", effort: "low" });
+    db.exec("ALTER TABLE nodes DROP COLUMN effort_choice");
+
+    const [entry] = getNodeInventory(db, rig.id);
+    expect(entry).toMatchObject({ effort: "low", effortSource: "authored" });
+    db.close();
+  });
 });
 
 describe("emittedEffortFromArgv: what the launch command line sent", () => {
