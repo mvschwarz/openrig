@@ -26,7 +26,7 @@ function fixture(compactInstruction = '') {
   // Runs on each text write after it is recorded; may return a receipt to use instead of ok.
   let onText: ((text: string) => {ok: boolean; code?: string; message?: string} | void) | undefined;
   // Runs before each key event is recorded as landed; may throw (an Enter whose outcome is lost).
-  let onKeys: ((keys: string[]) => void) | undefined;
+  let onKeys: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined;
   // When set, the seat-binding read throws (as a failing SQLite read would).
   let metaThrows = false;
   const generation = 'generation-one';
@@ -37,7 +37,7 @@ function fixture(compactInstruction = '') {
   const tmux = {
     probeSession: vi.fn(async () => ({state: 'present'})),
     sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return onText?.(text) ?? {ok: true}; }),
-    sendKeys: vi.fn(async (_: string, keys: string[]) => { onKeys?.(keys); events.push({kind: 'keys', keys}); return {ok: true}; }),
+    sendKeys: vi.fn(async (_: string, keys: string[]) => { const receipt = onKeys?.(keys); events.push({kind: 'keys', keys}); return receipt ?? {ok: true}; }),
   };
   Object.assign(tmux, {deliveryGuard: new SeatDeliveryGuard(db, () => ({nodeId: 'node-one', session: seat, pane: '%1', occupant: generation}))});
   // The transport's idle wait runs on real time (Date.now deadlines), so its sleep is a real timer and never moves
@@ -56,7 +56,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -476,4 +476,40 @@ it('Enter uncertainty (sendKeys itself throws): written, the submission outcome 
   vi.restoreAllMocks();
   await noSecondWrite(f);
   expect(compactWrites(f)).toBe(1);
+});
+
+async function compactResult(f: ReturnType<typeof fixture>) {
+  const real = f.transport.send.bind(f.transport);
+  const results: any[] = [];
+  vi.spyOn(f.transport, 'send').mockImplementation(async (s: string, text: string, opts?: any) => { const r = await real(s, text, opts); if (text.startsWith('/compact')) results.push(r); return r; });
+  await f.e.maybeAutoCompact(input);
+  vi.restoreAllMocks();
+  return results[0];
+}
+
+it('an Enter whose adapter call reports failure: the submission outcome is unconfirmed, never "not submitted"', async () => {
+  const f = fixture();
+  await armed(f);
+  let pasted = false;
+  f.onText((text) => { if (text.startsWith('/compact')) pasted = true; });
+  f.onKeys(() => (pasted ? {ok: false, code: 'unknown', message: 'send-keys failed'} : undefined));
+  const result = await compactResult(f);
+  expect(result).toMatchObject({reason: 'submit_failed', sent: true, inputPhase: 'written', outcome: 'failed'});
+  expect(result.error).toContain('the Enter reported a failure');
+  expect(result.error).toContain('submission outcome is unconfirmed');
+  expect(result.error).not.toMatch(/was not submitted/);
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
+  await noSecondWrite(f);
+  expect(compactWrites(f)).toBe(1);
+});
+
+it('an Enter receipt with no code is read without throwing: still submit_failed, written, uncertain', async () => {
+  const f = fixture();
+  await armed(f);
+  let pasted = false;
+  f.onText((text) => { if (text.startsWith('/compact')) pasted = true; });
+  f.onKeys(() => (pasted ? {ok: false, message: 'lost'} : undefined));
+  const result = await compactResult(f);
+  expect(result).toMatchObject({reason: 'submit_failed', sent: true, inputPhase: 'written'});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
 });

@@ -2880,14 +2880,14 @@ export class SessionTransport {
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
-        const policyRefusal = submitResult.code.startsWith("draft_");
+        const policyRefusal = typeof submitResult.code === "string" && submitResult.code.startsWith("draft_");
         return observe({
           ok: false,
           sessionName,
           reason: policyRefusal ? submitResult.code : "submit_failed",
           outcome: "failed",
           inputPhase: "written",
-          error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
+          error: `Text is in '${sessionName}', but the Enter reported a failure, so the submission outcome is unconfirmed. The agent may need manual attention.`,
           ...(waitMode || policyRefusal ? { sent: true, ...waitEvidence } : {}),
         });
       }

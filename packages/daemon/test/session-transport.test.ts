@@ -725,8 +725,8 @@ describe("SessionTransport", () => {
     const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("submit_failed");
-    expect(result.error).toContain("visible");
-    expect(result.error).toContain("not submitted");
+    expect(result.error).toContain("the Enter reported a failure");
+    expect(result.error).toContain("submission outcome is unconfirmed");
   });
 
   // Test 6: send with verify captures pane and checks for text
