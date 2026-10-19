@@ -722,19 +722,21 @@ Saves the directory (and an audit event) for this seat's next launch. The seat's
 identity, address, queue and history are kept. set-cwd creates the folder if it's
 missing and writes nothing else there: the next launch writes the startup files,
 as it does today. Its preflight policy checks the resource copies and startup
-skills that launch would place there: an operator-edited file, an unrecorded file
-with different content, or two sources for one destination refuses the change,
-naming those paths. (A refusal may leave the new folder created; nothing else
-changes.)
+skills that launch would place there, as they are now: an operator-edited file,
+an unrecorded file with different content, or two sources for one destination
+refuses the change, naming those paths. It's a point-in-time check, not a
+guarantee against later changes; at adoption, launch applies its own policy.
+(A refusal may leave the new folder created; nothing else changes.)
 
 The saved directory doesn't move the running process. Adopt it with
   rig seat launch <seat> --fresh --stop --reason <text>   (a blank conversation) or
   rig seat handover <seat> --source rebuild --reason <text>   (carries durable context)
 Until then, background work can already use the saved directory. For a running
-Claude seat, for example, the status-line collector is written there, and managed
-compaction, manual or automatic, asks the seat to write its restore map there,
-outside its current workspace, where a seat without bypass permissions may meet a
-write prompt. Adopting promptly is guidance; it doesn't protect against a poll or
+Claude seat, for example, collector provisioning writes .openrig/context-collector.cjs
+and merges .claude/settings.local.json there (under its existing preservation
+rules), and managed compaction, manual or automatic, asks the seat to write its
+restore map there, which may be outside its current workspace, where a seat
+without bypass permissions may meet a write prompt. Adopting promptly is guidance; it doesn't protect against a poll or
 a compaction that runs before your next command.
 Before adopting, don't rig down/rig up or hand over by fork: those resume the
 existing conversation in the saved directory, and Claude keeps conversations per
@@ -750,7 +752,9 @@ Example:
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         console.log(`Launch directory for ${s?.logicalId}@${s?.rigName}: ${String(data["to"])}${data["changed"] === false ? " (already selected)" : " (audited)"}.`);
         console.log("set-cwd wrote nothing there but the folder: the next fresh launch or rebuild handover writes its startup files.");
-        console.log(`The running process keeps its current directory. Adopt the new one promptly with: rig seat launch ${seat} --fresh --stop --reason <text>`);
+        console.log("The running process keeps its current directory. Adopt the new one promptly with either:");
+        console.log(`  rig seat launch ${seat} --fresh --stop --reason <text>   (a blank conversation)`);
+        console.log(`  rig seat handover ${seat} --source rebuild --reason <text>   (carries durable context)`);
         console.log("Until then, background work can already use the saved directory, such as a Claude seat's managed compaction (see rig seat set-cwd --help).");
         console.log("Files in the previous directory are left as they are; other seats may still use them.");
       });

@@ -305,7 +305,10 @@ not where the running process is.
 rebuild handover writes its startup files there, as launch does today.
 
 **`set-cwd`'s preflight policy:** before saving, it reads, without writing, the enumerated resource copies (including
-nested plugin files) and startup skills that launch would place in the new directory, at their actual destinations.
+nested plugin files) and startup skills that launch would place in the new directory, at their actual destinations,
+as they are at that moment. It's a point-in-time check, not a global overwrite guarantee or protection against later
+changes; at adoption, launch applies its own policy. (The commit's re-check covers the saved startup configuration,
+not the destination's file contents.)
 - **Refused, with the protected paths named (`cwd_destination_conflict`):** a file there that an operator edited, an
   unrecorded file with different content, or two sources for one destination. That's stricter than launch, which
   overwrites an unrecorded differing file with a warning; the refusal is deliberate, while the occupant still runs.
@@ -321,9 +324,11 @@ nested plugin files) and startup skills that launch would place in the new direc
 **Adopt it promptly.** The saved directory doesn't move the running process, but background work can use it before
 adoption. Saved configuration isn't the live process's directory, and these examples aren't the only consumers. For a
 running Claude seat:
-- **The status-line collector** is written to the saved directory.
+- **Collector provisioning** writes `.openrig/context-collector.cjs` and merges `.claude/settings.local.json` in the
+  saved directory, under its existing preservation rules.
 - **Managed compaction,** manual (`POST /api/compaction/trigger`) or automatic, asks the seat to write its restore map
-  under it. That's outside the seat's current workspace, so a seat without bypass permissions may meet a write prompt.
+  under it. That may be outside the seat's current workspace, so a seat without bypass permissions may meet a write
+  prompt.
 
 Adopting promptly is guidance. It doesn't protect against a poll or a compaction that runs before your next command.
 

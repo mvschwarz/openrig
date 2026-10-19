@@ -514,8 +514,8 @@ version, from checking the environment to a useful report to the OpenRig team.
   and history stay intact. It creates the folder (on the daemon's host) and writes nothing else there: launch writes the
   startup files, as today. Its preflight policy refuses, naming the paths, when the new directory
   holds an edited, unrecorded-and-different or doubly sourced copy that launch would place. The
-  running process keeps its directory: adopt the new one with `rig seat launch --fresh --stop
-  --reason <text>` or a rebuild handover, promptly (background work, such as a Claude seat's
+  running process keeps its directory: adopt the new one with `rig seat launch <seat> --fresh
+  --stop --reason <text>` or a rebuild handover, promptly (background work, such as a Claude seat's
   managed compaction, can use the saved directory before then; that's guidance, not a guard), and
   before any `rig down`/`rig up` or fork handover. In-place Codex restart isn't adoption. `rig seat status` shows the
   saved `launch_cwd`. Old-directory files are left.

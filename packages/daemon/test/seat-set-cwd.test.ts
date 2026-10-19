@@ -226,10 +226,12 @@ describe("changing an existing seat's launch directory", () => {
 
   it.each(["", "relative/workspace", path.parse(process.cwd()).root])("refuses an invalid destination %j, with no seat, custody or startup-file change", async cwd => {
     const seat = seed();
+    const before = custody();
     const result = await service.setCwd({ seatRef: seat.sessionName, cwd, reason: "isolate workspace" });
     expect(result).toMatchObject({ ok: false });
     expect(["missing_cwd", "invalid_cwd"]).toContain((result as { code: string }).code);
     expect(savedCwd(seat.node.id)).toBe(oldCwd);
+    expect(custody()).toEqual(before);
     expect(cwdEvents()).toEqual([]);
   });
 
