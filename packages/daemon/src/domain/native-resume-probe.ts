@@ -452,7 +452,9 @@ function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
     const choice = /^[ \t]*(?:[›»]\s*)?\d+\.\s+Trust and continue[ \t]*$/m.exec(panel);
     if (!choice) continue;
     const afterChoice = paneContent.slice(start + choice.index + choice[0].length);
-    return !hasCodexComposer(afterChoice) && !afterChoice.split("\n").some(isCodexModelFooterLine);
+    return !hasCodexComposer(afterChoice)
+      && !/(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(afterChoice)
+      && !afterChoice.split("\n").some(isCodexModelFooterLine);
   }
   return false;
 }
