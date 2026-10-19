@@ -142,7 +142,7 @@ import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
 import { getOpenRigInstallCwdError, resolveAuthoredCwd, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
-import { loadAgentAppPreset } from "./agent-app-presets.js";
+import { loadCommunityHarnessPreset } from "./community-harness-presets.js";
 import { BUILT_IN_RUNTIMES } from "./built-in-runtimes.js";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 import {
@@ -395,9 +395,9 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
         }
       }
 
-      // Check runtime: a built-in, or a community agent app whose preset is installed and usable.
+      // Check runtime: a built-in, or a community harness whose preset is installed and usable.
       if (!SUPPORTED_RUNTIMES.has(member.runtime)) {
-        const app = loadAgentAppPreset(member.runtime);
+        const app = loadCommunityHarnessPreset(member.runtime);
         if (!app.ok) {
           errors.push(`${pod.id}.${member.id}: unsupported runtime "${member.runtime}": ${app.kind === "missing" ? "it isn't built in, and " : ""}${app.message}`);
         }

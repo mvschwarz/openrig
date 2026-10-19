@@ -105,8 +105,8 @@ export interface Session {
   origin: "launched" | "claimed";
   startupStatus: "pending" | "ready" | "attention_required" | "failed";
   startupCompletedAt: string | null;
-  /** The community agent app this session was launched for (selected through its preset); absent otherwise. */
-  agentApp?: string;
+  /** The community harness this session was launched for (selected through its preset); absent otherwise. */
+  communityHarness?: string;
 }
 
 // -- Event types --
@@ -592,7 +592,7 @@ export type NodeLifecycleState = "running" | "detached" | "recoverable" | "atten
  * projection; `verified`, `binding_absent`, and `tmux_unavailable` (and an
  * absent verdict) leave it unchanged.
  */
-/** `unconfirmed`: the seat's pane is live, but nothing proves which session it runs (a community agent app). */
+/** `unconfirmed`: the seat's pane is live, but nothing proves which session it runs (a community harness). */
 export type SeatIdentityVerdictKind = "verified" | "unconfirmed" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
 
 export interface SeatIdentityVerdict {
@@ -665,8 +665,8 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
-  /** Present only on a community agent app's seat: its label, maintainer and declared limits. */
-  agentApp?: import("./agent-app-presets.js").AgentAppLabel;
+  /** Present only on a community harness's seat: its label, maintainer and declared limits. */
+  communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */

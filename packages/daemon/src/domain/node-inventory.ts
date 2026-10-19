@@ -23,9 +23,9 @@ import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
-import { agentAppLabel } from "./agent-app-presets.js";
-import { agentAppOf } from "./built-in-runtimes.js";
-import { sessionAgentAppSelect } from "./session-registry.js";
+import { communityHarnessLabel } from "./community-harness-presets.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 // -- Row types for SQL results --
 
@@ -57,7 +57,7 @@ interface InventoryRow {
   session_name: string | null;
   session_created_at: string | null;
   session_status: string | null;
-  session_agent_app?: string | null;
+  session_community_harness?: string | null;
   intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -603,7 +603,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.session_name,
       s.created_at as session_created_at,
       s.status as session_status,
-      ${sessionAgentAppSelect(db)} as session_agent_app,
+      ${sessionCommunityHarnessSelect(db)} as session_community_harness,
       s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
@@ -716,7 +716,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(agentAppOf(row.session_agent_app, row.runtime) ? { agentApp: agentAppLabel(row.runtime!) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     intentionallyStopped: row.intentionally_stopped === 1
@@ -1528,7 +1528,7 @@ export async function attachAgentActivity(
       now: sampledAt,
       captureObserver: deps.captureObserver,
       binding: deps.captureObserver ? deps.observationBinding?.(entry) : undefined,
-      agentApp: entry.agentApp?.app ?? null,
+      communityHarness: entry.communityHarness?.harness ?? null,
     })),
     };
   }));

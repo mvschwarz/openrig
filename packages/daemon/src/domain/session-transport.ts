@@ -476,12 +476,12 @@ function draftComposerLine(lines: string[], verdict: PaneActivityClassification)
   return lines[last]!.trim();
 }
 
-/** A community agent app's screen never proves it's idle: a quiet prompt can be an approval or a pause, so its idle
- *  reading becomes unknown. Positive work and attention are kept. `agentApp` is the seat's recorded selection
- *  (`agentAppOf`); without it the classification is returned as it is. */
-export function agentAppPaneActivity(classification: PaneActivityClassification, agentApp: string | null | undefined): PaneActivityClassification {
-  return agentApp && classification.state === "agent_idle"
-    ? { state: "unknown", reason: "agent_app_no_idle_signal", evidence: classification.evidence }
+/** A community harness's screen never proves it's idle: a quiet prompt can be an approval or a pause, so its idle
+ *  reading becomes unknown. Positive work and attention are kept. `communityHarness` is the seat's recorded selection
+ *  (`communityHarnessOf`); without it the classification is returned as it is. */
+export function communityHarnessPaneActivity(classification: PaneActivityClassification, communityHarness: string | null | undefined): PaneActivityClassification {
+  return communityHarness && classification.state === "agent_idle"
+    ? { state: "unknown", reason: "community_harness_no_idle_signal", evidence: classification.evidence }
     : classification;
 }
 
@@ -643,8 +643,8 @@ export async function probeSessionActivity(input: {
   timerlessStatusIsLive?: boolean;
   /** Supplied only by an active draft-aware send; ordinary observations stay unchanged. */
   composerSnapshot?: () => Promise<ComposerSnapshot | null>;
-  /** The seat's community agent app (`agentAppOf`): its idle-looking screen reads unknown. */
-  agentApp?: string | null;
+  /** The seat's community harness (`communityHarnessOf`): its idle-looking screen reads unknown. */
+  communityHarness?: string | null;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -759,8 +759,8 @@ export async function probeSessionActivity(input: {
     const paneContent = snapshot?.screen ?? await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
     const classifyOptions = { timerlessStatusIsLive: input.timerlessStatusIsLive === true };
-    let classification = agentAppPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
-      composerSnapshot: snapshot ?? undefined, runtime }), input.agentApp);
+    let classification = communityHarnessPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
+      composerSnapshot: snapshot ?? undefined, runtime }), input.communityHarness);
     // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
     // as a draft, one capture with styling is classified on its own. Newer attention or work there is
     // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;

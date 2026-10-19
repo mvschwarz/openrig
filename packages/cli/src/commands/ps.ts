@@ -79,8 +79,8 @@ interface NodeEntry {
     decidedBy: string | null;
   } | null;
   identityVerdict?: { reason?: string | null } | null;
-  /** A community agent app's seat: its label, maintainer and declared limits. */
-  agentApp?: { app: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  /** A community harness's seat: its label, maintainer and declared limits. */
+  communityHarness?: { harness: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -207,7 +207,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "canonicalSessionName",
   "nodeKind",
   "runtime",
-  "agentApp",
+  "communityHarness",
   "model",
   "modelObservation",
   "sessionStatus",
@@ -623,11 +623,11 @@ function hasCurrentUsageLimit(node: NodeEntry): boolean {
     && activity.stale === false && !activity.fallback;
 }
 
-/** One line per community agent app seat: what OpenRig knows about it, and what it doesn't. */
-export function formatAgentAppLine(seat: string, app: NonNullable<NodeEntry["agentApp"]>): string {
-  if (app.presetError) return `Community harness (${seat}): ${app.app}: ${app.presetError}.`;
+/** One line per community harness seat: what OpenRig knows about it, and what it doesn't. */
+export function formatCommunityHarnessLine(seat: string, app: NonNullable<NodeEntry["communityHarness"]>): string {
+  if (app.presetError) return `Community harness (${seat}): ${app.harness}: ${app.presetError}.`;
   const limits = app.limits.length ? `; declared limits: ${app.limits.join("; ")}` : "";
-  return `Community harness (${seat}): ${app.app}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
+  return `Community harness (${seat}): ${app.harness}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
 }
 
 function missingSessionGuidance(node: NodeEntry): string | null {
@@ -675,7 +675,7 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // runtime is complete fleet-wide; model is a DECLARATION, absent on 13 of
       // 15 claude-code seats — see formatDeclaredModel for the render rule.
       runtime: n.runtime ?? null,
-      ...(n.agentApp ? { agentApp: n.agentApp } : {}),
+      ...(n.communityHarness ? { communityHarness: n.communityHarness } : {}),
       model: n.model ?? null,
       // Compact tuple: [literal model, evidence source, native record time].
       // Full JSON / --fields retain the complete labelled object and occupant generation.
@@ -862,7 +862,7 @@ contextUsage.percent, contextUsage.state (with --nodes). Other keys are rejected
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, agentApp, model, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, communityHarness, model, sessionStatus,
 intentionallyStopped, startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
@@ -1312,7 +1312,7 @@ async function handleNodes(
     }
   }
   for (const n of humanList as NodeEntry[]) {
-    if (n.agentApp) console.log(formatAgentAppLine(n.canonicalSessionName ?? n.logicalId, n.agentApp));
+    if (n.communityHarness) console.log(formatCommunityHarnessLine(n.canonicalSessionName ?? n.logicalId, n.communityHarness));
   }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
@@ -1324,15 +1324,15 @@ async function handleNodes(
   }
 }
 
-function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState" | "agentApp">): string {
+function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState" | "communityHarness">): string {
   // S19 — render from the served taxonomy state when present: needs-input as
   // count(+reason), otherwise the bridge's display value. No local arbitration.
   const tax = n.activityState;
   if (tax) {
     if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
-    // A community agent app has no needs-input source in that state, so its zero isn't a clearance: a prompt the
+    // A community harness has no needs-input source in that state, so its zero isn't a clearance: a prompt the
     // screen shows is kept.
-    if (n.agentApp && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
+    if (n.communityHarness && n.agentActivity?.state === "needs_input") return "needs-input (screen)";
     return tax.display;
   }
   // Legacy fallback (a daemon without the S19 enrichment) — retires with the

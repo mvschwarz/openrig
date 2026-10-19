@@ -19,7 +19,7 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import { StubRuntimeAdapter } from "../src/adapters/stub-runtime-adapter.js";
-import { withAgentAppResolver } from "../src/adapters/agent-app-runtime-adapter.js";
+import { withCommunityHarnessResolver } from "../src/adapters/community-harness-runtime-adapter.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -345,14 +345,14 @@ describe("changing an existing seat's launch directory", () => {
     expect(cwdEvents()).toEqual([]);
   });
 
-  it("resolves a community agent app's adapter the way launch does, and checks none of the startup files it never takes", async () => {
+  it("resolves a community harness's adapter the way launch does, and checks none of the startup files it never takes", async () => {
     const seat = seed();
-    const presets = path.join(root, "agent-apps");
+    const presets = path.join(root, "community-harnesses");
     fs.mkdirSync(presets);
-    fs.writeFileSync(path.join(presets, "synth.yaml"), "format: 1\nname: synth\ncommand: synth-app --serve\nmaintainer: Example Maintainer\nlimits: [resume unsupported]\n");
+    fs.writeFileSync(path.join(presets, "synth.yaml"), "format: 1\nname: synth\ncommand: synth-harness --serve\nmaintainer: Example Maintainer\nlimits: [resume unsupported]\n");
     db.prepare("UPDATE nodes SET runtime = 'synth' WHERE id = ?").run(seat.node.id);
     db.prepare("UPDATE node_startup_context SET runtime = 'synth' WHERE node_id = ?").run(seat.node.id);
-    // A required startup skill the app would never take (an agent app takes no startup files).
+    // A required startup skill the app would never take (a community harness takes no startup files).
     const skill = path.join(root, "app-skill", "review", "SKILL.md");
     fs.mkdirSync(path.dirname(skill), { recursive: true });
     fs.writeFileSync(skill, "# Review\n");
@@ -360,9 +360,9 @@ describe("changing an existing seat's launch directory", () => {
       ...seat.files, { path: "SKILL.md", absolutePath: skill, ownerRoot: path.dirname(skill), deliveryHint: "skill_install", required: true, appliesOn: ["fresh_start"] },
     ]), seat.node.id);
     const sessionId = (db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string }).id;
-    registry.recordAgentAppSelection(sessionId, "synth");
+    registry.recordCommunityHarnessSelection(sessionId, "synth");
     service = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: tmux,
-      runtimeAdapters: withAgentAppResolver({ "claude-code": adapter } as Record<string, RuntimeAdapter>, { tmux, presetsDir: () => presets }) });
+      runtimeAdapters: withCommunityHarnessResolver({ "claude-code": adapter } as Record<string, RuntimeAdapter>, { tmux, presetsDir: () => presets }) });
     const result = await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" });
     // No refusal code, named first so a failure shows which one.
     expect((result as { code?: string }).code).toBeUndefined();

@@ -24,7 +24,7 @@ import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
-import { AgentAppRuntimeAdapter } from "../adapters/agent-app-runtime-adapter.js";
+import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
@@ -414,10 +414,10 @@ export class StartupOrchestrator {
     }
 
     // 5. Launch harness (unless skipped for legacy nodes)
-    // A community agent app's seat: record the selection on this session before the app starts. It's provenance for
+    // A community harness's seat: record the selection on this session before the app starts. It's provenance for
     // later reads (identity, activity, labels, restore), not launch success or identity proof.
-    if (input.adapter instanceof AgentAppRuntimeAdapter) {
-      try { this.sessionRegistry.recordAgentAppSelection(input.sessionId, input.adapter.runtime); }
+    if (input.adapter instanceof CommunityHarnessRuntimeAdapter) {
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 
