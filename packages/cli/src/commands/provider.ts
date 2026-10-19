@@ -178,10 +178,20 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (saved) console.log(`  ${saved["note"]}: ${((saved["names"] as string[]) ?? []).join(", ")}`);
   }
 
+  /** The row's sign-in fact, as served; nothing when an older daemon doesn't serve it. */
+  function signInLine(r: Record<string, unknown>): string | null {
+    const s = r["signIn"] as Record<string, unknown> | undefined;
+    if (!s) return null;
+    const state = s["state"] === "needs_sign_in" ? "needs sign-in" : String(s["state"]);
+    return `sign-in: ${state} (${s["evidence"]}${s["at"] ? `; as of ${s["at"]}` : ""})`;
+  }
+
   function renderUsageRow(r: Record<string, unknown>, pad = "  "): void {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
       console.log(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+      const signIn = signInLine(r);
+      if (signIn) console.log(`${pad}  ${signIn}`);
       return;
     }
     // Identity first; for Codex the email is a label.
@@ -209,7 +219,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
       }
     }
-    if (((r["windows"] as unknown[]) ?? []).length === 0 && r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
+    // Whenever availability is unknown, say why (with windows too).
+    if ((((r["windows"] as unknown[]) ?? []).length === 0 || r["currentAvailability"] === "unknown") && r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
     if (r["limitEvidence"]) console.log(`${pad}  limit evidence: ${r["limitEvidence"]}`);
     const last = r["lastRefresh"] as Record<string, unknown> | null;
     if (last?.["outcome"] === "failed") {
@@ -219,6 +230,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
     }
     console.log(`${pad}  current availability: ${r["currentAvailability"]}`);
+    const signIn = signInLine(r);
+    if (signIn) console.log(`${pad}  ${signIn}`);
   }
 
   // Slice 01 — usage across registered hosts, as the daemon serves it: each host's status and whether it serves usage

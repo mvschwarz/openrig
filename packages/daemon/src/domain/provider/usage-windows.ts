@@ -9,6 +9,7 @@ import { NEARING_THRESHOLD_PERCENT } from "./host-usage-rollup.js";
 import type {
   ProviderKind,
   ProviderUsageAllowance,
+  SignInFact,
   UsageRefreshOutcome,
   UsageWindowRow,
 } from "./provider-types.js";
@@ -159,6 +160,21 @@ export class UsageWindows<I extends { source: string }, R> {
     return this.lastRefresh;
   }
 
+  /** The sign-in fact for a row, from the last refresh only (never from its windows). Only the latest read's row is the
+   *  login the refresh read. */
+  private signIn(latest: boolean): SignInFact {
+    const last = this.lastRefresh;
+    if (!latest) return { state: "unknown", evidence: "not the current login: a later refresh read another one", at: null };
+    if (!last) return { state: "unknown", evidence: `no refresh since the daemon started at ${this.startedAt}`, at: null };
+    if (last.outcome === "ok") {
+      return { state: "usable", evidence: "the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME)", at: last.at };
+    }
+    if (last.reason === "not_signed_in") {
+      return { state: "needs_sign_in", evidence: "the refresh's account/read reported no signed-in account", at: last.at };
+    }
+    return { state: "unknown", evidence: `the last refresh failed (${last.reason ?? "unknown reason"})`, at: last.at };
+  }
+
   private recordFailure(at: string, reason: string, detail: string): UsageRefreshOutcome {
     this.lastRefresh = { at, outcome: "failed", reason, detail };
     return this.lastRefresh;
@@ -181,6 +197,7 @@ export class UsageWindows<I extends { source: string }, R> {
         latestFromSource: false,
         lastRefresh: this.lastRefresh,
         currentAvailability: "unknown",
+        signIn: this.signIn(true),
         unavailableReason: failure
           ? `refresh failed at ${failure.at}: ${failure.reason}; no earlier reading since the daemon started at ${this.startedAt}`
           : `no reading since the daemon started at ${this.startedAt}; refresh with rig provider status --refresh`,
@@ -213,6 +230,7 @@ export class UsageWindows<I extends { source: string }, R> {
         latestFromSource: reading.latest,
         lastRefresh: this.lastRefresh,
         currentAvailability: known ? "known" : "unknown",
+        signIn: this.signIn(reading.latest),
         ...(reading.identity.source === "unresolved" ? {
           unresolved: {
             note: reading.latest ? UNRESOLVED_NOTE : UNRESOLVED_EARLIER_NOTE,

@@ -14,6 +14,9 @@ import { stopGroup } from "../codex-network-default.js";
 
 export type CodexUsageFailureReason =
   | "binary_not_found"
+  /** `account/read` reported no signed-in account and `account/rateLimits/read` then failed: a classification of
+   *  answers already received, not another read. */
+  | "not_signed_in"
   | "spawn_failed"
   | "rpc_error"
   | "unrecognized_shape"
@@ -123,6 +126,9 @@ function converse(
         if (message.error !== undefined) {
           const method = message.id === 1 ? "initialize" : message.id === 2 ? "account/read" : "account/rateLimits/read";
           const text = isRecord(message.error) && typeof message.error.message === "string" ? `: ${message.error.message.split("\n")[0]}` : "";
+          if (message.id === 3 && isRecord(account) && account.account === null && account.requiresOpenaiAuth === true) {
+            return fail("not_signed_in", `codex app-server's account/read reported no signed-in account; account/rateLimits/read then failed${text}`);
+          }
           return fail("rpc_error", `codex app-server returned an error for ${method}${text}`);
         }
         if (message.id === 1) {

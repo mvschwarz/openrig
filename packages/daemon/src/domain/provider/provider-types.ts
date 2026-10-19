@@ -219,6 +219,16 @@ export interface UsageWindowRow {
   freshnessReason?: string;
 }
 
+/** Slice 01: whether an account's sign-in is usable, read only from the evidence a refresh already holds, apart
+ *  from usage. `unknown` is neither usable nor unusable, and nothing decides on it. Ages from `at`; a daemon restart
+ *  forgets it, as it forgets the refresh outcome. */
+export interface SignInFact {
+  state: "usable" | "needs_sign_in" | "unknown";
+  evidence: string;
+  /** The refresh the evidence comes from; null when there is none. */
+  at: string | null;
+}
+
 export interface UsageRefreshOutcome {
   at: string;
   outcome: "ok" | "failed";
@@ -243,6 +253,8 @@ export interface ProviderUsageAllowance {
   lastRefresh: UsageRefreshOutcome | null;
   currentAvailability: "known" | "unknown";
   unavailableReason?: string;
+  /** The sign-in fact for this row's login. Optional: an older daemon's rows don't carry it. */
+  signIn?: SignInFact;
   /** Claude: how the identity and the windows were joined (identity as of a refresh; windows from seats' samples at
    *  their own times; not proven to be the same login). */
   identityNote?: string;

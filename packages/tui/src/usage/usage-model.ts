@@ -45,6 +45,14 @@ export function identityLabel(id: Row): string {
 }
 
 /** One served allowance row, as served (also drawn per host by System → Usage across hosts). */
+/** The row's sign-in fact, as served; null when an older daemon doesn't serve it. */
+export function signInText(r: Row): string | null {
+  const s = r["signIn"] as Row | undefined;
+  if (!s) return null;
+  const state = s["state"] === "needs_sign_in" ? "needs sign-in" : str(s["state"]);
+  return `sign-in: ${state} (${str(s["evidence"])}${s["at"] ? `; as of ${str(s["at"])}` : ""})`;
+}
+
 export function allowanceLines(r: Row): ContentLine[] {
   const lines: ContentLine[] = [];
   const id = r["identity"] as Row | null | undefined;
@@ -52,6 +60,8 @@ export function allowanceLines(r: Row): ContentLine[] {
     lines.push({ text: `  ${str(r["provider"])}  unavailable: ${str(r["unavailableReason"], "no reading")}` });
     const last = r["lastRefresh"] as Row | null | undefined;
     if (last?.["outcome"] === "failed") lines.push({ text: `    refresh failed at ${str(last["at"])}: ${failureText(last)}` });
+    const signIn = signInText(r);
+    if (signIn) lines.push({ text: `    ${signIn}` });
     return lines;
   }
   const labels = [identityLabel(id), `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
@@ -80,7 +90,8 @@ export function allowanceLines(r: Row): ContentLine[] {
       lines.push({ text: `      seat ${str(d["seatSession"])} reports ${str(d["usedPercent"])}% used · resets ${str(d["resetsAt"])} · observed ${str(d["observedAt"])}` });
     }
   }
-  if (((r["windows"] as unknown[] | undefined) ?? []).length === 0 && r["unavailableReason"]) lines.push({ text: `    ${r["unavailableReason"]}` });
+  // Whenever availability is unknown, say why (with windows too).
+  if ((((r["windows"] as unknown[] | undefined) ?? []).length === 0 || r["currentAvailability"] === "unknown") && r["unavailableReason"]) lines.push({ text: `    ${r["unavailableReason"]}` });
   if (r["limitEvidence"]) lines.push({ text: `    limit evidence: ${r["limitEvidence"]}` });
   const last = r["lastRefresh"] as Row | null | undefined;
   if (last?.["outcome"] === "failed") {
@@ -89,6 +100,8 @@ export function allowanceLines(r: Row): ContentLine[] {
       : `    refresh failed at ${str(last["at"])}: ${failureText(last)}; last reading kept, marked old` });
   }
   lines.push({ text: `    current availability: ${str(r["currentAvailability"])}` });
+  const signIn = signInText(r);
+  if (signIn) lines.push({ text: `    ${signIn}` });
   return lines;
 }
 
