@@ -69,6 +69,8 @@ describe("saved community-harness provenance", () => {
     { label: "invalid legacy value is not provenance", fields: { agentApp: { name: "synth-harness" } }, expected: undefined },
     { label: "legacy number is not provenance", fields: { agentApp: 12 }, expected: undefined },
     { label: "legacy boolean is not provenance", fields: { agentApp: true }, expected: undefined },
+    { label: "legacy empty string is not provenance", fields: { agentApp: "" }, expected: undefined },
+    { label: "legacy array is not provenance", fields: { agentApp: ["synth-harness"] }, expected: undefined },
     { label: "no selection is not inferred", fields: {}, expected: undefined },
   ])("$label", ({ fields, expected }) => {
     const raw = storeSession(fields);

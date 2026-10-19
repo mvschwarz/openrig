@@ -219,7 +219,7 @@ export function decodeStoredSnapshotData(json: string): SnapshotData {
     for (const session of data.sessions) {
       if (!session || typeof session !== "object") continue;
       const stored = session as typeof session & { agentApp?: unknown };
-      if (!("communityHarness" in stored) && typeof stored.agentApp === "string") {
+      if (!("communityHarness" in stored) && typeof stored.agentApp === "string" && stored.agentApp.length > 0) {
         stored.communityHarness = stored.agentApp;
       }
       delete stored.agentApp;
