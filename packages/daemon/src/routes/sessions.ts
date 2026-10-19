@@ -170,14 +170,10 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   // selfHostId ONLY — never host.name (display-only; the DP4 conflation healthz already refuses).
   const hostSelfId = getSelfHostId();
   const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
-  const modelProcesses = modelReader?.processCensus.cycleLister();
-  const nodes = [];
-  for (const n of withTerminalAndWork) {
-    const modelObservation = modelReader
-      ? await modelReader.observe(n, modelProcesses)
-      : unknownModelObservation("observer-unavailable");
-    nodes.push({ ...n, hostSelfId, modelObservation });
-  }
+  const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
+  const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
+    modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
+  }));
   return c.json(nodes);
 });
 

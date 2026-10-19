@@ -104,12 +104,13 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
   const matches = inventory.nodes.filter(n => n.hostSelfId === member.host && n.canonicalSessionName === member.seat);
   // Two aliases can query the same host. Collapse repeated identical identity/configuration,
   // but leave conflicting identities or values ambiguous rather than choosing a route's answer.
-  const identities = new Set(matches.map(n => JSON.stringify([n.rigId, n.logicalId, n.runtime, n.model, n.sessionStatus, modelObservation(n.modelObservation, n.sessionStatus === "running")])));
+  const identities = new Set(matches.map(n => JSON.stringify([n.rigId, n.logicalId, n.runtime, n.model, n.sessionStatus])));
   const node = identities.size === 1 ? matches[0] : undefined;
   const sessionStatus = node ? text(node.sessionStatus) : null;
   const current = sessionStatus === "running";
   const activity = current && object(node?.agentActivity) ? node.agentActivity : null;
-  const observation = node ? modelObservation(node.modelObservation, current)
+  const observations = matches.map(n => modelObservation(n.modelObservation, current));
+  const observation = node && new Set(observations.map(o => JSON.stringify(o))).size === 1 ? observations[0]!
     : unknownModelObservation(matches.length ? "conflicting-observations" : "host-or-seat-unavailable");
   return { ...member, live: {
     status: !node ? "unknown" : current ? "reported" : "stale",

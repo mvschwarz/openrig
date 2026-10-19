@@ -659,6 +659,7 @@ export function formatDeclaredModel(model: string | null | undefined): string {
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const attention = needsAttention(n);
+    const observation = n.modelObservation == null ? null : modelObservation(n.modelObservation, n.sessionStatus === "running");
     const compact: Record<string, unknown> = {
       // identity (rigId/rigName + logicalId + session) — disambiguates under -A.
       rigId: n.rigId,
@@ -676,7 +677,11 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       runtime: n.runtime ?? null,
       ...(n.agentApp ? { agentApp: n.agentApp } : {}),
       model: n.model ?? null,
-      modelObservation: n.modelObservation == null ? null : modelObservation(n.modelObservation, n.sessionStatus === "running"),
+      // Compact tuple: [literal model, evidence source, native record time].
+      // Full JSON / --fields retain the complete labelled object and occupant generation.
+      modelObservation: !observation ? null : observation.status === "observed"
+        ? [observation.model, observation.source, observation.observedAt]
+        : { status: "unknown", reason: observation.reason },
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
       startupStatus: n.startupStatus,

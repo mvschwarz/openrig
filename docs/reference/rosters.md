@@ -49,8 +49,9 @@ Authored files contain recommendations, not runtime facts. Extra fields are igno
 any authored runtime, model or activity. At read time the command joins by exact host self-id
 and seat. Unmatched or conflicting observations are `unknown`; a seat not reported running is
 `stale`, with current runtime/model unknown. The configured model is the registry declaration.
-`rig ps --nodes` and roster members also carry `modelObservation`: `status`, `model`, `source`,
-`observedAt`, `generation` and `reason` (null in compact JSON when an older daemon supplies no observation). The configured `model` stays separate; roster's
+Daemon node listings, `rig ps --nodes --full` and roster members also carry the full
+`modelObservation`: `status`, `model`, `source`, `observedAt`, `generation` and `reason`.
+Compact JSON uses the smaller shape described below. The configured `model` stays separate; roster's
 `live.observedModel` is the observation's model or null. Human output says **last observed**.
 Claude (`claude-assistant-response`) and Pi (`pi-assistant-response`) name response evidence;
 Codex (`codex-turn-context` or `codex-world-state`) names recorded turn configuration, not a
@@ -72,3 +73,16 @@ valid rosters remain usable; duplicate IDs make `show` report ambiguity instead 
 Non-regular file targets, such as FIFOs and directories, are skipped with a warning; links to
 regular files remain readable. Inventory uses `ps --no-cleanup` to preserve even stale local
 daemon state files. Ordinary `rig ps` keeps its existing cleanup behavior unless given that flag.
+
+The daemon reuses model facts only while the selected record's identity, size and
+modification time and the occupant generation remain unchanged. Inventory reads
+share two bulk pane snapshots and one process census; identity is checked after
+the final snapshot. A different observation from duplicate host routes makes
+only that observation UNKNOWN, preserving agreed registry fields.
+
+`rig ps --nodes --json` keeps an observed model compact as
+`modelObservation: ["literal-model-id", "evidence-source", "native-record-time"]`.
+UNKNOWN is `{ "status": "unknown", "reason": "..." }`; older daemons may yield
+`null`. `--full` and `--fields modelObservation` retain the full object, including
+its status and occupant generation. Human output and roster reports use the full
+labelled observation.
