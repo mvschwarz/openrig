@@ -21,6 +21,9 @@ import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
 import { validateResumeToken } from "./resume-token-validation.js";
+import { agentAppOf } from "./built-in-runtimes.js";
+import { agentAppsDir, loadAgentAppPreset } from "./agent-app-presets.js";
+import { AGENT_APP_RESUME_TYPE, listAgentAppSessions, pickSeatSession, sqliteUtcToMs } from "./agent-app-sessions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +34,8 @@ export interface ResumeRefreshSession {
   resumeType: string | null;
   resumeToken: string | null;
   cwd?: string | null;
+  agentApp?: string | null;
+  createdAt?: string | null;
 }
 
 interface ResumeMetadataRefresherDeps {
@@ -56,6 +61,8 @@ interface ResumeMetadataRefresherDeps {
   /** Provider root used by the daemon's Claude launches; no scan of other homes. */
   claudeConfigDir?: string;
   listClaudeProcesses?: NativeProcessLister;
+  /** Finds the app session an agent-app seat started (tests inject). Defaults to captureAgentAppSessionId. */
+  captureAgentAppSession?: (session: ResumeRefreshSession, heldIds: ReadonlySet<string>) => Promise<string | null>;
 }
 
 export class ResumeMetadataRefresher {
@@ -74,6 +81,7 @@ export class ResumeMetadataRefresher {
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
   private claudeConfigDir: string;
   private listClaudeProcesses: NativeProcessLister | undefined;
+  private captureAgentAppSession: (session: ResumeRefreshSession, heldIds: ReadonlySet<string>) => Promise<string | null>;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
     this.sessionRegistry = deps.sessionRegistry;
@@ -101,6 +109,7 @@ export class ResumeMetadataRefresher {
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
     this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
     this.listClaudeProcesses = deps.listClaudeProcesses;
+    this.captureAgentAppSession = deps.captureAgentAppSession ?? ((session, heldIds) => captureAgentAppSessionId(session, heldIds));
   }
 
   /**
@@ -143,6 +152,14 @@ export class ResumeMetadataRefresher {
     const captureOpts = { attempts: fillNullOnly ? 1 : undefined, listProcesses: opts?.listProcesses };
     for (const session of sessions) {
       if (this.stopped.signal.aborted) return;
+      if (agentAppOf(session.agentApp, session.runtime)) {
+        // A community agent app: fill a null token from the app's own session list. Never replace a present one.
+        if (!session.resumeToken) {
+          const id = await this.captureAgentAppSession(session, this.sessionRegistry.agentAppSessionIdsHeldByOthers(session.sessionId)).catch(() => null);
+          if (id) this.sessionRegistry.updateResumeToken(session.sessionId, AGENT_APP_RESUME_TYPE, id, "scrape");
+        }
+        continue;
+      }
       if (session.runtime === "codex") {
         const sessionCaptureOpts = { ...captureOpts, sessionId: session.sessionId };
         if (session.resumeToken) {
@@ -527,4 +544,19 @@ function resolveProbeCwd(cwd: string | null | undefined, homeDir: string): strin
     return process.cwd();
   }
   return cwd;
+}
+
+/** The app session an agent-app seat started, from the app's own list (its preset's `session.list`), or null when the
+ *  preset declares none, the list can't be read, or more than one session could be this seat's. */
+export async function captureAgentAppSessionId(session: ResumeRefreshSession, heldIds: ReadonlySet<string>, presetsDir: string = agentAppsDir()): Promise<string | null> {
+  if (!session.runtime || !session.cwd) return null;
+  const found = loadAgentAppPreset(session.runtime, presetsDir);
+  const spec = found.ok ? found.preset.session : undefined;
+  const launchedAtMs = sqliteUtcToMs(session.createdAt);
+  if (!spec?.list || launchedAtMs === null) return null;
+  const rows = await listAgentAppSessions(spec, session.cwd);
+  if (!rows) return null;
+  const cwds = new Set([session.cwd]);
+  try { cwds.add(fs.realpathSync(session.cwd)); } catch { /* the recorded cwd alone */ }
+  return pickSeatSession(spec, rows, { cwds, launchedAtMs, heldIds });
 }

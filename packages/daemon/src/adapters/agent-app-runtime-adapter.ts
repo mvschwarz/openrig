@@ -15,11 +15,14 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import { isShellForeground } from "../domain/shell-classifier.js";
 import { isAgentAppRuntime, loadAgentAppPreset, agentAppsDir } from "../domain/agent-app-presets.js";
 import { agentAppOf } from "../domain/built-in-runtimes.js";
+import { AGENT_APP_RESUME_TYPE, agentAppSessionExists, checkAgentAppSessionId, renderSessionArgv, shellLineFor } from "../domain/agent-app-sessions.js";
 
 interface AgentAppAdapterDeps {
   tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand">;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command">;
   presetsDir?: () => string;
+  /** Asks the app whether a session exists (tests inject); defaults to running the preset's `exists` argv. */
+  sessionExists?: typeof agentAppSessionExists;
 }
 
 /**
@@ -51,21 +54,38 @@ export class AgentAppRuntimeAdapter implements RuntimeAdapter {
   }
 
   async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; forkSource?: ForkSource }): Promise<HarnessLaunchResult> {
+    const found = loadAgentAppPreset(this.runtime, this.deps.presetsDir?.() ?? agentAppsDir());
+    const spec = found.ok ? found.preset.session : undefined;
     if (opts.forkSource) {
-      return { ok: false, error: `Fork is unsupported: agent app "${this.runtime}" is launch-only. Remove session_source for this member.` };
+      return { ok: false, error: spec
+        ? `Fork is unsupported: agent app "${this.runtime}" declares resume but not fork. Remove session_source for this member.`
+        : `Fork is unsupported: agent app "${this.runtime}" is launch-only. Remove session_source for this member.` };
     }
-    if (opts.resumeToken) {
+    if (opts.resumeToken && !spec) {
       return { ok: false, error: `Resume is unsupported: agent app "${this.runtime}" is launch-only. No session was started.` };
     }
-    const found = loadAgentAppPreset(this.runtime, this.deps.presetsDir?.() ?? agentAppsDir());
     if (!found.ok) return { ok: false, error: found.message };
     const session = binding.tmuxSession ?? opts.name;
+    let line = found.preset.command;
+    let resumed: string | null = null;
+    if (opts.resumeToken && spec) {
+      const checked = checkAgentAppSessionId(spec, opts.resumeToken);
+      if (!checked.ok) return { ok: false, error: `Resume refused for agent app "${this.runtime}": ${checked.error}. No session was started.` };
+      // Asked before anything is typed: an app that opens a blank conversation for an unknown id (OpenCode 2.0 does)
+      // would otherwise look resumed. Unknown (null) goes ahead, as no answer isn't evidence the conversation is gone.
+      if (await (this.deps.sessionExists ?? agentAppSessionExists)(spec, checked.id, binding.cwd) === false) {
+        return { ok: false, error: `agent app "${this.runtime}" reports that the saved conversation no longer exists`,
+          recovery: "retry_fresh", missingConversation: true };
+      }
+      line = shellLineFor(renderSessionArgv(spec.resume, checked.id));
+      resumed = checked.id;
+    }
     const command = this.deps.seatLaunchEnvironment
-      ? await this.deps.seatLaunchEnvironment.command(session, found.preset.command, { runtime: this.runtime })
-      : found.preset.command;
+      ? await this.deps.seatLaunchEnvironment.command(session, line, { runtime: this.runtime })
+      : line;
     const sent = await this.deps.tmux.sendShellCommand(session, command, undefined, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start agent app "${this.runtime}": ${sent.message}` };
-    return { ok: true };
+    return resumed ? { ok: true, resumeToken: resumed, resumeType: AGENT_APP_RESUME_TYPE } : { ok: true };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

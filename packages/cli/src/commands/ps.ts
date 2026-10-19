@@ -78,7 +78,7 @@ interface NodeEntry {
   } | null;
   identityVerdict?: { reason?: string | null } | null;
   /** A community agent app's seat: its label, maintainer and declared limits. */
-  agentApp?: { app: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; presetError?: string };
+  agentApp?: { app: string; maintainer: string | null; limits: string[]; identity: string; needsInput: string; resume?: string; presetError?: string };
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -624,7 +624,8 @@ function hasCurrentUsageLimit(node: NodeEntry): boolean {
 export function formatAgentAppLine(seat: string, app: NonNullable<NodeEntry["agentApp"]>): string {
   if (app.presetError) return `Community app (${seat}): ${app.app}: ${app.presetError}.`;
   const limits = app.limits.length ? `; declared limits: ${app.limits.join("; ")}` : "";
-  return `Community app (${seat}): ${app.app}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
+  const resume = app.resume ? `; resume ${app.resume}` : "";
+  return `Community app (${seat}): ${app.app}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${resume}${limits}.`;
 }
 
 function missingSessionGuidance(node: NodeEntry): string | null {

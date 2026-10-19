@@ -11,7 +11,8 @@ export function agentAppsRoutes(): Hono {
     dir: agentAppsDir(),
     apps: listAgentAppPresets().map(found => found.ok
       ? { name: found.preset.name, usable: true, community: true, testedByOpenRig: false, maintainer: found.preset.maintainer,
-        limits: found.preset.limits, command: found.preset.command, path: found.preset.path }
+        limits: found.preset.limits, command: found.preset.command, path: found.preset.path,
+        resumes: found.preset.session !== undefined }
       : { name: basename(found.path, ".yaml"), usable: false, path: found.path, problem: found.message }),
   }));
   return app;

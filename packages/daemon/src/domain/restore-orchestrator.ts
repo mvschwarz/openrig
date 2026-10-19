@@ -80,6 +80,8 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError } from "./active-occupant.js";
 import { effectiveRestorePolicy, type RestoreSeatFacts } from "./restore-policy.js";
 import { agentAppOf } from "./built-in-runtimes.js";
+import { agentAppResumes } from "./agent-app-presets.js";
+import { AGENT_APP_RESUME_TYPE } from "./agent-app-sessions.js";
 import { seatAdapter } from "../adapters/agent-app-runtime-adapter.js";
 import { pluginPathsOf } from "./claude-core-plugin-env.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
@@ -115,6 +117,13 @@ export function launchStatusIsRunning(status: string): boolean {
   return !NON_RUNNING_LAUNCH_STATUSES.has(status);
 }
 
+/** An agent app's saved seat resumes only when its installed preset declares session continuity and the saved token
+ *  is an agent-app session id. Anything else (a launch-only preset, a removed preset, a token from a former runtime)
+ *  stays launch-only. */
+function agentAppSeatResumes(runtime: string | null, resumeType: string | null | undefined): boolean {
+  return !!runtime && resumeType === AGENT_APP_RESUME_TYPE && agentAppResumes(runtime);
+}
+
 /** The facts effectiveRestorePolicy reads for one saved seat: its saved runtime, the runtime it has now, and its recorded sessions. */
 function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | null, currentRuntime: string | null): RestoreSeatFacts {
   return { savedRuntime, currentRuntime, recordedSessions: data.sessions.filter((session) => session.nodeId === nodeId) };
@@ -140,7 +149,7 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: stri
   }
   const policy = effectiveRestorePolicy(seatFacts(data, nodeId, savedRuntime, runtime), session.restorePolicy);
   if (policy !== "resume_if_possible") return { kind: "fresh", why: `saves this seat with restore policy '${policy}'` };
-  if (agentAppOf(session.agentApp, runtime)) return { kind: "decision", why: "is an agent app whose preset is launch-only (resume unsupported)" };
+  if (agentAppOf(session.agentApp, runtime) && !agentAppSeatResumes(runtime, session.resumeType)) return { kind: "decision", why: "is an agent app whose preset is launch-only (resume unsupported)" };
   if (!session.resumeToken) return { kind: "decision", why: "has no resume token for this seat" };
   if (!session.resumeType || session.resumeType === "none") return { kind: "fresh", why: "records no resume source for this seat" };
   return { kind: "resume" };
@@ -921,7 +930,8 @@ export class RestoreOrchestrator {
       const policy = effectiveRestorePolicy(seatFacts(data, nodeId, node.runtime, liveNode ? liveNode.runtime : node.runtime), snapSession?.restorePolicy);
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
       // An agent app is launch-only: nothing resumes it, so even a saved token (say, from a former runtime) stops here.
-      if (policy === "resume_if_possible" && snapSession && !freshRequested && agentAppOf(snapSession.agentApp, node.runtime)) {
+      if (policy === "resume_if_possible" && snapSession && !freshRequested && agentAppOf(snapSession.agentApp, node.runtime)
+        && !agentAppSeatResumes(node.runtime, snapSession.resumeType)) {
         return {
           nodeId,
           logicalId: node.logicalId,

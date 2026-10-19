@@ -11,6 +11,8 @@ interface AgentAppWire {
   usable: boolean;
   maintainer?: string;
   limits?: string[];
+  /** Absent from a daemon older than preset format 2. */
+  resumes?: boolean;
   path: string;
   problem?: string;
 }
@@ -39,7 +41,8 @@ export function agentAppCommand(depsOverride?: StatusDeps): Command {
         for (const app of res.data.apps) {
           if (!app.usable) { console.log(`${app.name}: can't be used. ${app.problem}`); continue; }
           const limits = app.limits?.length ? ` Declared limits: ${app.limits.join("; ")}.` : "";
-          console.log(`${app.name}: community app, maintained by ${app.maintainer}, not tested by OpenRig.${limits}`);
+          const resume = app.resumes ? " Its preset declares resume, so a restore continues the conversation." : "";
+          console.log(`${app.name}: community app, maintained by ${app.maintainer}, not tested by OpenRig.${limits}${resume}`);
         }
       } catch (err) {
         console.error((err as Error).message);

@@ -47,7 +47,7 @@ describe("agent app presets", () => {
 
   it.each([
     ["a missing file", {}, "missing", `no agent app preset named "synth" is installed`],
-    ["another format", { "synth.yaml": GOOD.replace("format: 1", "format: 2") }, "incompatible", "it declares format 2; this OpenRig reads format 1"],
+    ["another format", { "synth.yaml": GOOD.replace("format: 1", "format: 3") }, "incompatible", "it declares format 3; this OpenRig reads formats 1 and 2"],
     ["a field this format doesn't read", { "synth.yaml": `${GOOD}resume: --resume {token}\n` }, "incompatible", "unknown field resume"],
     ["a name that isn't the file's", { "synth.yaml": GOOD.replace("name: synth", "name: other") }, "incompatible", `its name is "other", not "synth"`],
     ["no command", { "synth.yaml": GOOD.replace("command: synth-app --serve\n", "") }, "incompatible", "command must be a non-empty string"],

@@ -11,9 +11,29 @@ import { BUILT_IN_RUNTIMES, isAgentAppRuntime } from "./built-in-runtimes.js";
 
 export { BUILT_IN_RUNTIMES, isAgentAppRuntime };
 
-export const AGENT_APP_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits"] as const;
+/** The newest preset format this OpenRig reads. Format 1 is launch-only; format 2 adds the optional `session` block. */
+export const AGENT_APP_PRESET_FORMAT = 2;
+const READABLE_FORMATS: readonly number[] = [1, 2];
+const FIELDS_BY_FORMAT: Record<number, readonly string[]> = {
+  1: ["format", "name", "command", "maintainer", "limits"],
+  2: ["format", "name", "command", "maintainer", "limits", "session"],
+};
+const SESSION_FIELDS = ["id_pattern", "resume", "exists", "list"] as const;
+/** The one placeholder a session argv may hold, as a whole element. */
+export const SESSION_ID_PLACEHOLDER = "{session_id}";
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** How OpenRig continues an app's conversation. Each command is an argv run or typed without shell syntax. */
+export interface AgentAppSessionSpec {
+  /** Anchored regular expression every session id must match before it reaches a command line. */
+  idPattern: string;
+  /** Typed into the seat's pane to resume; holds `{session_id}` as a whole element. */
+  resume: string[];
+  /** Run in the seat's cwd: exit 0 when the session exists, 1 when it doesn't. Holds `{session_id}`. */
+  exists?: string[];
+  /** Run in the seat's cwd: prints a JSON array of {id, created, directory?}. No placeholder. */
+  list?: string[];
+}
 
 export interface AgentAppPreset {
   name: string;
@@ -21,6 +41,8 @@ export interface AgentAppPreset {
   maintainer: string;
   limits: string[];
   path: string;
+  /** Present only on a format-2 preset that declares session continuity; absent means launch-only. */
+  session?: AgentAppSessionSpec;
 }
 
 export type AgentAppPresetLookup =
@@ -38,11 +60,13 @@ function parsePreset(name: string, path: string, text: string): AgentAppPresetLo
   try { doc = parseYaml(text); } catch { return bad("it isn't valid YAML"); }
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return bad("it isn't a YAML mapping");
   const raw = doc as Record<string, unknown>;
-  if (raw.format !== AGENT_APP_PRESET_FORMAT) {
-    return bad(`it declares format ${JSON.stringify(raw.format ?? null)}; this OpenRig reads format ${AGENT_APP_PRESET_FORMAT}`);
+  if (typeof raw.format !== "number" || !READABLE_FORMATS.includes(raw.format)) {
+    return bad(`it declares format ${JSON.stringify(raw.format ?? null)}; this OpenRig reads formats ${READABLE_FORMATS.join(" and ")}`);
   }
-  const unknown = Object.keys(raw).filter(key => !(FIELDS as readonly string[]).includes(key));
-  if (unknown.length) return bad(`unknown field${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")} (format ${AGENT_APP_PRESET_FORMAT} has ${FIELDS.join(", ")})`);
+  const format = raw.format;
+  const fields = FIELDS_BY_FORMAT[format]!;
+  const unknown = Object.keys(raw).filter(key => !fields.includes(key));
+  if (unknown.length) return bad(`unknown field${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")} (format ${format} has ${fields.join(", ")})`);
   if (raw.name !== name) return bad(`its name is ${JSON.stringify(raw.name ?? null)}, not "${name}" (the file name)`);
   for (const key of ["command", "maintainer"] as const) {
     if (typeof raw[key] !== "string" || !(raw[key] as string).trim()) return bad(`${key} must be a non-empty string`);
@@ -55,7 +79,55 @@ function parsePreset(name: string, path: string, text: string): AgentAppPresetLo
   if (!Array.isArray(limits) || limits.some(limit => typeof limit !== "string" || !limit.trim())) {
     return bad("limits must be a list of non-empty strings");
   }
-  return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[], path } };
+  let session: AgentAppSessionSpec | undefined;
+  if (raw.session !== undefined) {
+    const parsed = parseSession(raw.session);
+    if (typeof parsed === "string") return bad(`session: ${parsed}`);
+    session = parsed;
+  }
+  return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[], path,
+    ...(session ? { session } : {}) } };
+}
+
+/** An argv from YAML, or why it can't be one. `placeholder` says whether `{session_id}` must, or must not, appear. */
+function parseArgv(value: unknown, key: string, placeholder: "required" | "forbidden"): string[] | string {
+  if (!Array.isArray(value) || value.length === 0) return `${key} must be a non-empty list of strings (an argv, not a shell line)`;
+  for (const arg of value) {
+    if (typeof arg !== "string" || arg.length === 0) return `${key} must be a non-empty list of non-empty strings`;
+    if (/[\n\r\0]/.test(arg)) return `${key} can't hold a newline or NUL`;
+    if (arg !== SESSION_ID_PLACEHOLDER && arg.includes("{session_id}")) return `${key}: {session_id} must be a whole element, not part of "${arg}"`;
+  }
+  const args = value as string[];
+  if (args[0] === SESSION_ID_PLACEHOLDER) return `${key}: the first element is the program and can't be {session_id}`;
+  const has = args.includes(SESSION_ID_PLACEHOLDER);
+  if (placeholder === "required" && !has) return `${key} must hold {session_id} as one element`;
+  if (placeholder === "forbidden" && has) return `${key} can't hold {session_id}`;
+  return args;
+}
+
+function parseSession(value: unknown): AgentAppSessionSpec | string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "must be a mapping";
+  const raw = value as Record<string, unknown>;
+  const unknown = Object.keys(raw).filter(key => !(SESSION_FIELDS as readonly string[]).includes(key));
+  if (unknown.length) return `unknown field${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")} (session has ${SESSION_FIELDS.join(", ")})`;
+  if (typeof raw.id_pattern !== "string" || !raw.id_pattern.startsWith("^") || !raw.id_pattern.endsWith("$")) {
+    return "id_pattern must be a regular expression anchored with ^ and $";
+  }
+  try { new RegExp(raw.id_pattern); } catch { return "id_pattern isn't a valid regular expression"; }
+  const resume = parseArgv(raw.resume, "resume", "required");
+  if (typeof resume === "string") return resume;
+  const spec: AgentAppSessionSpec = { idPattern: raw.id_pattern, resume };
+  if (raw.exists !== undefined) {
+    const exists = parseArgv(raw.exists, "exists", "required");
+    if (typeof exists === "string") return exists;
+    spec.exists = exists;
+  }
+  if (raw.list !== undefined) {
+    const list = parseArgv(raw.list, "list", "forbidden");
+    if (typeof list === "string") return list;
+    spec.list = list;
+  }
+  return spec;
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is
@@ -113,6 +185,13 @@ export function loadAgentAppPreset(name: string, dir: string = agentAppsDir()): 
   return parsePreset(name, path, text);
 }
 
+/** Whether the installed preset for this app declares session continuity (format 2 with a `session` block). A
+ *  missing or unusable preset, or one without the block, is launch-only. */
+export function agentAppResumes(name: string, dir: string = agentAppsDir()): boolean {
+  const found = loadAgentAppPreset(name, dir);
+  return found.ok && found.preset.session !== undefined;
+}
+
 /** Every preset file in the directory, usable or not, sorted by name. */
 export function listAgentAppPresets(dir: string = agentAppsDir()): AgentAppPresetLookup[] {
   if (!existsSync(dir)) return [];
@@ -130,6 +209,8 @@ export interface AgentAppLabel {
   limits: string[];
   identity: "not confirmed";
   needsInput: "from the screen only: no app prompt pattern";
+  /** "declared" when the preset has a `session` block (format 2), so a restore can continue the conversation. */
+  resume: "declared" | "not declared";
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
@@ -141,6 +222,7 @@ export function agentAppLabel(runtime: string, dir: string = agentAppsDir()): Ag
     maintainer: found.ok ? found.preset.maintainer : null,
     limits: found.ok ? found.preset.limits : [],
     identity: "not confirmed", needsInput: "from the screen only: no app prompt pattern",
+    resume: found.ok && found.preset.session ? "declared" : "not declared",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }
