@@ -158,6 +158,65 @@ describe("a cancelled caller's send never types later", () => {
   });
 });
 
+// Two cases from the independent review (review-r2's probes), plus the lease release and the Enter-only adapter check.
+describe("independent review cancellation seams", () => {
+  it("an Enter-only request cancelled during the staged-input capture presses nothing", async () => {
+    const f = fixture();
+    const caller = new AbortController();
+    vi.spyOn(f.tmux, "capturePaneContent").mockImplementation(async () => { caller.abort(); return "Ready\n❯ WORK\n────────────────────\n"; });
+    const res = await f.post("/send", { session: "worker@test", text: "", submitOnly: true, expectedStagedText: "WORK" }, caller.signal);
+    expect(f.writes).toEqual([]);
+    expect(await res.json()).toMatchObject({ reason: "caller_cancelled", sent: false, inputPhase: "not_reached" });
+  });
+
+  it.each([["guarded", true], ["unguarded", false]] as const)(
+    "%s: an Enter-only request cancelled at the adapter's last pre-key check presses nothing", async (_label, guarded) => {
+      const f = fixture({ guarded });
+      const caller = new AbortController();
+      vi.spyOn(f.tmux, "capturePaneContent").mockResolvedValue("Ready\n❯ WORK\n────────────────────\n");
+      // Guarded: abort in the guard's input check, which only the adapter calls, right before its pre-key callback
+      // (tmux.ts guardedInput), after every transport check; only that callback can stop it. Unguarded: the
+      // copy-mode probe, the last await before the key.
+      if (guarded) {
+        const original = f.guard.checkInput.bind(f.guard);
+        vi.spyOn(f.guard, "checkInput").mockImplementation((id: string) => { caller.abort(); return original(id); });
+      } else vi.spyOn(f.tmux, "isPaneInMode").mockImplementation(async () => { caller.abort(); return false; });
+      const result = await f.transport.send("worker@test", "", { submitOnly: true, expectedStagedText: "WORK", signal: caller.signal });
+      expect(f.writes).toEqual([]);
+      expect(result).toMatchObject({ reason: "caller_cancelled", sent: false, inputPhase: "not_reached" });
+    });
+
+  it("a cancel during the guarded second idle wait ends as caller_cancelled and releases the lease at once", async () => {
+    const f = fixture();
+    const caller = new AbortController();
+    let observations = 0;
+    (f.transport as never as { classifySendReadiness: unknown }).classifySendReadiness = async (input: { sessionName: string }) => {
+      if (input.sessionName !== "worker@test") return { state: "idle", reason: "fixture", evidenceSource: "pane_heuristic", sampledAt: new Date().toISOString(), evidence: null };
+      observations++;
+      if (observations === 2) caller.abort();
+      return { state: observations === 1 ? "idle" : "running", reason: "rewait fixture", evidenceSource: "pane_heuristic", sampledAt: new Date().toISOString(), evidence: null };
+    };
+    const started = Date.now();
+    const res = await f.post("/send", { session: "worker@test", text: "WORK", waitForIdleMs: 3_000 }, caller.signal);
+    expect(await res.json()).toMatchObject({ reason: "caller_cancelled", sent: false, inputPhase: "not_reached" });
+    expect(Date.now() - started).toBeLessThan(1_500); // ended at the cancel, not at the 3 s budget
+    // The lease is free: another operation on the seat runs at once.
+    let ran = false;
+    await Promise.race([f.guard.operation("worker@test", async () => { ran = true; }), new Promise((r) => setTimeout(r, 1_000))]);
+    expect(ran).toBe(true);
+    expect(f.writes).toEqual([]);
+  });
+
+  it("pinned: the Enter after this request's own successful paste still ignores a later cancellation", async () => {
+    const f = fixture({ guarded: false });
+    const caller = new AbortController();
+    f.hooks.paste = () => caller.abort();
+    const result = await f.transport.send("worker@test", "WORK", { signal: caller.signal });
+    expect(f.writes).toEqual(["paste:a:WORK", "keys:a:Enter"]);
+    expect(result.reason).not.toBe("caller_cancelled");
+  });
+});
+
 describe("what a caller's cancellation does not change", () => {
   it("managed preparation's own cancelled wait keeps its result", async () => {
     const f = fixture();

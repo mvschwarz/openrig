@@ -2579,15 +2579,29 @@ export class SessionTransport {
         };
       }
       this.tmuxAdapter.deliveryGuard?.expectStagedInput(sessionName, expected);
+      // This Enter is the request's first input, so a caller that has gone ends it here, before any key, as for a paste.
+      const cancel = callerSignal(opts);
+      if (cancel?.aborted) return callerCancelled(sessionName);
       const targetFailure = await checkClaudeTarget();
       if (targetFailure) return targetFailure;
       const copyModeFailure = await leavePaneMode("Nothing was submitted.");
       if (copyModeFailure) return copyModeFailure;
-      const submitResult = await this.runStage(
-        "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
-        (result) => result.ok ? "ok" : "failed",
-      );
+      if (cancel?.aborted) return callerCancelled(sessionName);
+      // The last check runs in the adapter, immediately before the key (after its guard checks).
+      const beforeKey = cancel ? () => { if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the key"); } : undefined;
+      let submitResult;
+      try {
+        submitResult = await this.runStage(
+          "session_transport.submit",
+          () => beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+          (result) => result.ok ? "ok" : "failed",
+        );
+      } catch (error) {
+        // Unguarded, the adapter's pre-key check throws instead of returning a result; no key was sent.
+        if (error instanceof DeliveryGuardError && error.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
+        throw error;
+      }
+      if (!submitResult.ok && submitResult.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
       if (!submitResult.ok) {
         return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
@@ -2664,6 +2678,7 @@ export class SessionTransport {
           timeoutLabelMs: waitForIdleMs,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+          signal: callerSignal(opts), cancelledBy: "caller",
         });
         waitEvidence = {
           activity: rewait.activity,
