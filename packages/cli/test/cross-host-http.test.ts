@@ -488,7 +488,7 @@ describe("capture --host (http branch)", () => {
     expect(sshRunnerNeverCalled).not.toHaveBeenCalled();
     const call = h.calls[0]!;
     expect(call.path).toBe("/api/transport/capture");
-    expect(call.body).toEqual({ lines: 50, session: "dev-impl@my-rig" });
+    expect(call.body).toEqual({ lines: 50, session: "dev-impl@my-rig", inputBox: true });
     expect(captured.stdoutLines).toContain("[via host=vps-b (http://vps-b:7433)]");
     expect(captured.stdoutLines).toContain("pane content here");
   });

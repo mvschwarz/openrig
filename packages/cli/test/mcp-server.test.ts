@@ -572,8 +572,8 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  // T15: rig_capture returns structured result
-  it("rig_capture returns structured result", async () => {
+  // T15: rig_capture asks for the input box and returns structured result
+  it("rig_capture asks for the input box and returns structured result", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { ok: true, sessionName: "dev-impl@my-rig", content: "pane output", lines: 20 },
@@ -586,6 +586,9 @@ describe("MCP Server", () => {
     });
 
     expect(postFn).toHaveBeenCalled();
+    const [path, body] = postFn.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(path).toBe("/api/transport/capture");
+    expect(body).toEqual({ session: "dev-impl@my-rig", inputBox: true });
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
     expect(parsed.ok).toBe(true);

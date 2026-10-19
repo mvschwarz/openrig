@@ -124,8 +124,9 @@ describe("Capture CLI", () => {
       return { out, err };
     }
 
-    it("prints the pane text as before and the input box's hint on stderr", async () => {
+    it("asks the daemon for the input box, prints the pane text as before and the input box's hint on stderr", async () => {
       const { out, err } = await run(["ghost@my-rig"]);
+      expect(requests.at(-1)!.inputBox).toBe(true);
       expect(out).toEqual(["pane text\n"]);
       expect(err).toEqual([`[rig capture: ghost@my-rig: input box: ${GHOST_HINT}]`]);
     });

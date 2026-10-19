@@ -44,11 +44,20 @@ describe("annotateInputBox: Claude Code", () => {
     expect(box.hint).toContain("isn't their intent, a draft or a staged command");
   });
 
-  it("Claude Code's Try \"...\" suggestion with the cursor at its start reads as a suggestion even unstyled", () => {
+  it("Claude Code's Try \"...\" words in an unstyled capture, cursor at their start, are only a possible suggestion: the words never stand in for faint styling", () => {
     const lines = frame("claude-code-2.1.296/idle-fresh-suggestion.txt");
     const row = lines.findLastIndex((line) => line.startsWith("❯"));
     const box = annotateInputBox(lines.join("\n"), cursorAt(2, row), "claude-code");
-    expect(box).toMatchObject({ status: "likely-suggestion", confidence: "high", suggestion: { text: 'Try "fix typecheck errors"' } });
+    expect(box).toMatchObject({ status: "likely-suggestion", confidence: "medium", suggestion: { text: 'Try "fix typecheck errors"' } });
+    expect(box.hint).toContain("possibly a Claude Code suggestion");
+    expect(box.hint).not.toContain("not something the person typed");
+  });
+
+  it("Try \"...\" words drawn partly faint and partly not, cursor at their start, are unknown: the words don't override contradictory styling", () => {
+    const { screen, row } = withPrompt("claude-code-2.1.296/staged-short.raw.txt", "❯", `Try "run ${FAINT("unit tests")}"`);
+    const box = annotateInputBox(screen, cursorAt(2, row), "claude-code");
+    expect(box).toMatchObject({ status: "unknown", confidence: "unknown", suggestion: null });
+    expect(box.hint).not.toContain("not something the person typed");
   });
 
   it("a typed draft with the cursor after it is the person's input", () => {
@@ -109,6 +118,17 @@ describe("annotateInputBox: Claude Code", () => {
     lines[live] = "! ls";
     const box = annotateInputBox(STYLED + lines.join("\n"), cursorAt(4, live), "claude-code");
     expect(box).toMatchObject({ status: "no-input-box", input: null, suggestion: null });
+  });
+
+  it("an empty frame with the cursor outside it, or with a cursor that moved, is unknown rather than an empty box", () => {
+    const rule = "─".repeat(40);
+    const screen = STYLED + ["Example:", rule, "❯ ", rule, "Working…"].join("\n");
+    const outside = annotateInputBox(screen, cursorAt(0, 4), "claude-code");
+    expect(outside).toMatchObject({ status: "unknown", confidence: "unknown", input: null, suggestion: null });
+    expect(outside.evidence).toEqual(["no text in the input box", "cursor outside the input box"]);
+    expect(annotateInputBox(screen, null, "claude-code", { cursorMoved: true })).toMatchObject({ status: "unknown", confidence: "unknown" });
+    expect(annotateInputBox(screen, cursorAt(2, 2), "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
+    expect(annotateInputBox(screen, null, "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
   });
 
   it("a prompt-looking line and a rule in output, with no input box, are not an input box", () => {
@@ -253,19 +273,59 @@ describe("rig capture reports the input box for agent seats only, leaving the pa
     expect(box.inputBox.evidence[0]).toBe("cursor moved during the capture");
   });
 
-  it("the capture route asks for the input box, for one seat and for a rig (what the CLI and MCP read)", async () => {
+  it("the capture route reads the input box only when the request asks (rig capture and MCP ask; send --verify and walk don't)", async () => {
     const capture = vi.fn(async (sessionName: string, _opts?: unknown) => ({ ok: true, sessionName, content: "x\n", lines: 20 }));
     const transport = { capture, resolveSessions: async () => ({ ok: true, sessions: [{ sessionName: "a@r" }, { sessionName: "b@r" }] }) };
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("sessionTransport" as never, transport as never); await next(); });
     app.route("/api/transport", transportRoutes());
     const post = (body: unknown) => app.request("/api/transport/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    expect((await post({ session: "a@r", lines: 30 })).status).toBe(200);
-    expect((await post({ rig: "r" })).status).toBe(200);
-    expect(capture.mock.calls).toEqual([
-      ["a@r", { lines: 30, inputBox: true }],
-      ["a@r", { lines: undefined, inputBox: true }],
-      ["b@r", { lines: undefined, inputBox: true }],
+    for (const body of [{ session: "a@r", lines: 30 }, { session: "a@r", inputBox: true }, { rig: "r" }, { rig: "r", inputBox: true }]) {
+      expect((await post(body)).status).toBe(200);
+    }
+    expect(capture.mock.calls.map(([session, opts]) => [session, (opts as { inputBox?: boolean }).inputBox === true])).toEqual([
+      ["a@r", false], ["a@r", true], ["a@r", false], ["b@r", false], ["a@r", true], ["b@r", true],
     ]);
+  });
+
+  it("a rig capture's input-box reads share one 1 s budget, so slow tmux can't push the fan-out past the client's timeout", async () => {
+    vi.useFakeTimers();
+    const { SessionTransport } = await import("../src/domain/session-transport.js");
+    const { screen, row } = withPrompt("claude-code-2.1.296/openrig-seat-accept-edits-idle.txt", "❯", FAINT("/compact"));
+    const slowCursor = () => new Promise((resolve) => setTimeout(() => resolve(cursorAt(2, row)), 300));
+    const tmux = {
+      probeSession: vi.fn(async () => ({ state: "present" })),
+      capturePaneContent: vi.fn(async (_s: string, lines: number, opts?: { escapeSequences?: boolean }) => (opts?.escapeSequences ? screen : `plain ${lines}`)),
+      getPaneCursorPosition: vi.fn(slowCursor),
+    };
+    const seats = ["s1@r", "s2@r", "s3@r", "s4@r", "s5@r"];
+    const transport = Object.create(SessionTransport.prototype) as InstanceType<typeof SessionTransport>;
+    Object.assign(transport, {
+      tmuxAdapter: tmux,
+      getSessionMeta: () => ({ runtime: "claude-code", attachmentType: "tmux", nodeId: "n1", pane: "%1", occupant: null, resumeToken: null }),
+      absenceProbeTarget: () => null,
+      now: () => new Date(),
+      recordSessionMissingVerdict: () => {},
+      reconcileStartupReadiness: async () => {},
+      resolveSessions: async () => ({ ok: true, sessions: seats.map((sessionName) => ({ sessionName })) }),
+    });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("sessionTransport" as never, transport as never); await next(); });
+    app.route("/api/transport", transportRoutes());
+    let settled: unknown = "pending";
+    void app.request("/api/transport/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rig: "r", inputBox: true }) })
+      .then(async (res) => { settled = await res.json(); });
+    // Each seat's three reads take 600 ms here; five seats with a 1 s deadline each would take 3 s.
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(settled).not.toBe("pending");
+    const results = (settled as { results: Array<{ ok: boolean; content: string; inputBox: { status: string; hint: string } }> }).results;
+    expect(results.map((r) => [r.ok, r.content])).toEqual(seats.map(() => [true, "plain 20"]));
+    expect(results[0]!.inputBox.status).toBe("likely-suggestion");
+    expect(results[1]!.inputBox).toMatchObject({ status: "unknown" });
+    expect(results[1]!.inputBox.hint).toContain("didn't finish");
+    for (const r of results.slice(2)) {
+      expect(r.inputBox).toMatchObject({ status: "unknown", confidence: "unknown", input: null });
+      expect(r.inputBox.hint).toContain("wasn't read");
+    }
   });
 });
