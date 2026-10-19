@@ -254,7 +254,8 @@ export interface PiOccupantRecordInput {
 }
 
 export type PiRecordSelection =
-  | { ok: true; path: string; launchId: string; notBeforeMs: number }
+  /** `pid`, `startedAt` and `command` are the verified runner's own process row. */
+  | { ok: true; path: string; launchId: string; notBeforeMs: number; pid: number; startedAt: string; command: string }
   | { ok: false; reason: string };
 
 /** The value after `flag` in a whitespace-tokenized process command line, or null. */
@@ -360,7 +361,10 @@ export async function resolveIdentityVerifiedPiRecord(
   if (inside === null || inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
     return { ok: false, reason: `Pi session file ${sessionFile} is not under the seat's sessions folder` };
   }
-  return { ok: true, path: file!, launchId, notBeforeMs: Math.max(bootAtMs, startedMs) + 999 };
+  return {
+    ok: true, path: file!, launchId, notBeforeMs: Math.max(bootAtMs, startedMs) + 999,
+    pid: runner.pid, startedAt: runner.startedAt!, command,
+  };
 }
 
 /** A Pi seat's effective-model read as the monitor wires it: the pin must resolve to a

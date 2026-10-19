@@ -329,7 +329,7 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     expect(await service.effortReport("dev-codex@eff")).toMatchObject({
       ok: true, requested: null, saved: { source: "runtime_default" }, emitted: { state: "unknown" }, observed: { state: "not_verified" },
     });
-    rigRepo.addNode(rigRepo.createRig("pi").id, "dev.pi", { runtime: "pi" });
-    expect(await service.effortReport("dev.pi")).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
+    rigRepo.addNode(rigRepo.createRig("omp").id, "dev.omp", { runtime: "omp" });
+    expect(await service.effortReport("dev.omp")).toMatchObject({ ok: false, code: "effort_unsupported_runtime" });
   });
 });

@@ -126,6 +126,15 @@ it("reports Pi response evidence without consulting its pin or models comparator
 });
 
 
+it("selects the current Pi runner and its session file for the effort report, and refuses another occupant's session", async () => {
+  const f = fixture("pi");
+  expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toMatchObject({
+    ok: true, path: f.path, launchId: "launch", pid: 20, startedAt: f.processRows[1]!.startedAt, command: f.processRows[1]!.command,
+  });
+  vi.spyOn(f.sessions, "currentOccupantGenerationForSession").mockReturnValue("replacement");
+  expect(await f.reader.currentPiRecord(f.node.id, "editor@studio")).toMatchObject({ ok: false });
+});
+
 it.each(["generation", "binding", "name-generation"])("r2: rejects %s turnover on the final PID await even with the same PID", async (kind) => {
   const f = fixture();
   f.getPanePid.mockImplementation(async () => {

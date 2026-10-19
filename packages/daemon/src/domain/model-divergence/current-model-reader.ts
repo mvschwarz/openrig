@@ -7,7 +7,7 @@ import { ProcessCensus } from "../process-census.js";
 import {
   resolveIdentityVerifiedClaudeRecord, resolveIdentityVerifiedPiRecord,
   resolveLiveCodexThreadId, readCurrentPiOccupantModel,
-  type CurrentGenerationDeps, type PiOccupantRecordInput,
+  type CurrentGenerationDeps, type PiOccupantRecordInput, type PiRecordSelection,
 } from "./current-generation-record.js";
 import {
   readClaudeEffectiveModel, readCodexEffectiveModel,
@@ -60,24 +60,39 @@ export class CurrentModelReader {
       const path = this.deps.codexRollout(live.id, seat.sessionName, reporting);
       return path ? { ok: true, path } : { ok: false, reason: "no readable rollout for the live thread" };
     }
+    if (seat.runtime === "claude-code") {
+      const sidecar = this.deps.context.readSidecar(seat.sessionName);
+      return resolveIdentityVerifiedClaudeRecord({ ...this.occupant(seat),
+        identity: this.deps.identities.getForNode(seat.nodeId), sidecar: sidecar.ok ? sidecar.data : null,
+      }, native, (path) => { try { return statSync(path).isFile(); } catch { return false; } });
+    }
+    if (seat.runtime === "pi") return this.selectPi(seat, native);
+    return { ok: false, reason: "runtime has no supported native model reader" };
+  }
+
+  private occupant(seat: Seat) {
     const binding = this.deps.sessions.getBindingForNode(seat.nodeId);
-    const common = {
+    return {
       sessionName: seat.sessionName, generation: seat.generation,
       occupantBootAt: this.deps.sessions.currentOccupantTenure(seat.nodeId)?.bootAt ?? null,
       binding: binding ? { tmuxSession: binding.tmuxSession, tmuxPane: binding.tmuxPane } : null,
     };
-    if (seat.runtime === "claude-code") {
-      const sidecar = this.deps.context.readSidecar(seat.sessionName);
-      return resolveIdentityVerifiedClaudeRecord({ ...common,
-        identity: this.deps.identities.getForNode(seat.nodeId), sidecar: sidecar.ok ? sidecar.data : null,
-      }, native, (path) => { try { return statSync(path).isFile(); } catch { return false; } });
+  }
+
+  private selectPi(seat: Seat, native: CurrentGenerationDeps): Promise<PiRecordSelection> {
+    return resolveIdentityVerifiedPiRecord({ ...this.occupant(seat), runner: this.deps.piRunner(seat.sessionName) }, native,
+      (path) => { try { return realpathSync(path); } catch { return null; } });
+  }
+
+  /** The identity-verified current Pi runner of a seat and its own session file, selected the same
+   *  way the model observation selects it. Never cached: each call re-reads the pane and processes. */
+  async currentPiRecord(nodeId: string, sessionName: string): Promise<PiRecordSelection> {
+    const generation = this.deps.sessions.currentOccupantTenure(nodeId)?.generationUuid ?? null;
+    if (generation && this.deps.sessions.currentOccupantGenerationForSession(sessionName) !== generation) {
+      return { ok: false, reason: `the occupant of ${sessionName} is not the seat's current occupant` };
     }
-    if (seat.runtime === "pi") {
-      const selection = await resolveIdentityVerifiedPiRecord({ ...common, runner: this.deps.piRunner(seat.sessionName) }, native,
-        (path) => { try { return realpathSync(path); } catch { return null; } });
-      return selection;
-    }
-    return { ok: false, reason: "runtime has no supported native model reader" };
+    const native = { ...this.deps.native, listProcesses: this.processCensus.cycleLister() };
+    return this.selectPi({ nodeId, sessionName, runtime: "pi", generation }, native);
   }
 
   /** Preserve the monitor's established read/comparison behavior, including Pi pin readings. */

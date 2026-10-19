@@ -272,11 +272,15 @@ export function readPiEffectiveModel(
   return result.ok ? { ok: true, model: result.model } : result;
 }
 
+/** Pi's observation also carries the `thinkingLevel` that same record names (Pi 0.99.0 and later
+ *  stamp it on every assistant message; absent on older Pi). */
+export type PiModelObservation = ({ ok: true; thinkingLevel?: string } & NativeModelObservation) | { ok: false; reason: string };
+
 export function readPiModelObservation(
   sessionFile: string,
   scope: PiOccupantScope,
   maxScanBytes = MAX_SCAN_BYTES,
-): ({ ok: true } & NativeModelObservation) | { ok: false; reason: string } {
+): PiModelObservation {
   const header = readFirstLine(sessionFile);
   if (header === null) return { ok: false, reason: `Pi session file ${sessionFile} is unreadable` };
   const boundary = parsePiSessionHeader(header);
@@ -289,7 +293,7 @@ function newestPiModel(
   lines: string[],
   boundary: PiSessionBoundary,
   scope: PiOccupantScope,
-): ({ ok: true } & NativeModelObservation) | { ok: false; reason: string } | null {
+): PiModelObservation | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (!line.includes('"assistant"')) continue;
@@ -312,7 +316,12 @@ function newestPiModel(
     if (origin !== "own") return { ok: false, reason: `newest Pi assistant record ${id} is ${origin === "inherited" ? "inherited from the fork parent" : "of undecidable fork origin"}` };
     if (at <= scope.notBeforeMs) return { ok: false, reason: `newest Pi assistant record ${id} predates the current runner` };
     if (!fields.provider || !fields.model) return { ok: false, reason: `newest Pi assistant record ${id} names no provider and model` };
-    return { ok: true, model: `${fields.provider}/${fields.model}`, source: "pi-assistant-response", observedAt: recordTime(timestamp) };
+    const message = entry["message"] as Record<string, unknown>;
+    const thinkingLevel = typeof message["thinkingLevel"] === "string" && message["thinkingLevel"].length > 0 ? message["thinkingLevel"] : undefined;
+    return {
+      ok: true, model: `${fields.provider}/${fields.model}`, source: "pi-assistant-response", observedAt: recordTime(timestamp),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+    };
   }
   return null;
 }
