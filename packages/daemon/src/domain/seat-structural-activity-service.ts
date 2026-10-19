@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
-import { agentAppPaneActivity, classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
+import { agentAppPaneActivity, classifyPaneActivity, readSeatBeforePaste, type PaneActivityClassification } from "./session-transport.js";
 import { agentAppOf } from "./built-in-runtimes.js";
 import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 import { IDLE_FULL_CAPTURE_MS, windowSnapshot } from "./transcript-rotation.js";
@@ -14,6 +14,8 @@ export interface StructuralObservation {
   reason: string;
   evidence: string | null;
   observedAt: string;
+  /** A complete idle frame read for this capture's target, not a generic footer or hook. */
+  idleFrame?: { sessionName: string; runtime: "claude-code" | "codex" };
   /** Set when a later sweep found the pane unchanged since observedAt without capturing it. Freshness counts from it;
    *  observedAt stays the capture. */
   checkedAt?: string;
@@ -117,6 +119,9 @@ export class SeatStructuralActivityService {
       reason: c.reason,
       evidence: c.evidence,
       observedAt: at.toISOString(),
+      ...(c.state === "agent_idle" && (runtime === "claude-code" || runtime === "codex")
+        && readSeatBeforePaste(content, runtime, sessionName) === "idle"
+        ? { idleFrame: { sessionName, runtime } } : {}),
     };
     this.latestBySession.set(sessionName, obs);
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,

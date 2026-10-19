@@ -15,7 +15,7 @@ import type { SeatActivityService } from "./seat-activity-service.js";
 import { deriveDisplayActivity } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity, mapPaneState } from "./session-transport.js";
-import type { StructuralObservation } from "./seat-structural-activity-service.js";
+import { DEFAULT_STRUCTURAL_STALE_MS, type StructuralObservation } from "./seat-structural-activity-service.js";
 import { RigRepository, findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
 import { hasCompleteGuidanceBlock, seatGuidanceFile } from "./restore-guidance.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
@@ -1377,7 +1377,9 @@ export async function attachAgentActivity(
      *
      *     needs_input > running > MOTION > idle / unknown
      *
-     * Live motion UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
+     * A current, target-bound complete idle frame is the narrow exception to motion below.
+     * A generic footer or old idle capture is not that evidence; D2 remains unchanged.
+     * Live motion otherwise UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
      * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
      * safety argument, and it is what each half of the defect needs:
      *
@@ -1401,8 +1403,8 @@ export async function attachAgentActivity(
      * "not unknown" by relabelling the default, which is the closed union rotting rather than the
      * signal improving. Silence therefore leaves the prior verdict exactly as it was.
      */
-    const withMotion = (activity: AgentActivity): AgentActivity => {
-      if (!motionRunning) return activity;
+    const withMotion = (activity: AgentActivity, currentIdleFrame = false): AgentActivity => {
+      if (!motionRunning || (currentIdleFrame && activity.state === "idle")) return activity;
       if (activity.state !== "idle" && activity.state !== "unknown") return activity;
       return {
         state: "running",
@@ -1420,19 +1422,29 @@ export async function attachAgentActivity(
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
     });
-    // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — EXCEPT that a positive
-    // `idle` hook now yields to live motion (D2). running/needs_input hooks are untouched.
-    if (hookActivity && hookActivity.state !== "unknown") {
+    // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
+    // target and no older than the motion fact, can distinguish idle redraw from resumed work.
+    const structural = entry.canonicalSessionName
+      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName) ?? null
+      : null;
+    const capturedMs = Date.parse(structural?.observedAt ?? "");
+    const motionMs = Date.parse(motion?.lastActivityAt ?? "");
+    const currentIdleFrame = structural?.state === "agent_idle"
+      && structural.idleFrame?.sessionName === entry.canonicalSessionName
+      && structural.idleFrame?.runtime === entry.runtime
+      && Number.isFinite(capturedMs) && capturedMs <= sampledAt.getTime()
+      && sampledAt.getTime() - capturedMs < DEFAULT_STRUCTURAL_STALE_MS
+      && (!motionRunning || (Number.isFinite(motionMs) && capturedMs >= motionMs));
+
+    // Running/needs_input hooks keep their meaning. An idle hook alone still yields to motion
+    // (D2); when a current complete idle frame exists, report that frame's provenance instead.
+    if (hookActivity && hookActivity.state !== "unknown"
+      && !(hookActivity.state === "idle" && currentIdleFrame)) {
       return {
         ...entry,
         agentActivity: withMotion(hookActivity),
       };
     }
-
-    // Capture-free cache read; the service rejects expired observations.
-    const structural = entry.canonicalSessionName
-      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
-      : null;
 
     // #763: a typed provider-interruption row (at_limit) is positive evidence
     // even though its state is unknown by construction (it must never count
@@ -1468,7 +1480,7 @@ export async function attachAgentActivity(
           evidenceSource: "pane_heuristic",
           sampledAt: structural.observedAt,
           evidence: structural.evidence,
-        }),
+        }, currentIdleFrame),
       };
     }
 
