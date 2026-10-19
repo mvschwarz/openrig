@@ -187,11 +187,14 @@ If the human registry is unavailable when a custody candidate's owner needs
 classification, that candidate keeps its original destination, and one log line
 per candidate names it and the registry error. This doesn't infer an agent
 identity from an unreadable registry, which may not exist before the first human
-is registered. Work bound for agents keeps routing, and repaired findings still
-close. A finding whose destination is a `<name>@external` person still needs the
-registry to admit it when it's saved, so during an outage that case fails the
-pass, as it did before this routing. After the repair, the next pass creates the
-finding and routes it to the closer. Registry recovery restores owner refinement
+is registered. In a pass with no finding to save for a `<name>@external` person,
+which includes an install with no registry yet, work bound for agents keeps
+routing and repaired findings still close. Such a finding still needs the
+registry to admit it when it's saved, so during an outage a pass that must save
+one fails at that finding, as it did before this routing. Findings not yet
+created in that pass, and the closing of repaired findings, wait for the next
+pass that completes. After the repair, the next pass creates the finding and
+routes it to the closer. Registry recovery restores owner refinement
 for new findings; existing findings keep their established route. Reserved human
 references and legacy agent names keep their known classifications without a
 registry read.
