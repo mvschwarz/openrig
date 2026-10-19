@@ -16,11 +16,11 @@ interface AgentAppWire {
 }
 
 export function agentAppCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("agent-app").description("Community agent apps installed as presets (not tested by OpenRig)");
+  const cmd = new Command("agent-app").description("Community harnesses installed as presets (not tested by OpenRig)");
   const getDeps = (): StatusDeps => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd.command("list")
-    .description("List installed agent app presets, with maintainer and declared limits")
+    .description("List installed community harness presets, with maintainer and declared limits")
     .option("--json", "JSON output")
     .action(async (opts: { json?: boolean }) => {
       try {
@@ -33,13 +33,13 @@ export function agentAppCommand(depsOverride?: StatusDeps): Command {
         if (res.status !== 200 || !res.data) throw new Error(`Daemon returned HTTP ${res.status}`);
         if (opts.json) { console.log(JSON.stringify(res.data, null, 2)); return; }
         if (res.data.apps.length === 0) {
-          console.log(`No agent app presets installed. Add one as ${res.data.dir}/<name>.yaml.`);
+          console.log(`No community harness presets installed. Add one as ${res.data.dir}/<name>.yaml.`);
           return;
         }
         for (const app of res.data.apps) {
           if (!app.usable) { console.log(`${app.name}: can't be used. ${app.problem}`); continue; }
           const limits = app.limits?.length ? ` Declared limits: ${app.limits.join("; ")}.` : "";
-          console.log(`${app.name}: community app, maintained by ${app.maintainer}, not tested by OpenRig.${limits}`);
+          console.log(`${app.name}: community harness, maintained by ${app.maintainer}, not tested by OpenRig.${limits}`);
         }
       } catch (err) {
         console.error((err as Error).message);

@@ -2678,7 +2678,7 @@ describe("RestoreOrchestrator", () => {
     if (result.ok) {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("awaiting-decision");
-      expect(nodeResult!.error).toBe(`Resume is unsupported for agent app "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
+      expect(nodeResult!.error).toBe(`Resume is unsupported for community harness "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh dev.impl only if you want a new conversation.`);
       expect(launchHarness).not.toHaveBeenCalled();
     }
   });
@@ -2703,7 +2703,7 @@ describe("RestoreOrchestrator", () => {
       const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("awaiting-decision");
       expect(nodeResult!.error).toContain("Original session unresumable");
-      expect(nodeResult!.error).not.toContain("Resume is unsupported for agent app");
+      expect(nodeResult!.error).not.toContain("Resume is unsupported for community harness");
     }
   });
 

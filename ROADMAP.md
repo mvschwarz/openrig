@@ -29,7 +29,7 @@ tie. Feel free to coordinate on the issue first.
 - **Custom Codex providers such as Bedrock** (#194): accept providers that authenticate with an environment key, and
   forward their token.
 - **Operator recovery for Pi and Oh My Pi seats** (#41).
-- **More agent apps:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
+- **More harnesses:** we're working out one way for any coding-agent CLI to plug into OpenRig. More on this soon
   (design discussion: #43).
 
 ## Slack

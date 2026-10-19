@@ -33,7 +33,7 @@ export function agentAppsDir(): string {
 
 function parsePreset(name: string, path: string, text: string): AgentAppPresetLookup {
   const bad = (reason: string): AgentAppPresetLookup => ({ ok: false, kind: "incompatible", path,
-    message: `agent app "${name}": the preset at ${path} can't be used: ${reason}` });
+    message: `community harness "${name}": the preset at ${path} can't be used: ${reason}` });
   let doc: unknown;
   try { doc = parseYaml(text); } catch { return bad("it isn't valid YAML"); }
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return bad("it isn't a YAML mapping");
@@ -93,22 +93,22 @@ function shellSyntaxIn(command: string): string | null {
 export function loadAgentAppPreset(name: string, dir: string = agentAppsDir()): AgentAppPresetLookup {
   const path = join(dir, `${name}.yaml`);
   if (BUILT_IN_RUNTIMES.has(name)) {
-    return { ok: false, kind: "incompatible", path, message: `"${name}" is a built-in runtime; an agent app preset can't use that name` };
+    return { ok: false, kind: "incompatible", path, message: `"${name}" is a built-in runtime; a community harness preset can't use that name` };
   }
   // The name check comes first: it keeps a runtime name from reaching outside the directory.
   if (!NAME.test(name)) {
     if (name === basename(name) && !name.startsWith(".") && existsSync(path)) {
       return { ok: false, kind: "incompatible", path,
-        message: `agent app "${name}": the preset at ${path} can't be used: its name must be lowercase letters, digits and hyphens, starting with a letter or digit` };
+        message: `community harness "${name}": the preset at ${path} can't be used: its name must be lowercase letters, digits and hyphens, starting with a letter or digit` };
     }
-    return { ok: false, kind: "missing", path, message: `no agent app preset named "${name}" is installed (looked for ${path})` };
+    return { ok: false, kind: "missing", path, message: `no community harness preset named "${name}" is installed (looked for ${path})` };
   }
   if (!existsSync(path)) {
-    return { ok: false, kind: "missing", path, message: `no agent app preset named "${name}" is installed (looked for ${path})` };
+    return { ok: false, kind: "missing", path, message: `no community harness preset named "${name}" is installed (looked for ${path})` };
   }
   let text: string;
   try { text = readFileSync(path, "utf-8"); } catch {
-    return { ok: false, kind: "incompatible", path, message: `agent app "${name}": the preset at ${path} couldn't be read` };
+    return { ok: false, kind: "incompatible", path, message: `community harness "${name}": the preset at ${path} couldn't be read` };
   }
   return parsePreset(name, path, text);
 }
@@ -129,7 +129,7 @@ export interface AgentAppLabel {
   maintainer: string | null;
   limits: string[];
   identity: "not confirmed";
-  needsInput: "from the screen only: no app prompt pattern";
+  needsInput: "from the screen only: no harness prompt pattern";
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
@@ -140,7 +140,7 @@ export function agentAppLabel(runtime: string, dir: string = agentAppsDir()): Ag
     app: runtime, community: true, testedByOpenRig: false,
     maintainer: found.ok ? found.preset.maintainer : null,
     limits: found.ok ? found.preset.limits : [],
-    identity: "not confirmed", needsInput: "from the screen only: no app prompt pattern",
+    identity: "not confirmed", needsInput: "from the screen only: no harness prompt pattern",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

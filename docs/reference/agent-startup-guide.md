@@ -315,7 +315,7 @@ not the destination's file contents.)
 - **What to do:** use a clean destination, or move or merge those files, then retry.
 - **Not checked:** managed guidance blocks and native configuration merges keep the adapter's policy at launch, and
   launch-owned files such as `.openrig/context-collector.cjs` are written by launch as always.
-- **An agent app** takes no startup files, so none are checked for it.
+- **A community harness** takes no startup files, so none are checked for it.
 
 **The running occupant keeps its current directory.** Adopt the new one with:
 - `rig seat launch <seat> --fresh --stop --reason <text>`, which starts a blank conversation; or

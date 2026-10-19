@@ -39,23 +39,23 @@ export class AgentAppRuntimeAdapter implements RuntimeAdapter {
     const skipped = plan.entries.map(entry => entry.effectiveId);
     return {
       projected: [], skipped, failed: [],
-      ...(skipped.length ? { warnings: [`Agent app "${this.runtime}" places no resources; ${skipped.length} not placed: ${skipped.join(", ")}`] } : {}),
+      ...(skipped.length ? { warnings: [`Community harness "${this.runtime}" places no resources; ${skipped.length} not placed: ${skipped.join(", ")}`] } : {}),
     };
   }
 
   async deliverStartup(files: ResolvedStartupFile[], _binding: NodeBinding): Promise<StartupDeliveryResult> {
     return {
       delivered: 0, failed: [],
-      ...(files.length ? { warnings: [`Agent app "${this.runtime}" takes no startup files; ${files.length} not delivered: ${files.map(file => file.path).join(", ")}`] } : {}),
+      ...(files.length ? { warnings: [`Community harness "${this.runtime}" takes no startup files; ${files.length} not delivered: ${files.map(file => file.path).join(", ")}`] } : {}),
     };
   }
 
   async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; forkSource?: ForkSource }): Promise<HarnessLaunchResult> {
     if (opts.forkSource) {
-      return { ok: false, error: `Fork is unsupported: agent app "${this.runtime}" is launch-only. Remove session_source for this member.` };
+      return { ok: false, error: `Fork is unsupported: community harness "${this.runtime}" is launch-only. Remove session_source for this member.` };
     }
     if (opts.resumeToken) {
-      return { ok: false, error: `Resume is unsupported: agent app "${this.runtime}" is launch-only. No session was started.` };
+      return { ok: false, error: `Resume is unsupported: community harness "${this.runtime}" is launch-only. No session was started.` };
     }
     const found = loadAgentAppPreset(this.runtime, this.deps.presetsDir?.() ?? agentAppsDir());
     if (!found.ok) return { ok: false, error: found.message };
@@ -64,7 +64,7 @@ export class AgentAppRuntimeAdapter implements RuntimeAdapter {
       ? await this.deps.seatLaunchEnvironment.command(session, found.preset.command, { runtime: this.runtime })
       : found.preset.command;
     const sent = await this.deps.tmux.sendShellCommand(session, command, undefined, { stageIfLong: true, execInScript: true });
-    if (!sent.ok) return { ok: false, error: `Couldn't start agent app "${this.runtime}": ${sent.message}` };
+    if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
     return { ok: true };
   }
 
@@ -75,7 +75,7 @@ export class AgentAppRuntimeAdapter implements RuntimeAdapter {
     }
     const command = await this.deps.tmux.getPaneCommand(session);
     if (!command || isShellForeground(command)) {
-      return { ready: false, reason: `Agent app "${this.runtime}" isn't running: the pane is at a shell.`, code: "app_not_running" };
+      return { ready: false, reason: `Community harness "${this.runtime}" isn't running: the pane is at a shell.`, code: "app_not_running" };
     }
     return { ready: true };
   }

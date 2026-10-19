@@ -625,9 +625,9 @@ function hasCurrentUsageLimit(node: NodeEntry): boolean {
 
 /** One line per community agent app seat: what OpenRig knows about it, and what it doesn't. */
 export function formatAgentAppLine(seat: string, app: NonNullable<NodeEntry["agentApp"]>): string {
-  if (app.presetError) return `Community app (${seat}): ${app.app}: ${app.presetError}.`;
+  if (app.presetError) return `Community harness (${seat}): ${app.app}: ${app.presetError}.`;
   const limits = app.limits.length ? `; declared limits: ${app.limits.join("; ")}` : "";
-  return `Community app (${seat}): ${app.app}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
+  return `Community harness (${seat}): ${app.app}, maintained by ${app.maintainer}, not tested by OpenRig. Identity ${app.identity}; needs-input ${app.needsInput}${limits}.`;
 }
 
 function missingSessionGuidance(node: NodeEntry): string | null {

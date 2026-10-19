@@ -46,7 +46,7 @@ describe("agent app presets", () => {
   });
 
   it.each([
-    ["a missing file", {}, "missing", `no agent app preset named "synth" is installed`],
+    ["a missing file", {}, "missing", `no community harness preset named "synth" is installed`],
     ["another format", { "synth.yaml": GOOD.replace("format: 1", "format: 2") }, "incompatible", "it declares format 2; this OpenRig reads format 1"],
     ["a field this format doesn't read", { "synth.yaml": `${GOOD}resume: --resume {token}\n` }, "incompatible", "unknown field resume"],
     ["a name that isn't the file's", { "synth.yaml": GOOD.replace("name: synth", "name: other") }, "incompatible", `its name is "other", not "synth"`],
@@ -97,7 +97,7 @@ describe("agent app presets", () => {
     for (const name of ["claude-code", "codex", "pi", "omp", "terminal", "stub"]) {
       const dir = presets({ [`${name}.yaml`]: GOOD.replace("name: synth", `name: ${name}`) });
       expect(loadAgentAppPreset(name, dir)).toMatchObject({ ok: false, kind: "incompatible",
-        message: `"${name}" is a built-in runtime; an agent app preset can't use that name` });
+        message: `"${name}" is a built-in runtime; a community harness preset can't use that name` });
     }
   });
 
@@ -136,9 +136,9 @@ describe("the agent app adapter", () => {
   it("refuses resume and fork without starting anything", async () => {
     const { tmux, app } = adapter(presets({ "synth.yaml": GOOD }));
     expect(await app.launchHarness(binding, { name: "w@r", resumeToken: "t" }))
-      .toEqual({ ok: false, error: `Resume is unsupported: agent app "synth" is launch-only. No session was started.` });
+      .toEqual({ ok: false, error: `Resume is unsupported: community harness "synth" is launch-only. No session was started.` });
     expect(await app.launchHarness(binding, { name: "w@r", forkSource: { kind: "native_id", value: "p" } }))
-      .toMatchObject({ ok: false, error: expect.stringContaining(`Fork is unsupported: agent app "synth" is launch-only.`) });
+      .toMatchObject({ ok: false, error: expect.stringContaining(`Fork is unsupported: community harness "synth" is launch-only.`) });
     expect(tmux.sendShellCommand).not.toHaveBeenCalled();
   });
 
@@ -153,7 +153,7 @@ describe("the agent app adapter", () => {
     const { app } = adapter(presets({ "synth.yaml": GOOD }));
     const plan = { entries: [{ effectiveId: "skill-a" }] } as never;
     expect(await app.project(plan, binding)).toEqual({ projected: [], skipped: ["skill-a"], failed: [],
-      warnings: [`Agent app "synth" places no resources; 1 not placed: skill-a`] });
+      warnings: [`Community harness "synth" places no resources; 1 not placed: skill-a`] });
   });
 });
 

@@ -70,7 +70,7 @@ describe("a community agent app from a data preset", () => {
     const byName = Object.fromEntries(listed.apps.map((app: { name: string }) => [app.name, app]));
     expect(byName["synth-app"]).toMatchObject({ usable: true, community: true, testedByOpenRig: false, maintainer: "Example Maintainer",
       limits: ["resume unsupported", "fork unsupported", "no approval-prompt detection"] });
-    expect(byName["codex"]).toMatchObject({ usable: false, problem: '"codex" is a built-in runtime; an agent app preset can\'t use that name' });
+    expect(byName["codex"]).toMatchObject({ usable: false, problem: '"codex" is a built-in runtime; a community harness preset can\'t use that name' });
   });
 
   it("starts from the preset, labelled as a community app with identity not confirmed", async () => {
@@ -80,9 +80,9 @@ describe("a community agent app from a data preset", () => {
     expect(await until(async () => capture(), text => text.includes("synth-app 1.0 started"))).toContain("app> ");
     const seat = await node();
     expect(seat).toMatchObject({ runtime: "synth-app", sessionStatus: "running",
-      agentApp: { app: "synth-app", maintainer: "Example Maintainer", identity: "not confirmed", needsInput: "from the screen only: no app prompt pattern" } });
+      agentApp: { app: "synth-app", maintainer: "Example Maintainer", identity: "not confirmed", needsInput: "from the screen only: no harness prompt pattern" } });
     const human = await rig(["ps", "--nodes", "--rig", "agent-app-rig"]);
-    expect(human.stdout).toContain(`Community app (${session}): synth-app, maintained by Example Maintainer, not tested by OpenRig. Identity not confirmed`);
+    expect(human.stdout).toContain(`Community harness (${session}): synth-app, maintained by Example Maintainer, not tested by OpenRig. Identity not confirmed`);
     const verdict = await until(() => json(["ps", "--nodes", "--rig", "agent-app-rig", "--full", "--json"]).then(n => n[0]?.identityVerdict),
       v => v?.verdict === "unconfirmed", 20_000);
     expect(verdict).toMatchObject({ verdict: "unconfirmed", reason: "process_identity_unconfirmed" });
@@ -154,7 +154,7 @@ describe("a community agent app from a data preset", () => {
     const launched = await rig(["launch", rigId, "work.worker", "--json"], 60_000);
     expect(launched.code).not.toBe(0);
     expect(JSON.parse(launched.stdout)).toMatchObject({ status: "awaiting-decision",
-      error: `Resume is unsupported for agent app "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh work.worker only if you want a new conversation.` });
+      error: `Resume is unsupported for community harness "synth-app": its preset is launch-only. No session was started, and the earlier conversation is left as it is. Re-run with --fresh work.worker only if you want a new conversation.` });
     expect(() => capture()).toThrow();
     // A new conversation stays the person's deliberate choice.
     const fresh = await rig(["up", "agent-app-rig", "--existing", "--fresh", "work.worker", "--json"], 120_000);
@@ -170,7 +170,7 @@ describe("a community agent app from a data preset", () => {
     const up = await rig(["up", specFor("missing-app-rig", "no-such-app"), "--cwd", rigRoot, "--json", "--yes"], 60_000);
     expect(up.code).not.toBe(0);
     expect(JSON.parse(up.stdout)).toMatchObject({ code: "preflight_failed" });
-    expect(JSON.parse(up.stdout).errors.join("\n")).toContain(`work.worker: unsupported runtime "no-such-app": it isn't built in, and no agent app preset named "no-such-app" is installed`);
+    expect(JSON.parse(up.stdout).errors.join("\n")).toContain(`work.worker: unsupported runtime "no-such-app": it isn't built in, and no community harness preset named "no-such-app" is installed`);
     const all = await json(["ps", "--nodes", "--all-rigs", "--json"]);
     expect(all.map((n: { rigName: string }) => n.rigName)).not.toContain("missing-app-rig");
   }, 90_000);
@@ -184,7 +184,7 @@ describe("a community agent app from a data preset", () => {
     await daemon.restart();
     const seat = await until(node, n => n.identityVerdict?.verdict === "unconfirmed", 30_000);
     expect(seat).toMatchObject({ runtime: "synth-app", identityVerdict: { verdict: "unconfirmed", reason: "process_identity_unconfirmed" } });
-    expect(seat.agentApp.presetError).toContain(`no agent app preset named "synth-app" is installed`);
+    expect(seat.agentApp.presetError).toContain(`no community harness preset named "synth-app" is installed`);
     await sleep(8_000);
     expect((await node()).activityState).toMatchObject({ activity: "unknown", decidedBy: null });
     // Stopped, then a snapshot: still launch-only, so nothing resumes and nothing starts in its place.
@@ -196,12 +196,12 @@ describe("a community agent app from a data preset", () => {
     const launched = await rig(["launch", rigId, "work.worker", "--json"], 60_000);
     expect(launched.code).not.toBe(0);
     expect(JSON.parse(launched.stdout)).toMatchObject({ status: "awaiting-decision",
-      error: expect.stringContaining(`Resume is unsupported for agent app "synth-app"`) });
+      error: expect.stringContaining(`Resume is unsupported for community harness "synth-app"`) });
     expect(() => capture()).toThrow();
     const again = await rig(["up", "agent-app-rig", "--existing", "--fresh", "work.worker", "--json"], 120_000);
     expect(again.stdout + again.stderr).toContain("Harness not started: no synth-app runtime adapter for work.worker.");
     expect(capture()).not.toContain("synth-app 1.0 started");
-    expect((await node()).agentApp.presetError).toContain(`no agent app preset named "synth-app" is installed`);
+    expect((await node()).agentApp.presetError).toContain(`no community harness preset named "synth-app" is installed`);
     expect(readFileSync(join(rigRoot, "agent-app-rig.yaml"), "utf-8")).toContain("runtime: synth-app");
   }, 300_000);
 

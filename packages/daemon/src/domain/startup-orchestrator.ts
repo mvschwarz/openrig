@@ -418,7 +418,7 @@ export class StartupOrchestrator {
     // later reads (identity, activity, labels, restore), not launch success or identity proof.
     if (input.adapter instanceof AgentAppRuntimeAdapter) {
       try { this.sessionRegistry.recordAgentAppSelection(input.sessionId, input.adapter.runtime); }
-      catch (err) { errors.push(`Couldn't record the agent app selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
+      catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 
     if (!input.skipHarnessLaunch) {
