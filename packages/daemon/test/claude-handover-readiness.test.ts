@@ -134,23 +134,25 @@ describe("Claude fresh in-place handover readiness", () => {
   }
 
 
-  it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable"])("1544 %s", async mode => {
+  it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable"])("1544 %s", async mode => {
     const { node } = seedSeat({ runtime: "claude-code" });
     let elapsed = 0, requested = false, packetPasted = false;
-    const headerless = mode.startsWith("working-headerless-auto");
-    if (headerless) new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "auto" }, "fixture", "headerless auto qualification");
+    const headerless = mode.startsWith("working-headerless-");
+    const auto = mode.startsWith("working-headerless-auto");
+    if (auto) new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "auto" }, "fixture", "headerless auto qualification");
     const nativeAt = mode === "new-runtime-already-ready" || mode === "working-wrapper-screen-unavailable" || headerless ? 0 : 500;
     const unavailable = mode.endsWith("screen-unavailable");
     const identicalFrame = "Claude Code v2.1.303\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const autoFrame = "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents";
+    const headerlessFrame = auto ? autoFrame : autoFrame.replace("auto mode on", "accept edits on");
     const oldFrame = "Claude Code v2.1.303\n❯ predecessor finished turn\n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const freshFrame = "Claude Code v2.1.303\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const trace: unknown[] = [];
-    const pane = () => headerless ? identicalFrame + "\n" + autoFrame : unavailable ? identicalFrame : requested && elapsed >= nativeAt ? freshFrame
+    const pane = () => headerless ? identicalFrame + "\n" + headerlessFrame : unavailable ? identicalFrame : requested && elapsed >= nativeAt ? freshFrame
       : mode === "classic-predecessor-history" ? oldFrame + "\noperator@host$ " : "operator@host$ ";
     getPaneCommand.mockImplementation(async () => (unavailable || headerless) && requested ? "sh" : requested && elapsed >= nativeAt ? "claude" : "zsh");
     capturePaneScreen.mockImplementation(async (target: string) => {
-      const returnedPane = unavailable ? null : headerless ? autoFrame : requested && elapsed < nativeAt ? "operator@host$ " : pane();
+      const returnedPane = unavailable ? null : headerless ? headerlessFrame : requested && elapsed < nativeAt ? "operator@host$ " : pane();
       trace.push({ kind: "current-frame", target, elapsed, returnedPane });
       return returnedPane;
     });
@@ -162,7 +164,7 @@ describe("Claude fresh in-place handover readiness", () => {
       sendShellCommand: async (session: string, text: string) => sendText(session, text) } as unknown as TmuxAdapter;
     const fsError = () => { throw new Error("unexpected filesystem access"); };
     const listProcesses = vi.fn(() => {
-      if (unavailable || mode === "working-headerless-auto-unavailable") throw new Error("fixture ps unavailable");
+      if (unavailable || mode.endsWith("-unavailable")) throw new Error("fixture ps unavailable");
       if (mode !== "working-headerless-auto-proof") return [];
       const startedAt = "Mon Oct 19 21:30:00 2026";
       return [
@@ -218,7 +220,7 @@ describe("Claude fresh in-place handover readiness", () => {
       expect(trace).toContainEqual({ kind: "current-frame", target: "%9", elapsed: 0, returnedPane: "operator@host$ " });
     } else if (headerless) {
       const launched = trace.find((x: any) => x.kind === "launch-text") as any;
-      expect(launched.text).toMatch(/--permission-mode auto(?: |$)/);
+      if (auto) expect(launched.text).toMatch(/--permission-mode auto(?: |$)/);
       expect(first.result.ready).toBe(true);
       expect(first.successorRuntimeStarted).toBe(true);
       expect(capturePaneScreen).toHaveBeenCalledWith("%9");

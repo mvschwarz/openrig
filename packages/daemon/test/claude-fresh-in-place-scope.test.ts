@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
 
@@ -12,7 +13,7 @@ function fixture() {
   const capturePaneScreen = vi.fn(async (): Promise<string | null> => "operator@host$ ");
   const capturePaneContent = vi.fn(async () => history);
   const getPaneCommand = vi.fn(async () => "zsh");
-  const listProcesses = vi.fn(() => { throw new Error("ps unavailable"); });
+  const listProcesses = vi.fn((): NativeProcessRow[] => { throw new Error("ps unavailable"); });
   const tmux = { hasSession: vi.fn(async () => true), getPaneCommand, capturePaneContent, capturePaneScreen,
     sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
     listPanes: vi.fn(async () => [{ id: "%9" }]), getPanePid: vi.fn(async () => 100) } as unknown as TmuxAdapter;
@@ -79,6 +80,23 @@ describe("fresh in-place readiness scope and fallback", () => {
     expect(f.capturePaneScreen).not.toHaveBeenCalled();
   });
 
+  it.each(["claude", "claude --unrecognized-option opaque --session-id apparent-token"])("keeps unknown identity unknown: %s", async command => {
+    for (const screen of [null, history,
+      "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle)",
+      "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)"]) {
+      const f = fixture();
+      f.getPaneCommand.mockResolvedValue("sh");
+      f.capturePaneScreen.mockResolvedValue(screen);
+      const startedAt = "Mon Oct 19 21:30:00 2026";
+      f.listProcesses.mockReturnValue([
+        { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
+        { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "claude", command, startedAt },
+      ]);
+      await launch(f.adapter);
+      expect(await f.adapter.checkReady(binding), JSON.stringify({ command, screen })).toEqual({ ready: true });
+    }
+  });
+
   it("does not use unavailable-screen fallback for a positively different launch identity", async () => {
     const f = fixture();
     f.capturePaneScreen.mockResolvedValue(null);
@@ -86,7 +104,7 @@ describe("fresh in-place readiness scope and fallback", () => {
     f.listProcesses.mockImplementation(() => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
       { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "claude", command: "claude --session-id different-token", startedAt },
-    ] as never);
+    ]);
     await launch(f.adapter);
     expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "claude_launch_identity_conflict" });
   });
