@@ -35,8 +35,8 @@ export function readFreshOccupantRelations(db: Database.Database, rigId: string)
  * the recorded restore outcome stands.
  */
 export function readReadyFreshLaunchFences(db: Database.Database, rigId?: string): Map<string, number> {
-  // From each node's current tenure into its own fresh-launch events (idx_events_node_type_seq),
-  // never a scan of the whole event history: `rig ps` runs this on every call.
+  // Indexed: from each node's current tenure into that node's fresh-launch events
+  // (idx_events_node_type_seq), not every event of the type. `rig ps` runs this on every call.
   const events = db.prepare(`
     SELECT e.seq AS seq, e.payload AS payload, t.node_id AS nodeId, t.generation_uuid AS generation
     FROM occupant_tenures t

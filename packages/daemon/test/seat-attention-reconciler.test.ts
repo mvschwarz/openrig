@@ -678,6 +678,24 @@ describe("SeatAttentionReconciler", () => {
       expect(strict).not.toHaveBeenCalled();
       expect(result.clearedClasses).toContain("restore_outcome");
       expect(JSON.parse(reconciledEvents()[0]!.payload)).toMatchObject({ attemptId: 0, from: "attention_required" });
+      // The clear's zero attemptId acknowledges that late subset outcome, as on main.
+      expect(getNodeInventory(db, rigId)[0]).toMatchObject({ restoreOutcome: "operator_recovered" });
+    });
+
+    it("a zero-ID acknowledgment after a full attempt started after the fresh launch still needs strict proof", async () => {
+      const { rigId, nodeId } = seedRunningSeat("r-116-zero-ack", "worker@r-116-zero-ack");
+      launchFreshOccupant(rigId, nodeId, "worker@r-116-zero-ack");
+      eventBus.emit({ type: "restore.started", rigId, snapshotId: "snap-1" });
+      eventBus.emit({ type: "restore.completed", rigId, snapshotId: "snap-1",
+        result: { ...failedRestoreResult(nodeId), nodes: [{ nodeId, logicalId: "worker", status: "attention_required" }] } } as any);
+      eventBus.emit({ type: "restore.outcome_reconciled", rigId, nodeId, attemptId: 0, from: "attention_required", to: "operator_recovered",
+        evidence: { source: "operator_attestation" } });
+      const { strict, fenced } = refusingStrictReconciler();
+
+      const result = await fenced.clearAttention("worker@r-116-zero-ack", { reason: "operator verified" });
+
+      expect(result).toMatchObject({ ok: false, code: "not_demonstrably_responsive" });
+      expect(strict).toHaveBeenCalledWith(rigId, nodeId);
     });
   });
 

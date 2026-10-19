@@ -386,7 +386,10 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
         outcome: mapStatus(event.to),
         ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
       });
-      attemptOf.set(key, { nodeId: event.nodeId, seq: typeof event.attemptId === "number" ? event.attemptId : 0 });
+      // A zero attemptId names no attempt (every subset clear writes it): it acknowledges the outcome it
+      // replaces, so it is as current as that outcome. With nothing replaced, it describes no attempt.
+      const scoped = typeof event.attemptId === "number" && event.attemptId > 0;
+      attemptOf.set(key, { nodeId: event.nodeId, seq: scoped ? event.attemptId : attemptOf.get(key)?.seq ?? 0 });
       continue;
     }
     if (!Array.isArray(event.result?.nodes)) continue;

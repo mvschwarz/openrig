@@ -753,7 +753,6 @@ export class SeatAttentionReconciler {
         if (row.type === "restore.outcome_reconciled") {
           const ev = JSON.parse(row.payload) as { nodeId: string; attemptId?: number; to: "operator_recovered" };
           if (ev.nodeId !== session.nodeId) continue;
-          if (fenced(typeof ev.attemptId === "number" ? ev.attemptId : 0)) return null;
           // Before restore receipts, both whole and subset clears used the
           // unscoped attemptId 0. It remains terminal for a subset, but cannot
           // settle a whole restore whose exact attempt still needs proof.

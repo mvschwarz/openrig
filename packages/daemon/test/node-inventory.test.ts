@@ -936,6 +936,38 @@ describe("Node Inventory Projection", () => {
 
       expect(agent()).toMatchObject({ restoreOutcome: "failed", lifecycleState: "attention_required" });
     });
+
+    // Every subset clear writes attemptId 0: it names no attempt and acknowledges the outcome it replaces.
+    function clearWithoutAttempt(from: string) {
+      seedEvent(db, "rig-1", "node-1", "restore.outcome_reconciled", {
+        rigId: "rig-1", nodeId: "node-1", attemptId: 0, from, to: "operator_recovered", evidence: { source: "operator_attestation" },
+      });
+    }
+
+    it("a zero-ID clear of a subset completed after the fresh launch reads operator_recovered", () => {
+      launchFreshOccupant();
+      completeRestore("snap-3", "failed", "restore.subset_completed");
+      clearWithoutAttempt("failed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "operator_recovered", lifecycleState: "running" });
+    });
+
+    it("a zero-ID clear of a subset completed before the fresh launch stays fenced", () => {
+      completeRestore("snap-3", "failed", "restore.subset_completed");
+      launchFreshOccupant();
+      clearWithoutAttempt("failed");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "n-a" });
+    });
+
+    it("a zero-ID acknowledgment of a full attempt started after the fresh launch keeps that attempt current", () => {
+      launchFreshOccupant();
+      startRestore("snap-2");
+      completeRestore("snap-2", "attention_required");
+      clearWithoutAttempt("attention_required");
+
+      expect(agent()).toMatchObject({ restoreOutcome: "operator_recovered" });
+    });
   });
 });
 
