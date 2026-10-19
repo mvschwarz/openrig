@@ -1,6 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { lstartToMinTs } from "./codex-thread-id.js";
+import { piThinkingValue } from "../adapters/pi-runner-protocol.js";
 
 /**
  * OPR.0.7.0.7 — one seat's reasoning effort, from the saved choice to what the native session runs.
@@ -129,7 +130,11 @@ export function unknownLevelWarning(runtime: EffortRuntime, level: string | null
   const consequence = runtime === "pi"
     ? "Pi doesn't reject the turn: it ignores a level it doesn't know (printing a warning) and keeps the level it would use without the flag (a model suffix, the resumed session's level, or its default)"
     : "the runtime may reject every turn until it is changed";
-  return `"${level}" isn't a level ${name} is known to accept (${KNOWN_EFFORT_LEVELS[runtime].join(", ")}); the next managed continuation sends it anyway, and ${consequence}.`;
+  // A Pi launch leaves out a value without set-effort's shape (only a spec can carry one).
+  const sent = runtime === "pi" && !piThinkingValue(level)
+    ? "a managed launch leaves it out, since it doesn't pass the check set-effort uses (a letter, then up to 31 letters, digits, - or _), so Pi keeps the level it would use without the flag (a model suffix, the resumed session's level, or its default)"
+    : `the next managed continuation sends it anyway, and ${consequence}`;
+  return `"${level}" isn't a level ${name} is known to accept (${KNOWN_EFFORT_LEVELS[runtime].join(", ")}); ${sent}.`;
 }
 
 /** The effort a launch command line carries. "none": parsed, and it sends no effort flag. */

@@ -76,6 +76,13 @@ describe("Pi effort: levels, warning, and launch argv", () => {
     expect(pi).toContain('"none" isn\'t a level Pi is known to accept');
     expect(pi).toContain("ignores a level it doesn't know");
     expect(pi).not.toContain("reject every turn");
+    expect(pi).toContain("the next managed continuation sends it anyway");
+    for (const level of ["--cwd", "very high"]) {
+      const left = unknownLevelWarning("pi", level)!;
+      expect(left).toContain(`"${level}" isn't a level Pi is known to accept`);
+      expect(left).toContain("a managed launch leaves it out, since it doesn't pass the check set-effort uses");
+      expect(left).not.toContain("sends it anyway");
+    }
     expect(unknownLevelWarning("pi", "high")).toBeUndefined();
     expect(unknownLevelWarning("claude-code", "bogus")).toBe(`"bogus" isn't a level Claude Code is known to accept (low, medium, high, xhigh, max); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`);
     expect(unknownLevelWarning("codex", "bogus")).toBe(`"bogus" isn't a level Codex is known to accept (none, minimal, low, medium, high, xhigh, max); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`);

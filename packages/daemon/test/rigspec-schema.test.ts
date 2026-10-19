@@ -137,6 +137,11 @@ describe("RigSpec schema (pod-aware)", () => {
     const bad = withPi({ effort: "none" });
     expect(bad.valid).toBe(true);
     expect((bad.advisories ?? []).join(" ")).toMatch(/pods\[0\]\.members\[2\]\.effort: "none" isn't a level Pi is known to accept/);
+    expect((bad.advisories ?? []).join(" ")).toContain("the next managed continuation sends it anyway");
+    const flag = withPi({ effort: "--cwd" });
+    expect(flag.valid).toBe(true);
+    expect((flag.advisories ?? []).join(" ")).toMatch(/pods\[0\]\.members\[2\]\.effort: "--cwd" isn't a level Pi is known to accept \([^)]*\); a managed launch leaves it out/);
+    expect((flag.advisories ?? []).join(" ")).not.toContain("sends it anyway");
     const codex = structuredClone(VALID_RIG);
     (codex.pods[0]!.members[1] as Record<string, unknown>)["effort"] = "none";
     expect(RigSpecSchema.validate(codex).advisories ?? []).toEqual([]);
@@ -151,6 +156,7 @@ describe("RigSpec schema (pod-aware)", () => {
     const bad = LegacyRigSpecSchema.validate(spec("pi", "none"));
     expect(bad.valid).toBe(true);
     expect((bad.advisories ?? []).join(" ")).toMatch(/effort: "none" isn't a level Pi is known to accept/);
+    expect((LegacyRigSpecSchema.validate(spec("pi", "high --cwd")).advisories ?? []).join(" ")).toContain("a managed launch leaves it out");
     expect(LegacyRigSpecSchema.validate(spec("codex", "none")).advisories ?? []).toEqual([]);
   });
 
