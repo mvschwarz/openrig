@@ -162,9 +162,14 @@ export class UsageWindows<I extends { source: string }, R> {
 
   /** The sign-in fact for a row, from the last refresh only (never from its windows). Only the latest read's row is the
    *  login the refresh read. */
-  private signIn(latest: boolean): SignInFact {
+  private signIn(latest: boolean, unresolved = false): SignInFact {
     const last = this.lastRefresh;
-    if (!latest) return { state: "unknown", evidence: "not the current login: a later refresh read another one", at: null };
+    if (!latest) {
+      // An unresolved earlier read can't be matched, so it may be this same login: never call it another one.
+      return { state: "unknown", at: null, evidence: unresolved
+        ? "an earlier read not matched to the latest one (possibly this same login)"
+        : "not the current login: a later refresh read another one" };
+    }
     if (!last) return { state: "unknown", evidence: `no refresh since the daemon started at ${this.startedAt}`, at: null };
     if (last.outcome === "ok") {
       return { state: "usable", evidence: "the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME)", at: last.at };
@@ -230,7 +235,7 @@ export class UsageWindows<I extends { source: string }, R> {
         latestFromSource: reading.latest,
         lastRefresh: this.lastRefresh,
         currentAvailability: known ? "known" : "unknown",
-        signIn: this.signIn(reading.latest),
+        signIn: this.signIn(reading.latest, reading.identity.source === "unresolved"),
         ...(reading.identity.source === "unresolved" ? {
           unresolved: {
             note: reading.latest ? UNRESOLVED_NOTE : UNRESOLVED_EARLIER_NOTE,

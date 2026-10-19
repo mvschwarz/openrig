@@ -66,6 +66,18 @@ describe("Codex: the sign-in fact from the existing refresh", () => {
     expect(rows.find((r) => !r.latestFromSource)!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("not the current login") });
   });
 
+  it("an earlier UNRESOLVED read isn't called another login: possibly this same login, still unknown", async () => {
+    let n = 0;
+    const unresolvedRead = (observedAt: string) => ({ ok: true as const, observedAt, account: ACCOUNT_ANSWER, rateLimits: rateLimitsAnswer({ accountId: null }) });
+    const answers = [unresolvedRead(NOW), unresolvedRead(at(10))];
+    const w = new CodexUsageWindows({ now: () => at(10), read: async () => answers[Math.min(n++, 1)]! });
+    await w.refresh(); await w.refresh();
+    const earlier = w.project(at(11)).find((r) => !r.latestFromSource)!;
+    expect(earlier.unresolved).toBeTruthy();
+    expect(earlier.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("possibly this same login") });
+    expect(earlier.signIn!.evidence).not.toMatch(/another/);
+  });
+
   it("not inferred from usage: fresh windows, availability known, but the fact comes only from the refresh outcome", async () => {
     const w = codex([okCodex()]);
     await w.refresh();
@@ -140,6 +152,25 @@ describe("Claude: at most unknown when signed in; needs_sign_in only when claude
     const w = claude([{ ok: false, at: NOW, reason: "not_logged_in", detail: "x" }], []);
     await w.refresh();
     expect(w.project(NOW)[0]!.signIn!.state).toBe("needs_sign_in");
+  });
+});
+
+describe("Claude: earlier rows", () => {
+  const unresolvedAuth = (observedAt: string): UsageReadOutcome<ClaudeAuthAnswer> =>
+    ({ ok: true, observedAt, auth: { loggedIn: true, authMethod: "claude.ai", email: null, orgId: null, orgName: null, subscriptionType: "team" } as unknown as ClaudeAuthAnswer["auth"] });
+  it("an earlier unresolved identity isn't called another login", async () => {
+    const w = claude([unresolvedAuth(NOW), authOk()]);
+    await w.refresh(); await w.refresh();
+    const earlier = w.project(NOW).find((r) => !r.latestFromSource)!;
+    expect(earlier.unresolved).toBeTruthy();
+    expect(earlier.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("possibly this same login") });
+    expect(earlier.signIn!.evidence).not.toMatch(/another/);
+  });
+  it("an earlier resolved login another refresh replaced keeps 'not the current login'", async () => {
+    const other: UsageReadOutcome<ClaudeAuthAnswer> = { ok: true, observedAt: NOW, auth: { loggedIn: true, authMethod: "claude.ai", email: "o***@example.test", orgId: "org-2", orgName: "Other", subscriptionType: "team" } as ClaudeAuthAnswer["auth"] };
+    const w = claude([authOk(), other]);
+    await w.refresh(); await w.refresh();
+    expect(w.project(NOW).find((r) => !r.latestFromSource)!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("not the current login") });
   });
 });
 
