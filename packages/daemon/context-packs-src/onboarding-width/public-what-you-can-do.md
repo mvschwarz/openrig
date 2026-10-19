@@ -396,6 +396,11 @@ not have to tear one down to change it, and you rarely have to start from nothin
   <account>` reports `moved` only when a tool turn has completed in the same conversation since
   the restart and Codex's status names that account. Linux only: on macOS a
   request that reaches the running-process check refuses before stopping the seat.
+  An adopted seat (one OpenRig didn't launch) refuses with `claimed_session`. "A conversation it
+  can prove" means the stored conversation matches the one the running Codex's command line names
+  (or, when it names none, the only one Codex has logged since it started); OpenRig can't tell
+  which conversation Codex is on now. If the conversation was changed inside the running Codex,
+  the restart may refuse or resume the earlier one, so look at the pane (`rig capture <seat>`) first.
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig add` takes the rig's name or ID; a name two active rigs share is refused
   with `rig_ambiguous` and the candidates. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
