@@ -157,6 +157,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private activityRelayPath?: string;
   // The vendored openrig-core plugin directory, resolved when the install step runs (vendoring happens at startup).
   private resolveCorePluginDir?: () => string | undefined;
+  // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_SEAT_PROJECT_DIR).
+  private resolveCorePluginSelected?: (nodeId: string) => boolean;
   private runCodexCli: CodexCliRunner;
   private codexSystemConfigDir: string;
 
@@ -185,11 +187,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveHooksEnabled?: () => Promise<boolean>;
     /** The vendored openrig-core directory. Absent: the plugin is never installed into Codex. */
     resolveCorePluginDir?: () => string | undefined;
+    /** Whether the node's resolved plugin selection includes openrig-core. Absent: no launch ever installs it. */
+    resolveCorePluginSelected?: (nodeId: string) => boolean;
     runCodexCli?: CodexCliRunner;
     /** Where Codex's system and legacy managed config files live (default /etc/codex). */
     codexSystemConfigDir?: string;
   }) {
     this.resolveCorePluginDir = deps.resolveCorePluginDir;
+    this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
     this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
     this.codexSystemConfigDir = deps.codexSystemConfigDir ?? "/etc/codex";
     this.tmux = deps.tmux;
@@ -225,14 +230,28 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * them: a rig with no Codex seat leaves the user's config alone. A failure warns and does
    * not block the launch.
    */
-  async ensureManagedConfig(): Promise<void> {
-    if (!this.resolveManagedConfigSettings) return;
+  async ensureManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+    if (!this.resolveManagedConfigSettings) return undefined;
     try {
       const { enabled, codexVersion } = await this.resolveManagedConfigSettings();
       this.ensureCodexFeatureFlag(enabled, { codexVersion });
       if (enabled) this.ensureCodexActivityHooks();
       else this.removeCodexActivityHooks();
-      if (enabled) await this.ensureCodexCorePlugin();
+      return { hooksEnabled: enabled };
+    } catch (err) {
+      console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Boot step, run after the plugin is vendored: install openrig-core into Codex only when hooks are enabled and some
+   * Codex seat's resolved selection includes it. A daemon whose Codex seats didn't select it never installs it.
+   */
+  async ensureCodexCorePluginAtBoot(anySeatSelected: boolean): Promise<void> {
+    if (!anySeatSelected || !this.resolveHooksEnabled) return;
+    try {
+      if (await this.resolveHooksEnabled()) await this.ensureCodexCorePlugin();
     } catch (err) {
       console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
     }
@@ -648,7 +667,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running?: RunningCodexLaunch): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
-    await this.ensureManagedConfig();
+    const managed = await this.ensureManagedConfig();
+    // Only a seat that selected openrig-core installs it into Codex; an unselected seat's launch never does.
+    if (managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
+      try { await this.ensureCodexCorePlugin(); }
+      catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
+    }
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
     const effort = binding.effort?.trim();

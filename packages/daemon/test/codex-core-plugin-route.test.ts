@@ -293,3 +293,45 @@ describe("the plugin relay on Codex: quiet only when Codex would run the managed
     chmodSync(config(home), 0o600);
   });
 });
+
+describe("the install runs only for a seat that selected the plugin", () => {
+  /** A Codex adapter that can run a real launchHarness against fixtures, with a vendored plugin and a recording CLI. */
+  function launchable(selected: (nodeId: string) => boolean) {
+    const home = join(root, "home"), codexHome = join(root, "codex-home"), cwd = join(root, "project"), bin = join(root, "bin");
+    for (const d of [home, codexHome, cwd, bin]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(bin, "codex"), `#!${process.execPath}\nif(process.argv.includes('--help'))console.log('Usage: codex [OPTIONS]\\n  --no-daemon');else if(process.argv.includes('--version'))console.log('codex-cli 0.163.0');\n`, { mode: 0o700 });
+    const dir = join(root, "plugins", "openrig-core");
+    mkdirSync(join(dir, ".codex-plugin"), { recursive: true });
+    writeFileSync(join(dir, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version: "9.9.9" }));
+    const calls: string[][] = [];
+    const tmux = { getPaneCommand: async () => "bash", getSessionEnv: async () => undefined, sendShellCommand: async () => ({ ok: true }) };
+    const adapter = new CodexRuntimeAdapter({
+      tmux: tmux as unknown as TmuxAdapter, fsOps: { ...realFs, homedir: home }, codexHome, launchPath: `${bin}:${NODE_DIR}:/usr/bin:/bin`,
+      activityRelayPath: RELAY, resolveGitAddDirs: async () => [], resolveManagedConfigSettings: async () => ({ enabled: true, codexVersion: "0.163.0" }),
+      resolveCorePluginDir: () => dir, codexSystemConfigDir: join(root, "etc"),
+      runCodexCli: async (args) => { calls.push(args); return { status: 0, stdout: "", stderr: "" }; },
+      resolveCorePluginSelected: selected,
+    } as ConstructorParameters<typeof CodexRuntimeAdapter>[0]);
+    const internals = adapter as unknown as Record<string, unknown>;
+    internals.dismissSkippableCodexUpdatePrompt = async () => undefined;
+    internals.captureFreshThreadId = async () => "fresh";
+    internals.verifyResumeLaunch = async () => ({ ok: true });
+    return { adapter, calls, cwd };
+  }
+
+  it("an unselected Codex seat's launch makes no Codex CLI call; a selected one installs", async () => {
+    let s = launchable((id) => id === "selected");
+    expect((await s.adapter.launchHarness({ nodeId: "unselected", tmuxSession: "u@rig", cwd: s.cwd } as never, { name: "u" })).ok).toBe(true);
+    expect(s.calls).toEqual([]);
+    rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+    s = launchable((id) => id === "selected");
+    expect((await s.adapter.launchHarness({ nodeId: "selected", tmuxSession: "s@rig", cwd: s.cwd } as never, { name: "s" })).ok).toBe(true);
+    expect(s.calls.map((c) => c.slice(0, 2))).toEqual([["plugin", "marketplace"], ["plugin", "add"]]);
+  });
+
+  it("ensureManagedConfig alone (boot, resume) never installs", async () => {
+    const s = launchable(() => true);
+    await s.adapter.ensureManagedConfig();
+    expect(s.calls).toEqual([]);
+  });
+});
