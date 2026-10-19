@@ -602,6 +602,28 @@ describe("parseRunnerArgs", () => {
     expect(parseRunnerArgs([...base, "--approve", "--thinking", "bogus"]).thinking).toBe("bogus");
     expect(parseRunnerArgs([...base, "--approve"]).thinking).toBeUndefined();
   });
+
+  it("a --thinking VALUE that looks like a control flag is a value, not a flag (builder→parser)", () => {
+    const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "approve" as const, launchId: "L1", runtime: "pi" as const };
+    for (const thinking of ["--approval-mode", "none"]) {
+      const cmd = buildPiRunnerCommand({ ...cmdBase, thinking });
+      const parsed = parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, "")));
+      expect(parsed.thinking).toBe(thinking);
+      expect(parsed.trust).toBe("approve");
+    }
+  });
+
+  it("still refuses genuinely incompatible trust control flags", () => {
+    expect(() => parseRunnerArgs([...base, "--approve", "--approval-mode", "yolo"])).toThrow(/explicit trust flag is required/);
+    expect(() => parseRunnerArgs([...base, "--runtime", "omp", "--approval-mode", "yolo", "--approve"])).toThrow(/OMP requires --approval-mode/);
+    expect(() => parseRunnerArgs([...base, "--runtime", "omp", "--approve"])).toThrow(/OMP requires --approval-mode/);
+  });
+
+  it("a flag-looking value elsewhere does not count as a Pi trust flag", () => {
+    const parsed = parseRunnerArgs([...base, "--runtime", "omp", "--approval-mode", "yolo", "--model", "--approve"]);
+    expect(parsed.model).toBe("--approve");
+    expect(parsed.trust).toBe("approve");
+  });
 });
 
 describe("--thinking in the runner command and the pi child argv", () => {
