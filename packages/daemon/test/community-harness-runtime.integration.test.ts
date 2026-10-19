@@ -56,6 +56,9 @@ describe("a community harness from a data preset", () => {
       "format: 1", "name: synth-harness", `command: node ${appScript}`, "maintainer: Example Maintainer",
       "limits:", "  - resume unsupported", "  - fork unsupported", "  - no approval-prompt detection", "",
     ].join("\n"));
+    const previousDir = join(scaffold.env.OPENRIG_HOME!, ["agent", "apps"].join("-"));
+    mkdirSync(previousDir);
+    writeFileSync(join(previousDir, "legacy-only.yaml"), "format: 1\nname: legacy-only\ncommand: node -e 0\nmaintainer: Example Maintainer\n");
     writePreset("codex.yaml", ["format: 1", "name: codex", "command: node -e 0", "maintainer: someone", ""].join("\n"));
     daemon = await spawnScenarioDaemon(scaffold, { rigBin });
   }, 120_000);
@@ -82,6 +85,9 @@ describe("a community harness from a data preset", () => {
   it("is discoverable with its maintainer and limits, and a preset can't take a built-in name", async () => {
     const listed = await json(["community-harness", "list", "--json"]);
     const byName = Object.fromEntries(listed.harnesses.map((app: { name: string }) => [app.name, app]));
+    expect(byName).not.toHaveProperty("legacy-only");
+    const previousPreset = join(scaffold.env.OPENRIG_HOME!, ["agent", "apps"].join("-"), "legacy-only.yaml");
+    expect(readFileSync(previousPreset, "utf-8")).toContain("name: legacy-only");
     expect(byName["synth-harness"]).toMatchObject({ usable: true, community: true, testedByOpenRig: false, maintainer: "Example Maintainer",
       limits: ["resume unsupported", "fork unsupported", "no approval-prompt detection"] });
     expect(byName["codex"]).toMatchObject({ usable: false, problem: '"codex" is a built-in runtime; a community harness preset can\'t use that name' });
