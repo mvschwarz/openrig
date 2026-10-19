@@ -460,7 +460,7 @@ describe("OPR.0.7.0.5 rig seat restart --keep-conversation", () => {
   });
 
   it("prints the --no-daemon launch evidence and a named startup gate's kind", async () => {
-    const data = { ...report("incomplete"), codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." },
+    const data = { ...report("incomplete"), codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
       processMode: { state: "unknown", detail: "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only." },
       account: { credentialStore: { detail: "File-backed." }, authFile: { detail: "Stat only." }, startupGate: "Codex is waiting for hook trust approval.", startupGateKind: "hook_trust_gate" },
       remainingStep: "Codex is waiting for a hook review decision in the pane (dev-codex@r, pane %1). That decision is for the person or an authorised operator; once it's made, run the recovery command." };

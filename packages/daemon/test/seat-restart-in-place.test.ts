@@ -14,6 +14,7 @@ import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-ada
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
 import { accountLineNames, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 
 const LSTART = "Mon Oct 12 21:00:00 2026";
 const LATER = "Mon Oct 12 21:05:00 2026";
@@ -408,8 +409,8 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     ["trust_gate", "Codex is waiting for the folder trust prompt to be answered.", "Codex is waiting for a folder trust decision in the pane"],
     ["model_selection_gate", "Codex is waiting for model selection before the session can become interactive.", "Codex is waiting for a model choice in the pane"],
     ["update_gate", "Codex is showing an update prompt.", "Codex is waiting for an update decision OpenRig could not skip in the pane"],
-  ])("incomplete names the %s startup gate and its native decision; nothing answered, nothing retried", async (gate, error, step) => {
-    const w = world({ launch: { ok: false, error, recovery: "attention_required", gate } });
+  ])("incomplete names the %s startup gate and its native decision; it says what was typed and that nothing was retried", async (gate, error, step) => {
+    const w = world({ launch: { ok: false, error, recovery: "attention_required", gate, verifierInput: "none", ...(gate === "update_gate" ? { gateChoice: true } : {}) } });
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     const recovery = `codex -m 'gpt-5.5' -s workspace-write resume '${TOKEN}'`;
     expect(result).toMatchObject({ ok: true, outcome: "incomplete", recoveryCommand: recovery,
@@ -419,9 +420,41 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(remaining).toContain(`(${SEAT}, pane %1)`);
     expect(remaining).toContain(recovery);
     expect(remaining).toContain("That decision is for the person or an authorised operator");
-    expect(remaining).toContain("Nothing was answered or retried.");
+    expect(remaining).toContain(`see it with \`rig capture ${SEAT}\``);
+    expect(remaining).toContain("OpenRig typed nothing into this screen; nothing was retried or relaunched.");
+    expect(remaining).not.toContain("answered");
     expect(remaining).not.toMatch(/\b(approve|trust all|choose|select|install)\b/i); // names the decision, never makes or prescribes it
     expect(w.launches).toHaveLength(1); // the one resume; no second launch
+  });
+
+  it("through the adapter: a skip key sent to an update prompt that stays on screen is reported as sent, never as nothing answered", async () => {
+    const prompt = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
+    const keys: string[][] = [];
+    const tmux = { getPaneCommand: async () => "codex", capturePaneScreen: async () => prompt, capturePaneContent: async () => prompt,
+      getPanePid: async () => 901, sendKeys: async (_: string, k: string[]) => { keys.push(k); return { ok: true }; } } as unknown as TmuxAdapter;
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: {} as never, sleep: async () => {},
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }] });
+    const launch = await adapter.verifyResumeInPane("impl", "tok");
+    expect(keys).toEqual([["3"]]);
+    const w = world({ launch });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain("Codex is waiting for an update decision OpenRig could not skip");
+    expect(remaining).toContain("OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched.");
+    expect(remaining).not.toMatch(/typed nothing|answered/);
+  });
+
+  it("an update in progress (no choice on screen) is not reported as a decision", async () => {
+    const w = world({ launch: { ok: false, error: "Codex reached an update flow; a restored conversation was not proven.", recovery: "attention_required", gate: "update_gate", gateChoice: false, verifierInput: "none" } });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining).toContain(`Codex is showing an update in progress in the pane (${SEAT}, pane %1); see it with \`rig capture ${SEAT}\`. Check it before you run the recovery command`);
+    expect(remaining).not.toMatch(/decision/);
+  });
+
+  it("a launch result that doesn't say what was typed claims nothing about input", async () => {
+    const w = world({ launch: { ok: false, error: "Codex is waiting for hook trust approval.", recovery: "attention_required", gate: "hook_trust_gate" } });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining).toMatch(/Nothing was retried or relaunched\.$/);
+    expect(remaining).not.toMatch(/typed nothing|answered/);
   });
 
   it("the sign-in and generic steps are unchanged; an unnamed gate still says what kind it is", async () => {
@@ -446,7 +479,7 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
       detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." });
     const optOut = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}` });
     expect(await optOut.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({
-      codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." } });
+      codexNoDaemonFlag: { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." } });
     const restarted = await optOut.service.restartInPlace({ seatRef: SEAT, reason: "x" });
     expect(restarted).toMatchObject({ outcome: "restarted_account_unverified", codexNoDaemonFlag: { present: true } });
   });

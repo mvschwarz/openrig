@@ -488,7 +488,7 @@ export class CodexInPlaceRestart {
           : "The restart keeps the settings the running Codex uses (effective), effort included. Saved choices for the next managed launch are shown, not applied." },
       codexHome,
       codexNoDaemonFlag: running.daemonOptOut
-        ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." }
+        ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." }
         : { present: false, detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
       processMode: { state: "unknown", detail: "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only." },
       billingRoute: { state: "unknown", apiKeyEnvNames: facts.apiKeyEnvNames,
@@ -644,7 +644,7 @@ export class CodexInPlaceRestart {
     const missing = launch.recovery === "retry_fresh";
     const attention = launch.recovery === "attention_required";
     // The native decision a named startup gate is waiting for. Nothing answers it: the step names it.
-    const named = attention && launch.gate ? STARTUP_GATE_STEPS[launch.gate] : undefined;
+    const named = attention && launch.gate ? startupGateStep(launch, report.sessionName, report.pane, recoveryCommand) : null;
     return {
       ...report, outcome: "incomplete", recoveryCommand, ...(paneHeld ? { paneHeld } : {}),
       account: { ...report.account, startupGate: attention ? launch.error : null, startupGateKind: attention ? launch.gate ?? null : null },
@@ -652,7 +652,7 @@ export class CodexInPlaceRestart {
         ? `Whoever owns the sign-in signs in to Codex in ${report.codexHome}, then the conversation resumes with the recovery command.`
         : missing
           ? `Codex in ${report.codexHome} has no saved session for this conversation; no fresh session was started. Find where it was saved before resuming.`
-          : (named ? `${named} in the pane (${report.sessionName}, pane ${report.pane}). That decision is for the person or an authorised operator; once it's made, run the recovery command${recoveryCommand ? `: ${recoveryCommand}` : ""}. Nothing was answered or retried.` : null)
+          : named
             ?? "Resolve what Codex shows in the pane, then resume with the recovery command. Nothing was retried.",
       message: `The original Codex exited, but the resume was not proven: ${launch.error}`,
     };
@@ -814,13 +814,35 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
 }
 
 /** The native decision each named Codex startup gate is waiting for, in plain words. OpenRig never makes it: the
- *  step names it and leaves it to the person or an authorised operator. Gates not listed keep the generic step. */
+ *  step names it and leaves it to the person or an authorised operator. Gates not listed keep the generic step. An
+ *  update screen is a decision only when it offered a choice; otherwise it's an update in progress (see below). */
 const STARTUP_GATE_STEPS: Record<string, string> = {
   hook_trust_gate: "Codex is waiting for a hook review decision",
   trust_gate: "Codex is waiting for a folder trust decision",
   model_selection_gate: "Codex is waiting for a model choice",
   update_gate: "Codex is waiting for an update decision OpenRig could not skip",
 };
+
+/** The remaining step for a named startup gate, or null for the generic step. It states only what the launch result
+ *  carries: the gate, whether an update screen offered a choice, and what the resume verification typed. */
+function startupGateStep(launch: Extract<HarnessLaunchResult, { ok: false }>, session: string, pane: string,
+  recoveryCommand: string | undefined): string | null {
+  const gate = launch.gate;
+  if (!gate || STARTUP_GATE_STEPS[gate] === undefined) return null;
+  const where = `in the pane (${session}, pane ${pane}); see it with \`rig capture ${session}\``;
+  const run = `run the recovery command${recoveryCommand ? `: ${recoveryCommand}` : ""}`;
+  const typed = launch.verifierInput === "update_skip_key_sent"
+    ? "OpenRig sent the update prompt's skip key (3) once while checking the resume; nothing was retried or relaunched."
+    : launch.verifierInput === "update_skip_key_failed"
+      ? "OpenRig tried to send the update prompt's skip key (3) once and the send failed, so its effect is unknown; nothing was retried or relaunched."
+      : launch.verifierInput === "none"
+        ? "OpenRig typed nothing into this screen; nothing was retried or relaunched."
+        : "Nothing was retried or relaunched.";
+  if (gate === "update_gate" && launch.gateChoice !== true) {
+    return `Codex is showing an update in progress ${where}. Check it before you ${run}. ${typed}`;
+  }
+  return `${STARTUP_GATE_STEPS[gate]} ${where}. That decision is for the person or an authorised operator; once it's made, ${run}. ${typed}`;
+}
 
 /** Processes under the Codex process, other than Codex itself. Reported, never refused. */
 function descendants(rows: NativeProcessRow[], codexPid: number, chain: NativeProcessRow[]): NativeProcessRow[] {

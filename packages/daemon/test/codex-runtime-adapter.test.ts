@@ -765,6 +765,47 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
+  // What a failed resume reports must match the newest screen observed and what was typed (reporting only).
+  const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n"); // no skip option
+  const HOOK_REVIEW = "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting";
+  const SKIPPABLE = ["✨ Update available! 0.120.0 -> 0.121.0", "› 1. Update now (runs `npm install -g @openai/codex`)", "  2. Skip", "  3. Skip until next version", "Press enter to continue"].join("\n");
+  function screens(next: () => string) {
+    const capture = vi.fn(async () => next());
+    return mockTmux({ capturePaneContent: capture, capturePaneScreen: capture, getPaneCommand: vi.fn(async () => "codex"), getPanePid: vi.fn(async () => 901) });
+  }
+
+  it("an update still in progress is reported as an update screen with no choice, and nothing typed", async () => {
+    const tmux = screens(() => UPDATING);
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: false, verifierInput: "none" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("when the update helper's own later capture shows hook review, the report names hook review, not the older update screen", async () => {
+    // Count the captures a stable update run makes; then show hook review only at the last one, which is the helper's
+    // nested capture on the final quick poll.
+    const counter = screens(() => UPDATING);
+    await new CodexRuntimeAdapter({ tmux: counter, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    const total = (counter.capturePaneScreen as ReturnType<typeof vi.fn>).mock.calls.length;
+    let n = 0;
+    const tmux = screens(() => (++n === total ? HOOK_REVIEW : UPDATING));
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    expect(n).toBe(total);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "hook_trust_gate" });
+    expect((result as { evidence: string }).evidence).toContain("Hooks need review");
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a skip key sent to an update prompt that stays on screen is reported as sent, with the choice-bearing update screen", async () => {
+    const tmux = screens(() => SKIPPABLE);
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+      listProcesses: () => [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }] });
+    const result = await adapter.verifyResumeInPane("impl", "tok");
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("impl", ["3"]);
+    expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_sent" });
+  });
+
   it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
     const tmux = mockTmux({
       getPanePid: vi.fn(async () => 900),

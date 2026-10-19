@@ -45,6 +45,11 @@ import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, 
 interface UpdatePromptAttempt {
   handled: boolean;
   failure?: Extract<HarnessLaunchResult, { ok: false }>;
+  /** Reporting only: the latest screen the helper itself captured and classified, so a report can name it rather
+   *  than an older capture. Never read by a polling or recovery decision. */
+  observed?: { probe: NativeResumeProbeResult; paneContent: string };
+  /** Reporting only: whether the helper sent the update prompt's skip key on this launch, and how that send came out. */
+  skipKey?: "sent" | "failed";
 }
 
 type CodexProcess = NativeProcessRow;
@@ -686,6 +691,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = await this.captureProbeScreen(tmuxSession);
       const probe = assessNativeResumeProbe({ runtime: "codex", paneCommand, paneContent });
+      updatePrompt.observed = { probe, paneContent };
 
       if (probe.code === "update_gate") {
         if (updatePrompt.handled || !isSkippableCodexUpdatePrompt(paneContent)) return false;
@@ -710,9 +716,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         // screen. Consume the attempt before sending, even if delivery fails.
         updatePrompt.handled = true;
         const result = await this.tmux.sendKeys(tmuxSession, ["3"]);
+        updatePrompt.skipKey = result.ok ? "sent" : "failed";
         if (!result.ok) {
           updatePrompt.failure = {
-            gate: "update_gate",
+            gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_failed",
             ok: false, recovery: "attention_required",
             error: `Could not skip the Codex update prompt: ${result.message}. Inspect the session before retrying.`,
             evidence: paneContent.split("\n").slice(-12).join("\n"),
@@ -1028,6 +1035,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // within the quick window. Only the awaiting_runtime boot case extends.
     let lastUnresolved: NativeResumeProbeResult | null = null;
     let lastPaneContent = "";
+    // Reporting only: the newest unresolved screen observed (the loop's own capture, or the update helper's later one
+    // in the same iteration), so the result names what was seen last. The loop's decisions keep using lastUnresolved.
+    let report: { probe: NativeResumeProbeResult; paneContent: string } | null = null;
+    // Reporting only: what this verification typed into the pane (only the update helper ever types here).
+    const verifierInput = (): "none" | "update_skip_key_sent" | "update_skip_key_failed" =>
+      updatePrompt.skipKey === "sent" ? "update_skip_key_sent" : updatePrompt.skipKey === "failed" ? "update_skip_key_failed" : "none";
+    const gateFields = (p: NativeResumeProbeResult, pane: string) => ({
+      ...(p.code ? { gate: p.code } : {}),
+      ...(p.code === "update_gate" ? { gateChoice: isSkippableCodexUpdatePrompt(pane) } : {}),
+    });
     let sawRealGate = false;
 
     const totalAttempts = quickAttempts + extendedAttempts;
@@ -1074,7 +1091,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           ok: false,
           error: probe.detail,
           recovery: "attention_required",
-          ...(probe.code ? { gate: probe.code } : {}),
+          ...gateFields(probe, paneContent),
+          verifierInput: verifierInput(),
           evidence: paneContent.split("\n").slice(-12).join("\n"),
         };
       }
@@ -1087,8 +1105,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
 
+      report = { probe, paneContent }; // resumed returned above, so this screen is unresolved
       if (probe.code === "update_gate") {
+        updatePrompt.observed = undefined;
         const dismissed = await this.dismissSkippableCodexUpdatePrompt(tmuxSession, updatePrompt, 1);
+        // The helper's own capture came after this one: report it if it saw an unresolved screen.
+        const helperSaw = helperObservation(updatePrompt);
+        if (helperSaw && helperSaw.probe.status !== "resumed") report = helperSaw;
         if (updatePrompt.failure) return updatePrompt.failure;
         if (dismissed) {
           lastUnresolved = null;
@@ -1110,14 +1133,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
     }
 
+    // Report the newest unresolved screen observed; the loop's own decisions above used lastUnresolved.
+    const shown = report && report.probe.code !== "awaiting_runtime" ? report : null;
     return {
       ok: false,
-      error: lastUnresolved?.detail
+      error: shown?.probe.detail ?? lastUnresolved?.detail
         ?? "Codex resume could not be confirmed: the process is alive but a restored conversation was never proven.",
       recovery: "attention_required",
-      // The gate that was still showing, if any. A boot still in progress names no gate.
-      ...(lastUnresolved?.code && lastUnresolved.code !== "awaiting_runtime" ? { gate: lastUnresolved.code } : {}),
-      evidence: lastPaneContent.split("\n").slice(-12).join("\n"),
+      // The gate on that screen, if any. A boot still in progress names no gate.
+      ...(shown ? gateFields(shown.probe, shown.paneContent) : {}),
+      verifierInput: verifierInput(),
+      evidence: (shown?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };
   }
 
@@ -1751,6 +1777,11 @@ function commandLooksLikeCodex(command: string): boolean {
     const base = nodePath.basename(unquoted);
     return base === "codex";
   });
+}
+
+/** The update helper's latest capture, read through a function so flow narrowing doesn't hide the helper's write. */
+function helperObservation(attempt: UpdatePromptAttempt): UpdatePromptAttempt["observed"] {
+  return attempt.observed;
 }
 
 function isSkippableCodexUpdatePrompt(paneContent: string): boolean {
