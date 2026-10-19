@@ -169,15 +169,19 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
         return fail(`daemon: unknown op ${JSON.stringify(op)} (allowed: sigterm, restart)`);
       }
       case "emit": {
-        const p = payload as { seat?: string; behavior?: string };
+        const p = payload as { seat?: string; behavior?: string; packet?: unknown };
         if (p.behavior !== "refocus") throw new UnboundActionError(verb);
         if (!p.seat || !opts.seatCwd) return fail("emit refocus requires an exact session name and scenario seat cwd");
+        if (p.packet !== undefined && typeof p.packet !== "boolean") return fail("emit refocus: packet must be true or false");
         // The controlled emitter calls the real hook with the real scenario daemon/CLI identity.
         // No pane mirror is used as evidence, and no native scheduling/consumption is implied.
         const hook = ["../daemon", "../../daemon"].map(dir => resolve(dirname(rigBin), dir,
           "assets/plugins/openrig-core/hooks/scripts/refocus.cjs")).find(existsSync);
         if (!hook) return fail("installed refocus hook asset not found");
-        const env = { ...daemon.readEnv, OPENRIG_SESSION_NAME: p.seat, OPENRIG_REFOCUS_TREES: "work" };
+        // `packet` sets the work-packet switch explicitly, so a scenario never depends on a runtime's default. The
+        // hook gets its selectable 20 s budget: these scenarios assert its content, and each traced node costs a CLI start.
+        const env = { ...daemon.readEnv, OPENRIG_SESSION_NAME: p.seat, OPENRIG_REFOCUS_TREES: "work", OPENRIG_REFOCUS_BUDGET_MS: "20000",
+          ...(p.packet === undefined ? {} : { OPENRIG_REFOCUS_WORK_PACKET: p.packet ? "1" : "0" }) };
         const state = JSON.parse(readFileSync(stubSeatSidecarPath(opts.seatCwd), "utf8"));
         if (typeof state.launchId !== "string" || !state.launchId) return fail("stub refocus has no observed launch identity");
         const result = fireRefocus(hook, opts.seatCwd, opts.refocusEnv?.(env) ?? env, state.launchId);

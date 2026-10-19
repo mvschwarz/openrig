@@ -44,18 +44,25 @@ try {
         assert.deepEqual(report.seed, { class: 'parked-baton-as-current', enabled: true });
         const dir = join(env.OPENRIG_HOME, 'planted-trace-fault'); mkdirSync(dir, { recursive: true });
         const shim = join(dir, 'python'); report.faultReceipt = join(dir, 'effect.json');
-        // Plant the lost-label regression in this hook's trace child, not in the captured hook output.
+        // Plant the held-as-current regression in this hook's trace child, not in the captured hook output:
+        // the real held row is moved into the candidates as the seat's current work, and the real trace renders it.
         writeFileSync(shim, `#!/usr/bin/env python3
 import sys, subprocess, json, os
-r = subprocess.run([sys.executable, *sys.argv[1:]], capture_output=True, text=True)
-lines = r.stdout.splitlines(keepends=True)
-removed = [line for line in lines if line.startswith("FALLBACK — no current typed baton")]
-if r.returncode != 0 or len(removed) != 1:
-    sys.stderr.write(r.stderr + "expected exactly one real fallback label before planting fault")
+args = sys.argv[1:]
+evidence = json.loads(sys.stdin.read() or "null")
+held = (evidence or {}).get("held") or []
+node = os.path.join((evidence or {}).get("missionsRoot") or "", "regression", "slices", "01-context")
+if "--packet" not in args or "--work-candidates" not in args or [r.get("qitemId") for r in held] != ["refocus-baton"] or not os.path.isdir(node):
+    sys.stderr.write("expected the packet with exactly one real held row before planting fault")
     sys.exit(1)
+row = held[0]
+evidence["held"] = []
+evidence["candidates"] = [{"kind": "tag", "qitemId": row["qitemId"], "mission": "regression", "slice": "SCN.1",
+    "workNodePath": node, "intent": None, "source": "tag mission:regression + slice:SCN.1 on row refocus-baton", "unresolved": None}]
+r = subprocess.run([sys.executable, *args], input=json.dumps(evidence), capture_output=True, text=True)
 with open(os.environ["SCENARIO_TRACE_FAULT_RECEIPT"], "w") as f:
-    json.dump({"class": "parked-baton-as-current", "removedLines": len(removed)}, f)
-sys.stdout.write("".join(line for line in lines if line not in removed))
+    json.dump({"class": "parked-baton-as-current", "movedRows": 1}, f)
+sys.stdout.write(r.stdout)
 sys.stderr.write(r.stderr)
 sys.exit(r.returncode)
 `, { mode: 0o755 });
