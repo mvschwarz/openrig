@@ -335,3 +335,14 @@ describe("the install runs only for a seat that selected the plugin", () => {
     expect(s.calls).toEqual([]);
   });
 });
+
+describe("the relay copied alone, as a Claude seat's settings relay", () => {
+  it("still loads and runs without its Codex sibling, and a Codex session without the sibling reports", () => {
+    const dir = join(root, "state", "claude-activity-hooks"); mkdirSync(dir, { recursive: true });
+    const copy = join(dir, "activity-relay.cjs");
+    writeFileSync(copy, readFileSync(RELAY));
+    const r = spawnSync(process.execPath, ["-e", `const m = require(${JSON.stringify(copy)}); process.stdout.write(String(m.pluginRunIsRedundant({ hook_event_name: "Stop" }, ["node", "x", "--from-plugin"], { OPENRIG_RUNTIME: "codex", CODEX_HOME: ${JSON.stringify(root)} })))`], { encoding: "utf8" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe("false");
+  });
+});

@@ -5,7 +5,6 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { managedRelayWouldRun } = require("./codex-managed-relay.cjs");
 
 // OpenRig activity-relay hook script.
 // Reads a hook event payload from stdin, normalizes it, and POSTs to the
@@ -272,7 +271,11 @@ function pluginRunIsRedundant(providerPayload, argv = process.argv, env = proces
   // Codex: the daemon's own relay lives in a managed block of the Codex config, not in Claude's settings. The plugin's run
   // stays quiet only when Codex would run that managed handler for this event (codex-managed-relay.cjs).
   if (firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) === "codex") {
-    return Boolean(hookEvent) && managedRelayWouldRun(hookEvent, env, { isThisScript, interpreterAvailable }).runs;
+    // Required here, not at the top: the daemon also copies this script alone into a Claude seat's settings relay, where
+    // the sibling isn't present and this branch never runs. A missing sibling reports rather than silencing.
+    let managed;
+    try { managed = require("./codex-managed-relay.cjs"); } catch { return false; }
+    return Boolean(hookEvent) && managed.managedRelayWouldRun(hookEvent, env, { isThisScript, interpreterAvailable }).runs;
   }
   return settingsRelayReports(hookEvent, providerPayload, env);
 }
