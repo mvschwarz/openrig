@@ -451,6 +451,15 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(restarted).toMatchObject({ outcome: "restarted_account_unverified", codexNoDaemonFlag: { present: true } });
   });
 
+  it("--plan and the report give the process mode as unknown, with the reason: nothing observes app-server attachment", async () => {
+    const detail = "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only.";
+    for (const runningArgs of [undefined, `--no-daemon -m gpt-5.5 -s workspace-write resume ${TOKEN}`]) {
+      const w = world(runningArgs ? { runningArgs } : {});
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ processMode: { state: "unknown", detail } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ processMode: { state: "unknown", detail } });
+    }
+  });
+
   it("incomplete, never fresh, when Codex has no saved session for the conversation", async () => {
     const w = world({ launch: { ok: false, error: "Codex resume failed: no saved session found", recovery: "retry_fresh" } });
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "x" });

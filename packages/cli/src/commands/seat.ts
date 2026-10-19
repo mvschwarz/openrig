@@ -1148,6 +1148,8 @@ function printRestartReport(data: Record<string, unknown>): void {
   console.log(`Billing route: ${(data["billingRoute"] as { detail: string }).detail}`);
   const noDaemon = data["codexNoDaemonFlag"] as { detail: string } | undefined;
   if (noDaemon) console.log(noDaemon.detail);
+  const processMode = data["processMode"] as { detail: string } | undefined;
+  if (processMode) console.log(processMode.detail);
   const account = data["account"] as { credentialStore: { detail: string }; authFile: { detail: string }; startupGate: string | null; startupGateKind?: string | null };
   console.log(`Account: unverified. ${account.credentialStore.detail} ${account.authFile.detail}`);
   if (account.startupGate) console.log(`Codex startup gate${account.startupGateKind ? ` (${account.startupGateKind})` : ""}: ${account.startupGate}`);

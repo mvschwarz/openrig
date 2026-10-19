@@ -134,6 +134,9 @@ export interface InPlaceRestartReport {
   /** Launch evidence only: whether the running Codex's command line carries `--no-daemon`. It doesn't show whether an
    *  app-server process, its login or any lock is involved. */
   codexNoDaemonFlag: { present: boolean; detail: string };
+  /** Whether the running Codex is attached to an app-server, as observed. Nothing OpenRig reads observes that today, so
+   *  it is always `unknown`, with the reason. Never inferred from the launch flag. */
+  processMode: { state: "observed" | "unknown"; detail: string };
   billingRoute: { state: "unknown"; detail: string; apiKeyEnvNames: string[] };
   account: AccountEvidence;
   peers: PeerReport[];
@@ -487,6 +490,7 @@ export class CodexInPlaceRestart {
       codexNoDaemonFlag: running.daemonOptOut
         ? { present: true, detail: "Launch evidence: the running Codex was started with --no-daemon." }
         : { present: false, detail: "Launch evidence: the running Codex's command line has no --no-daemon. This doesn't show whether an app-server process, its login or any lock is involved." },
+      processMode: { state: "unknown", detail: "Process mode: unknown. Nothing OpenRig reads shows whether the running Codex is attached to an app-server; the --no-daemon flag above is launch evidence only." },
       billingRoute: { state: "unknown", apiKeyEnvNames: facts.apiKeyEnvNames,
         detail: "Which billing route Codex uses is not observable without reading credentials; API-key variable names alone don't establish it." },
       account: this.accountEvidence(codexHome, startedAt, null),
