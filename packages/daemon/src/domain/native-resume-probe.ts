@@ -430,11 +430,22 @@ function looksLikeCodexAuthRefusal(paneContent: string): boolean {
 }
 
 function looksLikeCodexTrustPrompt(paneContent: string): boolean {
-  // Keep legacy wording unchanged; the newer panel has a different heading and choice.
-  return (paneContent.includes("Do you trust the contents of this directory?")
-    && paneContent.includes("Yes, continue"))
-    || (/^[ \t]*Trust this folder\?/m.test(paneContent)
-      && /^[ \t]*(?:[›»]\s*)?\d+\.\s+Trust and continue[ \t]*$/m.test(paneContent));
+  // Preserve legacy wording semantics, including scrollback matching.
+  if (paneContent.includes("Do you trust the contents of this directory?")
+    && paneContent.includes("Yes, continue")) return true;
+
+  // The newer panel is current only until a later composer or model footer.
+  const heading = [...paneContent.matchAll(/^[ \t]*Trust this folder\?/gm)].at(-1);
+  if (!heading) return false;
+  const panel = paneContent.slice(heading.index! + heading[0].length);
+  const choice = /^[ \t]*(?:[›»]\s*)?\d+\.\s+Trust and continue[ \t]*$/m.exec(panel);
+  if (!choice) return false;
+  const afterChoice = panel.slice(choice.index + choice[0].length);
+  return !hasCodexComposer(afterChoice) && !afterChoice.split("\n").some((line) => {
+    const fields = line.trim().split(" · ");
+    return /^[ \t]{2,}\S/.test(line) && fields.length > 1
+      && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
+  });
 }
 
 function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
