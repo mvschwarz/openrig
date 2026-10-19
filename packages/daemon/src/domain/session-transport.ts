@@ -1,3 +1,4 @@
+import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
@@ -525,7 +526,7 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     ? promptScanLines.slice(oldQuestionEnd + 1)
     : options.runtime === "codex" && !permissionPromptEvidence
       ? codexCurrentSelectionLines(paneContent) ?? promptScanLines : promptScanLines;
-  const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??
+  const selectionPromptEvidence = currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]);
   if (selectionPromptEvidence) {
     return {
