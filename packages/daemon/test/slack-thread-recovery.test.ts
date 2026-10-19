@@ -130,7 +130,8 @@ it("a reply that landed live and again in the thread scan lands once; coverage i
 
 it("tracks a thread whose root or close is within seven days, never by the map's rebuild clock", async () => {
   const f = fixture();
-  const offsets = { recentRoot: -7 * DAY + 60, staleRoot: -7 * DAY - 60, oldClosed: -30 * DAY, rebuilt: -20 * DAY, untracked: -DAY };
+  // The fixture's clock reads at(100), so the seven-day boundary sits at 100 - 7 days.
+  const offsets = { recentRoot: 100 - 7 * DAY + 60, staleRoot: 100 - 7 * DAY - 60, oldClosed: -30 * DAY, rebuilt: -20 * DAY, untracked: -DAY };
   const root = (key: keyof typeof offsets) => ts(offsets[key]);
   f.track(root("recentRoot"), "a@test");
   f.track(root("staleRoot"), "b@test");
