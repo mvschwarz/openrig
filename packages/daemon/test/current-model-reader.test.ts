@@ -37,9 +37,9 @@ function fixture(runtime = "claude-code") {
     { pid: 20, ppid: 10, command: runtime === "pi" ? `node ${dir}/pi-runner.mjs --session-name editor@studio --state-root ${dir} --cwd ${dir} --launch-id launch` : `${runtime === "codex" ? "codex" : "claude"} --session-id ${id}`, startedAt: new Date(boot).toISOString() }];
   const list = vi.fn(async () => processRows);
   const census = new ProcessCensus({ list, now: () => boot + 5_000 });
-  const getPanePid = vi.fn(async () => 10);
+  const getPanePid = vi.fn(async (): Promise<number | null> => 10);
   const thread = vi.fn(async () => id);
-  const readAllPaneProcesses = vi.fn(async () => new Map([["%1", { pid: 10, command: "claude" }]]));
+  const readAllPaneProcesses = vi.fn(async (): Promise<Map<string, { pid: number; command: string | null }> | null> => new Map([["%1", { pid: 10, command: "claude" }]]));
   const reader = new CurrentModelReader({ sessions, identities,
     context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
     codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
@@ -191,4 +191,43 @@ it("r2: finishes the entire inventory selection before the final bulk PID and le
   });
   const results = await f.reader.observeInventory([f.input, f.input]);
   expect(results.every(r => r.reason === "occupant-changed-during-read")).toBe(true);
+});
+
+
+it.each(["throws", "null"])("r3: reports unavailable rather than turnover when the final direct read %s", async kind => {
+  const f = fixture();
+  f.getPanePid.mockImplementation(async () => {
+    if (f.getPanePid.mock.calls.length === 3) {
+      if (kind === "throws") throw new Error("final pane lookup failed");
+      return null;
+    }
+    return 10;
+  });
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", model: null,
+    reason: kind === "throws" ? "native-read-unavailable" : "pane-unavailable" });
+  expect(f.getPanePid).toHaveBeenCalledTimes(3);
+});
+
+it.each(["throws", "null", "missing-pane"])("r3: reports unavailable rather than turnover when the final bulk read is %s", async kind => {
+  const f = fixture();
+  f.readAllPaneProcesses.mockImplementation(async () => {
+    if (f.readAllPaneProcesses.mock.calls.length === 2) {
+      if (kind === "throws") throw new Error("final bulk lookup failed");
+      return kind === "null" ? null : new Map();
+    }
+    return new Map([["%1", { pid: 10, command: "claude" }]]);
+  });
+  expect(await f.reader.observeInventory([f.input])).toMatchObject([{ status: "unknown", model: null,
+    reason: kind === "missing-pane" ? "pane-unavailable" : "native-read-unavailable" }]);
+  expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(2);
+  expect(f.getPanePid).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("r3: retains observed PID-turnover reporting with a warmed fact %s", async warm => {
+  const f = fixture();
+  if (warm) await f.reader.observe(f.input);
+  f.getPanePid.mockClear();
+  f.getPanePid.mockImplementation(async () => f.getPanePid.mock.calls.length === 3 ? 11 : 10);
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", model: null, reason: "occupant-changed-during-read" });
+  expect(f.getPanePid).toHaveBeenCalledTimes(3);
 });
