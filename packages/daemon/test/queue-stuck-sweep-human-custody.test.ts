@@ -234,6 +234,14 @@ describe("#514 custody findings for a human decision", () => {
     expect(logs).toEqual([]);
   });
 
+  it("routes a human row closed as handed-off to the agent that handed it off", async () => {
+    const row = await ask();
+    await repo.update({ qitemId: row.qitemId, actorSession: "closer@r", state: "handed-off", closureReason: "handed_off_to", closureTarget: "next@r" });
+
+    expect((await sweep()).findings).toContainEqual(expect.objectContaining({ qitemId: row.qitemId, action: "created" }));
+    expect(findings(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "closer@r" })]);
+  });
+
   describe("an external person's custody finding during a registry outage", () => {
     it("still refuses ordinary creates to a previously admitted external destination", async () => {
       const row = await ask();

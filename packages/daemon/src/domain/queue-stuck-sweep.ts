@@ -239,7 +239,7 @@ function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, 
            UNION ALL
            SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions_archive WHERE qitem_id = ?
          )
-     ) WHERE state IN ('done', 'canceled')
+     ) WHERE state IN ('done', 'canceled', 'handed-off')
          AND (state IS NOT previous_state OR closure_reason IS NOT NULL)
        ORDER BY transition_id DESC LIMIT 1`,
   ).get(row.qitemId, row.qitemId) as { actor_session: string } | undefined;
