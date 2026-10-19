@@ -13,14 +13,15 @@ function fixture() {
   const capturePaneScreen = vi.fn(async (): Promise<string | null> => "operator@host$ ");
   const capturePaneContent = vi.fn(async () => history);
   const getPaneCommand = vi.fn(async () => "zsh");
+  const getPanePid = vi.fn(async (): Promise<number | null> => 100);
   const listProcesses = vi.fn((): NativeProcessRow[] => { throw new Error("ps unavailable"); });
   const tmux = { hasSession: vi.fn(async () => true), getPaneCommand, capturePaneContent, capturePaneScreen,
     sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
-    listPanes: vi.fn(async () => [{ id: "%9" }]), getPanePid: vi.fn(async () => 100) } as unknown as TmuxAdapter;
+    listPanes: vi.fn(async () => [{ id: "%9" }]), getPanePid } as unknown as TmuxAdapter;
   const fail = () => { throw new Error("unexpected filesystem access"); };
   const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sessionIdFactory: () => token, sleep: async () => {},
     fsOps: { exists: () => false, readFile: fail, writeFile: fail, mkdirp: fail, copyFile: fail } });
-  return { adapter, capturePaneScreen, capturePaneContent, getPaneCommand, listProcesses };
+  return { adapter, capturePaneScreen, capturePaneContent, getPaneCommand, getPanePid, listProcesses };
 }
 const launch = (adapter: ClaudeCodeAdapter, opts: Partial<Parameters<RuntimeAdapter["launchHarness"]>[1]> = {}) =>
   adapter.launchHarness(binding, { name: "seat", freshInPlace: true, ...opts });
@@ -95,6 +96,22 @@ describe("fresh in-place readiness scope and fallback", () => {
       await launch(f.adapter);
       expect(await f.adapter.checkReady(binding), JSON.stringify({ command, screen })).toEqual({ ready: true });
     }
+  });
+
+  it.each(["missing-pane-pid", "missing-pane-row", "background-claude"])("does not claim absence from incomplete pane evidence: %s", async mode => {
+    const f = fixture();
+    f.getPaneCommand.mockResolvedValue("sh");
+    f.capturePaneScreen.mockResolvedValue("❯ ");
+    const startedAt = "Mon Oct 19 21:30:00 2026";
+    f.listProcesses.mockReturnValue(mode === "missing-pane-row" ? [] : [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 100, executableName: "bash", command: "-bash", startedAt },
+      ...(mode === "background-claude" ? [
+        { pid: 101, ppid: 100, pgid: 101, tpgid: 100, executableName: "claude", command: "claude", startedAt },
+      ] : []),
+    ]);
+    if (mode === "missing-pane-pid") f.getPanePid.mockResolvedValue(null);
+    await launch(f.adapter);
+    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
   });
 
   it("does not use unavailable-screen fallback for a positively different launch identity", async () => {
