@@ -82,9 +82,9 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 
   For any other failure, the table under "What can interrupt installation and the OpenRig view" in
   `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
-- **Join this session to the team (recommended, before the first send):** if this session hasn't already joined,
-  recommend joining OpenRig so the operator sees a named teammate instead of "unknown sender". Ask the person yes or
-  no after this short explanation:
+- **Offer to join this session before the first send:** if this session hasn't already joined, recommend joining
+  OpenRig in a plain shell so the operator sees a named teammate instead of "unknown sender". Inside tmux, offer
+  joining as optional, with the effects below. Ask the person yes or no after this short explanation:
   - This adds me as a named member of the team, with my name on messages.
   - In a plain shell, joining writes no files in your project or personal settings.
   - Inside tmux (from source, not hand-tested), other agents can type into this window, and stopping the team
