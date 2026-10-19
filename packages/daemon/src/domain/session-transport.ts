@@ -3134,7 +3134,9 @@ export class SessionTransport {
       if (input.signal?.aborted) return cancelled();
       if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
-      const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      // A caller's cancellation also ends a pending observation (the abandoned read is ignored, never delivered on).
+      // Managed preparation's wait keeps its own behaviour: it doesn't race the read against its signal.
+      const activity = await this.observeReadinessWithin(input, deadline - Date.now(), input.cancelledBy === "caller" ? input.signal : undefined);
       if (input.signal?.aborted) return cancelled();
       if (activity === null || Date.now() > deadline) return expire();
       last = activity;
@@ -3161,22 +3163,28 @@ export class SessionTransport {
     }
   }
 
-  /** One readiness observation, raced against the time left before the wait's deadline. Null
-   *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
+  /** One readiness observation, raced against the time left before the wait's deadline and, when given, the
+   *  caller's cancellation. Null when the deadline or the cancellation wins; the abandoned observation is ignored,
+   *  never delivered on. */
   private async observeReadinessWithin(
     input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
+    cancel?: AbortSignal,
   ): Promise<AgentActivity | null> {
+    if (cancel?.aborted) return null;
     const observation = this.classifySendReadiness(input);
     observation.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
       return await Promise.race([
         observation,
         new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, remainingMs)); }),
+        ...(cancel ? [new Promise<null>((resolve) => { onAbort = () => resolve(null); cancel.addEventListener("abort", onAbort, { once: true }); })] : []),
       ]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      if (cancel && onAbort) cancel.removeEventListener("abort", onAbort);
     }
   }
 

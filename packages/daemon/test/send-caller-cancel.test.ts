@@ -207,6 +207,37 @@ describe("independent review cancellation seams", () => {
     expect(f.writes).toEqual([]);
   });
 
+  // From the independent QA pass (its pending-observation probe): the abort must not wait for a readiness read.
+  it("an aborted guarded re-wait releases its lease while the readiness observation is still pending", async () => {
+    const f = fixture();
+    const caller = new AbortController();
+    let entered!: () => void, finishObservation!: () => void;
+    const atObservation = new Promise<void>(r => { entered = r; });
+    const observationGate = new Promise<void>(r => { finishObservation = r; });
+    let observations = 0;
+    (f.transport as never as { classifySendReadiness: unknown }).classifySendReadiness = async () => {
+      observations++;
+      if (observations === 2) { entered(); await observationGate; }
+      return { state: "idle", reason: "QA deferred observation", evidenceSource: "pane_heuristic", sampledAt: new Date().toISOString(), evidence: null };
+    };
+    const pending = f.post("/send", { session: "worker@test", text: "WORK", waitForIdleMs: 60_000 }, caller.signal)
+      .then(async res => ({ status: res.status, result: await res.json() }));
+    await atObservation;
+    caller.abort();
+    let followerRan = false;
+    const follower = f.guard.operation("worker@test", async () => { followerRan = true; });
+    const early = await Promise.race([Promise.all([pending, follower]).then(([done]) => done), settle(500).then(() => null)]);
+    const followerBeforeRelease = followerRan;
+    finishObservation();
+    const done = await pending;
+    await follower;
+    console.log("QA R3 PENDING OBSERVATION", JSON.stringify({ early, followerBeforeRelease, done, followerRan, observations, writes: f.writes }));
+    expect(done).toMatchObject({ status: 409, result: { reason: "caller_cancelled", sent: false, inputPhase: "not_reached" } });
+    expect(f.writes).toEqual([]); // even the late idle answer must not type
+    expect(early, "caller cancellation must not await a readiness read").not.toBeNull();
+    expect(followerBeforeRelease, "following lease operation must not await that read").toBe(true);
+  });
+
   it("pinned: the Enter after this request's own successful paste still ignores a later cancellation", async () => {
     const f = fixture({ guarded: false });
     const caller = new AbortController();
