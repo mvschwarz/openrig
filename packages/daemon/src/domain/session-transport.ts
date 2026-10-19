@@ -3444,12 +3444,12 @@ export class SessionTransport {
     return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
   }
 
-  /** The input box, or unknown when its reads don't finish within INPUT_BOX_READ_DEADLINE_MS: the pane text is already
+  /** The input box, or unknown when its reads don't finish within CAPTURE_INPUT_BOX_DEADLINE_MS: the pane text is already
    *  in hand, so a slow read never holds the capture. A read still pending then settles on its own, unused. */
   private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<InputBoxAnnotation>((resolve) => {
-      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), INPUT_BOX_READ_DEADLINE_MS);
+      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), CAPTURE_INPUT_BOX_DEADLINE_MS);
     });
     try {
       return await Promise.race([this.readInputBoxAnnotation(sessionName, runtime), late]);
@@ -3714,8 +3714,9 @@ export interface InputBoxAnnotation {
 }
 
 const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's later rows by two cells
-// How long a capture waits for the input box's three reads before reporting it unknown.
-const INPUT_BOX_READ_DEADLINE_MS = 1_000;
+// How long a capture waits for the input box's three reads together before reporting it unknown (the send path's
+// INPUT_BOX_READ_DEADLINE_MS bounds one read each).
+const CAPTURE_INPUT_BOX_DEADLINE_MS = 1_000;
 // Claude Code's input frame rule, as findClaudeComposer and the composer-boundary reader match it (a label may sit in it).
 const CLAUDE_FRAME_RULE = /^─{3,}(?: .+ ─+)?$/;
 
@@ -3752,7 +3753,7 @@ export function annotateInputBox(
     input: InputBoxSpan | null = null, suggestion: InputBoxSpan | null = null, evidence: string[] = []): InputBoxAnnotation =>
     ({ status, confidence, cursor, input, suggestion, evidence, hint });
   if (opts.timedOut) {
-    return result("unknown", "unknown", `The input box's reads didn't finish within ${INPUT_BOX_READ_DEADLINE_MS / 1000} s, so it wasn't checked.`,
+    return result("unknown", "unknown", `The input box's reads didn't finish within ${CAPTURE_INPUT_BOX_DEADLINE_MS / 1000} s, so it wasn't checked.`,
       null, null, ["input box reads timed out"]);
   }
   if (!styledScreen?.trim()) return result("unknown", "unknown", "The screen couldn't be read, so the input box wasn't checked.");
