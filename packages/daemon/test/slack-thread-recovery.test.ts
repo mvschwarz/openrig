@@ -195,6 +195,25 @@ it("a rate limit on replies holds every thread back across a restart, while chan
   expect(f.rows().map(row => row.destinationSession).filter(d => d !== "owner@test").sort()).toEqual(["a@test", "b@test"]);
 });
 
+it.each([
+  ["an older daemon's unmarked deadline holds history for every channel until it passes", {}, 0],
+  ["a deadline marked as not a rate limit holds only its own channel", { rateLimited: false }, 1],
+])("%s", async (_name, marker, otherChannelCalls) => {
+  const f = fixture();
+  // Checkpoints as an older daemon saved them: a 429 on the default channel kept only its nextRetryAt.
+  const covered = { coverageStart: `${BASE}.000000`, coveredThrough: `${BASE}.000000`, seedBasis: "feature-adoption" };
+  f.files.set("/s/coverage", JSON.stringify({ C1: { ...covered, nextRetryAt: at(700), ...marker }, C2: covered }) + "\n");
+  const r = f.recovery({ channels: [{ channel: "C1" }, { channel: "C2", seed: "adoption" }] });
+
+  await r.run();
+  expect(f.calls("conversations.history").map(u => u.searchParams.get("channel"))).toEqual(otherChannelCalls ? ["C2"] : []);
+
+  f.time(at(699)); await r.run();
+  expect(f.calls("conversations.history")).toHaveLength(otherChannelCalls ? 2 : 0);
+  f.time(at(701)); await r.run();
+  expect(f.calls("conversations.history").map(u => u.searchParams.get("channel"))).toContain("C1");
+});
+
 it("recovers a thread longer than a page in order across calls and passes, without a skip", async () => {
   const f = fixture(); f.track(ROOT);
   f.replies[`C1:${ROOT}`] = Array.from({ length: 70 }, (_, i) => f.reply(i + 1));
