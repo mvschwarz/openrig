@@ -443,11 +443,23 @@ describe("rig seat restart --keep-conversation: outcomes", () => {
     expect(remaining).not.toMatch(/typed nothing|answered/);
   });
 
-  it("an update in progress (no choice on screen) is not reported as a decision", async () => {
-    const w = world({ launch: { ok: false, error: "Codex reached an update flow; a restored conversation was not proven.", recovery: "attention_required", gate: "update_gate", gateChoice: false, verifierInput: "none" } });
+  it("an update screen without the recognised skip option is described neutrally: neither progress nor a waiting decision", async () => {
+    const w = world({ launch: { ok: false, error: "Codex is showing an update prompt.", recovery: "attention_required", gate: "update_gate", gateChoice: false, verifierInput: "none" } });
     const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
-    expect(remaining).toContain(`Codex is showing an update in progress in the pane (${SEAT}, pane %1); see it with \`rig capture ${SEAT}\`. Check it before you run the recovery command`);
-    expect(remaining).not.toMatch(/decision/);
+    expect(remaining).toContain(`Codex is showing an update screen in the pane (${SEAT}, pane %1); see it with \`rig capture ${SEAT}\`. Check it before you run the recovery command`);
+    expect(remaining).not.toMatch(/decision|in progress|waiting/);
+  });
+
+  it.each([
+    ["sent", "update_skip_key_sent", "The last screen OpenRig saw, before it sent the update prompt's skip key (3), offered an update choice. What Codex showed after the key wasn't observed."],
+    ["failed", "update_skip_key_failed", "The last screen OpenRig saw, before it tried to send the update prompt's skip key (3), offered an update choice. The send failed, so the key's effect is unknown."],
+  ] as const)("a screen OpenRig acted on afterwards (skip key %s) is reported as the screen before that input", async (_label, verifierInput, opening) => {
+    const w = world({ launch: { ok: false, error: "Codex is showing an update prompt.", recovery: "attention_required", gate: "update_gate", gateChoice: true, screenBeforeInput: true, verifierInput } });
+    const remaining = (await w.service.restartInPlace({ seatRef: SEAT, reason: "x" }) as { remainingStep: string }).remainingStep;
+    expect(remaining.startsWith(opening)).toBe(true);
+    expect(remaining).toContain(`See it with \`rig capture ${SEAT}\` (pane %1), then run the recovery command`);
+    expect(remaining).toMatch(/nothing was retried or relaunched\.$/i);
+    expect(remaining).not.toMatch(/is waiting|could not skip/);
   });
 
   it("a launch result that doesn't say what was typed claims nothing about input", async () => {

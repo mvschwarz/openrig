@@ -838,8 +838,14 @@ function startupGateStep(launch: Extract<HarnessLaunchResult, { ok: false }>, se
       : launch.verifierInput === "none"
         ? "OpenRig typed nothing into this screen; nothing was retried or relaunched."
         : "Nothing was retried or relaunched.";
+  if (gate === "update_gate" && launch.screenBeforeInput && launch.verifierInput !== undefined && launch.verifierInput !== "none") {
+    const before = launch.verifierInput === "update_skip_key_sent"
+      ? "before it sent the update prompt's skip key (3), offered an update choice. What Codex showed after the key wasn't observed."
+      : "before it tried to send the update prompt's skip key (3), offered an update choice. The send failed, so the key's effect is unknown.";
+    return `The last screen OpenRig saw, ${before} See it with \`rig capture ${session}\` (pane ${pane}), then ${run}. Nothing was retried or relaunched.`;
+  }
   if (gate === "update_gate" && launch.gateChoice !== true) {
-    return `Codex is showing an update in progress ${where}. Check it before you ${run}. ${typed}`;
+    return `Codex is showing an update screen ${where}. Check it before you ${run}. ${typed}`;
   }
   return `${STARTUP_GATE_STEPS[gate]} ${where}. That decision is for the person or an authorised operator; once it's made, ${run}. ${typed}`;
 }

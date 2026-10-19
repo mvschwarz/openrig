@@ -806,6 +806,65 @@ describe("Codex runtime adapter", () => {
     expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: true, verifierInput: "update_skip_key_sent" });
   });
 
+  // Round 3: the newest observation wins in the order it was taken, including the helper's current-screen recheck, and
+  // a screen OpenRig acted on afterwards is reported as the screen before that input.
+  const RESUMED = "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything";
+  const CODEX_ROW = [{ pid: 901, ppid: 1, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex" }];
+  /** How many screen captures a run on an unchanging, unskippable update screen makes. */
+  async function updatingCaptures(): Promise<number> {
+    const counter = screens(() => UPDATING);
+    await new CodexRuntimeAdapter({ tmux: counter, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => [] }).verifyResumeInPane("impl", "tok");
+    return (counter.capturePaneScreen as ReturnType<typeof vi.fn>).mock.calls.length;
+  }
+
+  it("(a) when the helper's current-screen recheck shows hook review, the report names hook review", async () => {
+    // Final quick poll: the loop sees the update screen, the helper's first capture is skippable, and its recheck (one
+    // capture more than an unskippable run makes) shows hook review. No key is sent.
+    const total = await updatingCaptures() + 1;
+    let n = 0;
+    const tmux = screens(() => { n++; return n === total ? HOOK_REVIEW : n === total - 1 ? SKIPPABLE : UPDATING; });
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+    expect(n).toBe(total);
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "hook_trust_gate", verifierInput: "none" });
+    expect((result as { evidence: string }).evidence).toContain("Hooks need review");
+  });
+
+  it("(b) when the helper's capture on the last quick poll shows a resumed screen, no older gate is reported as current", async () => {
+    const total = await updatingCaptures();
+    let n = 0;
+    const tmux = screens(() => (++n === total ? RESUMED : UPDATING));
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+    expect(n).toBe(total);
+    expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+    expect(result).not.toHaveProperty("gate");
+    expect((result as { evidence: string }).evidence).toContain("Ask Codex to do anything");
+  });
+
+  it.each([["sent", { ok: true }], ["failed", { ok: false, code: "unknown", message: "injected send failure" }]] as const)(
+    "(c) an update prompt first seen on the last quick poll, skip key %s, no later capture: reported as the screen before the key",
+    async (outcome, sendResult) => {
+      // The loop's capture and the helper's two captures on the final quick poll show the skippable prompt.
+      const total = await updatingCaptures() + 1;
+      let n = 0;
+      const tmux = screens(() => (++n >= total - 2 ? SKIPPABLE : UPDATING));
+      (tmux.sendKeys as ReturnType<typeof vi.fn>).mockResolvedValue(sendResult);
+      const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+      expect(n).toBe(total);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ ok: false, recovery: "attention_required", gate: "update_gate", gateChoice: true,
+        screenBeforeInput: true, verifierInput: outcome === "sent" ? "update_skip_key_sent" : "update_skip_key_failed" });
+    });
+
+  it("(d) a current update menu without option 3 is an update screen without a recognised choice, and no key is sent", async () => {
+    const menu = fs.readFileSync(nodePath.join(__dirname, "fixtures", "codex-update-0.160.0.txt"), "utf8").replace(/^.*3\. Skip until next version.*$/m, "");
+    const tmux = screens(() => menu);
+    const result = await new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, listProcesses: () => CODEX_ROW }).verifyResumeInPane("impl", "tok");
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, gate: "update_gate", gateChoice: false, verifierInput: "none" });
+    expect(result).not.toHaveProperty("screenBeforeInput");
+  });
+
   it("launchHarness captures a fresh Codex thread id from the live child process", async () => {
     const tmux = mockTmux({
       getPanePid: vi.fn(async () => 900),

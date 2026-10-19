@@ -114,6 +114,9 @@ export type HarnessLaunchResult =
     gateChoice?: boolean;
     /** Reporting only: what the resume verification itself typed into the pane. */
     verifierInput?: "none" | "update_skip_key_sent" | "update_skip_key_failed";
+    /** Reporting only: the reported screen is the last one seen before the verification's own input (`verifierInput`);
+     *  nothing after that input was observed. */
+    screenBeforeInput?: true;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };
