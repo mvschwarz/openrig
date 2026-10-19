@@ -102,7 +102,7 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
     cleanup.push(() => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close(error => error ? reject(error) : resolve()); }));
     await new Promise<void>(resolve => server.once("listening", resolve));
     const { port } = server.address() as AddressInfo;
-    const sends: unknown[] = [];
+    const sends: Array<{ hook: string; status: number; body: { ok: boolean; reason?: string }; effects: typeof effects }> = [];
     for (const hook of ["none", "running", "permission"] as const) {
       if (hook !== "none") activity.recordHookEvent({ runtime: "claude-code", sessionName: "worker@test",
         hookEvent: hook === "running" ? "UserPromptSubmit" : "Notification", ...(hook === "permission" ? { subtype: "permission_prompt" } : {}), occurredAt: now.toISOString() });
@@ -112,20 +112,22 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
         body: JSON.stringify({ session: "worker@test", text: "ordinary status update" }) });
       const body = await response.json();
       sends.push({ hook, status: response.status, body, effects: structuredClone(effects) });
-      expect(response.status).toBe(body.ok ? 200 : 409);
-      expect(effects.map(x => x.kind)).toEqual(body.ok ? ["paste", "keys"] : []);
-      if (hook === "permission") expect(body).toMatchObject({ ok: false, reason: "target_needs_input" });
-      const currentMcp = frame.id === "old-current-MCP" || frame.id === "2.1.303-current-MCP";
+    }
+    const classified = classifyPaneActivity(frame.pane, { runtime: "claude-code" });
+    const structural = await new SeatStructuralActivityService(tmux).pollSeat("worker@test");
+    records.push({ id: frame.id, pane: frame.pane, assessments, readiness, classifier: classified, structural, sends });
+    const currentMcp = frame.id === "old-current-MCP" || frame.id === "2.1.303-current-MCP";
+    for (const { hook, status, body, effects } of sends) {
       const blocked = hook === "permission" || (hook === "none" && (currentMcp || frame.id === "ordinary-current-permission"));
       expect(body.ok).toBe(!blocked);
-      expect(response.status).toBe(blocked ? 409 : 200);
+      expect(status).toBe(blocked ? 409 : 200);
+      expect(effects.map(x => x.kind)).toEqual(blocked ? [] : ["paste", "keys"]);
       if (blocked) expect(body).toMatchObject({ ok: false, reason: "target_needs_input" });
       else {
         expect(effects[0]?.text).toBe("ordinary status update");
         expect(effects[1]?.argv.at(-1)).toBe("Enter");
       }
     }
-    const currentMcp = frame.id === "old-current-MCP" || frame.id === "2.1.303-current-MCP";
     const assessmentCodes: Record<string, string[]> = {
       "old-current-MCP": ["mcp_gate", "mcp_gate", "mcp_gate"],
       "2.1.303-current-MCP": ["mcp_gate", "mcp_gate", "mcp_gate"],
@@ -142,11 +144,8 @@ describe("current Claude MCP menus through assessment, readiness and HTTP send",
     const ready = readiness as Array<{ result: { ready: boolean; code?: string } }>;
     expect(ready.map(x => x.result.ready)).toEqual(currentMcp || frame.id === "old-MCP-history-before-composer" ? [false, false]
       : ["ordinary-current-permission", "clipped-new-MCP", "current-checkbox-cursor-without-normal-composer"].includes(frame.id) ? [false, true] : [true, true]);
-    const classified = classifyPaneActivity(frame.pane, { runtime: "claude-code" });
     if (currentMcp) expect(classified).toMatchObject({ state: "attention", reason: "selection_prompt" });
-    const structural = new SeatStructuralActivityService(tmux);
-    expect(await structural.pollSeat("worker@test")).toMatchObject({ state: classified.state, reason: classified.reason });
-    records.push({ id: frame.id, pane: frame.pane, assessments, readiness, classifier: classifyPaneActivity(frame.pane, { runtime: "claude-code" }), sends });
+    expect(structural).toMatchObject({ state: classified.state, reason: classified.reason });
   });
 });
 
