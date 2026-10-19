@@ -941,7 +941,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
     // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
     // seats holding it will never be refreshed.
-    const collectorCmd = `${shellQuote(this.nodeExecutable)} ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
+    const collectorCmd = managedClaudeNodeCommand(this.nodeExecutable, collectorDest, contextDir, providerUsageDir);
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
     // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a
@@ -971,7 +971,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
     const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
-    const ownedCmd = `${shellQuote(this.nodeExecutable)} ${shellQuote(relayDest)}`;
+    const ownedCmd = managedClaudeNodeCommand(this.nodeExecutable, relayDest);
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
     // PREVALIDATE BEFORE ANY MUTATION using the SHARED delivery validation (same gate
@@ -1071,6 +1071,13 @@ interface ActivityHookOutcome {
 // argument ends with this path — a changed prefix still matches (replace, not duplicate); a
 // user command that merely contains the path (echo, or node with extra args) does NOT.
 const LEGACY_OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
+
+function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
+  const quotedArgs = args.map(shellQuote).join(" ");
+  const pinned = `${shellQuote(executable)} ${quotedArgs}`;
+  // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar.
+  return parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`;
+}
 
 function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;

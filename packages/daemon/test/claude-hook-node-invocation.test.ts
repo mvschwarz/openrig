@@ -8,6 +8,7 @@ import { afterEach, expect, it } from "vitest";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { parseManagedClaudeNodeCommand } from "../src/domain/claude-activity-hooks.js";
+import { RestoreCheckService, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 
@@ -71,6 +72,42 @@ it.each(["{ bad json", "[]", JSON.stringify({ statusLine: { command: "custom sta
     f.adapter().ensureContextCollector({ cwd: f.cwd });
     expect(fs.readFileSync(f.settings, "utf8")).toBe(original);
   });
+
+it("keeps non-node-named runtimes on the recognized legacy form through refresh and restore-check", async () => {
+  const f = fixture();
+  const executable = path.join(f.root, "node-22");
+  fs.symlinkSync(process.execPath, executable);
+  const a = f.adapter(executable);
+  const first = await f.project(a);
+  expect(first.hooks.Stop[0].hooks[0].command).toBe(`node ${shellQuote(f.relayDest)}`);
+  expect(first.statusLine.command).toBe(`node ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
+  expect(relayParser.settingsRelayPath(first.hooks.Stop[0].hooks[0].command))
+    .toEqual({ executable: "node", relay: f.relayDest });
+  const bytes = fs.readFileSync(f.settings, "utf8");
+  await f.project(a);
+  expect(fs.readFileSync(f.settings, "utf8")).toBe(bytes); // no duplicate relays
+
+  const service = new RestoreCheckService({
+    stateDir: f.state, listRigs: () => [{ rigId: "fixture-rig", name: "fixture-rig" }],
+    getNodeInventory: () => [{ nodeId: "fixture-node", logicalId: "fixture-worker", nodeKind: "agent",
+      canonicalSessionName: "fixture-worker", runtime: "claude-code", cwd: f.cwd,
+      sessionStatus: "running", startupStatus: "ready" } as NodeInventoryEntry],
+    getStartupContext: () => ({ status: "ok", runtime: "claude-code", resolvedStartupFiles: [],
+      projectionEntries: [{ absolutePath: f.relayDest, category: "runtime_resource", resourceType: "claude_activity_hooks" }] }),
+    getClaudeActivityHookEvents: () => Object.keys(first.hooks), hasSnapshot: () => false,
+    getRestoreInputs: () => ({ unavailable: "fixture does not select restore" }),
+    probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running (fixture)" }),
+    exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8"),
+  });
+  const hook = service.check({ noQueue: true }).checks.find(c => c.check === "seat.fixture-worker.hooks");
+  expect(hook?.status).toBe("green");
+  expect(hook?.evidence).toContain("activity hooks are projected");
+
+  // A later recognized interpreter replaces the collector rather than treating it as user-owned.
+  const refreshed = await f.project(f.adapter());
+  expect(refreshed.statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
+  expect(refreshed.hooks.Stop).toHaveLength(1);
+});
 
 it("executes both actual generated commands with no Node on PATH and quoted interpreter/project names", async () => {
   const f = fixture();

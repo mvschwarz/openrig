@@ -45,8 +45,9 @@ This plugin ships dual-manifest packaging — both `.claude-plugin/` and `.codex
   the daemon writes into Codex's `config.toml` (the activity relay); `hooks/codex.json` is not read.
 
 Generated Claude settings commands for the activity relay and context collector use the daemon's absolute Node
-executable, so they do not require Node on the Claude process's inherited PATH. The executable must remain installed;
-removing or moving it requires normal command refresh from a healthy runtime. This does not change the static plugin
+executable when its name is recognized (`node` or `node.exe`); other names keep the legacy bare `node` command and
+its PATH requirement. Pinned commands do not require Node on the Claude process's inherited PATH. The executable must
+remain installed; removing or moving it requires normal command refresh from a healthy runtime. This does not change the static plugin
 manifest commands, which still use `node`, or prove that an already-running Claude reloaded changed settings.
 
 One skill targets Claude Code's compaction behavior specifically:
