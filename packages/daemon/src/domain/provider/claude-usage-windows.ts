@@ -12,6 +12,10 @@
 //   join is not proven to be the same login. Key: (orgId, email) plus the bucket; either missing is unresolved.
 // - A refresh that reports another login freezes the earlier row as it was at its own last refresh; that row reads
 //   stale (a later read exists). Nothing is merged or relabelled. A daemon restart starts with no identity.
+// - Account availability stays unknown. A sample records a seat and a time, and the identity is the daemon's login as of
+//   a refresh: nothing links a seat's sample to the login that seat used when it sampled, so a seat on another login, or
+//   a seat still on the previous login, can't be told apart (two hermetic source cases: the same reset on another login, and a seat still on an earlier login). The windows stay visible
+//   as each seat's own readings; until a sample-time seat-to-account binding exists, the row never reads "known".
 
 import type Database from "better-sqlite3";
 import type { ClaudeAuthAnswer, ClaudeAuthReader } from "./claude-auth-status-reader.js";
@@ -123,6 +127,10 @@ function windowRow(p: Pick, now: string, superseded: boolean): UsageWindowRow {
     ...usageFreshness(p.observedAt, now, null, superseded),
   };
 }
+
+/** Why a joined Claude row's account availability is unknown, whatever its windows show. */
+export const CLAUDE_NO_SAMPLE_BINDING =
+  "no sample-time link between these seats' readings and this login: a seat on another login, or still on an earlier one, reads the same, so this account's availability isn't known from them";
 
 export const claudeUsageIdentityKey = (i: ClaudeUsageIdentity): string | null =>
   (i.orgId !== null && i.email !== null ? `claude:org:${i.orgId}:email:${i.email}:${i.limitId}` : null);
@@ -266,7 +274,9 @@ export class ClaudeUsageWindows {
         limitEvidence: null,
         latestFromSource: true,
         lastRefresh: this.lastRefresh,
-        currentAvailability: resolved && windows.every((w) => w.freshness === "fresh" && w.level !== "unknown") ? "known" : "unknown",
+        // Never "known" from this join: see CLAUDE_NO_SAMPLE_BINDING. The windows below are each seat's own readings.
+        currentAvailability: "unknown",
+        unavailableReason: CLAUDE_NO_SAMPLE_BINDING,
         identityNote: current
           ? `identity: the daemon's Claude login (claude auth status) as of the refresh at ${current.at}; windows: status-line readings from ${seatsOf(live)} at their own times; not proven to be the same login`
           : `identity not read yet (rig provider status --refresh); windows: status-line readings from ${seatsOf(live)} at their own times`,
