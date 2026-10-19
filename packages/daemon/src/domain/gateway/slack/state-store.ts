@@ -283,7 +283,8 @@ export interface ChannelCoverage {
   historyLimited?: boolean;
   /** On a machine without its own connection: when the hub first relayed this channel here (the coverage floor then). */
   relayAdoptedAt?: string;
-  /** nextRetryAt came from Slack's rate limit, which holds the whole method, not only this channel. */
+  /** Whether nextRetryAt came from Slack's rate limit, which holds the whole method, not only this channel. Absent on an
+   *  older daemon's deadline, which is treated as a possible rate limit. */
   rateLimited?: boolean;
 }
 
@@ -384,7 +385,7 @@ export interface ThreadCoverage {
   coveredThrough: string;
   pending?: { upper: string };
   nextRetryAt?: number;
-  /** nextRetryAt came from Slack's rate limit, which holds the whole method. */
+  /** Whether nextRetryAt came from Slack's rate limit, which holds the whole method. */
   rateLimited?: boolean;
 }
 

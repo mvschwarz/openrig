@@ -125,17 +125,18 @@ export class SlackRecovery {
   }
 
   /** Slack's rate limit holds a method for the whole workspace. Before any source is admitted, restore each method's hold
-   *  from every saved rate-limit deadline, including one on a thread no longer tracked. */
+   *  from every saved rate-limit deadline, including one on a thread no longer tracked. A deadline saved without the
+   *  marker, as an older daemon saved every backoff, may be a rate limit, so it holds the method too. */
   private restoreMethodHolds(): void {
     const now = this.now();
     try {
       for (const c of Object.values(this.channelStore.all())) {
-        if (c.rateLimited && c.nextRetryAt && c.nextRetryAt > now) this.backoff.hold(HISTORY, c.nextRetryAt);
+        if (c.rateLimited !== false && c.nextRetryAt && c.nextRetryAt > now) this.backoff.hold(HISTORY, c.nextRetryAt);
       }
     } catch { /* an unreadable channel file leaves its channels unavailable */ }
     try {
       for (const t of Object.values(this.threadStore.read())) {
-        if (t.rateLimited && t.nextRetryAt && t.nextRetryAt > now) this.backoff.hold(REPLIES, t.nextRetryAt);
+        if (t.rateLimited !== false && t.nextRetryAt && t.nextRetryAt > now) this.backoff.hold(REPLIES, t.nextRetryAt);
       }
     } catch { /* reported when threads are listed */ }
   }

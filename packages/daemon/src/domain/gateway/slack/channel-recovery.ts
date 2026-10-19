@@ -127,7 +127,7 @@ export class ChannelRecovery implements RecoverySource {
       this.reason = r.status === 429 ? "rate-limited" : known.includes(r.error ?? "") ? r.error : "history-api-unavailable";
       const retrySeconds = r.retryAfterSeconds ?? (r.status === 0 || r.status >= 500 ? 5 : 300);
       if (r.status === 429) backoff.hold(HISTORY, this.now() + retrySeconds * 1000);
-      this.save({ ...c, nextRetryAt: this.now() + retrySeconds * 1000, rateLimited: r.status === 429 ? true : undefined });
+      this.save({ ...c, nextRetryAt: this.now() + retrySeconds * 1000, rateLimited: r.status === 429 });
       this.state = "backoff"; return "done";
     }
     const messages = r.json.messages;
