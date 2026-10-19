@@ -579,9 +579,12 @@ export class SeatLifecycleService {
     const flag = emittedEffortFromArgv("pi", tokens);
     const value = flag.flag === "present" ? flag.value : null;
     // ps joins argv with spaces: a bare word after the value may be the rest of a value with whitespace.
-    let at = -1;
-    tokens.forEach((t, i) => { if (t === "--thinking" || t.startsWith("--thinking=")) at = i; });
-    const after = at < 0 ? undefined : tokens[at + (tokens[at] === "--thinking" ? 2 : 1)];
+    // Scanned as emittedEffortFromArgv does, so a value is never taken for the flag.
+    let after: string | undefined;
+    for (let index = 1; index < tokens.length; index += 1) {
+      if (tokens[index] === "--thinking") { after = tokens[index + 2]; index += 1; }
+      else if (tokens[index]!.startsWith("--thinking=")) after = tokens[index + 1];
+    }
     const emitted: EffortReport["emitted"] = value !== null && after !== undefined && !after.startsWith("--")
       ? { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." }
       : { state: "observed", value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === saved.effective };
@@ -1957,7 +1960,11 @@ function isStringArrayOf<T extends string>(value: unknown, allowed: readonly T[]
 /** One line naming where the four values agree, and where they can't be seen. */
 function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"], observed: EffortReport["observed"], runtime: string): string {
   const savedText = saved.effective ? `${saved.effective} (${saved.source === "seat_choice" ? "seat choice" : "authored"})` : "no flag (the runtime's own default)";
-  if (emitted.state !== "observed") return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: NOT VERIFIED.`;
+  if (emitted.state !== "observed") {
+    // Only a Pi launch value that can't be read back unambiguously leaves the native turn readable.
+    const native = observed.state === "observed" ? `${observed.value} (${observed.source}, ${observed.at})` : "NOT VERIFIED";
+    return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: ${native}.`;
+  }
   const launch = emitted.value ?? "no flag";
   const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
   if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;

@@ -309,6 +309,9 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
       observed: { state: "observed", value: "high" },
     });
     expect((report as { observed: object }).observed).not.toHaveProperty("matchesEmitted");
+    expect((report as { summary: string }).summary).toContain("Launch: unknown");
+    expect((report as { summary: string }).summary).toContain("Native effort: high (Pi session");
+    expect((report as { summary: string }).summary).not.toContain("NOT VERIFIED");
   });
 
   it("a Pi that doesn't record the level (0.87.1) is NOT VERIFIED and says why", async () => {
