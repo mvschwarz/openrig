@@ -189,7 +189,7 @@ for (const code of [1, 40]) test(`a rig setup exit ${code} reports the CLI insta
   assert.ok(r.stderr.includes(`INSTALLED, SETUP NOT COMPLETE (exit ${code})`), r.stderr);
   assert.ok(r.stderr.includes(`The OpenRig CLI is installed: ${path.join(f.prefix, "bin", "rig")}`), r.stderr);
   assert.match(r.stderr, /Node\/SQLite compatibility check: passed\./);
-  assert.match(r.stderr, /"Some steps need attention", each with its Fix, or shows the error that stopped it/);
+  assert.match(r.stderr, /"Some steps need attention", with a Fix where setup gives one, or shows the error that stopped it/);
   assert.match(r.stderr, /run rig setup again; the CLI does not need reinstalling/);
   assert.ok(!/sign[ -]?in|login/i.test(r.stderr.slice(r.stderr.indexOf("INSTALLED, SETUP NOT COMPLETE"))), "the summary claims no sign-in");
   assert.ok(!r.stdout.includes("Follow the next steps"));

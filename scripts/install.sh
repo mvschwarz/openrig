@@ -30,7 +30,7 @@ install_setup_incomplete() {
   printf 'The OpenRig CLI is installed: %s\n' "$install_rig" >&2
   printf 'Node/SQLite compatibility check: %s.\n' "$install_abi" >&2
   printf '%s\n' 'rig setup did not finish ready. Its output above lists what is left under' \
-    '"Some steps need attention", each with its Fix, or shows the error that stopped it.' \
+    '"Some steps need attention", with a Fix where setup gives one, or shows the error that stopped it.' \
     'Fix those, then run rig setup again; the CLI does not need reinstalling.' >&2
   exit "$install_exit"
 }

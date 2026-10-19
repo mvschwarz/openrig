@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/in
 curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh
 ```
 
-If `rig setup` doesn't finish ready, the installer ends with `INSTALLED, SETUP NOT COMPLETE` and setup's own exit status: the CLI is installed, and `rig setup` lists what's left under "Some steps need attention", each with its Fix. A provider that isn't signed in yet shows up there; if sign-ins are all that's left, sign in to each selected provider as below and continue.
+If a provider isn't signed in yet, the last step reports `FAILED [4/4]`, and `rig setup` lists the sign-in under "Some steps need attention". If the only remaining failures are provider sign-ins, the install steps finished; sign in to each selected provider as below and continue.
 
 **Or step by step:**
 
