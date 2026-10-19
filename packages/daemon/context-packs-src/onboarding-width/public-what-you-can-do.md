@@ -511,7 +511,7 @@ version, from checking the environment to a useful report to the OpenRig team.
   divergence.
 - **`rig seat set-cwd <seat> --cwd <absolute-path> --reason <text>`** — save an existing seat's
   launch directory, audited, for its next fresh launch or rebuild handover. Its node, address, queue
-  and history stay intact. It creates the folder and writes nothing else there: launch writes the
+  and history stay intact. It creates the folder (on the daemon's host) and writes nothing else there: launch writes the
   startup files, as today. Its preflight policy refuses, naming the paths, when the new directory
   holds an edited, unrecorded-and-different or doubly sourced copy that launch would place. The
   running process keeps its directory: adopt the new one with `rig seat launch --fresh --stop
