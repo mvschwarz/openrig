@@ -1,3 +1,4 @@
+import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { codexPostureArg } from "../adapters/yolo-mode.js";
 
@@ -119,7 +120,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is waiting for workspace trust approval before the session can become interactive.",
       };
     }
-    if (looksLikeClaudeMcpApprovalPrompt(paneContent)) {
+    if (currentClaudeMcpMenu(paneContent) || looksLikeClaudeMcpApprovalPrompt(paneContent)) {
       return {
         status: "inconclusive",
         code: "mcp_gate",
