@@ -186,7 +186,6 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (r["accountHistory"] === "unknown") out.push("account history unknown");
     if (r["savedProfile"] === "not linked") out.push("saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
     return out;
-    return out;
   }
 
   /** The row's sign-in fact, as served; nothing when an older daemon doesn't serve it. */
