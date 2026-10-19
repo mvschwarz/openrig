@@ -579,6 +579,12 @@ describe("native resume probe", () => {
     })).toMatchObject({ status: "resumed", code: "active_runtime" });
   });
 
+  it.each(["", " ", "  ", "\t\t"])("preserves the whole-text default-footer match after blank lines with indentation %j", (indent) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n\n${indent}gpt-5.5 xhigh fast · Context 0% used · Fast on`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
   it("does not keep trust pending after a later composer without readiness corroboration", () => {
     expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
       paneContent: `${currentTrustPrompt}\n› Continue`,
