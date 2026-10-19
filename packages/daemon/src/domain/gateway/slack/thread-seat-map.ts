@@ -148,6 +148,17 @@ export class ThreadSeatMap {
     return row ? { threadTs: row.thread_ts, seat: row.seat, conversationId: row.conversation_id } : null;
   }
 
+  /** Missed-reply recovery's threads: roots in these channels that are open, or closed at or after
+   *  `closedSince` (ISO). */
+  trackedForRecovery(channels: string[], closedSince: string): Array<{ channel: string; threadTs: string }> {
+    if (!channels.length) return [];
+    const rows = this.db
+      .prepare(`SELECT channel, thread_ts FROM thread_seat_map
+         WHERE channel IN (${channels.map(() => "?").join(", ")}) AND (state = 'open' OR closed_at >= ?)`)
+      .all(...channels, closedSince) as Array<{ channel: string; thread_ts: string }>;
+    return rows.map((r) => ({ channel: r.channel, threadTs: r.thread_ts }));
+  }
+
   close(threadTs: string, channel?: string): void {
     const at = this.now().toISOString();
     if (channel === undefined) this.db.prepare(`UPDATE thread_seat_map SET state = 'closed', closed_at = ? WHERE thread_ts = ?`).run(at, threadTs);

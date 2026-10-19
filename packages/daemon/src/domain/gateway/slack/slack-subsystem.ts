@@ -12,7 +12,7 @@
 // the relay's history IS the subsystem's history — enabling the subsystem replays nothing the
 // relay already delivered (the enable-time backlog rule survives the cutover by construction).
 
-import { ChannelRecovery } from "./channel-recovery.js";
+import { SlackRecovery, ownedRecoveryChannels } from "./slack-recovery.js";
 import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -700,7 +700,18 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const stops: Array<() => void> = [];
   const starts: Array<() => void> = [];
   let inboundHandle: SocketInboundHandle | undefined;
-  let recovery: ChannelRecovery | undefined;
+  let recovery: SlackRecovery | undefined;
+  // Recovery covers the channels this machine owns and the threads tracked in them. The configured
+  // default channel keeps its established seed; a channel newly recovered starts at adoption.
+  const buildRecovery = (router: InboundRouter, seedDefault: boolean, relayed?: () => boolean): SlackRecovery => new SlackRecovery({
+    channels: ownedRecoveryChannels(cfg).map((channel) => (seedDefault && channel === cfg.channel ? { channel } : { channel, seed: "adoption" as const })),
+    token: bot,
+    stateDir: stateDir(opts.home),
+    router,
+    trackedThreads: (channels, closedSince) => threadMap.trackedForRecovery(channels, closedSince),
+    fetchImpl: opts.fetchImpl,
+    ...(relayed ? { relayed } : {}),
+  });
 
   if (outboundReady) {
     const driver = new SlackOutboundDriver({
@@ -831,22 +842,27 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     acceptForwarded = (env) => { relayedReceived++; return handleEnvelope(env, () => {}, built, log, undefined, { relayed: true }); };
     if (!inboundReady) {
       // No socket here, so no socket-driven retry: drain this machine's own retained events on the
-      // same five-minute cadence the socket uses, once services start.
+      // same five-minute cadence the socket uses, once services start. The hub relays this machine's
+      // channels' live events; once one has arrived, this machine, which owns them, also recovers
+      // what nobody received.
+      const relayedRecovery = (recovery = buildRecovery(built, false, () => relayedReceived > 0));
+      const recover = () => { void relayedRecovery.run().catch(() => log("channel recovery failed; checkpoint retained")); };
       let retryTimer: ReturnType<typeof setInterval> | undefined;
       starts.push(() => {
         retryTimer = setInterval(() => {
+          recover();
           void built.retryDeadLetters().catch((e) => log(`slack dead-letter retry failed: ${(e as Error).message}`));
         }, opts.inboundRetryIntervalMs ?? 5 * 60 * 1000);
         retryTimer.unref?.();
       });
-      stops.push(() => { if (retryTimer) clearInterval(retryTimer); });
+      stops.push(() => { relayedRecovery.stop(); if (retryTimer) clearInterval(retryTimer); });
     }
   }
 
   if (inboundReady && router) {
     const socketRouter = router;
     const receipts = new InboundReceiptStore(path.join(stateDir(opts.home), "slack-inbound-receipts.jsonl"));
-    recovery = new ChannelRecovery({ channel: cfg.channel, token: bot, stateDir: stateDir(opts.home), router: socketRouter, fetchImpl: opts.fetchImpl });
+    recovery = buildRecovery(socketRouter, true);
     starts.push(() => {
       recovery!.initialize(); // persist the once-only floor before any live events
       inboundHandle = startSocketInbound(app!, socketRouter, {

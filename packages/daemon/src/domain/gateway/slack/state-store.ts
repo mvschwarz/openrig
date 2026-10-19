@@ -341,4 +341,54 @@ export class ChannelCoverageStore {
     this.save(channel, coverage);
     return coverage;
   }
+
+  /** Only once per channel, at adoption: older coverage is unknown. A landing or seen record is
+   * not scanned coverage, so it never sets this floor (it could skip an earlier hole). */
+  initializeAtAdoption(channel: string, at: string): ChannelCoverage {
+    const data = this.read();
+    if (Object.hasOwn(data, channel)) return data[channel]!;
+    const coverage: ChannelCoverage = { coverageStart: at, coveredThrough: at, seedBasis: "feature-adoption" };
+    this.save(channel, coverage);
+    return coverage;
+  }
+}
+
+export interface ThreadCoverage {
+  /** The thread root: no reply is older, so it is the scan floor. */
+  coverageStart: string;
+  /** Exclusive: every reply posted before this was scanned. */
+  coveredThrough: string;
+  pending?: { upper: string };
+  nextRetryAt?: number;
+}
+
+/** Scan boundaries for tracked threads, keyed `channel:thread_ts`. A separate file, so a channel
+ * checkpoint reader (including an older daemon's) never meets a thread record. */
+export class ThreadCoverageStore {
+  constructor(private readonly file: string, private readonly fsops: StateFsOps = nodeStateFs) {}
+
+  read(): Record<string, ThreadCoverage> {
+    const raw = readOptional(this.file, this.fsops);
+    if (raw === undefined) return {};
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid thread coverage store");
+    for (const c of Object.values(data) as ThreadCoverage[]) {
+      const start = slackMicros(c?.coverageStart), through = slackMicros(c?.coveredThrough);
+      if (start === null || through === null || start > through ||
+        (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid thread checkpoint");
+      if (c.pending) {
+        const upper = slackMicros(c.pending.upper);
+        if (upper === null || upper <= through) throw new Error("invalid pending interval");
+      }
+    }
+    return data;
+  }
+
+  save(key: string, coverage: ThreadCoverage): void {
+    const data = this.read();
+    Object.defineProperty(data, key, { value: coverage, enumerable: true, configurable: true });
+    this.fsops.mkdirp(path.dirname(this.file));
+    this.fsops.writeFileSync(`${this.file}.tmp`, JSON.stringify(data) + "\n");
+    this.fsops.rename(`${this.file}.tmp`, this.file);
+  }
 }

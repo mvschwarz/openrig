@@ -40,6 +40,9 @@ export interface SlackEvent {
   event_ts?: string;
   /** Internal history provenance, retained across dead-letter retry. */
   recoveredAfterGap?: boolean;
+  /** Internal: a reply recovered from a tracked thread's history. It lands as a late reply row and
+   *  never answers a decision; the seat reads it and decides. Retained across dead-letter retry. */
+  recoveredThreadReply?: boolean;
   /** The envelope's `api_app_id`: the app RECEIVING the event, ours. Set by handleEnvelope only, and
    *  retained across dead-letter retry; a named bot whose app matches it is OpenRig itself. */
   receivingAppId?: string;
@@ -223,7 +226,9 @@ export class InboundRouter {
     const sections: string[] = [text];
     if (ev.recoveredAfterGap) {
       const posted = new Date(Number(ev.ts) * 1000).toISOString();
-      sections.unshift(`Recovered after a gap (late delivery). Originally posted ${posted} (Slack ts ${ev.ts}).`);
+      const unapplied = ev.recoveredThreadReply && correlationQitemId
+        ? ` It was not applied as an answer to ${correlationQitemId}; read it and decide.` : "";
+      sections.unshift(`Recovered after a gap (late delivery). Originally posted ${posted} (Slack ts ${ev.ts}).${unapplied}`);
     }
     if (transfer && (transfer.stored.length > 0 || transfer.failed.length > 0)) {
       const lines: string[] = [];
@@ -334,7 +339,7 @@ export class InboundRouter {
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
-      if (route.correlationQitemId && this.deps.resolveHumanReply) {
+      if (route.correlationQitemId && this.deps.resolveHumanReply && !ev.recoveredThreadReply) {
         try {
           replyResolution = await this.deps.resolveHumanReply({
             qitemId: route.correlationQitemId,
@@ -922,7 +927,7 @@ export async function handleEnvelope(
   }
   if (env.type !== "events_api") return { status: "ignored", reason: "envelope-type" };
   // Only history admission supplies recovery provenance; only the envelope names the receiving app.
-  const ev = { ...env.payload?.event, recoveredAfterGap: undefined, receivingAppId: env.payload?.api_app_id, botAdmitted: undefined };
+  const ev = { ...env.payload?.event, recoveredAfterGap: undefined, recoveredThreadReply: undefined, receivingAppId: env.payload?.api_app_id, botAdmitted: undefined };
   // A bot's post in the bot inbox; every other bot post stays dropped by ingestDecision.
   if (ev.bot_id && router.hearsBotsIn(ev.channel)) return router.routeBot(ev);
   const decision = ingestDecision(ev);
