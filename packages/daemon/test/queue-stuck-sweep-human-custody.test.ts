@@ -209,9 +209,8 @@ describe("#514 custody findings for a human decision", () => {
   it.each([
     { destination: "owner@kernel", actor: "closer@r", source: "asker@r", terminalWakes: ["owner@kernel"] },
     { destination: "worker@r", actor: "closer@r", source: "asker@r", terminalWakes: ["worker@r"] },
-    // @external delivery retains its existing gateway path without using terminal transport.
-    { destination: "owner@external", actor: "owner@kernel", source: "asker@r", terminalWakes: [] },
-    { destination: "owner@external", actor: "human@host", source: "owner@kernel", terminalWakes: [] },
+    // An external person's destination needs the registry to admit it: during an outage that case fails the pass, as on
+    // main, and is covered in "an external person's custody finding during a registry outage" below.
   ])("keeps the established route when registry classification is unavailable for $destination / $actor / $source", async ({ destination, actor, source, terminalWakes }) => {
     const row = await ask(destination, source);
     await close(row.qitemId, actor);
@@ -235,7 +234,7 @@ describe("#514 custody findings for a human decision", () => {
     expect(logs).toEqual([]);
   });
 
-  describe("custody finding admission during a registry outage", () => {
+  describe("an external person's custody finding during a registry outage", () => {
     it("still refuses ordinary creates to a previously admitted external destination", async () => {
       const row = await ask();
       await close(row.qitemId);
@@ -247,94 +246,22 @@ describe("#514 custody findings for a human decision", () => {
       expect(sent).toEqual([]);
     });
 
-    it.each(["missing source", "different destination", "different source", "reopened source", "non-custody closure"])(
-      "refuses the custody exception for a %s",
-      async (condition) => {
-        const row = await ask();
-        if (condition === "non-custody closure") {
-          await repo.update({ qitemId: row.qitemId, actorSession: "closer@r", state: "done", closureReason: "no-follow-on" });
-        } else {
-          await close(row.qitemId);
-        }
-        const input = custodyInput(row);
-        const sourceQitemId = condition === "missing source" ? "qitem-no-such-source" : row.qitemId;
-        if (condition === "different destination") input.destinationSession = "stranger@external";
-        if (condition === "different source") input.sourceSession = "another@r";
-        if (condition === "reopened source") {
-          await repo.update({ qitemId: row.qitemId, actorSession: "closer@r", state: "pending", reopen: true,
-            transitionNote: "Recheck the handoff before creating the finding" });
-        }
-        registryError = "fixture human registry is unreadable";
-
-        await expect(repo.createCustodyFinding(sourceQitemId, input)).rejects.toMatchObject({ code: "human_registry_unavailable" });
-        expect(repo.getById(input.qitemId!)).toBeNull();
-        expect(repo.transitionLog.listForQitem(input.qitemId!)).toEqual([]);
-        expect(sent).toEqual([]);
-      },
-    );
-
-    it("still refuses an external identity removed from a healthy registry", async () => {
-      const row = await ask();
-      await close(row.qitemId);
-      registeredHumans = [];
-      const input = custodyInput(row);
-
-      await expect(repo.createCustodyFinding(row.qitemId, input)).rejects.toMatchObject({ code: "unknown_destination_rig" });
-      expect(repo.getById(input.qitemId!)).toBeNull();
-    });
-
-    it.each([false, true])("still refuses an unknown rig (registry unavailable: %s)", async (unavailable) => {
-      const row = await ask("worker@retired-rig");
-      await close(row.qitemId);
-      if (unavailable) registryError = "fixture human registry is unreadable";
-      repo = new QueueRepository(db, new EventBus(db), {
-        validateRig: () => false,
-        loadHumanRegistry: () => registryError ? { ok: false, error: registryError } : { ok: true, entities: registeredHumans },
-      });
-      const input = custodyInput(row);
-
-      await expect(repo.createCustodyFinding(row.qitemId, input)).rejects.toMatchObject({ code: "unknown_destination_rig" });
-      expect(repo.getById(input.qitemId!)).toBeNull();
-    });
-
-    it.each(["summary", "evidenceRef"] as const)("still requires a human-gated finding's %s", async (field) => {
-      const row = await ask();
-      await close(row.qitemId);
-      registryError = "fixture human registry is unreadable";
-      const input = custodyInput(row);
-      input.tier = "human-gate";
-      input[field] = null;
-
-      await expect(repo.createCustodyFinding(row.qitemId, input)).rejects.toMatchObject({ code: "human_route_fields_required" });
-      expect(repo.getById(input.qitemId!)).toBeNull();
-    });
-
-    it("keeps idempotent retry warnings and the original source unchanged", async () => {
-      const row = await ask();
-      await close(row.qitemId);
-      const original = repo.getById(row.qitemId);
-      registryError = "fixture human registry is unreadable";
-      const input = custodyInput(row);
-      const created = await repo.createCustodyFinding(row.qitemId, input);
-      const transitions = repo.transitionLog.listForQitem(created.qitemId);
-
-      const retry = await repo.createCustodyFinding(row.qitemId, { ...input, body: "A different retry body" });
-      expect(retry).toMatchObject({ ...created, createWarning: { code: "qitem_body_not_saved" } });
-      expect(repo.transitionLog.listForQitem(created.qitemId)).toEqual(transitions);
-      expect(repo.getById(row.qitemId)).toEqual(original);
-      expect(sent).toEqual([]);
-    });
-
-    it("persists a canceled item's unresolved custody finding at its external destination", async () => {
+    it("fails the pass as main does, then creates the finding for the closer once the registry is repaired", async () => {
       const row = await ask();
       await repo.update({ qitemId: row.qitemId, actorSession: "closer@r", state: "canceled",
         closureReason: "superseded", closureTarget: "qitem-missing-replacement" });
       registryError = "fixture human registry is unreadable";
 
-      expect((await sweep()).findings).toContainEqual(expect.objectContaining({ qitemId: row.qitemId, action: "created" }));
-      expect(findings(row.qitemId)).toHaveLength(1);
-      expect(findings(row.qitemId)[0]).toMatchObject({ destinationSession: "owner@external", state: "pending" });
+      const during = await sweepResult();
+      expect(during.outcome).toBe("failed");
+      expect(during.error).toContain("human registry");
+      expect(findings(row.qitemId)).toEqual([]);
       expect(sent).toEqual([]);
+
+      registryError = null;
+      expect((await sweep()).findings).toContainEqual(expect.objectContaining({ qitemId: row.qitemId, action: "created" }));
+      expect(findings(row.qitemId)).toEqual([expect.objectContaining({ destinationSession: "closer@r", state: "pending" })]);
+      expect(sent).toEqual(["closer@r"]);
     });
   });
 
@@ -371,7 +298,6 @@ describe("#514 custody findings for a human decision", () => {
 
   it.each([
     { destination: "worker@r", registryInitiallyUnavailable: true, terminalWakes: ["overdue@r", "unclaimed@r", "worker@r"] },
-    { destination: "owner@external", registryInitiallyUnavailable: false, terminalWakes: ["overdue@r", "unclaimed@r"] },
   ])("routes $destination custody, unclaimed and overdue findings with an unavailable human registry", async ({ destination, registryInitiallyUnavailable, terminalWakes }) => {
     if (registryInitiallyUnavailable) registryError = "fixture human registry is unavailable";
     const custody = await ask(destination);
@@ -404,7 +330,6 @@ describe("#514 custody findings for a human decision", () => {
 
   it.each([
     { destination: "worker@r", terminalWakes: ["worker@r"] },
-    { destination: "owner@external", terminalWakes: [] },
   ])("closes a repaired finding while $destination custody needs the unavailable registry", async ({ destination, terminalWakes }) => {
     const repaired = await ask("owner@kernel");
     await close(repaired.qitemId);

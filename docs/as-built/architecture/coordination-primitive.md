@@ -183,21 +183,18 @@ destination keeps its existing route; if neither closer nor source is an admitte
 agent, the human destination remains the durable fallback. This routing does not
 change custody verification or suppress unresolved findings.
 
-If the human registry is unavailable when a canonical identity needs classification,
-the sweep retains that item's original destination and logs the registry error. This
-does not infer an agent identity from an unreadable registry, which may not exist before
-the first human is registered. The pass continues to route unrelated findings and close
-repaired ones. Registry recovery restores owner refinement for new findings; existing
-findings keep their established route. Reserved human references and legacy agent names
-retain their known classifications without a registry read.
-
-External destinations also require registry-backed admission when a finding is saved.
-`QueueRepository.createCustodyFinding` can retain the original destination only when
-admission fails with `human_registry_unavailable`. Inside the create transaction, it
-re-reads the source and requires a `done` or `canceled` custody closure with matching
-source and destination addresses. Normal creation and all other admission errors still
-refuse the address. The finding uses the same validation, persistence, event and wake
-path as ordinary creation; external delivery remains on the gateway path.
+If the human registry is unavailable when a custody candidate's owner needs
+classification, that candidate keeps its original destination, and one log line
+per candidate names it and the registry error. This doesn't infer an agent
+identity from an unreadable registry, which may not exist before the first human
+is registered. Work bound for agents keeps routing, and repaired findings still
+close. A finding whose destination is a `<name>@external` person still needs the
+registry to admit it when it's saved, so during an outage that case fails the
+pass, as it did before this routing. After the repair, the next pass creates the
+finding and routes it to the closer. Registry recovery restores owner refinement
+for new findings; existing findings keep their established route. Reserved human
+references and legacy agent names keep their known classifications without a
+registry read.
 
 ## 3. The hot-potato closure contract (where queue closure is enforced)
 

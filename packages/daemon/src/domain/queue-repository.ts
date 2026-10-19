@@ -332,11 +332,6 @@ export interface QueueCreateInput {
   identityProvenance?: string | null;
 }
 
-export type QueueCreateResult = QueueItem & {
-  /** Response-only: the retry's changed body was not written. Never stored on the row. */
-  createWarning?: { code: "qitem_body_not_saved"; message: string };
-};
-
 export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
@@ -1524,39 +1519,21 @@ export class QueueRepository {
     }
   }
 
-  async create(input: QueueCreateInput): Promise<QueueCreateResult> {
-    return this.createWithCustodySource(input);
-  }
-
-  /** A custody finding may retain its closed source's destination during a registry
-   *  outage. Ordinary creates never receive this admission exception. */
-  async createCustodyFinding(sourceQitemId: string, input: QueueCreateInput): Promise<QueueCreateResult> {
-    return this.createWithCustodySource(input, sourceQitemId);
-  }
-
-  private async createWithCustodySource(input: QueueCreateInput, custodySourceQitemId?: string): Promise<QueueCreateResult> {
+  async create(input: QueueCreateInput): Promise<QueueItem & {
+    /** Response-only: the retry's changed body was not written. Never stored on the row. */
+    createWarning?: { code: "qitem_body_not_saved"; message: string };
+  }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
     // instance. Host identity is added only at the cross-host forwarding boundary
     // (routes/queue.ts stamp-at-FORWARD), and a genuine origin triple arriving from a
     // forward is stored verbatim (never re-stamped, never stripped).
+    if (!this.validateRig(input.destinationSession)) {
+      throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
+    }
+
     let wakeStaged = false;
     const txn = this.db.transaction(() => {
-      if (!this.validateRig(input.destinationSession)) {
-        const error = destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
-        // Re-read the durable source inside the create transaction. The exception
-        // preserves one known custody route; it cannot admit a new destination or
-        // turn a healthy registry's refusal into an accepted address.
-        const source = error.code === "human_registry_unavailable" && custodySourceQitemId
-          ? this.getById(custodySourceQitemId)
-          : null;
-        const retainsCustodyDestination = source
-          && (source.state === "done" || source.state === "canceled")
-          && (source.closureReason === "handed_off_to" || source.closureTarget?.startsWith("qitem-"))
-          && source.destinationSession === input.destinationSession
-          && source.sourceSession === input.sourceSession;
-        if (!retainsCustodyDestination) throw error;
-      }
       const created = this.createInTransactionalContext(input);
       if (this.outbox && input.nudge !== false) {
         try {

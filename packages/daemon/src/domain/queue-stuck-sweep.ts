@@ -644,9 +644,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId)],
         };
-        const created = c.kind === "dangling-closure"
-          ? await deps.queueRepo.createCustodyFinding(c.row.qitemId, input)
-          : await deps.queueRepo.create(input);
+        const created = await deps.queueRepo.create(input);
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
       }
     }
