@@ -61,7 +61,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -243,7 +243,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult> {
     binding = { ...binding };
     this.autoLaunches.delete(binding.nodeId);
@@ -343,9 +343,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    const launch = { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable,
+    const launch = { binding, token: opts.resumeToken ?? generatedSessionId!,
+      freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable,
       scriptLaunch: managed?.executableIsScript } as
-      { binding: NodeBinding; token: string; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
+      { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
@@ -372,7 +373,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
-    const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
+    const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent);
+    const probe = await this.assessFreshInPlaceProbe(binding, paneCommand, historyProbe);
 
     // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone
     // is not a return to a shell. Say so only for a proven idle shell (the rule Codex's checkReady uses).
@@ -400,6 +402,42 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   // -- Private helpers --
+
+  /** A fresh in-place launch keeps the retiree's scrollback. Qualify a history-based ready result
+   * with the current frame, only for the exact launch that requested it. Unavailable observations
+   * retain the old admission (including its ambiguity); visible gates and conflicting identity do not. */
+  private async assessFreshInPlaceProbe(
+    binding: NodeBinding, paneCommand: string | null,
+    historyProbe: ReturnType<typeof assessNativeResumeProbe>,
+  ) {
+    const launch = this.autoLaunches.get(binding.nodeId);
+    if (historyProbe.status !== "resumed" || !launch?.freshInPlace || !binding.tmuxPane || !binding.tmuxSession
+      || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
+      || launch.binding.tmuxSession !== binding.tmuxSession
+      || launch.binding.launchGeneration !== binding.launchGeneration) return historyProbe;
+
+    let screen: string | null = null;
+    try { screen = await this.tmux.capturePaneScreen(binding.tmuxPane); } catch { /* unavailable */ }
+    // Missing process evidence is unknown, not a conflicting recipient. Reuse the launch observer's
+    // positive conflict distinction without requiring process proof for ordinary ready frames.
+    let occupant: "own" | "another" | "unknown" = "unknown";
+    try { occupant = await this.paneOccupant(binding, false); } catch { /* unavailable */ }
+    if (this.autoLaunches.get(binding.nodeId) !== launch) return {
+      status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
+    };
+    if (occupant === "another") return {
+      status: "inconclusive" as const, code: "claude_launch_identity_conflict",
+      detail: "A different runtime identity occupies the fresh launch's pane.",
+    };
+    if (!screen?.trim()) return historyProbe;
+    const current = await this.assessManagedProbe(binding, paneCommand, screen);
+    if (this.autoLaunches.get(binding.nodeId) !== launch) return {
+      status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
+    };
+    // A headerless auto-mode frame can be working while its process listing is unavailable. Keep
+    // today's ready fallback only for that missing proof, never for a trust/MCP/consent/error gate.
+    return current.code === "claude_auto_identity_required" ? historyProbe : current;
+  }
 
   private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
     const input = { runtime: "claude-code", paneCommand, paneContent };
