@@ -214,7 +214,6 @@ export class RigInstantiator {
       this.eventBus.emit({
         type: "rig.imported",
         rigId: rigId!,
-        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
         specName: spec.name,
         specVersion: spec.version,
       });
@@ -226,6 +225,7 @@ export class RigInstantiator {
       ok: true,
       result: {
         rigId: rigId!,
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
         specName: spec.name,
         specVersion: spec.version,
         nodes: nodeResults,
