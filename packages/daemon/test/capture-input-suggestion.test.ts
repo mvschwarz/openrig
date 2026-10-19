@@ -120,7 +120,7 @@ describe("annotateInputBox: Claude Code", () => {
     expect(box).toMatchObject({ status: "no-input-box", input: null, suggestion: null });
   });
 
-  it("an empty frame with the cursor outside it, or with a cursor that moved, is unknown rather than an empty box", () => {
+  it("an empty frame reads empty only with a steady cursor in it: outside, moved or missing, it's unknown", () => {
     const rule = "─".repeat(40);
     const screen = STYLED + ["Example:", rule, "❯ ", rule, "Working…"].join("\n");
     const outside = annotateInputBox(screen, cursorAt(0, 4), "claude-code");
@@ -128,7 +128,9 @@ describe("annotateInputBox: Claude Code", () => {
     expect(outside.evidence).toEqual(["no text in the input box", "cursor outside the input box"]);
     expect(annotateInputBox(screen, null, "claude-code", { cursorMoved: true })).toMatchObject({ status: "unknown", confidence: "unknown" });
     expect(annotateInputBox(screen, cursorAt(2, 2), "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
-    expect(annotateInputBox(screen, null, "claude-code")).toMatchObject({ status: "empty", confidence: "high" });
+    const missing = annotateInputBox(screen, null, "claude-code");
+    expect(missing).toMatchObject({ status: "unknown", confidence: "unknown", input: null });
+    expect(missing.evidence).toEqual(["no text in the input box", "cursor unavailable"]);
   });
 
   it("a prompt-looking line and a rule in output, with no input box, are not an input box", () => {
@@ -211,9 +213,11 @@ describe("annotateInputBox: Codex", () => {
 describe("rig capture reports the input box for agent seats only, leaving the pane text as it was", () => {
   afterEach(() => { vi.useRealTimers(); });
 
-  async function makeTransport(getPaneCursorPosition: (promptRow: number) => Promise<unknown>) {
+  async function makeTransport(getPaneCursorPosition: (promptRow: number) => Promise<unknown>, screenOverride?: string) {
     const { SessionTransport } = await import("../src/domain/session-transport.js");
-    const { screen, row } = withPrompt("claude-code-2.1.296/openrig-seat-accept-edits-idle.txt", "❯", FAINT("/compact"));
+    const prompt = withPrompt("claude-code-2.1.296/openrig-seat-accept-edits-idle.txt", "❯", FAINT("/compact"));
+    const screen = screenOverride ?? prompt.screen;
+    const row = prompt.row;
     const capturePaneContent = vi.fn(async (_s: string, lines: number, opts?: { escapeSequences?: boolean }) => (opts?.escapeSequences ? screen : `plain ${lines}`));
     const cursor = vi.fn(() => getPaneCursorPosition(row));
     const tmux = { probeSession: vi.fn(async () => ({ state: "present" })), capturePaneContent, getPaneCursorPosition: cursor };
@@ -259,6 +263,24 @@ describe("rig capture reports the input box for agent seats only, leaving the pa
     expect((settled as { inputBox: { hint: string } }).inputBox.hint).toContain("didn't finish");
   });
 
+  it("when one cursor read fails, an outside reading from the other is kept: an empty frame and faint text both read unknown", async () => {
+    const rule = "─".repeat(40);
+    const emptyFrame = STYLED + ["Example:", rule, "❯ ", rule, "Working…"].join("\n");
+    const firstOutsideThenFailed = () => {
+      let call = 0;
+      return async (row: number) => (call++ === 0 ? cursorAt(0, row + 2) : null);
+    };
+    const empty = await makeTransport(firstOutsideThenFailed(), emptyFrame);
+    const emptyBox = (await empty.make("claude-code").capture("seat@rig", { inputBox: true })) as { inputBox: { status: string; cursor: unknown; evidence: string[] } };
+    expect(emptyBox.inputBox).toMatchObject({ status: "unknown", cursor: null });
+    expect(emptyBox.inputBox.evidence).toEqual(["no text in the input box", "cursor outside the input box (the other cursor read failed)"]);
+    const faint = await makeTransport(firstOutsideThenFailed());
+    const faintBox = (await faint.make("claude-code").capture("seat@rig", { inputBox: true })) as { inputBox: { status: string; evidence: string[]; hint: string } };
+    expect(faintBox.inputBox).toMatchObject({ status: "unknown" });
+    expect(faintBox.inputBox.evidence[0]).toBe("cursor outside the input box (the other cursor read failed)");
+    expect(faintBox.inputBox.hint).not.toContain("not something the person typed");
+  });
+
   it("a failed input-box read leaves the capture as it was, with the input box unknown", async () => {
     const { make } = await makeTransport(async () => { throw new Error("tmux went away"); });
     expect(await make("claude-code").capture("seat@rig", { inputBox: true }))
@@ -288,7 +310,7 @@ describe("rig capture reports the input box for agent seats only, leaving the pa
     ]);
   });
 
-  it("a rig capture's input-box reads share one 1 s budget, so slow tmux can't push the fan-out past the client's timeout", async () => {
+  it("a rig capture's input-box reads share one 1 s budget, so slow tmux adds about 1 s to the fan-out, not 1 s per seat", async () => {
     vi.useFakeTimers();
     const { SessionTransport } = await import("../src/domain/session-transport.js");
     const { screen, row } = withPrompt("claude-code-2.1.296/openrig-seat-accept-edits-idle.txt", "❯", FAINT("/compact"));
