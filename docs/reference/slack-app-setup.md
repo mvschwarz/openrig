@@ -312,13 +312,23 @@ decisions, and posts its own replies.
 The daemon scans available top-level messages and replies broadcast with **Also send to
 channel** in the channels this machine owns: its default channel and its channel map's, except a
 channel it relays to another machine. It also scans replies in the threads it tracks in those
-channels: open threads, and threads closed within the last seven days. The hub scans after a
-Socket Mode connection and on its existing five-minute retry cadence. A machine the hub relays to
-scans every five minutes once the hub has relayed it an event, and its channels' coverage starts
-then; a machine nothing is relayed to never reads its channels' history. Broadcast replies keep their thread's routing. Recovered
-tasks say **Recovered after a gap** and show the original Slack posting time. A recovered thread
-reply lands as a reply in its thread, marked late, and never answers a decision, even one still
-open: the seat reads it and decides.
+channels whose root was posted, or which closed, within the last seven days. A root's age is its
+Slack posting time, so rebuilding the thread map doesn't make an old thread eligible again. An old
+thread that closed within seven days is scanned from its root, so this isn't a seven-day history
+limit. Missed replies in older open threads aren't caught up; live delivery is unchanged.
+
+The hub scans after a Socket Mode connection and on its existing five-minute retry cadence. A
+machine the hub relays to scans every five minutes, and recovers only the channels it owns that the
+hub has relayed it an event for. Each such channel's coverage starts when its first relayed event
+arrives, and is kept across restarts, so a restart needs no new event. A channel the machine no
+longer owns isn't scanned, and a machine nothing is relayed to never reads its channels' history.
+
+Broadcast replies keep their thread's routing. Recovered tasks say **Recovered after a gap** and
+show the original Slack posting time. A recovered thread reply lands as a reply in its thread,
+marked late, and never answers a decision, even one still open: the seat reads it and decides. A
+recovered broadcast reply does the same in every channel except the default channel of the machine
+that holds the Socket Mode connection, where it behaves as before; a relayed machine's default
+channel counts as newly covered. A dead-lettered recovered reply keeps that mark when it's retried.
 They use the same sender admission, routing, attachment handling, fixed identity
 and dead-letter path as live messages. A durable dead letter is custody of a
 failed delivery, not successful delivery.
@@ -330,7 +340,9 @@ when recovery first adopts it. **Older history is unknown.** A tracked thread's 
 at its root, so its first scan reads the whole thread; replies that already landed are recognized
 and not delivered twice. New live messages never move the recovery checkpoint. A
 partial scan resumes its saved interval; only an exhausted interval advances the
-covered boundary. Each new interval ends five seconds before the local clock to
+covered boundary. The checkpoint moves past a message once it landed, was a duplicate, was
+dead-lettered, was refused because its sender isn't admitted, or was skipped as a kind inbound
+doesn't take (a bot's post, an edit or join, an empty message). Each new interval ends five seconds before the local clock to
 allow recent messages to become visible; larger clock skew or visibility lag is
 not covered by that margin. A corrupt or unreadable checkpoint leaves recovery unavailable
 and preserves the existing file; live inbound continues.
@@ -346,8 +358,10 @@ Transport and server failures use a five-second backoff unless Slack supplies Re
 When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.
 Missing bot credentials, history scope, membership, retention limits and API
-failures appear as recovery limitations. No additional scope is required to keep
-live delivery working. Threads nobody tracks, threads closed more than seven days ago and other
+failures appear as recovery limitations. A tracked thread Slack can't find stays incomplete in
+status, with no further call, until its thread mapping changes; that isn't proof the thread was
+deleted. No additional scope is required to keep live delivery working. Threads nobody tracks,
+older open threads, threads closed more than seven days ago and other
 channels remain outside this recovery scope; global chronological order is not promised. This
 change does not replay intervals already checkpointed before broadcast-reply recovery was added.
 
@@ -355,7 +369,7 @@ change does not replay intervals already checkpointed before broadcast-reply rec
 snapshot: socket state/generation, last event, recovery interval/state/reason for each
 channel, a thread line (tracked, scanned, waiting and why any are backing off or incomplete),
 retry time and accepted/dead-lettered recovery counts since the connector last
-started (they reset when it is enabled or disabled, and when the daemon restarts).
+started, including threads that have since left the window (they reset when it is enabled or disabled, and when the daemon restarts).
 It also reports the durable dead-letter backlog: the retained records for inbound messages,
 reactions and click answers that await retry, counted from both dead-letter files so the number
 survives a restart, and shown as unknown with a reason (and no count) when a file cannot be read.
