@@ -453,6 +453,11 @@ export interface QueueListOptions {
   activeOnly?: boolean;
 }
 
+/** The message a `--wake-after` park timer carries when its owner gives none. */
+export function defaultParkWakeMessage(qitemId: string): string {
+  return `Wake timer fired for parked qitem ${qitemId}. Resume the recorded continuation and update the row.`;
+}
+
 export class QueueRepositoryError extends Error {
   readonly code: string;
   readonly meta: Record<string, unknown> | undefined;
@@ -2875,7 +2880,7 @@ export class QueueRepository {
           "policy: periodic-reminder",
           "target:",
           `  session: ${JSON.stringify(qitem.destinationSession)}`,
-          `message: ${JSON.stringify(input.wakeMessage ?? `Wake timer fired for parked qitem ${qitem.qitemId}. Resume the recorded continuation and update the row.`)}`,
+          `message: ${JSON.stringify(input.wakeMessage ?? defaultParkWakeMessage(qitem.qitemId))}`,
           "",
         ].join("\n"),
         targetSession: qitem.destinationSession,
@@ -3207,6 +3212,22 @@ export class QueueRepository {
    * queue-domain door. */
   listRecentTransitions(scope: RecentQueueTransitionScope | string, limit = 20): ReturnType<QueueTransitionLog["listRecent"]> {
     return this.transitionLog.listRecent(typeof scope === "string" ? { kind: "rig", rig: scope } : scope, limit);
+  }
+
+  /** The parked row an ordinary due park timer reminds about, when its reminder may share one message with other
+   *  reminders due for the same seat in the same scheduler pass: a one-shot `--wake-after` timer serving exactly one
+   *  live parked row, carrying its default message. Null keeps the reminder's own send: a custom message, a shared
+   *  or attached watchdog, a repeating wait and a provider-limit timer each deliver as before. */
+  parkReminderDigestEntry(jobId: string, message: string): { qitemId: string; summary: string | null } | null {
+    const generated = this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId);
+    const bound = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
+    if (generated.length !== 1 || bound.length !== 1 || bound[0]!.qitemId !== generated[0]!.qitemId) return null;
+    const row = this.getById(generated[0]!.qitemId);
+    if (!row || row.state !== "blocked" || row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG)) return null;
+    const job = (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).getById(jobId);
+    if (!job || job.policy !== "periodic-reminder" || isQueueWait(job.specYaml)) return null;
+    if (message !== defaultParkWakeMessage(row.qitemId)) return null;
+    return { qitemId: row.qitemId, summary: row.summary ?? null };
   }
 
   /** Called by the watchdog engine after the delivery attempt is durably

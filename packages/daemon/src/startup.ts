@@ -2119,6 +2119,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       onWakeAttempt: ({ jobId, deliveryStatus }) => {
         queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus);
       },
+      // Due parked-row reminders for one seat in one scheduler pass go as one message.
+      resolveDigestEntry: ({ jobId, message }) => queueRepoInstance.parkReminderDigestEntry(jobId, message),
       // PL-004 Phase D: register workflow-keepalive policy alongside
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables
