@@ -10,6 +10,7 @@ import { createDaemon } from "../src/startup.js";
 import type { AppDeps } from "../src/server.js";
 import type { CmuxTransportFactory } from "../src/terminal/cmux-transport.js";
 import type { ExecFn } from "../src/domain/tmux-adapter.js";
+import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 
 let db: Database.Database;
 let deps: AppDeps;
@@ -17,7 +18,7 @@ let scratch: string;
 const savedEnv: Record<string, string | undefined> = {};
 const sends: Array<{ session: string; text: string }> = [];
 /** What the stubbed transport answers next. */
-let reply: () => Record<string, unknown> = () => ({ ok: true, verified: true });
+let reply: () => Record<string, unknown> | Promise<Record<string, unknown>> = () => ({ ok: true, verified: true });
 
 beforeAll(async () => {
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "park-digest-"));
@@ -34,7 +35,7 @@ beforeAll(async () => {
   deps = result.deps;
   vi.spyOn(deps.sessionTransport, "send").mockImplementation(async (session: string, text: string) => {
     sends.push({ session, text });
-    return { sessionName: session, ...reply() } as never;
+    return { sessionName: session, ...(await reply()) } as never;
   });
 }, 60000);
 
@@ -105,7 +106,8 @@ describe("due parked-row reminders for one seat", () => {
         wakePhase: "fired", rowState: "blocked",
       });
       const [history] = deps.watchdogHistoryLog!.listForJob(r.jobId, 1);
-      expect(history!.evaluationNotes).toMatchObject({ digestMemberJobIds: rows.map((x) => x.jobId) });
+      expect(history!.evaluationNotes).toMatchObject({ digestSize: 3 });
+      expect(history!.deliveryMessage).toMatch(new RegExp(`^- ${r.qitemId} — `));
     }
     // Nothing is sent again on the next pass.
     await deps.watchdogScheduler!.runTickNow();
@@ -200,5 +202,110 @@ describe("due parked-row reminders for one seat", () => {
     // The one attempt is never replayed whole by the next pass.
     await deps.watchdogScheduler!.runTickNow();
     expect(sends.filter((s) => s.session === owner)).toHaveLength(1);
+  });
+
+  it("never sends an attempted reminder again after its digest's accounting was cut short, and still wakes a new one", async () => {
+    const owner = seat();
+    const [a, b, c] = [await park(owner, "a"), await park(owner, "b"), await park(owner, "c")];
+    due(a!.jobId);
+    due(b!.jobId);
+    // The send goes out but its outcome never returns: the daemon stops with A and B unaccounted.
+    let abandon!: () => void;
+    reply = () => new Promise((done) => { abandon = () => done({ ok: false, error: "the process ended" }); });
+    const interrupted = new WatchdogScheduler({ jobsRepo: deps.watchdogJobsRepo!, policyEngine: deps.watchdogPolicyEngine! });
+    const lost = interrupted.runTickNow();
+    await vi.waitFor(() => expect(sends.filter((s) => s.session === owner)).toHaveLength(1));
+    expect(sends[0]!.text).toContain(a!.qitemId);
+    // The store is reopened by a fresh daemon, where C has fallen due as well.
+    const again = await createDaemon({ cmuxFactory: async () => { throw Object.assign(new Error("no socket"), { code: "ENOENT" }); },
+      tmuxExec: async () => "", dbPath: process.env.OPENRIG_DB! });
+    const later: Array<{ session: string; text: string }> = [];
+    vi.spyOn(again.deps.sessionTransport, "send").mockImplementation(async (session: string, text: string) => {
+      later.push({ session, text });
+      return { sessionName: session, ok: true, verified: true } as never;
+    });
+    due(c!.jobId);
+    await again.deps.watchdogScheduler!.runTickNow();
+    // Only C is sent, alone; A and B are accounted from the earlier attempt, never sent again.
+    expect(later).toEqual([{ session: owner, text: `[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${c!.jobId}]\n`
+      + `Wake timer fired for parked qitem ${c!.qitemId}. Resume the recorded continuation and update the row.` }]);
+    for (const r of [a!, b!]) {
+      expect(again.deps.watchdogJobsRepo!.getByIdOrThrow(r.jobId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once" });
+      expect(again.deps.watchdogHistoryLog!.listForJob(r.jobId, 1)[0]).toMatchObject({ deliveryStatus: "failed" });
+      expect(String(again.deps.watchdogHistoryLog!.listForJob(r.jobId, 1)[0]!.evaluationNotes?.["deliveryReason"])).toMatch(/outcome is unknown/);
+    }
+    again.deps.watchdogScheduler?.stop?.();
+    again.db.close();
+    // Let the first process's abandoned pass end, so it holds nothing in this file's later tests.
+    abandon();
+    await lost;
+  });
+
+  it("accounts a member whose accounting failed after the send from that attempt, without a second send", async () => {
+    const owner = seat();
+    const [a, b] = [await park(owner, "a"), await park(owner, "b")];
+    due(a.jobId);
+    due(b.jobId);
+    const original = deps.queueRepo.recordWatchdogWakeAttempt.bind(deps.queueRepo);
+    const spy = vi.spyOn(deps.queueRepo, "recordWatchdogWakeAttempt").mockImplementationOnce(() => { throw new Error("accounting interrupted"); });
+    await deps.watchdogScheduler!.runTickNow();
+    spy.mockImplementation(original);
+    expect(sends.filter((s) => s.session === owner)).toHaveLength(1);
+    // B was never accounted, so it is still due; the next pass accounts it from the digest and sends nothing.
+    expect(deps.watchdogJobsRepo!.getByIdOrThrow(b.jobId).state).toBe("active");
+    due(b.jobId);
+    await deps.watchdogScheduler!.runTickNow();
+    expect(sends.filter((s) => s.session === owner)).toHaveLength(1);
+    expect(disposition(b.jobId, b.qitemId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once", deliveryStatus: "ok", wakePhase: "fired" });
+  });
+
+  it("re-checks eligibility at the send: a timer another row attached to meanwhile keeps its ordinary send", async () => {
+    const owner = seat();
+    const [a, b, c] = [await park(owner, "a"), await park(owner, "b"), await park(owner, "c")];
+    for (const r of [a, b, c]) due(r.jobId);
+    const engine = deps.watchdogPolicyEngine!;
+    const flush = engine.deliverHeldReminders.bind(engine);
+    let attached = "";
+    vi.spyOn(engine, "deliverHeldReminders").mockImplementationOnce(async (...args) => {
+      // Between the hold and the send, another parked row attaches to A's watchdog.
+      const other = await deps.queueRepo.create({ sourceSession: "orch@rig", destinationSession: owner, body: "attached", nudge: false } as never) as unknown as { qitemId: string };
+      deps.queueRepo.update({ qitemId: other.qitemId, actorSession: owner, state: "blocked", blockedOn: "external:wait",
+        transitionNote: "attach", wakeWatchdogId: a.jobId } as never);
+      attached = other.qitemId;
+      return flush(...args);
+    });
+    await deps.watchdogScheduler!.runTickNow();
+    const texts = sends.filter((s) => s.session === owner).map((s) => s.text);
+    expect(texts).toHaveLength(2);
+    const digest = texts.find((t) => t.includes("parked rows"))!;
+    expect(digest).toContain(b.qitemId);
+    expect(digest).toContain(c.qitemId);
+    expect(digest).not.toContain(a.qitemId);
+    expect(texts).toContain(`[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${a.jobId}]\n`
+      + `Wake timer fired for parked qitem ${a.qitemId}. Resume the recorded continuation and update the row.`);
+    expect(deps.queueRepo.getParkWakeStatus(attached)).toMatchObject({ phase: "fired" });
+  });
+
+  it("stops between seats at shutdown: the send in flight finishes and is accounted, and later seats stay due", async () => {
+    const [first, second] = [seat(), seat()];
+    const rows = [await park(first, "f1"), await park(first, "f2"), await park(second, "s1"), await park(second, "s2")];
+    for (const r of rows) due(r.jobId);
+    const scheduler = new WatchdogScheduler({ jobsRepo: deps.watchdogJobsRepo!, policyEngine: deps.watchdogPolicyEngine!,
+      setTimer: () => ({}) as NodeJS.Timeout, clearTimer: () => {} });
+    scheduler.start();
+    let release!: () => void;
+    reply = () => new Promise((done) => { release = () => done({ ok: true, verified: true }); });
+    const pass = scheduler.runTickNow();
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    const stopping = scheduler.stop();
+    release();
+    await pass;
+    await stopping;
+    expect(sends.map((s) => s.session)).toEqual([first]);
+    for (const r of rows.slice(0, 2)) expect(deps.watchdogJobsRepo!.getByIdOrThrow(r.jobId).state).toBe("terminal");
+    for (const r of rows.slice(2)) {
+      expect(deps.watchdogJobsRepo!.getByIdOrThrow(r.jobId).state).toBe("active");
+      expect(deps.watchdogHistoryLog!.listForJob(r.jobId, 1)).toEqual([]);
+    }
   });
 });

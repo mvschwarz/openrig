@@ -145,7 +145,7 @@ export class WatchdogScheduler {
       }
     }
     if (this.shuttingDown) return;
-    await this.policyEngine.deliverHeldReminders(pass, (err) => this.onTickError(err));
+    await this.policyEngine.deliverHeldReminders(pass, (err) => this.onTickError(err), () => this.shuttingDown);
   }
 }
 
