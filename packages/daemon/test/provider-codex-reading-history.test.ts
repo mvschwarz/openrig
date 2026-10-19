@@ -230,3 +230,37 @@ describe("a malformed stored row is skipped on its own, never wiping the rest", 
     expect(store.latest(B)!.observedAt).toBe(at(5));
   });
 });
+
+describe("projection cost and restart guidance", () => {
+  it("the last exhaustion is held in memory: projecting reads no store, and the value is unchanged across a restart", async () => {
+    const d = db();
+    let lookups = 0;
+    const counting = () => {
+      const store = new ProviderAccountReadingsStore(d);
+      const lastExhaustion = store.lastExhaustion.bind(store);
+      store.lastExhaustion = (key: string) => { lookups += 1; return lastExhaustion(key); };
+      return store;
+    };
+    let n = 0;
+    const answers = [read(T0, { primaryUsed: 100, primaryResets: epoch(at(300)) })];
+    const live = new CodexUsageWindows({ now: () => at(1), read: async () => answers[Math.min(n++, 0)]!, store: counting() });
+    await live.refresh();
+    const before = live.project(at(1))[0]!.lastObservedExhausted;
+    lookups = 0;
+    for (let i = 0; i < 5; i++) live.project(at(2 + i));
+    expect(lookups).toBe(0);
+    const restarted = new CodexUsageWindows({ now: () => at(10), read: async () => answers[0]!, store: counting() });
+    lookups = 0;
+    for (let i = 0; i < 5; i++) restarted.project(at(10 + i));
+    expect(lookups).toBe(0);
+    expect(before).toEqual({ at: T0, window: "primary", evidence: "at the limit" });
+    expect(restarted.project(at(10))[0]!.lastObservedExhausted).toEqual(before);
+  });
+
+  it("a retained row's windows say how to get a current reading", async () => {
+    const d = db();
+    await windows(d, [read(T0, { primaryUsed: 40 })]).w.refresh();
+    const [row] = windows(d, [], at(10)).w.project(at(10));
+    for (const w of row!.windows) expect(w.freshnessReason).toContain("refresh with rig provider status --refresh");
+  });
+});
