@@ -227,7 +227,8 @@ integrity:
 By default, create refuses `.claude/.credentials.json`, `.codex/auth.json` and `.pi/agent/auth.json`
 at the root or nested anywhere in selected bundle content, including agents and an explicitly carried project.
 The author check reports them too. Messages name paths, never contents, and explain both remedies:
-remove the file from the agent folder or carried project and build again, or deliberately recreate with
+remove the file from the agent folder or carried project and build again; or, only if recipients should have this
+login (for example, your own internal test bundle) and its owner agrees, recreate with
 `rig bundle create <spec> -o <archive.rigbundle> --include-login-files`.
 Anyone with that archive could read the included login files.
 
@@ -311,7 +312,7 @@ rig bundle create <spec-path-or-github-link> -o <output.rigbundle> [--rig-root <
 | `--min-cli-version`, `--min-daemon-version` | no | — | The oldest OpenRig CLI or daemon that may install the bundle, checked on install. For a link they override the author's `bundle.yaml` minimums. |
 | `--notes <text>` | no | — | Notes stored in the manifest's provenance. |
 | `--include-packages <refs...>` | no | all from the spec | Legacy (schema 1) specs only: the package refs to include. |
-| `--include-login-files` | no | off | Deliberately include contained harness login files and record their exact archive-relative paths. Create and consumers show a credential-bearing notice. Does not exempt other sensitive files. |
+| `--include-login-files` | no | off | Only if recipients should have these logins and their owner agrees (for example, an internal test bundle), include them and record their exact archive-relative paths. Create and consumers show a credential-bearing notice. Does not exempt other sensitive files. |
 | `--allow-drift` | no | off | Build a spec that differs from the running rig of the same name. Without it, create refuses; with it, the difference is written into the manifest's provenance notes. |
 | `--json` | no | off | Machine-readable output. |
 

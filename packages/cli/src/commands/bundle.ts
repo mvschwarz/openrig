@@ -78,7 +78,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .requiredOption("-o, --output <path>", "Output path for .rigbundle")
     .option("--name <name>", "Bundle name (default: the rig's name in rig.yaml)")
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
-    .option("--include-login-files", "Deliberately include harness login files and record their exact paths in the manifest; anyone with the bundle could read them")
+    .option("--include-login-files", "Include harness login files only if recipients should have them and their owner agrees (for example, an internal test bundle); record exact paths in the manifest")
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--context-pack <dir>", "Carry the context pack in <dir> (its manifest.yaml and declared files), which may sit outside the rig folder; repeatable", (dir: string, dirs: string[]) => [...dirs, dir], [] as string[])

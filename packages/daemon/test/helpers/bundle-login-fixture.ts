@@ -66,5 +66,8 @@ export function expectLoginMessage(message: string, file: string): void {
   expect(message).toMatch(/carried project/i);
   expect(message).toMatch(/build.*again/i);
   expect(message).toContain("--include-login-files");
+  expect(message).toContain("only if recipients should have this login");
+  expect(message).toContain("internal test bundle");
+  expect(message).toContain("its owner agrees");
   expect(message).not.toContain(MARKER);
 }

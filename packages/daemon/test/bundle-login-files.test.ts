@@ -112,7 +112,7 @@ describe("known harness login paths in selected bundle content", () => {
     const plan = await installed.json(); for (const file of LOGIN_FILES) expectLoginMessage(plan.warnings.join("\n"), file);
   });
 
-  it.each([null, true, "*", ["*"], ["agents/*/.codex/auth.json"], ["agents/worker/.codex"], ["../.codex/auth.json"], [".codex/auth.json", ".codex/auth.json"]])(
+  it.each([null, true, "*", ["*"], ["agents/*/.codex/auth.json"], ["agents/worker/.codex"], ["../.codex/auth.json"], ["/.codex/auth.json"], [".codex/auth.json", ".codex/auth.json"]])(
     "rejects a malformed or non-exact login record: %j", async record => {
       const f = await existingArchive(root, undefined, record);
       const result = verifyIntegrity(f.staging, { integrity: f.integrity, includedLoginFiles: record } as never, integrityFs);
@@ -121,6 +121,15 @@ describe("known harness login paths in selected bundle content", () => {
       const inspected = await (await post("inspect", { bundlePath: f.archive })).json();
       expect(inspected.error || inspected.integrityResult?.errors.join("\n")).toMatch(/included_login_files/);
     });
+
+  it.each([1, 2] as const)("v%s inspect keeps a malformed login record diagnostic", async schemaVersion => {
+    const f = await existingArchive(root, undefined, true, schemaVersion);
+    const response = await post("inspect", { bundlePath: f.archive });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.digestValid).toBe(true);
+    expect(body.error).toMatch(/included_login_files/);
+  });
 
   it("an additional unrecorded login file still fails every consumer", async () => {
     const paths = LOGIN_FILES.map(file => `agents/worker/${file}`);

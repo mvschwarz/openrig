@@ -37,7 +37,7 @@ export function isHarnessLoginPath(relativePath: string): boolean {
 }
 
 export function harnessLoginMessage(relativePath: string, included = false): string {
-  return `${included ? "Credential-bearing bundle includes" : "Bundle refuses"} harness login file '${relativePath}': anyone with the bundle could read this login file. Remove it from the agent folder or carried project and build the bundle again, or deliberately recreate with --include-login-files. ${included ? "The unsigned manifest records the producer's declaration, not trust or receiver approval." : "No file contents are shown."}`;
+  return `${included ? "Credential-bearing bundle includes" : "Bundle refuses"} harness login file '${relativePath}': anyone with the bundle could read this login file. Remove it from the agent folder or carried project and build the bundle again, or, only if recipients should have this login (for example, your own internal test bundle) and its owner agrees, recreate with --include-login-files. ${included ? "The unsigned manifest records the producer's declaration, not trust or receiver approval." : "No file contents are shown."}`;
 }
 
 function includedLoginPaths(raw: unknown): Set<string> {

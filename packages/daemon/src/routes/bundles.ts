@@ -1089,7 +1089,13 @@ bundleRoutes.post("/inspect", async (c) => {
       return c.json({ ...identity, manifest: podManifest, digestValid, integrityResult, behaviour }, 200);
     }
 
-    const manifest = normalizeBundleManifest(parseBundleManifest(manifestYaml));
+    let manifest: ReturnType<typeof normalizeBundleManifest>;
+    try {
+      manifest = normalizeBundleManifest(parseBundleManifest(manifestYaml));
+    } catch (err) {
+      // Like v2, malformed v1 manifests are inspect diagnostics, not server failures.
+      return c.json({ error: `Invalid v1 manifest: ${(err as Error).message}`, digestValid }, 200);
+    }
     const integrityResult = manifest.integrity
       ? verifyIntegrity(tmpDir, manifest, integrityFsOps())
       : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
