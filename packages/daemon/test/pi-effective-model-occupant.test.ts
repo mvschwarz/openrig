@@ -102,10 +102,10 @@ function fixture(lines: string[], overrides: Partial<Omit<Fixture, "sessionsDir"
 
 /** The managed runner command as ps shows it, built by the launch builder itself so the reader's
  *  expected argument order cannot drift from it: argv joined by spaces, shell quoting removed. */
-function runnerCommand(f: Pick<Fixture, "entryPath" | "stateRoot">, launchId: string, opts: { node?: string; entryPath?: string; stateRoot?: string } = {}): string {
+function runnerCommand(f: Pick<Fixture, "entryPath" | "stateRoot">, launchId: string, opts: { node?: string; entryPath?: string; stateRoot?: string; thinking?: string } = {}): string {
   const built = buildPiRunnerCommand({
     runtime: "pi", runnerEntryPath: opts.entryPath ?? f.entryPath, sessionName: SESSION, stateRoot: opts.stateRoot ?? f.stateRoot,
-    cwd: "/p", trust: "approve", model: PIN, launchId,
+    cwd: "/p", trust: "approve", model: PIN, launchId, thinking: opts.thinking,
   });
   const ps = built.replace(/'([^']*)'/g, "$1");
   return opts.node ? ps.replace(/^node /, `${opts.node} `) : ps;
@@ -402,6 +402,14 @@ describe("Pi runner arguments and pane process must be unambiguous", () => {
     const command = `${runnerCommand(managed, "L2").replace(`--model ${PIN}`, `--model ${PIN} --thinking high`)}`;
     expect(command).toContain("--thinking high");
     expect((await pass(monitorFor(withRunner(command)))).fired).toHaveLength(1);
+  });
+
+  it("an effort shaped like an identity flag is never sent, so the runner still verifies", async () => {
+    for (const thinking of ["--cwd", "high --cwd", "--launch-id", "--runtime"]) {
+      const command = runnerCommand(managed, "L2", { thinking });
+      expect(command).not.toContain("--thinking");
+      expect((await pass(monitorFor(withRunner(command)))).fired).toHaveLength(1);
+    }
   });
 
   it("a pane whose own process is not a shell stays pending, with the exact runner under it", async () => {

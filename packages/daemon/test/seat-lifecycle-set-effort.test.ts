@@ -314,6 +314,21 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     expect((report as { summary: string }).summary).not.toContain("NOT VERIFIED");
   });
 
+  it("a saved value the launch guard leaves out is reported as not sent, with the reason", async () => {
+    const { sessionName } = piSeat("pi", "--cwd");
+    runner(null, [turn(5, "medium")]);
+    const report = await service.effortReport(sessionName);
+    expect(report).toMatchObject({ saved: { effective: "--cwd" }, emitted: { state: "observed", value: null, matchesSaved: true } });
+    const summary = (report as { summary: string }).summary;
+    expect(summary).toContain("Launch sent: no flag. The saved value isn't sent: it doesn't pass the check set-effort uses");
+    expect(summary).not.toContain("it applies at the seat's next managed continuation");
+    // A launch from before the value was saved still carries its own flag; the saved value still isn't sent.
+    runner("high", [turn(5, "high")]);
+    const older = (await service.effortReport(sessionName)) as { summary: string };
+    expect(older.summary).toContain("Launch sent: high. The saved value isn't sent");
+    expect(older.summary).not.toContain("it applies at the seat's next managed continuation");
+  });
+
   it("a Pi that doesn't record the level (0.87.1) is NOT VERIFIED and says why", async () => {
     const { sessionName } = piSeat("pi", "high");
     runner("high", [turn(5)]);

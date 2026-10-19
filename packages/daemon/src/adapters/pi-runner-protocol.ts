@@ -268,6 +268,16 @@ export interface PiRunnerLaunchOpts {
   launchId: string;
 }
 
+/** The shape `rig seat set-effort` accepts for an effort level. */
+export const EFFORT_SHAPE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+
+/** The `--thinking` value a Pi launch sends: only one of set-effort's shape, so `ps` never shows it
+ *  as a flag or splits it on whitespace (the Pi identity check reads the runner's command line). */
+export function piThinkingValue(thinking: string | null | undefined): string | undefined {
+  const value = thinking?.trim();
+  return value && EFFORT_SHAPE.test(value) ? value : undefined;
+}
+
 /** The command typed into the seat's tmux pane. The runner owns everything
  *  past this boundary (pi spawn, env allowlist, RPC, mirror, sidecar). */
 export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
@@ -285,8 +295,9 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
-  if (opts.thinking?.trim() && opts.runtime !== "omp") {
-    parts.push("--thinking", shellQuote(opts.thinking.trim()));
+  const thinking = opts.runtime === "omp" ? undefined : piThinkingValue(opts.thinking);
+  if (thinking) {
+    parts.push("--thinking", shellQuote(thinking));
   }
   if (opts.sessionFile) {
     parts.push("--session", shellQuote(opts.sessionFile));
@@ -308,7 +319,7 @@ export function buildPiChildArgs(opts: {
   sessionsDir: string;
   sessionName: string;
   model?: string;
-  /** Pi only: forwarded as `--thinking`; Pi warns on a level it does not know. */
+  /** Pi only: forwarded as `--thinking` when it has set-effort's shape; Pi warns on a level it does not know. */
   thinking?: string;
   trust: "approve" | "no-approve";
   sessionFile?: string;
@@ -325,8 +336,9 @@ export function buildPiChildArgs(opts: {
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());
   }
-  if (opts.thinking?.trim() && opts.runtime !== "omp") {
-    args.push("--thinking", opts.thinking.trim());
+  const thinking = opts.runtime === "omp" ? undefined : piThinkingValue(opts.thinking);
+  if (thinking) {
+    args.push("--thinking", thinking);
   }
   if (opts.sessionFile) {
     // Exact file resume — NEVER --resume (interactive picker; forbidden in

@@ -6,6 +6,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
@@ -456,7 +457,7 @@ export class SeatLifecycleService {
     if (requested !== null) {
       if (!requested) return { ok: false, code: "missing_effort", message: "An effort level is required (--effort <level>), or pass --clear." };
       // Levels are the runtime's own (they differ by model and client), so only the shape is checked here.
-      if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(requested)) {
+      if (!EFFORT_SHAPE.test(requested)) {
         return { ok: false, code: "invalid_effort", message: `"${requested}" isn't an effort level: use the runtime's level name, such as low, medium or high.` };
       }
     }
@@ -587,7 +588,8 @@ export class SeatLifecycleService {
     }
     const emitted: EffortReport["emitted"] = value !== null && after !== undefined && !after.startsWith("--")
       ? { state: "unknown", detail: "The launch command's --thinking value can't be read unambiguously (it contains whitespace)." }
-      : { state: "observed", value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === saved.effective };
+      // Compared with what the launch guard sends for the saved value, not the saved value itself.
+      : { state: "observed", value, pid: selection.pid, startedAt: selection.startedAt, matchesSaved: value === (piThinkingValue(saved.effective) ?? null) };
     const read = selection.observation;
     if (!read.ok) return { emitted, observed: { state: "not_verified", detail: `No Pi turn from this launch can be read: ${read.reason}.` } };
     if (!read.thinkingLevel) {
@@ -1966,7 +1968,9 @@ function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"]
     return `Saved: ${savedText}. Launch: unknown (${emitted.detail}) Native effort: ${native}.`;
   }
   const launch = emitted.value ?? "no flag";
-  const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
+  // A Pi saved value the launch guard leaves out never applies, so it isn't reported as pending.
+  const launchNote = runtime === "pi" && saved.effective && !piThinkingValue(saved.effective) ? " The saved value isn't sent: it doesn't pass the check set-effort uses (a letter, then up to 31 letters, digits, - or _)."
+    : emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
   if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;
   const sent = observed.matchesEmitted !== false ? observed.value
     : runtime === "pi" ? `${observed.value}, not the ${launch} sent at launch (Pi caps a level the model doesn't offer, ignores one it doesn't know, and the level can change inside the session)`

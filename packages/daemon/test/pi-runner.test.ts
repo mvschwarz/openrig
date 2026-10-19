@@ -603,14 +603,13 @@ describe("parseRunnerArgs", () => {
     expect(parseRunnerArgs([...base, "--approve"]).thinking).toBeUndefined();
   });
 
-  it("a --thinking VALUE that looks like a control flag is a value, not a flag (builder→parser)", () => {
+  it("a --thinking VALUE that looks like a control flag is a value, not a flag", () => {
+    const parsed = parseRunnerArgs([...base, "--approve", "--thinking", "--approval-mode"]);
+    expect(parsed.thinking).toBe("--approval-mode");
+    expect(parsed.trust).toBe("approve");
     const cmdBase = { runnerEntryPath: "/r.js", sessionName: SESSION, stateRoot: "/sr", cwd: "/work", trust: "approve" as const, launchId: "L1", runtime: "pi" as const };
-    for (const thinking of ["--approval-mode", "none"]) {
-      const cmd = buildPiRunnerCommand({ ...cmdBase, thinking });
-      const parsed = parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, "")));
-      expect(parsed.thinking).toBe(thinking);
-      expect(parsed.trust).toBe("approve");
-    }
+    const cmd = buildPiRunnerCommand({ ...cmdBase, thinking: "none" });
+    expect(parseRunnerArgs(cmd.split(" ").slice(2).map((w) => w.replace(/^'|'$/g, ""))).thinking).toBe("none");
   });
 
   it("still refuses genuinely incompatible trust control flags", () => {
@@ -639,6 +638,17 @@ describe("--thinking in the runner command and the pi child argv", () => {
     }
     expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", thinking: "high" })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "omp" }));
     expect(buildPiRunnerCommand({ ...cmdBase, runtime: "omp", thinking: "high" })).not.toContain("--thinking");
+  });
+
+  it("only a value of set-effort's shape is sent: Pi's levels and unknown words go through, flag-shaped and spaced values are left out", () => {
+    for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max", "none"]) {
+      expect(buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking })).toContain(`--thinking '${thinking}'`);
+      expect(buildPiChildArgs({ ...childBase, thinking })).toEqual(expect.arrayContaining(["--thinking", thinking]));
+    }
+    for (const thinking of ["--cwd", "very high", "x".repeat(33)]) {
+      expect(buildPiRunnerCommand({ ...cmdBase, runtime: "pi", thinking })).toBe(buildPiRunnerCommand({ ...cmdBase, runtime: "pi" }));
+      expect(buildPiChildArgs({ ...childBase, thinking })).not.toContain("--thinking");
+    }
   });
 
   it("a suffixed model passes through unchanged next to --thinking", () => {
