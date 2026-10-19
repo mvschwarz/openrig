@@ -14,7 +14,7 @@
  * suite, not the pure unit tests.
  */
 
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, cpSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -98,6 +98,9 @@ export interface QueuePrecondition {
   body?: string;
   /** Claim the created qitem so it lands in-progress + owned by `destination`. */
   claim?: boolean;
+  state?: "blocked";
+  blockedOn?: string;
+  tags?: string[];
 }
 
 /** Extract + shape-check the `env.queue` preconditions (loud on a malformed entry). */
@@ -114,6 +117,9 @@ export function extractQueuePreconditions(env: Record<string, unknown> | undefin
         throw new ScenarioPreconditionError(`env.queue[${i}].${key} is required (non-empty string)`);
       }
     }
+    if (e.state !== undefined && e.state !== "blocked") throw new ScenarioPreconditionError("queue state fixture supports blocked only (use claim for in-progress)");
+    if (e.state === "blocked" && (e.claim === true || typeof e.blocked_on !== "string" || !e.blocked_on)) throw new ScenarioPreconditionError("blocked fixture needs blocked_on and cannot also claim");
+    if (e.tags !== undefined && (!Array.isArray(e.tags) || !e.tags.every(t => typeof t === "string" && t))) throw new ScenarioPreconditionError("queue tags fixture must be nonempty strings");
     return {
       id: e.id as string,
       source: e.source as string,
@@ -121,6 +127,8 @@ export function extractQueuePreconditions(env: Record<string, unknown> | undefin
       summary: typeof e.summary === "string" ? e.summary : undefined,
       body: typeof e.body === "string" ? e.body : undefined,
       claim: e.claim === true,
+      ...(e.state === "blocked" ? { state: "blocked" as const, blockedOn: typeof e.blocked_on === "string" ? e.blocked_on : undefined } : {}),
+      ...(Array.isArray(e.tags) && e.tags.every(t => typeof t === "string") ? { tags: e.tags as string[] } : {}),
     };
   });
 }
@@ -155,11 +163,18 @@ export async function applyQueuePreconditions(
   for (const p of preconditions) {
     const create = await runRig(
       ["queue", "create", "--id", p.id, "--destination", p.destination,
+        ...(p.tags?.length ? ["--tags", p.tags.join(",")] : []),
         "--summary", p.summary ?? p.id, "--body", p.body ?? `51-02 precondition baton ${p.id}`, "--json"],
       { ...ctx.readEnv, OPENRIG_SESSION_NAME: p.source }, ctx.rigBin,
     );
     if (create.code !== 0) {
       throw new ScenarioPreconditionError(`queue create ${p.id} (exit ${create.code}): ${create.stderr || create.stdout}`);
+    }
+    if (p.state === "blocked") {
+      if (!p.blockedOn) throw new ScenarioPreconditionError("blocked queue fixture requires blocked_on");
+      const block = await runRig(["queue", "update", p.id, "--state", "blocked", "--blocked-on", p.blockedOn,
+        "--note", "Scenario parked typed baton", "--json"], { ...ctx.readEnv, OPENRIG_SESSION_NAME: p.destination }, ctx.rigBin);
+      if (block.code !== 0) throw new ScenarioPreconditionError(`queue block ${p.id}: ${block.stderr || block.stdout}`);
     }
     if (p.claim) {
       const claim = await runRig(
@@ -216,7 +231,7 @@ export interface RunScenarioFileOptions {
   /** Base environment for the hermetic scaffold (HOME/PATH/TERM). */
   baseEnv?: Record<string, string | undefined>;
   /** Overrides forwarded to buildRealDeps, including an explicit test fault controller. */
-  deps?: Partial<Pick<RealDepsOptions, "now" | "sleep" | "appendRecord" | "defaults" | "normalizer" | "seedRegression">>;
+  deps?: Partial<Pick<RealDepsOptions, "now" | "sleep" | "appendRecord" | "defaults" | "normalizer" | "seedRegression" | "refocusEnv" | "onHookContext">>;
   /**
    * 51-04 opt-in: how the scenario-local daemon is stood up. ABSENT => host-mode,
    * byte-identical to pre-51-04 (`defaultHostDaemon` = spawnScenarioDaemon with rigBin).
@@ -326,6 +341,23 @@ export async function runScenarioFile(
     ...(opts.baseEnv ? { baseEnv: opts.baseEnv } : {}),
     ...(opts.injectClockNow !== undefined ? { injectClockNow: opts.injectClockNow } : {}),
   });
+  if (loaded.loaded.scenario.env?.work_fixture !== undefined && (typeof loaded.loaded.scenario.env.work_fixture !== "string"
+    || !loaded.loaded.scenario.env.work_fixture || loaded.loaded.scenario.env.work_fixture.startsWith("/")
+    || loaded.loaded.scenario.env.work_fixture.split(/[\\/]/).includes(".."))) {
+    scaffold.cleanup();
+    throw new ScenarioPreconditionError("work_fixture must be a nonempty relative fixture directory without traversal");
+  }
+  if (typeof loaded.loaded.scenario.env?.work_fixture === "string") {
+    const workspace = join(scaffold.openrigHome, "workspace");
+    cpSync(resolve(dirname(path), loaded.loaded.scenario.env.work_fixture), workspace, { recursive: true });
+    scaffold.env.OPENRIG_WORKSPACE_ROOT = workspace;
+    // Forward to the actual selected CLI; no canned queue answers.
+    const bin = join(scaffold.root, "hook-bin"); mkdirSync(bin);
+    writeFileSync(join(bin, "rig"), `#!/usr/bin/env node
+const r=require("node:child_process").spawnSync(${JSON.stringify(process.execPath)},[${JSON.stringify(opts.rigBin)},...process.argv.slice(2)],{env:process.env,stdio:"inherit"});process.exit(r.status??1);
+`, { mode: 0o755 });
+    scaffold.env.PATH = `${bin}:${scaffold.env.PATH}`;
+  }
   // Seats launch with cwd under the scaffold so their managed writes (AGENTS.md,
   // the stub sidecar) stay in scratch and never pollute the launch cwd.
   const seatCwd = join(scaffold.root, "seat-cwd");
