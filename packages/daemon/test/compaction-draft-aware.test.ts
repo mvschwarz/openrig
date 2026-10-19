@@ -109,43 +109,43 @@ it("manual, recorded pane (existing-behaviour control): the preparation prompt i
 });
 
 // ---------------------------------------------------------------------------------------------------------
-// DOCUMENTS CURRENT BEHAVIOUR; HELD FOR A PRODUCT DECISION. A running draft-aware seat whose binding records a
-// session but no pane (tmux_pane NULL). SeatDeliveryGuard.lifecycle counts the missing pane as absent, so the
-// compaction lease is granted; TmuxAdapter's guarded input then refuses every write to a managed seat without a
-// pane ("Managed pane identity unavailable or changed; no input written", tmux.ts). These assertions pin what
-// this head does today, bound to the counts in the round-4 packet. The founder's choice is expected to flip
-// them deliberately.
+// A running draft-aware seat whose binding records a session but no pane (tmux_pane NULL). The input layer
+// already refuses every write to such a seat (TmuxAdapter guarded input: "Managed pane identity unavailable or
+// changed; no input written"). Managed compaction now refuses it up front, before any preparation prompt or
+// /compact copy, as pane_unknown_protected. (Until round 5 these two tests pinned the old behaviour: an
+// indeterminate prep row, one retained /compact row per busy poll, and an indeterminate /compact row.)
 // ---------------------------------------------------------------------------------------------------------
 
-it("pane-less draft-aware seat, automatic, busy x4 then idle: documents current behaviour; held for a product decision", async () => {
+it("pane-less draft-aware seat, automatic, busy x4 then idle: refused before any preparation or /compact, no outbox row at all", async () => {
   const f = await fixture({ pane: null });
-  expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: false, reason: "send_failed" }); // the preparation prompt
-  expect(f.rows()).toEqual([{ kind: "prep", state: "indeterminate" }]);
-  f.stageMap();
+  const outcomes = [await f.e.maybeAutoCompact(input)];
   f.activity("running");
-  for (let i = 1; i <= 4; i++) {
-    expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: false, reason: "waiting_for_idle" });
-    expect(f.compactRows("retained")).toHaveLength(i); // one more held /compact row per busy poll
-  }
+  for (let i = 0; i < 4; i++) outcomes.push(await f.e.maybeAutoCompact(input));
   f.activity("idle");
-  expect(await f.e.maybeAutoCompact(input)).toEqual({ triggered: false, reason: "send_failed" });
-  expect(f.rows()).toEqual([
-    { kind: "prep", state: "indeterminate" },
-    { kind: "compact", state: "retained" }, { kind: "compact", state: "retained" },
-    { kind: "compact", state: "retained" }, { kind: "compact", state: "retained" },
-    { kind: "compact", state: "indeterminate" },
-  ]);
-  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 0, enters: 0 }); // no write ever reaches the pane
-  expect(f.e.getPreparationState(seat)).toMatchObject({ status: "stopped", compact: "uncertain" });
+  outcomes.push(await f.e.maybeAutoCompact(input));
+  expect(outcomes.every((o) => o.triggered === false && o.reason === "pane_unknown_protected")).toBe(true);
+  expect(f.rows()).toEqual([]); // every outbox row, counted: none
+  expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 0, enters: 0 });
+  expect(f.e.getPreparationState(seat)).toBeNull(); // no attempt was begun: nothing was sent
 });
 
-it("pane-less draft-aware seat, manual, idle: documents current behaviour; held for a product decision", async () => {
+it("pane-less draft-aware seat, manual: refused up front as not sent, with no preparation prompt and no /compact", async () => {
   const f = await fixture({ pane: null });
-  let staged = false;
-  const real = f.transport.send.bind(f.transport);
-  vi.spyOn(f.transport, "send").mockImplementation(async (s: string, t: string, o?: any) => { const r = await real(s, t, o); if (!staged) { staged = true; f.stageMap(); } return r; });
   const outcome = await f.e.triggerManualCompact({ ...input, usedPercentage: 40 }, { operatorInitiated: true });
-  expect(outcome).toMatchObject({ triggered: false, reason: "send_failed", preparation: { delivery: "uncertain", compact: "uncertain" } });
-  expect(f.rows()).toEqual([{ kind: "prep", state: "indeterminate" }, { kind: "compact", state: "indeterminate" }]);
+  expect(outcome).toMatchObject({ triggered: false, reason: "pane_unknown_protected" });
+  expect(f.rows()).toEqual([]);
   expect(f.effects()).toEqual({ compactPastes: 0, prepPastes: 0, enters: 0 });
+  expect(f.e.getPreparationState(seat)).toBeNull();
+});
+
+it("a draft-aware seat with a recorded pane is not affected by the pane check", async () => {
+  const auto = await fixture();
+  expect(await auto.e.maybeAutoCompact(input)).toEqual({ triggered: false, reason: "guard_target_unknown" }); // the lease refusal, as before
+  const manual = await fixture();
+  let staged = false;
+  const real = manual.transport.send.bind(manual.transport);
+  vi.spyOn(manual.transport, "send").mockImplementation(async (s: string, t: string, o?: any) => { const r = await real(s, t, o); if (!staged) { staged = true; manual.stageMap(); } return r; });
+  const outcome = await manual.e.triggerManualCompact({ ...input, usedPercentage: 40 }, { operatorInitiated: true });
+  expect(outcome).toMatchObject({ reason: "draft_aware_lifecycle" });
+  expect(manual.rows()).toEqual([{ kind: "prep", state: "delivered" }]);
 });

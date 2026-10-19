@@ -172,6 +172,8 @@ function manualReasonMessage(sessionName: string, reason: string): string {
       return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
     case "preparation_incomplete":
       return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
+    case "pane_unknown_protected":
+      return `Refused: '${sessionName}' uses draft-aware input protection, and its tmux pane is not recorded. Input to a protected seat needs a known pane, so no preparation or /compact was sent. Retry once the seat's pane is recorded.`;
     case "preparation_cancelled":
       return `Preparation for '${sessionName}' was cancelled; no further compact is armed.`;
     case "disabled":

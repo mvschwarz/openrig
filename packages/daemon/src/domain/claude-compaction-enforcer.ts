@@ -128,7 +128,8 @@ export type EnforcerSkipReason =
   | "preparation_stopped"
   | "occupant_generation_unavailable"
   | "no_pending_stage"
-  | "waiting_for_idle";
+  | "waiting_for_idle"
+  | "pane_unknown_protected";
 
 /** Out-of-contract thresholds (0, 101, NaN, a non-integer) are treated as disabled. */
 export function isValidThresholdPercent(value: unknown): boolean {
@@ -732,6 +733,14 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "already_triggered_above_threshold" };
     }
 
+    // Before any preparation prompt or /compact copy: a protected seat with no recorded pane cannot take input.
+    // An attempt already under way stops as not sent; none is begun.
+    if (this.paneUnknownProtected(input.sessionName)) {
+      const existing = this.pendingPreCompactPrep.get(input.sessionName);
+      if (existing) this.stopPreparation(input.sessionName, "pane_unknown_protected", existing);
+      return { triggered: false, reason: "pane_unknown_protected" };
+    }
+
     let attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (attempt?.mode === "manual") return { triggered: false, reason: "preparation_pending" };
     if (attempt?.status === "stopped") return { triggered: false, reason: "preparation_stopped" };
@@ -789,6 +798,8 @@ export class ClaudeCompactionEnforcer {
     }
     if (input.runtime !== "claude-code") return this.recordManualFailure(input.sessionName, "runtime_filter");
     if (input.usedPercentage == null) return this.recordManualFailure(input.sessionName, "no_usage_data");
+    // The preparation prompt cannot be written to such a seat either, so the whole attempt is refused up front.
+    if (this.paneUnknownProtected(input.sessionName)) return this.recordManualFailure(input.sessionName, "pane_unknown_protected");
     const attempt = this.beginPreparation(input, "manual", opts.skipMap === true);
     if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, "occupant_generation_unavailable");
     const failed = (reason: string): ManualCompactionOutcome => {
@@ -1075,6 +1086,21 @@ export class ClaudeCompactionEnforcer {
 
   private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {
     this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
+  }
+
+  /** A draft-aware (protected) seat whose binding records no tmux pane. The input layer refuses every write to a
+   *  managed seat without a known pane, so compaction refuses it before preparing anything. "Protected" is the
+   *  mode an automatic input lease takes from the guard's configuration (desired draft-aware, else effective),
+   *  the mode needsInputCheck then reads. It is read synchronously, so the manual path's in-progress guard
+   *  (no await before an attempt is registered) is unchanged. */
+  private paneUnknownProtected(sessionName: string): boolean {
+    const guard = this.sessionTransport.deliveryGuard;
+    const target = guard?.maybeTarget(sessionName);
+    if (!guard || !target || target.pane) return false;
+    try {
+      const config = guard.configuration(target.nodeId);
+      return (config.desired.mode === "draft-aware" ? config.desired : config.effective).mode === "draft-aware";
+    } catch { return false; }
   }
 
   private recordManualFailure(sessionName: string, reason: string): ManualCompactionOutcome {
