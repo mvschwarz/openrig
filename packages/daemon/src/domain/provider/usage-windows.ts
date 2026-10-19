@@ -162,22 +162,41 @@ export class UsageWindows<I extends { source: string }, R> {
 
   /** The sign-in fact for a row, from the last refresh only (never from its windows). Only the latest read's row is the
    *  login the refresh read. */
-  private signIn(latest: boolean, unresolved = false): SignInFact {
+  private signIn(latest: boolean, unresolved = false, observedAt: string | null = null): SignInFact {
     const last = this.lastRefresh;
     if (!latest) {
       // An unresolved earlier read can't be matched, so it may be this same login: never call it another one.
       return { state: "unknown", at: null, evidence: unresolved
         ? "an earlier read not matched to the latest one (possibly this same login)"
-        : "not the current login: a later refresh read another one" };
+        : "not the latest read: a later refresh didn't report this row (another login, one it couldn't identify, or this bucket no longer reported)" };
     }
     if (!last) return { state: "unknown", evidence: `no refresh since the daemon started at ${this.startedAt}`, at: null };
     if (last.outcome === "ok") {
       return { state: "usable", evidence: "the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME)", at: last.at };
     }
+    // A failure after this row's reading identified no account, so it says nothing about this row's login. The
+    // home it did read is reported on its own row (homeRow).
+    if (observedAt !== null) {
+      return { state: "unknown", at: last.at,
+        evidence: `the last refresh at ${last.at} failed (${last.reason ?? "unknown reason"}) and didn't identify an account; this row's login was last read at ${observedAt}` };
+    }
     if (last.reason === "not_signed_in") {
       return { state: "needs_sign_in", evidence: "the refresh's account/read reported no signed-in account", at: last.at };
     }
     return { state: "unknown", evidence: `the last refresh failed (${last.reason ?? "unknown reason"})`, at: last.at };
+  }
+
+  /** The daemon's current home when the last refresh found no signed-in account but earlier rows are kept: its own row,
+   *  in the shape the projection already serves with no reading, so the fact isn't pinned on an earlier account. */
+  private homeRow(provider: ProviderKind, source: ProviderUsageAllowance["source"]): ProviderUsageAllowance | null {
+    const last = this.lastRefresh;
+    if (last?.outcome !== "failed" || last.reason !== "not_signed_in") return null;
+    return {
+      provider, identity: null, source, observedAt: null, seats: "unknown", windows: [], limitEvidence: null,
+      latestFromSource: true, lastRefresh: last, currentAvailability: "unknown",
+      signIn: this.signIn(true),
+      unavailableReason: `the refresh at ${last.at} found no signed-in account in the daemon's CODEX_HOME; the rows above keep their earlier reads`,
+    };
   }
 
   private recordFailure(at: string, reason: string, detail: string): UsageRefreshOutcome {
@@ -235,7 +254,7 @@ export class UsageWindows<I extends { source: string }, R> {
         latestFromSource: reading.latest,
         lastRefresh: this.lastRefresh,
         currentAvailability: known ? "known" : "unknown",
-        signIn: this.signIn(reading.latest, reading.identity.source === "unresolved"),
+        signIn: this.signIn(reading.latest, reading.identity.source === "unresolved", reading.observedAt),
         ...(reading.identity.source === "unresolved" ? {
           unresolved: {
             note: reading.latest ? UNRESOLVED_NOTE : UNRESOLVED_EARLIER_NOTE,
@@ -245,6 +264,9 @@ export class UsageWindows<I extends { source: string }, R> {
         } : {}),
       });
     }
+    // Last, so the existing rows keep their order.
+    const home = this.homeRow(provider, source);
+    if (home) rows.push(home);
     return rows;
   }
 }

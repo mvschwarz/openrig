@@ -138,8 +138,14 @@ export const CLAUDE_NO_SAMPLE_BINDING_UNREAD =
 
 /** The Claude sign-in fact, from the last identity refresh only. `claude auth status` is local: a stored login proves
  *  nothing about whether it works, so a signed-in Claude login reads at most unknown. */
-function claudeSignIn(last: UsageRefreshOutcome | null): SignInFact {
+function claudeSignIn(last: UsageRefreshOutcome | null, readAt: string | null = null): SignInFact {
   if (!last) return { state: "unknown", evidence: "claude auth status not read since the daemon started", at: null };
+  // A failure after this row's login was read identified no login, so it says nothing about this row's login. The
+  // config it did read is reported on its own row.
+  if (last.outcome === "failed" && readAt !== null) {
+    return { state: "unknown", at: last.at,
+      evidence: `the last identity refresh at ${last.at} failed (${last.reason ?? "unknown reason"}) and didn't identify a login; this row's login was read at ${readAt}` };
+  }
   if (last.outcome === "ok") {
     return { state: "unknown", at: last.at,
       evidence: "claude auth status reports a stored claude.ai login; whether it works isn't checked (no read here contacts the service)" };
@@ -275,7 +281,7 @@ export class ClaudeUsageWindows {
         latestFromSource: true,
         lastRefresh: this.lastRefresh,
         currentAvailability: "unknown",
-        signIn: claudeSignIn(this.lastRefresh),
+        signIn: claudeSignIn(this.lastRefresh, current?.at ?? null),
         unavailableReason: unreadable ?? NO_SEAT,
       });
     } else {
@@ -293,7 +299,7 @@ export class ClaudeUsageWindows {
         lastRefresh: this.lastRefresh,
         // Never "known" from this join: see CLAUDE_NO_SAMPLE_BINDING. The windows below are each seat's own readings.
         currentAvailability: "unknown",
-        signIn: claudeSignIn(this.lastRefresh),
+        signIn: claudeSignIn(this.lastRefresh, current?.at ?? null),
         unavailableReason: current ? CLAUDE_NO_SAMPLE_BINDING : CLAUDE_NO_SAMPLE_BINDING_UNREAD,
         identityNote: current
           ? `identity: the daemon's Claude login (claude auth status) as of the refresh at ${current.at}; windows: status-line readings from ${seatsOf(live)} at their own times; not proven to be the same login`
@@ -325,13 +331,25 @@ export class ClaudeUsageWindows {
         signIn: { state: "unknown", at: null, evidence: s.identity.source === "unresolved"
           // An unresolved earlier identity can't be matched, so it may be this same login.
           ? "an earlier read not matched to the latest one (possibly this same login)"
-          : "not the current login: a later refresh reported another one" },
-        identityNote: `identity: the daemon's Claude login as of the refresh at ${s.at}; a refresh at ${s.supersededAt} reported another login; windows as they were at ${s.at}${s.picks.length > 0 ? ` (from ${seatsOf(s.picks)})` : " (none reported then)"}`,
+          : "not the current login: a later refresh reported another login, or one it couldn't identify" },
+        identityNote: `identity: the daemon's Claude login as of the refresh at ${s.at}; a refresh at ${s.supersededAt} reported another login, or one it couldn't identify; windows as they were at ${s.at}${s.picks.length > 0 ? ` (from ${seatsOf(s.picks)})` : " (none reported then)"}`,
         ...(s.identity.source === "unresolved" ? {
           unresolved: { note: UNRESOLVED_EARLIER_NOTE, keptReads: UNRESOLVED_READS_KEPT, droppedReads: this.unresolvedDropped },
         } : {}),
       });
     }
+    // Last, so the existing rows keep their order. The daemon's Claude config when its last refresh reported no login but a login read earlier is kept: its own
+    // row, in the shape served with no identity, so the fact isn't pinned on the earlier login.
+    const last = this.lastRefresh;
+    if (current && last?.outcome === "failed" && last.reason === "not_logged_in") {
+      rows.push({
+        provider: "claude", identity: null, source, observedAt: null, seats: "unknown", windows: [], limitEvidence: null,
+        latestFromSource: true, lastRefresh: last, currentAvailability: "unknown",
+        signIn: claudeSignIn(last),
+        unavailableReason: `claude auth status at ${last.at} reported no login in the daemon's Claude config; the rows above keep the login read at ${current.at}`,
+      });
+    }
+
     return rows;
   }
 }

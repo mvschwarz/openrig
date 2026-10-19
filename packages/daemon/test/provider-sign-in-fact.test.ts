@@ -63,7 +63,7 @@ describe("Codex: the sign-in fact from the existing refresh", () => {
     await w.refresh(); await w.refresh();
     const rows = w.project(at(11));
     expect(rows.find((r) => r.latestFromSource)!.signIn).toMatchObject({ state: "usable" });
-    expect(rows.find((r) => !r.latestFromSource)!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("not the current login") });
+    expect(rows.find((r) => !r.latestFromSource)!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("not the latest read") });
   });
 
   it("an earlier UNRESOLVED read isn't called another login: possibly this same login, still unknown", async () => {
@@ -87,6 +87,81 @@ describe("Codex: the sign-in fact from the existing refresh", () => {
     const failed = codex([{ ok: false, at: NOW, reason: "rpc_error", detail: "x" }]);
     await failed.refresh();
     expect(failed.project(NOW)[0]!.signIn!.state).toBe("unknown");
+  });
+});
+
+describe("a signed-out refresh that identifies no account (round 2)", () => {
+  it("Codex: success for A, then not_signed_in: A stays unknown; the current home's needs-sign-in is its own row", async () => {
+    const w = codex([okCodex(), { ok: false, at: at(1), reason: "not_signed_in", detail: "no account" }]);
+    await w.refresh(); await w.refresh();
+    const rows = w.project(at(1));
+    const a = rows.find((r) => r.identity !== null)!;
+    expect(a.signIn).toMatchObject({ state: "unknown", at: at(1) });
+    expect(a.signIn!.evidence).toContain("didn't identify an account");
+    const home = rows.find((r) => r.identity === null)!;
+    expect(home).toMatchObject({ windows: [], currentAvailability: "unknown", signIn: { state: "needs_sign_in", at: at(1) } });
+    expect(home.unavailableReason).toContain("the daemon's CODEX_HOME");
+  });
+
+  it("Codex: success for A, then another failure: A unknown, and no extra row", async () => {
+    const w = codex([okCodex(), { ok: false, at: at(1), reason: "timeout", detail: "slow" }]);
+    await w.refresh(); await w.refresh();
+    const rows = w.project(at(1));
+    expect(rows.filter((r) => r.identity === null)).toEqual([]);
+    expect(rows[0]!.signIn).toMatchObject({ state: "unknown", evidence: expect.stringContaining("timeout") });
+  });
+
+  it("Claude: success for A, then not_logged_in: A stays unknown; the current config's needs-sign-in is its own row", async () => {
+    const w = claude([authOk(), { ok: false, at: at(1), reason: "not_logged_in", detail: "no login" }]);
+    await w.refresh(); await w.refresh();
+    const rows = w.project(at(1));
+    const a = rows.find((r) => r.identity !== null)!;
+    expect(a.signIn).toMatchObject({ state: "unknown" });
+    expect(a.signIn!.evidence).toContain("didn't identify a login");
+    const home = rows.find((r) => r.identity === null)!;
+    expect(home).toMatchObject({ windows: [], signIn: { state: "needs_sign_in", at: at(1) } });
+  });
+
+  it("control: a signed-out refresh on an empty store still reads needs_sign_in on the one row (both providers)", async () => {
+    const c = codex([{ ok: false, at: NOW, reason: "not_signed_in", detail: "x" }]); await c.refresh();
+    expect(c.project(NOW)).toHaveLength(1);
+    expect(c.project(NOW)[0]!.signIn!.state).toBe("needs_sign_in");
+    const l = claude([{ ok: false, at: NOW, reason: "not_logged_in", detail: "x" }], []); await l.refresh();
+    expect(l.project(NOW)).toHaveLength(1);
+    expect(l.project(NOW)[0]!.signIn!.state).toBe("needs_sign_in");
+  });
+});
+
+describe("superseded rows don't claim another login (round 2)", () => {
+  it("Codex: a bucket the same account's next read no longer reports isn't called another login", async () => {
+    const both = { ...rateLimitsAnswer({}) } as Record<string, unknown>;
+    const twoBuckets = { ...both, rateLimitsByLimitId: { codex: (both as { rateLimits: unknown }).rateLimits, other: { ...(both as { rateLimits: Record<string, unknown> }).rateLimits, limitId: "other" } } };
+    let n = 0;
+    const answers = [{ ok: true as const, observedAt: NOW, account: ACCOUNT_ANSWER, rateLimits: twoBuckets }, { ...okCodex(ACCOUNT_ANSWER, at(10)) }];
+    const w = new CodexUsageWindows({ now: () => at(10), read: async () => answers[Math.min(n++, 1)]! });
+    await w.refresh(); await w.refresh();
+    const dropped = w.project(at(11)).find((r) => !r.latestFromSource && r.identity !== null)!;
+    expect(dropped).toBeTruthy();
+    expect(dropped.signIn!.evidence).not.toMatch(/read another one|another login$/);
+    expect(dropped.signIn!.evidence).toContain("this bucket no longer reported");
+  });
+
+  it("Codex: a resolved row followed by an unresolved read says it may not be another login", async () => {
+    let n = 0;
+    const answers = [okCodex(), { ok: true as const, observedAt: at(10), account: ACCOUNT_ANSWER, rateLimits: rateLimitsAnswer({ accountId: null }) }];
+    const w = new CodexUsageWindows({ now: () => at(10), read: async () => answers[Math.min(n++, 1)]! });
+    await w.refresh(); await w.refresh();
+    const earlier = w.project(at(11)).find((r) => !r.latestFromSource && r.unresolved === undefined)!;
+    expect(earlier.signIn!.evidence).toContain("one it couldn't identify");
+  });
+
+  it("Claude: a resolved login followed by an unidentified one: the row and its note say 'or one it couldn't identify'", async () => {
+    const unidentified: UsageReadOutcome<ClaudeAuthAnswer> = { ok: true, observedAt: NOW, auth: { loggedIn: true, authMethod: "claude.ai", email: null, orgId: null, orgName: null, subscriptionType: "team" } as unknown as ClaudeAuthAnswer["auth"] };
+    const w = claude([authOk(), unidentified]);
+    await w.refresh(); await w.refresh();
+    const earlier = w.project(NOW).find((r) => !r.latestFromSource && r.unresolved === undefined)!;
+    expect(earlier.signIn!.evidence).toContain("or one it couldn't identify");
+    expect(earlier.identityNote).toContain("reported another login, or one it couldn't identify");
   });
 });
 
