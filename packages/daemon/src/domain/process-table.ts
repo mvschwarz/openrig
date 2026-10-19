@@ -129,7 +129,7 @@ const READER_SOURCE = String.raw`
 
 let reader: Worker | null = null;
 let lastAsk = 0;
-const asked = new Map<number, { rows: ProcessTableRow[]; resolve: (rows: ProcessTableRow[]) => void; reject: (error: Error) => void }>();
+const asked = new Map<number, { worker: Worker; rows: ProcessTableRow[]; resolve: (rows: ProcessTableRow[]) => void; reject: (error: Error) => void }>();
 
 /** The process table read from /proc (`root` for tests): the rows ps would print, without a process of its own. The
  *  files are read on the reader's thread: a read that waits (a cmdline waits on its process's memory lock) holds that
@@ -140,7 +140,7 @@ export function readProcTable(root = "/proc"): Promise<ProcessTableRow[]> {
   // Idle, the reader keeps no process up; while an answer is owed it does.
   worker.ref();
   return new Promise((resolve, reject) => {
-    asked.set(id, { rows: [], resolve, reject });
+    asked.set(id, { worker, rows: [], resolve, reject });
     worker.postMessage({ id, root });
   });
 }
@@ -163,11 +163,15 @@ function startReader(): Worker {
     if ("files" in part) ask.resolve(ask.rows);
     else ask.reject(new Error(part.error));
   });
-  // A reader lost fails what it owed; the next read starts another.
+  // A reader lost fails what it owed, and only that: its `error` then its `exit` may come after the next read has
+  // started another, whose reads are its own.
   const lost = (error: Error) => {
     if (reader === worker) reader = null;
-    for (const ask of asked.values()) ask.reject(error);
-    asked.clear();
+    for (const [id, ask] of asked) {
+      if (ask.worker !== worker) continue;
+      asked.delete(id);
+      ask.reject(error);
+    }
   };
   worker.on("error", lost);
   worker.on("exit", (code) => lost(new Error(`the /proc reader exited with code ${code}`)));
