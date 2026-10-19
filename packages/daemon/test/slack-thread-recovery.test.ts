@@ -9,7 +9,7 @@ import { InboundRouter, handleEnvelope, type InboundDeps, type SlackEvent } from
 import { SlackRecovery, ownedRecoveryChannels } from "../src/domain/gateway/slack/slack-recovery.js";
 import { ChannelCoverageStore, ThreadCoverageStore, SeenStore, DeadLetterStore, slackMicros, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
-import { ThreadSeatMap } from "../src/domain/gateway/slack/thread-seat-map.js";
+import { ThreadSeatMap, formatPostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 
 const closes: (() => void)[] = [];
@@ -30,7 +30,8 @@ function fixture() {
   };
   const db = createFullTestDb(); closes.push(() => db.close());
   let now = at(100);
-  const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+  let queueDown = false;
+  const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => !queueDown });
   const seen = new SeenStore("/s/slack-inbound-seen.jsonl", fsops);
   const dead = new DeadLetterStore<SlackEvent>("/s/dead", fsops);
   const channelStore = new ChannelCoverageStore("/s/coverage", fsops);
@@ -68,11 +69,11 @@ function fixture() {
     const channel = (history[u.searchParams.get("channel")!] ?? []).filter(inRange).sort(byTs).reverse();
     return Response.json({ ok: true, messages: channel.slice(0, limit), has_more: channel.length > limit });
   };
-  const recovery = (opts: { channels?: Array<{ channel: string; seed?: "adoption" }>; relayed?: () => boolean } = {}) => {
+  const recovery = (opts: { channels?: Array<{ channel: string; seed?: "adoption" }> } = {}) => {
     const r = new SlackRecovery({ channels: opts.channels ?? [{ channel: "C1" }], token: "fixture-token", stateDir: "/s", router,
       trackedThreads: (channels, closedSince) => map.trackedForRecovery(channels, closedSince),
-      fetchImpl, now: () => now, channelStore, threadStore, ...(opts.relayed ? { relayed: opts.relayed } : {}) });
-    if (!opts.relayed) r.initialize();
+      fetchImpl, now: () => now, channelStore, threadStore });
+    r.initialize();
     closes.push(() => r.stop());
     return r;
   };
@@ -86,7 +87,7 @@ function fixture() {
   const rows = () => repo.list({ limit: 500 });
   return { db, files, seen, dead, map, router, deps, routed, resolveHumanReply, history, replies, queries, recovery, track, reply, message,
     calls, rows, time: (ms: number) => { now = ms; }, advance: (ms: number) => { now += ms; },
-    respond: (fn?: typeof respond) => { respond = fn; } };
+    respond: (fn?: typeof respond) => { respond = fn; }, down: (v: boolean) => { queueDown = v; } };
 }
 
 it.each(["open", "closed"])("a missed reply in a %s decision thread lands once as a late reply and never answers the decision", async state => {
@@ -127,22 +128,70 @@ it("a reply that landed live and again in the thread scan lands once; coverage i
   expect(f.rows()).toHaveLength(2);
 });
 
-it("scans open threads and threads closed within seven days, never older closed or untracked threads", async () => {
+it("tracks a thread whose root or close is within seven days, never by the map's rebuild clock", async () => {
   const f = fixture();
-  const offsets = { open: -12 * DAY, staleClosed: -11 * DAY, recentClosed: -10 * DAY, untracked: -9 * DAY };
-  const open = ts(offsets.open), staleClosed = ts(offsets.staleClosed), recentClosed = ts(offsets.recentClosed), untracked = ts(offsets.untracked);
-  f.track(open, "a@test");
-  f.time(at(100 - 8 * DAY)); f.track(staleClosed, "b@test"); f.map.close(staleClosed, "C1");
-  f.time(at(100 - DAY)); f.track(recentClosed, "c@test"); f.map.close(recentClosed, "C1");
-  f.time(at(100));
-  // Each reply follows its own root: a Slack ts is unique in its channel.
+  const offsets = { recentRoot: -7 * DAY + 60, staleRoot: -7 * DAY - 60, oldClosed: -30 * DAY, rebuilt: -20 * DAY, untracked: -DAY };
+  const root = (key: keyof typeof offsets) => ts(offsets[key]);
+  f.track(root("recentRoot"), "a@test");
+  f.track(root("staleRoot"), "b@test");
+  f.track(root("oldClosed"), "c@test"); f.time(at(100 - DAY)); f.map.close(root("oldClosed"), "C1"); f.time(at(100));
+  // A rebuild restamps opened_at with the rebuild clock; the root's own Slack time still decides.
+  f.map.rebuildFromStamps([formatPostedStamp({ threadTs: root("rebuilt"), messageTs: root("rebuilt"), channel: "C1",
+    human: "human-fixture@external", seat: "d@test", conversationId: "q-rebuilt" })]);
   for (const offset of Object.values(offsets)) f.replies[`C1:${ts(offset)}`] = [f.reply(offset + 10, ts(offset))];
   const r = f.recovery();
 
   await r.run();
 
-  expect(f.calls("conversations.replies").map(u => u.searchParams.get("ts"))).toEqual([open, recentClosed]);
+  expect(f.calls("conversations.replies").map(u => u.searchParams.get("ts"))).toEqual([root("oldClosed"), root("recentRoot")]);
+  // The old root closed yesterday is scanned from its root: eligibility isn't a seven-day history cap.
   expect(f.rows().map(row => row.destinationSession).sort()).toEqual(["a@test", "c@test"]);
+});
+
+it("keeps recovery counts for the connector's lifetime after a thread leaves the window", async () => {
+  const f = fixture(); const root = ts(-30 * DAY);
+  f.track(root); f.time(at(100 - DAY)); f.map.close(root, "C1"); f.time(at(100));
+  f.replies[`C1:${root}`] = [f.reply(-30 * DAY + 10, root)];
+  const r = f.recovery();
+  await r.run();
+  expect(r.status().acceptedThisProcess).toBe(1);
+
+  f.time(at(100 + 7 * DAY)); await r.run();
+
+  expect(r.status().threads).toMatchObject({ tracked: 0 });
+  expect(r.status().acceptedThisProcess).toBe(1);
+});
+
+it("a thread Slack can't find stays incomplete without a call each pass until its mapping changes", async () => {
+  const f = fixture(); f.track(ROOT);
+  f.respond(u => u.pathname.endsWith("conversations.replies") ? Response.json({ ok: false, error: "thread_not_found" }) : undefined);
+  const r = f.recovery();
+  await r.run();
+  f.time(at(1000)); await r.run();
+
+  expect(f.calls("conversations.replies")).toHaveLength(1);
+  expect(r.status().threads).toMatchObject({ incomplete: { thread_not_found: 1 } });
+  f.map.close(ROOT, "C1"); f.time(at(1100)); await r.run();
+  expect(f.calls("conversations.replies")).toHaveLength(2);
+});
+
+it("a rate limit on replies holds every thread back across a restart, while channel history still runs", async () => {
+  const f = fixture(); f.track(ts(1), "a@test"); f.track(ts(2), "b@test");
+  f.replies[`C1:${ts(1)}`] = [f.reply(11, ts(1))]; f.replies[`C1:${ts(2)}`] = [f.reply(12, ts(2))];
+  f.respond(u => u.pathname.endsWith("conversations.replies") ? Response.json({ ok: false }, { status: 429, headers: { "retry-after": "600" } }) : undefined);
+  const first = f.recovery();
+  await first.run();
+  expect(f.calls("conversations.replies")).toHaveLength(1);
+  first.stop(); f.respond();
+
+  const restarted = f.recovery(); f.history.C1 = [f.message(108)]; f.time(at(120));
+  await restarted.run();
+  expect(f.calls("conversations.replies")).toHaveLength(1); // neither thread asks before the workspace hold ends
+  expect(f.calls("conversations.history")).toHaveLength(1); // the other method still runs
+
+  f.time(at(701)); await restarted.run();
+  expect(f.calls("conversations.replies")).toHaveLength(3);
+  expect(f.rows().map(row => row.destinationSession).filter(d => d !== "owner@test").sort()).toEqual(["a@test", "b@test"]);
 });
 
 it("recovers a thread longer than a page in order across calls and passes, without a skip", async () => {
@@ -200,7 +249,7 @@ it("a rate limit on thread replies holds back only replies; channel history stil
   expect(f.calls("conversations.history")).toHaveLength(2);
 });
 
-it.each(["missing_scope", "not_in_channel", "thread_not_found"])("%s leaves the thread backing off with its reason while live inbound lands", async error => {
+it.each(["missing_scope", "not_in_channel", "thread_not_found"])("%s leaves the thread waiting with its reason while live inbound lands", async error => {
   const f = fixture(); f.track(ROOT);
   f.replies[`C1:${ROOT}`] = [f.reply(10)];
   f.respond(u => u.pathname.endsWith("conversations.replies") ? Response.json({ ok: false, error }) : undefined);
@@ -209,7 +258,8 @@ it.each(["missing_scope", "not_in_channel", "thread_not_found"])("%s leaves the 
   await r.run();
 
   expect(f.rows()).toHaveLength(0);
-  expect(r.status().threads).toMatchObject({ backoff: { [error]: 1 } });
+  // A transient or permission error backs off and retries; a missing thread stays incomplete without spending calls.
+  expect(r.status().threads).toMatchObject(error === "thread_not_found" ? { incomplete: { [error]: 1 } } : { backoff: { [error]: 1 } });
   await handleEnvelope({ type: "events_api", payload: { event: f.message(99) } }, () => {}, f.router);
   expect(f.rows()).toHaveLength(1);
 });
@@ -265,19 +315,48 @@ it("recovers the machine's own channels, never one it relays to another machine"
   expect(ownedRecoveryChannels({ channel: null, channelMap: [{ channel: "C2" }], forwardChannels: "not a list" })).toEqual(["C2"]);
 });
 
-it("a machine without its own connection recovers only after the hub relays it an event, from then on", async () => {
-  const f = fixture(); let relayed = false;
-  f.history.C1 = [f.message(110)]; f.time(at(120));
-  const r = f.recovery({ channels: [{ channel: "C1", seed: "adoption" }], relayed: () => relayed });
+it.each([
+  { label: "the socket default channel keeps main's answer", channels: [{ channel: "C1" }], channel: "C1", answers: true },
+  { label: "a newly mapped channel's lands late and never answers", channels: [{ channel: "C1" }, { channel: "C2", seed: "adoption" as const }], channel: "C2", answers: false },
+  { label: "a relay receiver's default lands late and never answers", channels: [{ channel: "C1", seed: "adoption" as const }], channel: "C1", answers: false },
+])("recovered broadcast reply: $label", async ({ channels, channel, answers }) => {
+  const f = fixture(); const root = ts(10);
+  f.map.open({ threadTs: root, channel, human: "human-fixture@external", seat: "asker@test", conversationId: "q-decision" });
+  f.history[channel] = [f.reply(110, root, { channel, subtype: "thread_broadcast", text: "Approved" })];
+  const r = f.recovery({ channels }); f.time(at(120));
 
   await r.run();
-  expect(f.queries).toHaveLength(0);
-  expect(r.status()).toMatchObject({ state: "waiting", reason: "no-relayed-event-yet" });
 
-  relayed = true;
-  await r.run();
-  expect(f.rows()).toHaveLength(0); // coverage starts when relaying does
-  f.history.C1.push(f.message(130)); f.time(at(140));
-  await r.run();
   expect(f.rows()).toHaveLength(1);
+  expect(f.rows()[0]!.body).toContain("In reply to: q-decision");
+  expect(f.resolveHumanReply).toHaveBeenCalledTimes(answers ? 1 : 0);
+  if (!answers) expect(f.rows()[0]!.body).toContain("It was not applied as an answer to q-decision");
+});
+
+it("live broadcast and thread replies still answer in a newly covered channel", async () => {
+  const f = fixture(); const root = ts(10);
+  f.map.open({ threadTs: root, channel: "C2", human: "human-fixture@external", seat: "asker@test", conversationId: "q-decision" });
+  f.recovery({ channels: [{ channel: "C1" }, { channel: "C2", seed: "adoption" }] });
+
+  await handleEnvelope({ type: "events_api", payload: { event: f.reply(110, root, { channel: "C2", subtype: "thread_broadcast" }) } }, () => {}, f.router);
+  await handleEnvelope({ type: "events_api", payload: { event: f.reply(111, root, { channel: "C2" }) } }, () => {}, f.router);
+
+  expect(f.resolveHumanReply).toHaveBeenCalledTimes(2);
+});
+
+it.each(["thread reply", "broadcast reply in a newly covered channel"])("a recovered %s that was dead-lettered still never answers after retry", async kind => {
+  const f = fixture(); const root = ts(10);
+  f.map.open({ threadTs: root, channel: "C1", human: "human-fixture@external", seat: "asker@test", conversationId: "q-decision" });
+  if (kind === "thread reply") f.replies[`C1:${root}`] = [f.reply(50, root)];
+  else f.history.C1 = [f.reply(110, root, { subtype: "thread_broadcast" })];
+  const r = f.recovery({ channels: [{ channel: "C1", seed: "adoption" }] }); f.time(at(120));
+  f.down(true);
+  await r.run();
+  expect(f.dead.readAll()).toHaveLength(1);
+
+  f.down(false); await f.router.retryDeadLetters();
+
+  expect(f.rows()).toHaveLength(1);
+  expect(f.resolveHumanReply).not.toHaveBeenCalled();
+  expect(f.rows()[0]!.body).toContain("It was not applied as an answer to q-decision");
 });
