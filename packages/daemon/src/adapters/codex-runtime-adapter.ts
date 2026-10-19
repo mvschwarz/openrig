@@ -294,7 +294,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const pluginsDir = nodePath.dirname(pluginDir);
     const userLayer = layers.find((layer) => layer.name === "user config");
     const recorded = recordedMarketplaceSource(userLayer?.state === "read" ? userLayer.content : null);
-    if (recorded !== undefined && (recorded === null || nodePath.resolve(recorded) !== nodePath.resolve(pluginsDir))) {
+    // Compared as real paths, so a marketplace recorded through a symlink to the plugins folder is the same source.
+    const canonical = (p: string) => { try { return fs.realpathSync.native(nodePath.resolve(p)); } catch { return nodePath.resolve(p); } };
+    if (recorded !== undefined && (recorded === null || canonical(recorded) !== canonical(pluginsDir))) {
       return report("skipped", `a marketplace named ${CODEX_CORE_MARKETPLACE} is already configured with another source; it's left alone`);
     }
     const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);

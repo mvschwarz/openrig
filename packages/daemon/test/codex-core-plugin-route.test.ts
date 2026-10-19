@@ -214,6 +214,14 @@ describe("read before install: the person's choice is never overridden", () => {
     }
   });
 
+  it("a marketplace recorded through a symlink to the plugins folder is the same source", async () => {
+    const s = setup("0.1.15", null, { installed: "0.1.14" });
+    const alias = join(root, "plugins-alias"); fs.symlinkSync(s.pluginsDir, alias);
+    writeFileSync(join(s.codexHome, "config.toml"), `${recorded(alias)}\n[plugins."openrig-core@openrig"]\nenabled = true\n`);
+    expect((await s.adapter.ensureCodexCorePlugin()).outcome).toBe("installed");
+    expect(s.calls.map((c) => c.slice(0, -1))).toEqual([["plugin", "add", "openrig-core@openrig"]]);
+  });
+
   it("a codex that can't be started is reported with the reason, not as an exit status", async () => {
     const pluginsDir = join(root, "plugins"); const dir = join(pluginsDir, "openrig-core");
     mkdirSync(join(dir, ".codex-plugin"), { recursive: true });
