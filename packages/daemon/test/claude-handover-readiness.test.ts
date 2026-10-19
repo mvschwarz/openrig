@@ -134,17 +134,18 @@ describe("Claude fresh in-place handover readiness", () => {
   }
 
 
-  it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable"])("1544 %s", async mode => {
+  it.each(["classic-predecessor-history", "screen-without-predecessor-history", "new-runtime-already-ready", "stale-wrapper-screen-unavailable", "working-wrapper-screen-unavailable", "working-headerless-auto-proof", "working-headerless-auto-unavailable", "working-headerless-accept-edits-unavailable", "working-headerless-bypass-unavailable"])("1544 %s", async mode => {
     const { node } = seedSeat({ runtime: "claude-code" });
     let elapsed = 0, requested = false, packetPasted = false;
     const headerless = mode.startsWith("working-headerless-");
     const auto = mode.startsWith("working-headerless-auto");
-    if (auto) new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "auto" }, "fixture", "headerless auto qualification");
+    const bypass = mode === "working-headerless-bypass-unavailable";
+    if (auto || bypass) new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: auto ? "auto" : "bypassPermissions" }, "fixture", "headerless qualification");
     const nativeAt = mode === "new-runtime-already-ready" || mode === "working-wrapper-screen-unavailable" || headerless ? 0 : 500;
     const unavailable = mode.endsWith("screen-unavailable");
     const identicalFrame = "Claude Code v2.1.303\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const autoFrame = "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents";
-    const headerlessFrame = auto ? autoFrame : autoFrame.replace("auto mode on", "accept edits on");
+    const headerlessFrame = auto ? autoFrame : autoFrame.replace("auto mode on", bypass ? "bypass permissions on" : "accept edits on");
     const oldFrame = "Claude Code v2.1.303\n❯ predecessor finished turn\n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const freshFrame = "Claude Code v2.1.303\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)";
     const trace: unknown[] = [];
@@ -221,6 +222,8 @@ describe("Claude fresh in-place handover readiness", () => {
     } else if (headerless) {
       const launched = trace.find((x: any) => x.kind === "launch-text") as any;
       if (auto) expect(launched.text).toMatch(/--permission-mode auto(?: |$)/);
+      if (bypass) expect(launched.text).toMatch(/--permission-mode bypassPermissions(?: |$)/);
+      if (!auto && !bypass) expect(launched.text).toMatch(/--permission-mode acceptEdits(?: |$)/);
       expect(first.result.ready).toBe(true);
       expect(first.successorRuntimeStarted).toBe(true);
       expect(capturePaneScreen).toHaveBeenCalledWith("%9");
