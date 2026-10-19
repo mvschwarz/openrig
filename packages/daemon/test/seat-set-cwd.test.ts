@@ -19,6 +19,7 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import { StubRuntimeAdapter } from "../src/adapters/stub-runtime-adapter.js";
+import { withAgentAppResolver } from "../src/adapters/agent-app-runtime-adapter.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -340,6 +341,21 @@ describe("changing an existing seat's launch directory", () => {
       .toMatchObject({ ok: false, code: "cwd_persistence_failed" });
     expect(savedCwd(seat.node.id)).toBe(oldCwd);
     expect(cwdEvents()).toEqual([]);
+  });
+
+  it("resolves a community agent app's adapter the way launch does", async () => {
+    const seat = seed();
+    const presets = path.join(root, "agent-apps");
+    fs.mkdirSync(presets);
+    fs.writeFileSync(path.join(presets, "synth.yaml"), "format: 1\nname: synth\ncommand: synth-app --serve\nmaintainer: Example Maintainer\nlimits: [resume unsupported]\n");
+    db.prepare("UPDATE nodes SET runtime = 'synth' WHERE id = ?").run(seat.node.id);
+    db.prepare("UPDATE node_startup_context SET runtime = 'synth' WHERE node_id = ?").run(seat.node.id);
+    const sessionId = (db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string }).id;
+    registry.recordAgentAppSelection(sessionId, "synth");
+    service = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: tmux,
+      runtimeAdapters: withAgentAppResolver({ "claude-code": adapter } as Record<string, RuntimeAdapter>, { tmux, presetsDir: () => presets }) });
+    expect(await service.setCwd({ seatRef: seat.sessionName, cwd: newCwd, reason: "isolate workspace" })).toMatchObject({ ok: true, changed: true });
+    expect(savedCwd(seat.node.id)).toBe(fs.realpathSync(newCwd));
   });
 
   it("works with the seat's typing guard on, without an input lease and without changing its protection", async () => {

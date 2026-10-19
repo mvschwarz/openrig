@@ -370,7 +370,8 @@ export class SeatLifecycleService {
     if (!node.runtime || startup.context.runtime !== node.runtime) {
       return { ok: false, code: "startup_context_runtime_mismatch", message: "The saved startup context belongs to a different runtime." };
     }
-    const adapter = this.runtimeAdapters[node.runtime];
+    // Resolved as launch resolves it, so a recorded community agent app finds its adapter too.
+    const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.agent_app);
     if (!adapter) return { ok: false, code: "runtime_adapter_missing", message: "The configured runtime adapter is unavailable." };
 
     const warnings: string[] = [];
