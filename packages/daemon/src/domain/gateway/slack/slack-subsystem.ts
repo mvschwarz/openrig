@@ -34,7 +34,7 @@ import { makeThreadRouteResolver } from "./thread-routing.js";
 import { resolveInboundChannelDestination, resolveOutboundChannel, unsupportedChannelMapFields } from "./channel-map.js";
 import { resolveRigRepresentative } from "../../queue-owner.js";
 import { getSelfHostId } from "../../hosts/fanout-contract.js";
-import { forwardChannelProblems, makeEnvelopeForwarder } from "./forwarding.js";
+import { envelopeChannel, forwardChannelProblems, makeEnvelopeForwarder } from "./forwarding.js";
 import type { HostRegistryLoadResult } from "../../hosts/hosts-registry-reader.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
@@ -703,14 +703,14 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   let recovery: SlackRecovery | undefined;
   // Recovery covers the channels this machine owns and the threads tracked in them. The configured
   // default channel keeps its established seed; a channel newly recovered starts at adoption.
-  const buildRecovery = (router: InboundRouter, seedDefault: boolean, relayed?: () => boolean): SlackRecovery => new SlackRecovery({
+  const buildRecovery = (router: InboundRouter, seedDefault: boolean, relayed = false): SlackRecovery => new SlackRecovery({
     channels: ownedRecoveryChannels(cfg).map((channel) => (seedDefault && channel === cfg.channel ? { channel } : { channel, seed: "adoption" as const })),
     token: bot,
     stateDir: stateDir(opts.home),
     router,
     trackedThreads: (channels, closedSince) => threadMap.trackedForRecovery(channels, closedSince),
     fetchImpl: opts.fetchImpl,
-    ...(relayed ? { relayed } : {}),
+    ...(relayed ? { relayed: true } : {}),
   });
 
   if (outboundReady) {
@@ -839,16 +839,22 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       log(`slack bot inbox OFF: ${!bot ? "SLACK_BOT_TOKEN unresolved (bots.info needs it)" : botInboxProblems(cfg).join("; ")}`);
     }
     // An envelope the hub relayed is handled here and never relayed again.
-    acceptForwarded = (env) => { relayedReceived++; return handleEnvelope(env, () => {}, built, log, undefined, { relayed: true }); };
+    acceptForwarded = (env) => {
+      relayedReceived++;
+      // A relayed event adopts its channel for recovery, from this local receipt time (only a channel configured here).
+      if (!inboundReady) recovery?.adoptRelayed(envelopeChannel(env), Date.now());
+      return handleEnvelope(env, () => {}, built, log, undefined, { relayed: true });
+    };
     if (!inboundReady) {
       // No socket here, so no socket-driven retry: drain this machine's own retained events on the
       // same five-minute cadence the socket uses, once services start. The hub relays this machine's
-      // channels' live events; once one has arrived, this machine, which owns them, also recovers
-      // what nobody received.
-      const relayedRecovery = (recovery = buildRecovery(built, false, () => relayedReceived > 0));
+      // channels' live events; each configured channel the hub has relayed here is also recovered,
+      // from its first relayed event, so this machine, which owns it, gets what nobody received.
+      const relayedRecovery = (recovery = buildRecovery(built, false, true));
       const recover = () => { void relayedRecovery.run().catch(() => log("channel recovery failed; checkpoint retained")); };
       let retryTimer: ReturnType<typeof setInterval> | undefined;
       starts.push(() => {
+        relayedRecovery.initialize(); // channels adopted before a restart resume from their saved coverage
         retryTimer = setInterval(() => {
           recover();
           void built.retryDeadLetters().catch((e) => log(`slack dead-letter retry failed: ${(e as Error).message}`));

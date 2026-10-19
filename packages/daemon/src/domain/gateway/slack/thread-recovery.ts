@@ -3,9 +3,7 @@
 import { callWebApi, type FetchImpl } from "./slack-api.js";
 import { ingestDecision, type InboundRouter, type SlackEvent } from "./inbound.js";
 import { slackMicros, slackTimestamp, type ThreadCoverage, type ThreadCoverageStore } from "./state-store.js";
-import { budgetLeft, type MethodBackoff, type RecoveryBudget, type RecoverySource } from "./recovery-budget.js";
-
-const REPLIES = "conversations.replies";
+import { budgetLeft, REPLIES, type MethodBackoff, type RecoveryBudget, type RecoverySource } from "./recovery-budget.js";
 /** Slack's page cap for apps distributed outside the Marketplace. */
 const PAGE = 15;
 
@@ -33,6 +31,9 @@ export class ThreadRecovery implements RecoverySource {
   accepted = 0;
   deadLettered = 0;
   private coverage: ThreadCoverage;
+  /** Slack can't find the thread. This source stays incomplete, without a call, until the coordinator replaces it because its
+   *  mapping or the configuration changed. Not proof of deletion, and never set by a transient error. */
+  private missing = false;
 
   constructor(private readonly opts: ThreadRecoveryOptions) {
     this.coverage = opts.stored ?? { coverageStart: opts.threadTs, coveredThrough: opts.threadTs };
@@ -59,6 +60,7 @@ export class ThreadRecovery implements RecoverySource {
 
   private async page(budget: RecoveryBudget, backoff: MethodBackoff): Promise<"more" | "done"> {
     const now = this.opts.now();
+    if (this.missing) { this.state = "incomplete"; this.reason = "thread_not_found"; return "done"; }
     if (backoff.blocked(REPLIES, now)) { this.state = "backoff"; this.reason = "rate-limited"; return "done"; }
     if (this.coverage.nextRetryAt && this.coverage.nextRetryAt > now) { this.state = "backoff"; return "done"; }
     if (!this.coverage.pending) {
@@ -66,7 +68,7 @@ export class ThreadRecovery implements RecoverySource {
       const upper = slackTimestamp(BigInt(Math.max(0, now - 5000)) * 1000n);
       if (slackMicros(upper)! <= slackMicros(this.coverage.coveredThrough)!) return "done";
       if (!budgetLeft(budget, now)) { this.state = "pending"; return "done"; }
-      this.save({ ...this.coverage, nextRetryAt: undefined, pending: { upper } });
+      this.save({ ...this.coverage, nextRetryAt: undefined, rateLimited: undefined, pending: { upper } });
     } else if (!budgetLeft(budget, now)) { this.state = "pending"; return "done"; }
     this.lastScanAt = new Date(now).toISOString();
     this.state = "scanning"; this.reason = undefined;
@@ -82,10 +84,11 @@ export class ThreadRecovery implements RecoverySource {
     if (this.opts.stopped()) return "done";
     if (!r.ok) {
       const known = ["missing_scope", "not_in_channel", "channel_not_found", "thread_not_found", "invalid_auth", "token_revoked"];
+      if (r.error === "thread_not_found") { this.missing = true; this.state = "incomplete"; this.reason = "thread_not_found"; return "done"; }
       this.reason = r.status === 429 ? "rate-limited" : known.includes(r.error ?? "") ? r.error : "replies-api-unavailable";
       const retrySeconds = r.retryAfterSeconds ?? (r.status === 0 || r.status >= 500 ? 5 : 300);
       if (r.status === 429) backoff.hold(REPLIES, this.opts.now() + retrySeconds * 1000);
-      this.save({ ...c, nextRetryAt: this.opts.now() + retrySeconds * 1000 });
+      this.save({ ...c, nextRetryAt: this.opts.now() + retrySeconds * 1000, rateLimited: r.status === 429 ? true : undefined });
       this.state = "backoff"; return "done";
     }
     const messages = r.json.messages;
@@ -119,13 +122,14 @@ export class ThreadRecovery implements RecoverySource {
       if (landed.disposition === "accepted") this.accepted++;
       if (landed.disposition === "dead-lettered") this.deadLettered++;
     }
-    // Replies arrive oldest first, so everything through the last one handled is covered.
+    // Replies arrive oldest first, so everything through the last one handled is covered: landed, duplicate, dead-lettered,
+    // refused by sender policy or skipped as not ingestible.
     const through = more ? slackMicros(ordered.at(-1)!.ts)! + 1n : upper;
     if (through >= upper) {
-      this.save({ ...c, coveredThrough: c.pending!.upper, pending: undefined, nextRetryAt: undefined });
+      this.save({ ...c, coveredThrough: c.pending!.upper, pending: undefined, nextRetryAt: undefined, rateLimited: undefined });
       this.state = "scanned"; return "done";
     }
-    this.save({ ...c, coveredThrough: slackTimestamp(through), nextRetryAt: undefined });
+    this.save({ ...c, coveredThrough: slackTimestamp(through), nextRetryAt: undefined, rateLimited: undefined });
     this.state = "incomplete"; this.reason = "pass-budget";
     return "more";
   }

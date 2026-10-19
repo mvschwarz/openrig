@@ -1,5 +1,9 @@
 // One recovery pass's work, shared in turn by every channel and thread it reaches.
 
+/** The two Slack methods recovery calls; each has its own rate limit. */
+export const HISTORY = "conversations.history";
+export const REPLIES = "conversations.replies";
+
 export interface RecoveryBudget { deadline: number; calls: number; entries: number }
 
 /** Four history calls, 100 entries and 15 seconds per pass, however many sources share it. */

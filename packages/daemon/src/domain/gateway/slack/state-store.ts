@@ -281,6 +281,10 @@ export interface ChannelCoverage {
   nextRetryAt?: number;
   /** Available history was scanned, but Slack reported older history beyond its plan limit. */
   historyLimited?: boolean;
+  /** On a machine without its own connection: when the hub first relayed this channel here (the coverage floor then). */
+  relayAdoptedAt?: string;
+  /** nextRetryAt came from Slack's rate limit, which holds the whole method, not only this channel. */
+  rateLimited?: boolean;
 }
 
 function readOptional(file: string, fsops: StateFsOps): string | undefined {
@@ -305,6 +309,8 @@ export class ChannelCoverageStore {
       if (start === null || through === null || start > through ||
         !["newest-durable-landing", "feature-adoption"].includes(c.seedBasis) ||
         (c.historyLimited !== undefined && typeof c.historyLimited !== "boolean") ||
+        (c.rateLimited !== undefined && typeof c.rateLimited !== "boolean") ||
+        (c.relayAdoptedAt !== undefined && slackMicros(c.relayAdoptedAt) === null) ||
         (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid coverage checkpoint");
       if (c.pending) {
         const upper = slackMicros(c.pending.upper), next = slackMicros(c.pending.nextLatest);
@@ -312,6 +318,11 @@ export class ChannelCoverageStore {
       }
     }
     return data;
+  }
+
+  /** Every saved channel record (throws on an unreadable or invalid file, like every read). */
+  all(): Record<string, ChannelCoverage> {
+    return this.read();
   }
 
   save(channel: string, coverage: ChannelCoverage): void {
@@ -351,6 +362,19 @@ export class ChannelCoverageStore {
     this.save(channel, coverage);
     return coverage;
   }
+
+  /** The hub relayed this channel here at `at` (local receipt time). The first time, that's the coverage floor; retained
+   * coverage wins over it, and later relays change nothing. Persisted, so a restart needs no fresh relayed event. */
+  adoptRelayed(channel: string, at: string): ChannelCoverage {
+    const data = this.read();
+    const existing = Object.hasOwn(data, channel) ? data[channel]! : undefined;
+    if (existing?.relayAdoptedAt) return existing;
+    const coverage: ChannelCoverage = existing
+      ? { ...existing, relayAdoptedAt: at }
+      : { coverageStart: at, coveredThrough: at, seedBasis: "feature-adoption", relayAdoptedAt: at };
+    this.save(channel, coverage);
+    return coverage;
+  }
 }
 
 export interface ThreadCoverage {
@@ -360,6 +384,8 @@ export interface ThreadCoverage {
   coveredThrough: string;
   pending?: { upper: string };
   nextRetryAt?: number;
+  /** nextRetryAt came from Slack's rate limit, which holds the whole method. */
+  rateLimited?: boolean;
 }
 
 /** Scan boundaries for tracked threads, keyed `channel:thread_ts`. A separate file, so a channel
@@ -375,6 +401,7 @@ export class ThreadCoverageStore {
     for (const c of Object.values(data) as ThreadCoverage[]) {
       const start = slackMicros(c?.coverageStart), through = slackMicros(c?.coveredThrough);
       if (start === null || through === null || start > through ||
+        (c.rateLimited !== undefined && typeof c.rateLimited !== "boolean") ||
         (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid thread checkpoint");
       if (c.pending) {
         const upper = slackMicros(c.pending.upper);

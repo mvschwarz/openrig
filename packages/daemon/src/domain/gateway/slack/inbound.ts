@@ -40,8 +40,9 @@ export interface SlackEvent {
   event_ts?: string;
   /** Internal history provenance, retained across dead-letter retry. */
   recoveredAfterGap?: boolean;
-  /** Internal: a reply recovered from a tracked thread's history. It lands as a late reply row and
-   *  never answers a decision; the seat reads it and decides. Retained across dead-letter retry. */
+  /** Internal: a reply recovered from history, from a tracked thread or as a broadcast reply in a channel recovery newly
+   *  covers. It lands as a late reply row and never answers a decision; the seat reads it and decides. Retained across
+   *  dead-letter retry; a live envelope can't set it. */
   recoveredThreadReply?: boolean;
   /** The envelope's `api_app_id`: the app RECEIVING the event, ours. Set by handleEnvelope only, and
    *  retained across dead-letter retry; a named bot whose app matches it is OpenRig itself. */

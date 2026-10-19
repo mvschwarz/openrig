@@ -35,16 +35,16 @@ it.each([undefined,"thread_broadcast"])("wires %s recovery after bind and serves
   subsystem.startServices();await ready;ws.onopen?.();
   await vi.waitFor(()=>expect(queueRepo.list({limit:100})).toHaveLength(1));
   expect(queueRepo.list({limit:100})[0]).toMatchObject({destinationSession:subtype?"asker@test":"owner@test"});
-  // The pass then takes its turn on the tracked thread; status must not add a call after it.
-  await vi.waitFor(()=>expect(calls.filter(url=>url.includes("conversations.replies"))).toHaveLength(1));
   const before=calls.length;
   vi.spyOn(subsystem,"status").mockImplementation(()=>{throw new Error("must not scan outbound buffer");});
   const app=new Hono();app.use("*",async(c,next)=>{c.set("gatewaySubsystem" as never,subsystem as never);await next();});
   app.route("/api/gateway",gatewayRoutes({home}));
   const res=await app.request("/api/gateway/slack/status");expect(res.status).toBe(200);
   const body=await res.json();expect(body).toMatchObject({state:"active",connector:{inbound:{state:"connected"},recovery:{state:"scanned",acceptedThisProcess:1}}});
-  if(subtype)expect(body.connector.recovery.limits).toContain("history of the channels this machine owns, including broadcast replies, and replies in tracked threads that are open or closed within seven days");
-  expect(body.connector.recovery.threads).toMatchObject({state:"available",tracked:1});
+  if(subtype)expect(body.connector.recovery.limits).toContain("history of the channels this machine owns, including broadcast replies, and replies in tracked threads whose root was posted or which closed within seven days");
+  // The open thread's root (900.1) is far older than seven days, so it isn't tracked and nothing asks Slack for its replies.
+  expect(body.connector.recovery.threads).toMatchObject({state:"available",tracked:0});
+  expect(calls.filter(url=>url.includes("conversations.replies"))).toHaveLength(0);
   expect(calls).toHaveLength(before);expect(JSON.stringify(body)).not.toContain("fixture-bot");
 });
 

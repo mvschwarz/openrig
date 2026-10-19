@@ -3,9 +3,7 @@ import path from "node:path";
 import { callWebApi, type FetchImpl } from "./slack-api.js";
 import { ingestDecision, type InboundRouter, type SlackEvent } from "./inbound.js";
 import { ChannelCoverageStore, slackMicros, slackTimestamp, type ChannelCoverage } from "./state-store.js";
-import { budgetLeft, MethodBackoff, newRecoveryBudget, type RecoveryBudget, type RecoverySource } from "./recovery-budget.js";
-
-const HISTORY = "conversations.history";
+import { budgetLeft, HISTORY, MethodBackoff, newRecoveryBudget, type RecoveryBudget, type RecoverySource } from "./recovery-budget.js";
 
 interface RecoveryOptions {
   channel: string | null;
@@ -113,7 +111,7 @@ export class ChannelRecovery implements RecoverySource {
       const upper = slackTimestamp(BigInt(Math.max(0, this.now() - 5000)) * 1000n);
       if (slackMicros(upper)! <= slackMicros(this.coverage!.coveredThrough)!) { this.state = "pending"; return "done"; }
       if (!budgetLeft(budget, this.now())) { this.state = "incomplete"; this.reason = "pass-budget"; return "done"; }
-      this.save({ ...this.coverage!, nextRetryAt: undefined, pending: { upper, nextLatest: upper } });
+      this.save({ ...this.coverage!, nextRetryAt: undefined, rateLimited: undefined, pending: { upper, nextLatest: upper } });
     } else if (!budgetLeft(budget, this.now())) { this.state = "incomplete"; this.reason = "pass-budget"; return "done"; }
     const c = { ...this.coverage! };
     const lower = slackMicros(c.coveredThrough)!;
@@ -129,7 +127,7 @@ export class ChannelRecovery implements RecoverySource {
       this.reason = r.status === 429 ? "rate-limited" : known.includes(r.error ?? "") ? r.error : "history-api-unavailable";
       const retrySeconds = r.retryAfterSeconds ?? (r.status === 0 || r.status >= 500 ? 5 : 300);
       if (r.status === 429) backoff.hold(HISTORY, this.now() + retrySeconds * 1000);
-      this.save({ ...c, nextRetryAt: this.now() + retrySeconds * 1000 });
+      this.save({ ...c, nextRetryAt: this.now() + retrySeconds * 1000, rateLimited: r.status === 429 ? true : undefined });
       this.state = "backoff"; return "done";
     }
     const messages = r.json.messages;
@@ -156,6 +154,9 @@ export class ChannelRecovery implements RecoverySource {
       const ev: SlackEvent = { ...message, channel: this.opts.channel!, recoveredAfterGap: true };
       // Broadcast replies are channel history too; preserve their thread routing.
       if (ev.thread_ts && ev.thread_ts !== ev.ts && ev.subtype !== "thread_broadcast") continue;
+      // In a channel this recovery newly covers, a broadcast reply lands late and never answers a decision, like a thread
+      // reply. The configured default channel keeps its established broadcast behaviour.
+      if (this.opts.seed === "adoption" && ev.thread_ts && ev.thread_ts !== ev.ts) ev.recoveredThreadReply = true;
       if (!ingestDecision(ev).ingest) continue;
       const landed = await this.opts.router.route(ev, 0, () => !this.stopped);
       if (this.stopped) return "done";
@@ -166,10 +167,10 @@ export class ChannelRecovery implements RecoverySource {
       if (landed.disposition === "dead-lettered") this.deadLettered++;
     }
     if (!more) {
-      this.save({ ...c, coveredThrough: c.pending!.upper, pending: undefined, nextRetryAt: undefined });
+      this.save({ ...c, coveredThrough: c.pending!.upper, pending: undefined, nextRetryAt: undefined, rateLimited: undefined });
       this.state = "scanned"; return "done";
     }
-    this.save({ ...c, pending: { upper: c.pending!.upper, nextLatest: ordered[0]!.ts }, nextRetryAt: undefined });
+    this.save({ ...c, pending: { upper: c.pending!.upper, nextLatest: ordered[0]!.ts }, nextRetryAt: undefined, rateLimited: undefined });
     // More history waits for this pass's next turn, or the next pass.
     this.state = "incomplete"; this.reason = "pass-budget";
     return "more";
