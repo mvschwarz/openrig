@@ -81,6 +81,26 @@ export function seatCorePluginDir(
   return selectedCorePluginDir(paths, pluginsDir);
 }
 
+/** The explicit interpreter a Codex seat's plugin hooks run with, so they never depend on `node` resolving on PATH. */
+export const SEAT_NODE_ENV = "OPENRIG_NODE";
+
+/**
+ * Codex: the vendored plugin directory when this node is a Codex seat whose resolved plugin selection includes it, else
+ * undefined. Codex loads the plugin from its own installation, not from this directory, so this only decides the seat's
+ * signal: OPENRIG_SEAT_PROJECT_DIR and OPENRIG_NODE, which the plugin's Codex hook commands check before running anything.
+ */
+export function seatCodexCorePluginDir(
+  node: { id: string; runtime: string | null },
+  db: Database.Database,
+  selectedPaths?: readonly string[],
+  pluginsDir?: string,
+): string | undefined {
+  if (node.runtime !== "codex") return undefined;
+  const dir = vendoredCorePluginDir(pluginsDir);
+  if (!dir) return undefined;
+  return selectedCorePluginDir(selectedPaths ?? persistedPluginPaths(db, node.id) ?? [], pluginsDir);
+}
+
 /** The seat's declared env with the vendored plugin added after any list the seat declared itself. */
 export function withCorePlugin(seatEnv: SeatEnv, dir: string | undefined): SeatEnv {
   if (!dir) return seatEnv;

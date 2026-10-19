@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { managedRelayWouldRun } = require("./codex-managed-relay.cjs");
 
 // OpenRig activity-relay hook script.
 // Reads a hook event payload from stdin, normalizes it, and POSTs to the
@@ -225,6 +226,16 @@ function settingsRelayPath(command) {
   return path.isAbsolute(decoded) && decoded.endsWith(`/${SETTINGS_RELAY_TAIL}`) ? decoded : null;
 }
 
+function interpreterAvailable(executable, env) {
+  const candidates = executable === "node"
+    ? typeof env.PATH === "string" ? env.PATH.split(path.delimiter).map(dir => path.resolve(dir || ".", "node")) : []
+    : [executable];
+  return candidates.some(candidate => {
+    try { fs.accessSync(candidate, fs.constants.X_OK); return fs.statSync(candidate).isFile(); }
+    catch { return false; }
+  });
+}
+
 // A settings entry only silences this run if it would really report: the file it names is there and is this very script.
 // A missing script, or a different one at that path (a no-op, a stale copy from an older install), reports from the plugin.
 function isThisScript(file) {
@@ -253,6 +264,11 @@ function settingsRelayReports(hookEvent, providerPayload, env = process.env) {
 function pluginRunIsRedundant(providerPayload, argv = process.argv, env = process.env) {
   if (!argv.includes("--from-plugin")) return false;
   const hookEvent = firstString(providerPayload.hookEvent, providerPayload.hookEventName, providerPayload.hook_event_name, providerPayload.event, providerPayload.eventName);
+  // Codex: the daemon's own relay lives in a managed block of the Codex config, not in Claude's settings. The plugin's run
+  // stays quiet only when Codex would run that managed handler for this event (codex-managed-relay.cjs).
+  if (firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) === "codex") {
+    return Boolean(hookEvent) && managedRelayWouldRun(hookEvent, env, { isThisScript, interpreterAvailable }).runs;
+  }
   return settingsRelayReports(hookEvent, providerPayload, env);
 }
 

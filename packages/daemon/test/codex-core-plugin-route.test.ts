@@ -1,0 +1,295 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { NodeLauncher } from "../src/domain/node-launcher.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV } from "../src/domain/claude-core-plugin-env.js";
+import { CodexRuntimeAdapter, computeCodexHookTrust, type CodexCliRunner } from "../src/adapters/codex-runtime-adapter.js";
+import { codexCorePluginEnablement, type CodexConfigLayerRead } from "../src/domain/codex-core-plugin-install.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
+
+// Codex seats get the openrig-core plugin through Codex's own install. Its hooks act only in a seat that selected the plugin,
+// a person's explicit or default disable is never overridden, and the plugin's relay stays quiet only when Codex would run the
+// daemon's managed relay for the same event. Hermetic: temp HOME and CODEX_HOME, a fake `codex` CLI, no real Codex or login.
+
+const require = createRequire(import.meta.url);
+const PLUGIN = resolve(import.meta.dirname, "../assets/plugins/openrig-core");
+const RELAY = join(PLUGIN, "hooks", "scripts", "activity-relay.cjs");
+const relay = require(RELAY) as { pluginRunIsRedundant(p: Record<string, unknown>, argv: string[], env: NodeJS.ProcessEnv): boolean };
+const managed = require(join(PLUGIN, "hooks", "scripts", "codex-managed-relay.cjs")) as {
+  managedRelayWouldRun(event: string, env: NodeJS.ProcessEnv, deps: { isThisScript(f: string): boolean; interpreterAvailable(e: string, env: NodeJS.ProcessEnv): boolean }): { runs: boolean; reason: string };
+  computeCodexHookTrust(event: string, input: { keySource: string; command: string; timeoutSec: number }): { key: string; hash: string };
+};
+const NODE_DIR = dirname(process.execPath);
+
+let root: string;
+beforeEach(() => { root = mkdtempSync(join(tmpdir(), "codex-core-route-")); });
+afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+const realFs = {
+  readFile: (p: string) => fs.readFileSync(p, "utf8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf8"),
+  exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+};
+
+function codexCommands(): Array<{ event: string; command: string }> {
+  const hooks = JSON.parse(readFileSync(join(PLUGIN, "hooks", "codex.json"), "utf8")).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  return Object.entries(hooks).flatMap(([event, groups]) => groups.flatMap((g) => g.hooks.map((h) => ({ event, command: h.command }))));
+}
+
+describe("the plugin's Codex hook commands: a shell guard before any interpreter", () => {
+  /** A plugin root whose scripts only say they ran, with which interpreter and arguments. */
+  function stubPluginRoot(): string {
+    const scripts = join(root, "plugin", "hooks", "scripts");
+    mkdirSync(scripts, { recursive: true });
+    for (const name of ["activity-relay.cjs", "refocus.cjs"]) {
+      writeFileSync(join(scripts, name), `process.stdout.write("RAN ${name} " + process.argv.slice(2).join(" ") + " NODE=" + process.execPath);\n`);
+    }
+    return join(root, "plugin");
+  }
+  /** Run one command the way Codex does: `${PLUGIN_ROOT}` substituted, then `<shell> -lc`. */
+  function runAs(shell: string, command: string, env: Record<string, string>) {
+    const noNode = join(root, "empty-bin"); mkdirSync(noNode, { recursive: true });
+    const r = spawnSync(shell, ["-lc", command.split("${PLUGIN_ROOT}").join(stubPluginRoot())],
+      { env: { HOME: join(root, "home"), PATH: noNode, ...env }, encoding: "utf8" });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  }
+  const shells = ["/bin/sh", "/bin/bash"].filter((s) => existsSync(s));
+
+  it("every one of the six entries starts with the guard and runs the explicit interpreter, never a bare node", () => {
+    const commands = codexCommands();
+    expect(commands).toHaveLength(6);
+    for (const { command } of commands) {
+      expect(command.startsWith('test -n "$OPENRIG_SEAT_PROJECT_DIR" && test -f "$OPENRIG_NODE" && test -x "$OPENRIG_NODE" || exit 0; exec "$OPENRIG_NODE" ')).toBe(true);
+      expect(command).not.toMatch(/(^|[\s;])node\s/);
+      expect(command).not.toContain(":-"); // no ${VAR:-…}, which fish can't parse
+    }
+  });
+
+  it.each(shells)("%s: a personal session and an unselected seat are successful no-ops with no node on PATH", (shell) => {
+    for (const { command } of codexCommands()) {
+      for (const env of [{}, { OPENRIG_SESSION_NAME: "unselected@rig", OPENRIG_RUNTIME: "codex" }]) {
+        const r = runAs(shell, command, env);
+        expect(r.status, r.stderr).toBe(0);
+        expect(r.stdout).toBe("");
+      }
+    }
+  });
+
+  it.each(shells)("%s: a selected seat runs the script with its explicit interpreter even with no node on PATH", (shell) => {
+    for (const { command } of codexCommands()) {
+      const r = runAs(shell, command, { OPENRIG_SEAT_PROJECT_DIR: "/work/seat", OPENRIG_NODE: process.execPath, OPENRIG_SESSION_NAME: "s@rig" });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(new RegExp(`^RAN (activity-relay|refocus)\\.cjs (--from-plugin|--runtime codex) NODE=${process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+    }
+  });
+
+  it.each(shells)("%s: an inherited project signal without a usable interpreter is a no-op, not a failed hook", (shell) => {
+    for (const { command } of codexCommands()) {
+      for (const node of [undefined, join(root, "missing-node"), root]) {
+        const r = runAs(shell, command, { OPENRIG_SEAT_PROJECT_DIR: "/work/seat", ...(node ? { OPENRIG_NODE: node } : {}) });
+        expect(r.status, r.stderr).toBe(0);
+        expect(r.stdout).toBe("");
+      }
+    }
+  });
+});
+
+describe("the launch signal: selected, unselected and personal", () => {
+  function vendored(): { pluginsDir: string; dir: string } {
+    const pluginsDir = join(root, "plugins"); const dir = join(pluginsDir, "openrig-core");
+    mkdirSync(join(dir, ".claude-plugin"), { recursive: true }); writeFileSync(join(dir, ".claude-plugin", "plugin.json"), "{}");
+    return { pluginsDir, dir };
+  }
+  function fakeTmux(created: Array<{ env: Record<string, string> | undefined }>): TmuxAdapter {
+    return {
+      createSession: async (_n: string, _c?: string, env?: Record<string, string>) => { created.push({ env }); return { ok: true as const }; },
+      setSessionEnv: async () => {}, unsetSessionEnv: async () => {}, killSession: async () => ({ ok: true as const }),
+      listPanes: async () => [], listSessions: async () => [], listWindows: async () => [], hasSession: async () => false,
+      sendText: async () => ({ ok: true as const }), sendKeys: async () => ({ ok: true as const }),
+    } as unknown as TmuxAdapter;
+  }
+
+  it("only a Codex seat that selected the plugin gets the project signal and the explicit interpreter; never Claude's plugin list", async () => {
+    const { pluginsDir, dir } = vendored();
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const rig = rigRepo.createRig("codex-core");
+      for (const [id, runtime] of [["codex-selected", "codex"], ["codex-unselected", "codex"], ["claude-selected", "claude-code"]] as const) {
+        rigRepo.addNode(rig.id, id, { runtime, cwd: `/work/${id}` });
+      }
+      const created: Array<{ env: Record<string, string> | undefined }> = [];
+      const launcher = new NodeLauncher({ db, rigRepo, sessionRegistry: new SessionRegistry(db), eventBus: new EventBus(db), tmuxAdapter: fakeTmux(created), pluginsDir });
+      expect((await launcher.launchNode(rig.id, "codex-selected", { pluginPaths: [dir] })).ok).toBe(true);
+      expect((await launcher.launchNode(rig.id, "codex-unselected", { pluginPaths: [] })).ok).toBe(true);
+      expect((await launcher.launchNode(rig.id, "claude-selected", { pluginPaths: [dir] })).ok).toBe(true);
+      expect(created[0]!.env).toMatchObject({ [SEAT_PROJECT_DIR_ENV]: "/work/codex-selected", [SEAT_NODE_ENV]: process.execPath });
+      expect(created[0]!.env).not.toHaveProperty("CLAUDE_CODE_PLUGIN_DIRS");
+      expect(created[1]!.env).not.toHaveProperty(SEAT_PROJECT_DIR_ENV);
+      expect(created[1]!.env).not.toHaveProperty(SEAT_NODE_ENV);
+      expect(created[2]!.env).toMatchObject({ [SEAT_PROJECT_DIR_ENV]: "/work/claude-selected", CLAUDE_CODE_PLUGIN_DIRS: dir });
+      expect(created[2]!.env).not.toHaveProperty(SEAT_NODE_ENV);
+    } finally { db.close(); }
+  });
+});
+
+describe("read before install: the person's choice is never overridden", () => {
+  const layer = (name: string, content: string | null): CodexConfigLayerRead => content === null
+    ? { name, path: `/${name}`, state: "absent" } : { name, path: `/${name}`, state: "read", content };
+  const KEY = '[plugins."openrig-core@openrig"]';
+
+  it("decides from the readable layers: explicit values, the _default policy, and unreadable or unparsable layers", () => {
+    const decide = (system: string | null, user: string | null, managedCfg: string | null = null) =>
+      codexCorePluginEnablement([layer("system config", system), layer("user config", user), layer("legacy managed config", managedCfg)]).decision;
+    expect(decide(null, null)).toBe("allow"); // absent
+    expect(decide(null, `${KEY}\nenabled = true\n`)).toBe("allow"); // explicit true
+    expect(decide(null, `${KEY}\nenabled = false\n`)).toBe("disabled"); // explicit false
+    expect(decide(null, "[plugins._default]\nenabled = false\n")).toBe("disabled"); // default off, no entry
+    expect(decide(null, `[plugins._default]\nenabled = false\n\n${KEY}\n`)).toBe("disabled"); // default off, entry without enabled
+    expect(decide(null, `[plugins._default]\nenabled = false\n\n${KEY}\nenabled = true\n`)).toBe("allow"); // the person's explicit choice
+    expect(decide(null, "[plugins._default]\nenabled = true\n")).toBe("allow"); // default on
+    expect(decide("[plugins._default]\nenabled = false\n", null)).toBe("disabled"); // a layer above the user file
+    expect(decide(null, `${KEY}\nenabled = true\n`, `${KEY}\nenabled = false\n`)).toBe("disabled"); // the higher layer's explicit value wins
+    expect(decide(null, "this is = = not toml")).toBe("unknown");
+    expect(decide(null, `${KEY}\nenabled = "yes"\n`)).toBe("unknown");
+    expect(codexCorePluginEnablement([{ name: "user config", path: "/u", state: "unreadable", reason: "EACCES" }]).decision).toBe("unknown");
+  });
+
+  /** A vendored plugin at `version`, a CODEX_HOME with `userConfig`, an /etc/codex stand-in, and a recording fake CLI. */
+  function setup(version: string, userConfig: string | null, opts: { installed?: string; systemConfig?: string } = {}) {
+    const pluginsDir = join(root, "plugins"); const dir = join(pluginsDir, "openrig-core");
+    mkdirSync(join(dir, ".codex-plugin"), { recursive: true });
+    writeFileSync(join(dir, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "openrig-core", version }));
+    const codexHome = join(root, "codex-home"); mkdirSync(codexHome, { recursive: true });
+    if (userConfig !== null) writeFileSync(join(codexHome, "config.toml"), userConfig);
+    if (opts.installed) mkdirSync(join(codexHome, "plugins", "cache", "openrig", "openrig-core", opts.installed), { recursive: true });
+    const etc = join(root, "etc-codex"); mkdirSync(etc, { recursive: true });
+    if (opts.systemConfig) writeFileSync(join(etc, "config.toml"), opts.systemConfig);
+    const calls: string[][] = [];
+    const runCodexCli: CodexCliRunner = async (args, env) => { calls.push([...args, `CODEX_HOME=${env.CODEX_HOME}`]); return { status: 0, stdout: "", stderr: "" }; };
+    const adapter = new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, fsOps: realFs, codexHome, resolveCorePluginDir: () => dir, runCodexCli, codexSystemConfigDir: etc });
+    return { adapter, calls, pluginsDir, codexHome };
+  }
+  const recorded = (pluginsDir: string) => `[marketplaces.openrig]\nsource_type = "local"\nsource = "${pluginsDir}"\n`;
+
+  it("first install: absent runs Codex's own marketplace add and plugin add, with the daemon's CODEX_HOME", async () => {
+    const { adapter, calls, pluginsDir, codexHome } = setup("0.1.14", null);
+    expect((await adapter.ensureCodexCorePlugin()).outcome).toBe("installed");
+    expect(calls).toEqual([["plugin", "marketplace", "add", pluginsDir, `CODEX_HOME=${codexHome}`], ["plugin", "add", "openrig-core@openrig", `CODEX_HOME=${codexHome}`]]);
+    expect(JSON.parse(readFileSync(join(pluginsDir, ".agents", "plugins", "marketplace.json"), "utf8"))).toEqual({
+      name: "openrig", interface: { displayName: "OpenRig" }, plugins: [{ name: "openrig-core", source: "./openrig-core" }] });
+    expect(existsSync(join(codexHome, "config.toml"))).toBe(false); // OpenRig writes nothing into the config itself
+  });
+
+  it("first install: explicit false, default-off and unreadable never call Codex", async () => {
+    for (const config of ['[plugins."openrig-core@openrig"]\nenabled = false\n', "[plugins._default]\nenabled = false\n", "not = = toml"]) {
+      const { adapter, calls, codexHome } = setup("0.1.14", config);
+      expect((await adapter.ensureCodexCorePlugin()).outcome).toBe("skipped");
+      expect(calls).toEqual([]);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe(config);
+      rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+    }
+    const { adapter, calls } = setup("0.1.14", null, { systemConfig: "[plugins._default]\nenabled = false\n" });
+    expect((await adapter.ensureCodexCorePlugin()).outcome).toBe("skipped");
+    expect(calls).toEqual([]);
+  });
+
+  it("version change: enabled reinstalls with plugin add only; explicit false or default-off keeps the old version untouched", async () => {
+    let s = setup("0.1.14", null, { installed: "0.1.13" });
+    writeFileSync(join(s.codexHome, "config.toml"), `${recorded(s.pluginsDir)}\n[plugins."openrig-core@openrig"]\nenabled = true\n`);
+    expect((await s.adapter.ensureCodexCorePlugin()).outcome).toBe("installed");
+    expect(s.calls.map((c) => c.slice(0, -1))).toEqual([["plugin", "add", "openrig-core@openrig"]]);
+    for (const off of ['[plugins."openrig-core@openrig"]\nenabled = false\n', '[plugins._default]\nenabled = false\n\n[plugins."openrig-core@openrig"]\n']) {
+      rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+      s = setup("0.1.14", null, { installed: "0.1.13" });
+      writeFileSync(join(s.codexHome, "config.toml"), `${recorded(s.pluginsDir)}\n${off}`);
+      expect((await s.adapter.ensureCodexCorePlugin()).outcome).toBe("skipped");
+      expect(s.calls).toEqual([]);
+    }
+  });
+
+  it("the current version is left alone, and another marketplace named openrig is never replaced", async () => {
+    let s = setup("0.1.14", null, { installed: "0.1.14" });
+    expect((await s.adapter.ensureCodexCorePlugin()).outcome).toBe("current");
+    expect(s.calls).toEqual([]);
+    rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+    s = setup("0.1.14", '[marketplaces.openrig]\nsource_type = "git"\nsource = "https://example.invalid/other.git"\n');
+    expect((await s.adapter.ensureCodexCorePlugin()).outcome).toBe("skipped");
+    expect(s.calls).toEqual([]);
+  });
+});
+
+describe("the plugin relay on Codex: quiet only when Codex would run the managed relay for the same event", () => {
+  /** A CODEX_HOME whose config the daemon itself provisioned: the managed relay block and its trust. */
+  function provisioned(): string {
+    const codexHome = join(root, "codex-home"); mkdirSync(codexHome, { recursive: true });
+    new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, fsOps: realFs, codexHome, activityRelayPath: RELAY }).ensureCodexActivityHooks();
+    return codexHome;
+  }
+  const env = (codexHome: string, path = NODE_DIR): NodeJS.ProcessEnv => ({ OPENRIG_RUNTIME: "codex", CODEX_HOME: codexHome, PATH: path });
+  const quiet = (event: string, e: NodeJS.ProcessEnv) => relay.pluginRunIsRedundant({ hook_event_name: event }, ["node", RELAY, "--from-plugin"], e);
+  const config = (codexHome: string) => join(codexHome, "config.toml");
+  const trustKey = (codexHome: string, event: string) => managed.computeCodexHookTrust(event, {
+    keySource: fs.realpathSync.native(config(codexHome)), command: `node "${RELAY}"`, timeoutSec: 5 }).key;
+  const edit = (codexHome: string, fn: (s: string) => string) => writeFileSync(config(codexHome), fn(readFileSync(config(codexHome), "utf8")));
+
+  it("both active and trusted: the plugin's run is quiet for each managed event, so each is reported once", () => {
+    const home = provisioned();
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]) expect(quiet(event, env(home))).toBe(true);
+    // The same config read by the daemon's own trust recipe and the relay's agree byte for byte.
+    expect(computeCodexHookTrust("Stop", { keySource: "/k/config.toml", command: `node "${RELAY}"`, timeoutSec: 5 }))
+      .toEqual(managed.computeCodexHookTrust("Stop", { keySource: "/k/config.toml", command: `node "${RELAY}"`, timeoutSec: 5 }));
+  });
+
+  it("reports for each state in which Codex wouldn't run the managed handler", () => {
+    const reason = (home: string, event = "UserPromptSubmit", e = env(home)) => managed.managedRelayWouldRun(event, e, {
+      isThisScript: (f) => readFileSync(f).equals(readFileSync(RELAY)),
+      interpreterAvailable: (x, en) => x === "node" && String(en.PATH).split(":").some((d) => existsSync(join(d, "node"))),
+    }).reason;
+    const cases: Array<[string, (home: string) => void, string]> = [
+      ["disabled", (h) => edit(h, (s) => s.replace(`[hooks.state.${JSON.stringify(trustKey(h, "UserPromptSubmit"))}]\n`, (m) => `${m}enabled = false\n`)), "disabled"],
+      ["untrusted", (h) => edit(h, (s) => s.replace(new RegExp(`(\\[hooks\\.state\\.${JSON.stringify(trustKey(h, "UserPromptSubmit")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\n)trusted_hash = "[^"]+"\\n`), "$1")), "untrusted"],
+      ["modified", (h) => edit(h, (s) => s.replace(new RegExp(`(\\[hooks\\.state\\.${JSON.stringify(trustKey(h, "UserPromptSubmit")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\ntrusted_hash = ")sha256:[0-9a-f]{64}`), `$1sha256:${"0".repeat(64)}`)), "modified since it was trusted"],
+      ["a matcher", (h) => edit(h, (s) => s.replace("[[hooks.UserPromptSubmit]]\n", "[[hooks.UserPromptSubmit]]\nmatcher = \"x\"\n")), "no managed stanza for this event in the daemon's form"],
+      ["another script", (h) => { const other = join(root, "other-relay.cjs"); writeFileSync(other, "// not the relay\n"); edit(h, (s) => s.split(RELAY).join(other)); }, "the managed relay is a different script"],
+      ["a group before it", (h) => edit(h, (s) => `[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\ncommand = "echo mine"\n\n${s}`), "another hook group may precede it"],
+      ["no managed block (plugin only)", (h) => writeFileSync(config(h), "[features]\nhooks = true\n"), "no single managed relay block"],
+    ];
+    for (const [, mutate, expected] of cases) {
+      rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+      const home = provisioned();
+      mutate(home);
+      expect(reason(home)).toBe(expected);
+      expect(quiet("UserPromptSubmit", env(home))).toBe(false);
+    }
+    // A non-managed event (refocus's PostCompact) has no managed relay to defer to.
+    const home = provisioned();
+    expect(quiet("PostCompact", env(home))).toBe(false);
+    // The managed relay runs a bare `node`: with none on the session's PATH it wouldn't run, so the plugin reports.
+    const empty = join(root, "no-node"); mkdirSync(empty, { recursive: true });
+    expect(reason(home, "Stop", env(home, empty))).toBe("node does not resolve on this PATH");
+    expect(quiet("Stop", env(home, empty))).toBe(false);
+  });
+
+  it("an untrusted managed relay leaves the plugin reporting, which is twice only where Codex is told to bypass hook trust", () => {
+    // Codex runs an untrusted handler only when hook trust is bypassed for the session, which this check can't see; that
+    // case reports twice. It is the stated limit, never a lost report.
+    const home = provisioned();
+    edit(home, (s) => s.replace(/trusted_hash = "sha256:[0-9a-f]{64}"\n/g, ""));
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]) expect(quiet(event, env(home))).toBe(false);
+  });
+
+  it("the Claude path is unchanged: without OPENRIG_RUNTIME=codex the Codex config is never consulted", () => {
+    const home = provisioned();
+    expect(relay.pluginRunIsRedundant({ hook_event_name: "Stop", cwd: root }, ["node", RELAY, "--from-plugin"], { CODEX_HOME: home, PATH: NODE_DIR })).toBe(false);
+    chmodSync(config(home), 0o000);
+    expect(quiet("Stop", env(home))).toBe(false); // unreadable: reports
+    chmodSync(config(home), 0o600);
+  });
+});

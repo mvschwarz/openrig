@@ -15,7 +15,7 @@ import { observeSolePane, paneObservationVerdict } from "./pane-binding-observat
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { OccupantKind } from "./session-registry.js";
 import { mergeSeatEnv, seatEnvLaunchVars, type SeatEnv } from "./seat-env.js";
-import { SEAT_PROJECT_DIR_ENV, seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
+import { SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCodexCorePluginDir, seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -153,6 +153,7 @@ export class NodeLauncher {
     // collision, never authority to kill an unmanaged same-name session.
     const specEnv = this.rigRepo.getEffectiveSeatEnv(node.id);
     const corePluginDir = seatCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
+    const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, opts?.pluginPaths, this.pluginsDir);
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
     const launchEnv = (oneOff?: SeatEnv) => compactEnv({
       OPENRIG_NODE_ID: node.id,
@@ -162,7 +163,9 @@ export class NodeLauncher {
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
       ...seatEnvLaunchVars(withCorePlugin(mergeSeatEnv(specEnv, oneOff), corePluginDir)),
       // The launch project of a seat that loads the plugin, so a Claude started elsewhere inside the seat is not taken for it.
-      [SEAT_PROJECT_DIR_ENV]: corePluginDir ? sessionCwd : undefined,
+      // For a Codex seat it is also the selection signal its plugin hooks check, beside the interpreter they run with.
+      [SEAT_PROJECT_DIR_ENV]: corePluginDir || codexCorePluginDir ? sessionCwd : undefined,
+      [SEAT_NODE_ENV]: codexCorePluginDir ? process.execPath : undefined,
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
     const openRigEnv = launchEnv(opts?.env);
