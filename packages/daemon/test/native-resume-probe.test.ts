@@ -572,6 +572,7 @@ describe("native resume probe", () => {
   it.each([
     "  5h 71% left · GPT-6-Astra high · Context 81% left",
     "  gpt-6-astra high · /work",
+    "  gpt-5.5 xhigh fast · Context 0% used · Fast on",
   ])("does not treat an old panel before a later model footer as current: %s", (footer) => {
     expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
       paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n${footer}`,
