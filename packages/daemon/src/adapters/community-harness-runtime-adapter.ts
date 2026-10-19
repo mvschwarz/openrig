@@ -113,8 +113,8 @@ export function withCommunityHarnessResolver<T extends Record<string, RuntimeAda
   return builtIns;
 }
 
-/** The adapter to relaunch a seat with: its runtime's built-in adapter, or, for a seat launched for a community agent
- *  app (`communityHarnessOf`), that app's adapter while its preset is installed. */
+/** The adapter to relaunch a seat with: its runtime's built-in adapter, or, for a seat launched for a community
+ *  harness (`communityHarnessOf`), that harness's adapter while its preset is installed. */
 export function seatAdapter(map: Record<string, RuntimeAdapter> | undefined, runtime: string | null | undefined,
   communityHarness: string | null | undefined): RuntimeAdapter | undefined {
   if (!map || !runtime) return undefined;

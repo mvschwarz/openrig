@@ -8,7 +8,7 @@ export function isCommunityHarnessRuntime(runtime: string | null | undefined): r
 }
 
 /** The community harness a seat runs, from positive provenance only: the session was launched for that app
- *  (`sessions.community_harness`), and it's still the node's runtime. A free-text runtime name alone, an older session or a
+ *  (the retained session-selection column), and it's still the node's runtime. A free-text runtime name alone, an older session or a
  *  changed runtime gives null, so such a seat is treated as it always was. */
 export function communityHarnessOf(communityHarness: string | null | undefined, runtime: string | null | undefined): string | null {
   return communityHarness && communityHarness === runtime ? communityHarness : null;
