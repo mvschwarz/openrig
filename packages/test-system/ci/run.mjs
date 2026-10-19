@@ -1,7 +1,7 @@
 // Runs INSIDE the network-disabled testbed, never on an operator's working host.
 // The existing pipeline, YAML, assertions, CLI, daemon and SQLite remain real.
 import assert from 'node:assert/strict';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { networkInterfaces } from 'node:os';
@@ -14,12 +14,13 @@ assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
 assert.ok(Object.values(networkInterfaces()).flat().every(address => address.internal),
   'requires --network none');
 const mode = process.argv[2];
-assert.ok(['healthy', 'lost-baton'].includes(mode), 'expected healthy or lost-baton');
+assert.ok(['healthy', 'lost-baton', 'seeded'].includes(mode), 'expected healthy or lost-baton');
 const caseName = process.argv[3] ?? 'fixture';
 const passingOnly = Object.hasOwn(PASSING_CASES, caseName);
 const selected = passingOnly ? PASSING_CASES[caseName] : CASES[caseName];
 assert.ok(selected, 'unknown scenario case');
 assert.ok(!passingOnly || mode === 'healthy', 'a passing-only case runs healthy only');
+assert.ok(mode !== 'seeded' || selected.kind === 'hook', 'seeded mode is bound to the hook control');
 const rigBin = realpathSync('/usr/local/bin/rig');
 const scenario = join('/opt/openrig-testbed', selected.file);
 const records = [];
@@ -34,6 +35,32 @@ try {
     baseEnv: { PATH: '/usr/local/bin:/usr/bin:/bin', TERM: 'xterm-256color' },
     deps: {
       appendRecord: record => records.push(record),
+      onHookContext: hook => {
+        report.hook = hook;
+        if (mode === 'seeded') report.fault = JSON.parse(readFileSync(report.faultReceipt, 'utf8'));
+      },
+      refocusEnv: env => {
+        if (mode !== 'seeded') return env;
+        assert.deepEqual(report.seed, { class: 'parked-baton-as-current', enabled: true });
+        const dir = join(env.OPENRIG_HOME, 'planted-trace-fault'); mkdirSync(dir, { recursive: true });
+        const shim = join(dir, 'python'); report.faultReceipt = join(dir, 'effect.json');
+        // Plant the lost-label regression in this hook's trace child, not in the captured hook output.
+        writeFileSync(shim, `#!/usr/bin/env python3
+import sys, subprocess, json, os
+r = subprocess.run([sys.executable, *sys.argv[1:]], capture_output=True, text=True)
+lines = r.stdout.splitlines(keepends=True)
+removed = [line for line in lines if line.startswith("FALLBACK — no current typed baton")]
+if r.returncode != 0 or len(removed) != 1:
+    sys.stderr.write(r.stderr + "expected exactly one real fallback label before planting fault")
+    sys.exit(1)
+with open(os.environ["SCENARIO_TRACE_FAULT_RECEIPT"], "w") as f:
+    json.dump({"class": "parked-baton-as-current", "removedLines": len(removed)}, f)
+sys.stdout.write("".join(line for line in lines if line not in removed))
+sys.stderr.write(r.stderr)
+sys.exit(r.returncode)
+`, { mode: 0o755 });
+        return { ...env, PYTHON: shim, SCENARIO_TRACE_FAULT_RECEIPT: report.faultReceipt };
+      },
       seedRegression: async regressionClass => {
         assert.equal(regressionClass, selected.seed, 'unsupported regression class');
         assert.equal(report.seed, undefined, 'seed must be armed exactly once');
@@ -43,7 +70,7 @@ try {
     },
     daemon: async (scaffold, options) => {
       const daemon = await defaultHostDaemon(scaffold, options);
-      if (mode === 'healthy') return daemon;
+      if (mode === 'healthy' || selected.kind === 'hook') return daemon;
       return {
         ...daemon,
         restart: async () => {

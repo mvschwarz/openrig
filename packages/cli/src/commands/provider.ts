@@ -186,12 +186,23 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     if (r["accountHistory"] === "unknown") out.push("account history unknown");
     if (r["savedProfile"] === "not linked") out.push("saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)");
     return out;
+    return out;
+  }
+
+  /** The row's sign-in fact, as served; nothing when an older daemon doesn't serve it. */
+  function signInLine(r: Record<string, unknown>): string | null {
+    const s = r["signIn"] as Record<string, unknown> | undefined;
+    if (!s) return null;
+    const state = s["state"] === "needs_sign_in" ? "needs sign-in" : String(s["state"]);
+    return `sign-in: ${state} (${s["evidence"]}${s["at"] ? `; as of ${s["at"]}` : ""})`;
   }
 
   function renderUsageRow(r: Record<string, unknown>, pad = "  "): void {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
       console.log(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+      const signIn = signInLine(r);
+      if (signIn) console.log(`${pad}  ${signIn}`);
       return;
     }
     // Identity first; for Codex the email is a label.
@@ -233,6 +244,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
     }
     console.log(`${pad}  current availability: ${r["currentAvailability"]}`);
+    const signIn = signInLine(r);
+    if (signIn) console.log(`${pad}  ${signIn}`);
   }
 
   // Slice 01 — usage across registered hosts, as the daemon serves it: each host's status and whether it serves usage

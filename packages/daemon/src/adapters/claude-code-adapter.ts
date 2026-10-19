@@ -60,7 +60,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -339,8 +339,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    const launch = { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable } as
-      { binding: NodeBinding; token: string; executable?: string; fingerprint?: string; process?: ClaudeLaunchedProcess };
+    const launch = { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable,
+      scriptLaunch: managed?.executableIsScript } as
+      { binding: NodeBinding; token: string; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
@@ -414,22 +415,29 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const panes = await this.tmux.listPanes(binding.tmuxSession);
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
       const observation = { target: binding.tmuxPane, tmux: this.tmux,
-        listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable };
+        listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable,
+        scriptLaunch: launch.scriptLaunch };
       const first = await observeClaudePaneProcess(observation);
       if (!first) return probe;
       // Pin the first exact process for this launch; retries cannot adopt a replacement. It is also
-      // the launch's record of the process it started (#1077).
-      if (!launch.fingerprint) {
+      // the launch's record of the process it started (#1077). A process found through a script launch
+      // is trusted on its first sight only once every other check has passed (below), so that an
+      // unconfirmed sample is not what the launch is held to.
+      const pin = () => {
         launch.fingerprint = first.fingerprint;
         if (first.process.startedAt) launch.process = { pid: first.process.pid, startedAt: first.process.startedAt };
-      }
-      if (first.fingerprint !== launch.fingerprint) return probe;
+      };
+      if (!launch.fingerprint && !first.afterScript) pin();
+      if (launch.fingerprint !== undefined && first.fingerprint !== launch.fingerprint) return probe;
       const native = await observeClaudePaneProcess(observation);
-      if (native?.fingerprint !== launch.fingerprint) return probe;
+      if (native?.fingerprint !== first.fingerprint) return probe;
       const currentPanes = await this.tmux.listPanes(binding.tmuxSession);
       if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
         || currentPanes[0]?.id !== binding.tmuxPane
         || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
+      if (!launch.fingerprint) pin();
+      // Another check of this launch can pin while this one awaits; only the pinned process is verified.
+      if (launch.fingerprint !== first.fingerprint) return probe;
       return verifiedProbe;
     } catch { return probe; }
   }
@@ -454,9 +462,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!binding.tmuxPane || !launch) return looksReady ? "another" : "unknown";
     let rows: Awaited<ReturnType<NativeProcessLister>>;
-    try { rows = await (this.listProcesses ?? listNativeProcesses)(); } catch { return "unknown"; }
+    try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true })))(); } catch { return "unknown"; }
     if (looksReady) return "another";
-    const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable };
+    const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable,
+      scriptLaunch: launch.scriptLaunch };
     if (await observeClaudePaneProcess({ ...observation, expectedToken: launch.token })) return "own";
     if (await observeClaudePaneRuntime(observation)) return "another";
     return await observeCodexPaneProcess(observation) && await verifyCodexPaneProcess({ ...observation, listProcesses: this.listProcesses })

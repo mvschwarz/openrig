@@ -131,6 +131,26 @@ describe("rig provider status — usage windows", () => {
     expect(out).toContain("    account history unknown");
   });
 
+  it("the sign-in fact prints after availability, with its evidence and time; an unavailable row prints it too", async () => {
+    model = { ...MODEL, usage: [
+      { ...READING, signIn: { state: "usable", evidence: "the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME)", at: "2026-10-12T20:00:00.000Z" } },
+      { provider: "codex", identity: null, windows: [], unavailableReason: "refresh failed at T: not_signed_in; no earlier reading since the daemon started at S",
+        lastRefresh: { at: "T", outcome: "failed", reason: "not_signed_in", detail: "no account" },
+        signIn: { state: "needs_sign_in", evidence: "the refresh's account/read reported no signed-in account", at: "T" } },
+      { ...READING, latestFromSource: false, signIn: { state: "unknown", evidence: "not the latest read: a later refresh read another one", at: null } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("    current availability: unknown\n    sign-in: usable (the refresh's rate-limit read was answered for this login (the daemon's CODEX_HOME); as of 2026-10-12T20:00:00.000Z)");
+    expect(out).toContain("  codex  unavailable: refresh failed at T: not_signed_in; no earlier reading since the daemon started at S\n    sign-in: needs sign-in (the refresh's account/read reported no signed-in account; as of T)");
+    expect(out).toContain("    sign-in: unknown (not the latest read: a later refresh read another one)");
+  });
+
+  it("CHANGED: a row with windows whose availability is unknown prints its reason too", async () => {
+    model = { ...MODEL, usage: [{ ...READING, unavailableReason: "no sample-time link between these seats' readings and this login" }] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("    no sample-time link between these seats' readings and this login");
+  });
+
   it("an unavailable row and a last-seen row say so", async () => {
     model = { ...MODEL, usage: [
       { provider: "codex", identity: null, windows: [], unavailableReason: "no reading since the daemon started at T; refresh with rig provider status --refresh" },

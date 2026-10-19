@@ -20,13 +20,13 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 
 ## Install and first run
 
-Requires Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
+Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
-**One command.** This runs OpenRig's install script from the `v0.6.8` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+**One command.** This runs OpenRig's install script from the `v0.6.11` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.11/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.11/scripts/install.sh | sh
 ```
 
 If a provider isn't signed in yet, the last step reports `FAILED [4/4]`, and `rig setup` lists the sign-in under "Some steps need attention". If the only remaining failures are provider sign-ins, the install steps finished; sign in to each selected provider as below and continue.

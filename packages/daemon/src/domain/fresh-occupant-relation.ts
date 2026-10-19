@@ -27,3 +27,40 @@ export function readFreshOccupantRelations(db: Database.Database, rigId: string)
   }
   return relation;
 }
+
+/** The event seq of each node's current-generation fresh launch that reached
+ * ready. A restore attempt that started before it describes the retired
+ * occupant, not the current one. A launch that needed attention, failed,
+ * belongs to an older generation or contradicts another gives no fence, so
+ * the recorded restore outcome stands.
+ */
+export function readReadyFreshLaunchFences(db: Database.Database, rigId?: string): Map<string, number> {
+  // Indexed: from each node's current tenure into that node's fresh-launch events
+  // (idx_events_node_type_seq), not every event of the type. `rig ps` runs this on every call.
+  const events = db.prepare(`
+    SELECT e.seq AS seq, e.payload AS payload, t.node_id AS nodeId, t.generation_uuid AS generation
+    FROM occupant_tenures t
+    JOIN nodes n ON n.id = t.node_id
+    JOIN events e ON e.node_id = t.node_id AND e.type = 'seat.fresh_launched'
+    WHERE t.generation_ordinal =
+      (SELECT MAX(t2.generation_ordinal) FROM occupant_tenures t2 WHERE t2.node_id = t.node_id)${rigId ? " AND n.rig_id = ?" : ""}
+    ORDER BY e.seq
+  `).all(...(rigId ? [rigId] : [])) as Array<{ seq: number; payload: string; nodeId: string; generation: string }>;
+  const launches = new Map<string, { seq: number; sessionId: string | null; ready: boolean } | null>();
+  for (const row of events) {
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(row.payload) as Record<string, unknown>; } catch { continue; }
+    if (event.nodeId !== row.nodeId || event.newGeneration !== row.generation) continue;
+    const sessionId = typeof event.sessionId === "string" && event.sessionId ? event.sessionId : null;
+    const prior = launches.get(row.nodeId);
+    if (prior === null) continue;
+    launches.set(row.nodeId, prior && prior.sessionId !== sessionId
+      ? null // contradictory current effects give no fence
+      : { seq: row.seq, sessionId, ready: event.status === "ready" && (prior?.ready ?? true) });
+  }
+  const fences = new Map<string, number>();
+  for (const [nodeId, launch] of launches) {
+    if (launch?.sessionId && launch.ready) fences.set(nodeId, launch.seq);
+  }
+  return fences;
+}

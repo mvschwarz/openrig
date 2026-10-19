@@ -15,7 +15,9 @@ operator in the OpenRig view.
 
 ## Before you start
 
-You need Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the
+You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or
+Codex account: one is enough, since the kernel operator adapts the shipped `starter`
+team to whichever you have. On Linux, the
 distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a
 supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
 or NodeSource. On a Mac with Apple
@@ -123,11 +125,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.11/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.11/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
