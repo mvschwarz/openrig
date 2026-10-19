@@ -29,6 +29,8 @@ function fixture(compactInstruction = '') {
   let onKeys: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined;
   // When set, the seat-binding read throws (as a failing SQLite read would).
   let metaThrows = false;
+  // When set, the pane reads as being in a tmux mode it cannot leave: the transport refuses before any input.
+  let paneInMode = false;
   const generation = 'generation-one';
   const db = {prepare: () => ({get: () => undefined, all: () => []})} as any;
   // Every input event in order: a text write with its options, or a key.
@@ -36,6 +38,8 @@ function fixture(compactInstruction = '') {
   const policy = {enabled: true, thresholdPercent: 80, preCompactInstruction: 'Write a restore map.', get compactInstruction() { return policyRef.compactInstruction; }, messageInline: '', messageFilePath: '', postRestoreAuditInstruction: ''};
   const tmux = {
     probeSession: vi.fn(async () => ({state: 'present'})),
+    isPaneInMode: vi.fn(async () => paneInMode),
+    cancelPaneMode: vi.fn(async () => undefined),
     sendText: vi.fn(async (_: string, text: string, _before?: unknown, options?: {bracketed?: boolean}) => { events.push({kind: 'text', text, bracketed: options?.bracketed !== false}); return onText?.(text) ?? {ok: true}; }),
     sendKeys: vi.fn(async (_: string, keys: string[]) => { const receipt = onKeys?.(keys); events.push({kind: 'keys', keys}); return receipt ?? {ok: true}; }),
   };
@@ -56,7 +60,7 @@ function fixture(compactInstruction = '') {
   const compactIndex = () => events.findIndex((ev) => ev.kind === 'text' && ev.text.startsWith('/compact'));
   const texts = () => events.filter((ev): ev is {kind: 'text'; text: string; bracketed: boolean} => ev.kind === 'text').map((ev) => ev.text);
   const compactText = () => (events[compactIndex()] as {text?: string} | undefined)?.text;
-  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
+  return {e, transport, tmux, events, texts, compactText, policyRef, stageMap, compactIndex, onSleep: (fn: () => void) => { onSleep = fn; }, onText: (fn: (text: string) => {ok: boolean; code?: string; message?: string} | void) => { onText = fn; }, onKeys: (fn: ((keys: string[]) => {ok: boolean; code?: string; message?: string} | void) | undefined) => { onKeys = fn; }, metaThrows: (v: boolean) => { metaThrows = v; }, paneInMode: (v: boolean) => { paneInMode = v; }, advance2: (ms: number) => { clock += ms; }, activity: (s: string) => { activity = s; }, hook: (s: string | null) => { hookActivity = s; }, advance: (ms: number) => { clock += ms; }};
 }
 
 const LONGEST_PATH = '/' + 'p'.repeat(4095); // PATH_MAX on Linux
@@ -335,7 +339,7 @@ for (const end of ['deadline', 'cancel'] as const) {
   });
 }
 
-it('deadline before the first paste: zero writes and not sent', async () => {
+it('deadline case before the first paste (not a transport refusal): zero writes and not sent', async () => {
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
@@ -382,7 +386,8 @@ it('a malformed receipt (no code) for a failed write is never reported as not se
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
-  // No code: reading the receipt throws inside the transport after the write was handed to the adapter.
+  // No code: the transport reads the receipt as a failed write (send_failed, inputPhase attempted) without
+  // throwing. A failed write may still have landed, so it is uncertain, never not sent.
   f.onText((text) => (text.startsWith('/compact') ? {ok: false, message: 'lost'} : undefined));
   await f.e.maybeAutoCompact(input);
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
@@ -391,7 +396,7 @@ it('a malformed receipt (no code) for a failed write is never reported as not se
   expect(compactWrites(f)).toBe(1);
 });
 
-it('a draft refusal at the write is the guard holding input, not an attempted write: not sent', async () => {
+it('a draft_* receipt from the paste stage is classified not_sent (the guard\'s refusal code, not an attempted write); the fake records the call, so this is not a zero-input proof', async () => {
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
@@ -420,7 +425,7 @@ async function noSecondWrite(f: ReturnType<typeof fixture>) {
   for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
 }
 
-it('zero-input refusal: the preparation ends before any write, so not sent and nothing written', async () => {
+it('deadline case (not a transport refusal): the attempt stops before any send, so not sent and no /compact write', async () => {
   const f = fixture();
   await armed(f);
   f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1);
@@ -512,4 +517,22 @@ it('an Enter receipt with no code is read without throwing: still submit_failed,
   const result = await compactResult(f);
   expect(result).toMatchObject({reason: 'submit_failed', sent: true, inputPhase: 'written'});
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'uncertain'});
+});
+
+it('a real zero-input refusal through the transport (the pane is stuck in a tmux mode): 0 writes, 0 Enters, not sent; clearing it sends nothing more', async () => {
+  const f = fixture();
+  await armed(f);
+  f.paneInMode(true);
+  const result = await compactResult(f);
+  // Refused inside SessionTransport before the text stage: no adapter write was issued.
+  expect(result).toMatchObject({ok: false, sent: false, reason: 'pane_in_mode'});
+  expect(result.inputPhase).toBeUndefined();
+  expect(compactWrites(f)).toBe(0);
+  expect(entersAfterCompact(f)).toBe(0);
+  expect(f.events.filter((ev) => ev.kind === 'keys')).toHaveLength(1); // only the preparation prompt's Enter
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
+  // Clear the fault and keep polling: the stopped attempt owes no /compact, and none is written.
+  f.paneInMode(false);
+  for (let i = 0; i < 3; i++) await f.e.maybeAutoCompact(input);
+  expect(compactWrites(f)).toBe(0);
 });
