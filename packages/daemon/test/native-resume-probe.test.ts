@@ -557,9 +557,42 @@ describe("native resume probe", () => {
       .toMatchObject({ status: "inconclusive", code: "trust_gate" });
   });
 
-  it("does not let a custom model footer hide the current trust prompt", () => {
+  it.each(["›", "»"])("keeps the current trust panel below an earlier %s composer and custom footer gated", (prompt) => {
     expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
-      paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n  Context 81% left · GPT-6-Astra high`,
+      paneContent: `${prompt} Earlier conversation prompt\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it.each(["›", "»"])("accepts a headerless %s composer and custom footer after an old trust panel", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n${prompt} Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it.each([
+    "  5h 71% left · GPT-6-Astra high · Context 81% left",
+    "  gpt-6-astra high · /work",
+  ])("does not treat an old panel before a later model footer as current: %s", (footer) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `› Earlier conversation prompt\n${currentTrustPrompt}\n${footer}`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it("does not keep trust pending after a later composer without readiness corroboration", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n› Continue`,
+    })).toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+  });
+
+  it("keeps the latest panel current after an older panel was dismissed", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: `${currentTrustPrompt}\n› Continue\n  Context 81% left · GPT-6-Astra high\n${currentTrustPrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
+  });
+
+  it("preserves the legacy branch even with a later headerless composer and custom footer", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
+      paneContent: "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No\n› Continue\n  Context 81% left · GPT-6-Astra high",
     })).toMatchObject({ status: "inconclusive", code: "trust_gate" });
   });
 

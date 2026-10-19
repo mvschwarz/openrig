@@ -1230,6 +1230,18 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendKeys).toHaveBeenCalledWith(makeBinding().tmuxSession, ["Enter"]);
   });
 
+  it("accepts readiness and resume after a current-format panel is superseded by a headerless composer", async () => {
+    const tmux = mockTmux({
+      getPaneCommand: vi.fn(async () => "node"),
+      capturePaneContent: vi.fn(async () => `${currentTrustPrompt}\n› Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`),
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    expect(await adapter.checkReady(makeBinding())).toEqual({ ready: true });
+    expect(await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" }))
+      .toMatchObject({ ok: true, resumeToken: "sess-456" });
+  });
+
   it("FR-2: resume on an unresolved Codex model-selection gate returns attention_required, not ok:true", async () => {
     const modelGate = [
       "Select a model to continue:",
