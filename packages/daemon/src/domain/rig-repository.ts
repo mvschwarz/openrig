@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
+import { decodeStoredSnapshotData } from "./snapshot-repository.js";
 import { resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
@@ -34,7 +35,7 @@ interface SnapshotRow { id: string; rig_id: string; kind: string; status: string
 function snapshotFromRowIfUsable(row: SnapshotRow): Snapshot | null {
   let data: SnapshotData;
   try {
-    data = JSON.parse(row.data) as SnapshotData;
+    data = decodeStoredSnapshotData(row.data);
   } catch {
     return null;
   }
