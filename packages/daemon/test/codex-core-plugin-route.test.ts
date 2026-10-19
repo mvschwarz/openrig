@@ -309,9 +309,12 @@ describe("the plugin relay on Codex: quiet only when Codex would run the managed
   it("the Claude path is unchanged: without OPENRIG_RUNTIME=codex the Codex config is never consulted", () => {
     const home = provisioned();
     expect(relay.pluginRunIsRedundant({ hook_event_name: "Stop", cwd: root }, ["node", RELAY, "--from-plugin"], { CODEX_HOME: home, PATH: NODE_DIR })).toBe(false);
-    chmodSync(config(home), 0o000);
-    expect(quiet("Stop", env(home))).toBe(false); // unreadable: reports
-    chmodSync(config(home), 0o600);
+    // Root reads a mode-000 file anyway, so the unreadable case can't be made there.
+    if (process.getuid?.() !== 0) {
+      chmodSync(config(home), 0o000);
+      try { expect(quiet("Stop", env(home))).toBe(false); } // unreadable: reports
+      finally { chmodSync(config(home), 0o600); }
+    }
   });
 });
 
