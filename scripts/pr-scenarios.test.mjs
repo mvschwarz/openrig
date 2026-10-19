@@ -111,7 +111,7 @@ test('only one structured outcome is allowed amid human-readable logs', () => {
 test('refocus admission requires the exact emitted hook context and seeded missing-label observation', () => {
   const context = '## WORK TRACE\nKeep the test product useful';
   const hook = { rawOutput: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context } }), additionalContext: context };
-  const result = { scenario: 'refocus-parked-baton', verdict: 'FAIL', failedStep: 3,
+  const result = { scenario: 'refocus-parked-baton', verdict: 'FAIL', failedStep: 4,
     observation: { surface: 'hook_context', value: { rawOutput: hook.rawOutput, content: context } } };
   const red = { mode: 'seeded', caseName: 'refocus-parked', scenarioSha256: 'a'.repeat(64),
     result, records: [result], hook, seed: { class: 'parked-baton-as-current', enabled: true },

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 export const RESULT_PREFIX = 'OPENRIG_SCENARIO_RESULT=';
 export const SCENARIO = 'queue-baton-survives-restart';
 export const CASES = {
-  'refocus-parked': { file: 'library/refocus-parked-baton.yaml', scenario: 'refocus-parked-baton', kind: 'hook', seed: 'parked-baton-as-current', failedStep: 3 },
+  'refocus-parked': { file: 'library/refocus-parked-baton.yaml', scenario: 'refocus-parked-baton', kind: 'hook', seed: 'parked-baton-as-current', failedStep: 4 },
   fixture: { file: 'scenarios/scenario-02-baton.yaml', destination: 'dev-worker@scn-baton', failedStep: 3 },
   library: { file: 'library/queue-baton-survives-restart.yaml', destination: 'dev-qa@dev-pair-stub', failedStep: 4, seed: 'baton-drop' },
 };

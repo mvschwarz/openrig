@@ -19,7 +19,8 @@
  *
  * seed_regression calls an explicitly supplied test fault controller. With no
  * controller it fails loud; a declaration alone never counts as a seeded test.
- * restore/emit/mutate/policy have NO shipped runtime binding at v1
+ * emit refocus invokes the shipped hook as a controlled consumer and captures its raw context.
+ * restore/other emit/mutate/policy have NO shipped runtime binding at v1
  * (they ride 51-03 / A5 items 6-8) — the adapter FAILS LOUD with a named
  * UnboundActionError rather than fabricating a call (same floor as the FLAG-1
  * `proof` surface: unbound is never silently-skipped).

@@ -181,7 +181,7 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO, identity
       io.mirrorLine(io.fireRefocus().additionalContext);
       continue;
     }
-    // All four seeded behaviors are wired above; step.behavior is `never` here. A value
+    // All declared behaviors are wired above; step.behavior is `never` here. A value
     // outside the closed STUB_BEHAVIORS union can only reach the executor by bypassing
     // parseStubScript — a programming error. Fail LOUDLY, never a silent no-op.
     throw new Error(
