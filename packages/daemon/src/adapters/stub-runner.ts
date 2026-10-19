@@ -351,7 +351,7 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
       cwd: args.cwd,
       injectClockNow: process.env.OPENRIG_TEST_CLOCK_NOW,
     }),
-    fireRefocus: () => fireRefocus(nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/scripts/refocus.cjs"), args.cwd, process.env),
+    fireRefocus: () => fireRefocus(nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/scripts/refocus.cjs"), args.cwd, process.env, args.launchId),
     postActivity: (payload) => {
       if (!endpoint || typeof fetch !== "function") return;
       const controller = new AbortController();

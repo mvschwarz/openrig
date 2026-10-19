@@ -28,8 +28,9 @@
  * so the verb→argv MAPPING is unit-testable without a live daemon.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { stubSeatSidecarPath } from "../../src/adapters/stub-runner-protocol.js";
 import { fireRefocus, type StubRefocusResult } from "../../src/adapters/stub-refocus.js";
 import { runRig as realRunRig, type RigResult, type ScenarioDaemon } from "./scenario-daemon.js";
 import { readSurface } from "./scenario-surfaces.js";
@@ -176,7 +177,9 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
           "assets/plugins/openrig-core/hooks/scripts/refocus.cjs")).find(existsSync);
         if (!hook) return fail("installed refocus hook asset not found");
         const env = { ...daemon.readEnv, OPENRIG_SESSION_NAME: p.seat, OPENRIG_REFOCUS_TREES: "work" };
-        const result = fireRefocus(hook, opts.seatCwd, opts.refocusEnv?.(env) ?? env);
+        const state = JSON.parse(readFileSync(stubSeatSidecarPath(opts.seatCwd), "utf8"));
+        if (typeof state.launchId !== "string" || !state.launchId) return fail("stub refocus has no observed launch identity");
+        const result = fireRefocus(hook, opts.seatCwd, opts.refocusEnv?.(env) ?? env, state.launchId);
         hookContexts.set(p.seat, result);
         opts.onHookContext?.(result);
         return { code: 0, stdout: result.rawOutput, stderr: "" };
