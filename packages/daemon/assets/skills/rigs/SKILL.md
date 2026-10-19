@@ -87,14 +87,15 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   no after this short explanation:
   - This adds me as a named member of the team, with my name on messages.
   - In a plain shell, joining writes no files in your project or personal settings.
-  - Inside tmux (from source, not hand-tested), it can record this session's transcript. For Claude Code it can also
+  - Inside tmux (from source, not hand-tested), other agents can type into this window, and stopping the team
+    (`rig down`) also closes this tmux session. It can record this session's transcript, and for Claude Code also
     write `.openrig/context-collector.cjs` and update `.claude/settings.local.json` for the status line, keeping an
     existing custom status line.
-  - Other agents reply through the task queue because they can't type into this window. Stopping the team leaves
-    this session running.
+  - In a plain shell, other agents reply through the task queue because they can't type into this window, and
+    stopping the team leaves this session running.
 
   Attach only on their yes; if they decline, continue the operator handoff. For this first contact, use the kernel's
-  rig ID and its `operator` pod:
+  rig ID (the `rigId` of the `kernel` row in `rig ps --json`) and its `operator` pod:
   `rig attach --self --rig <rigId> --pod operator --member person-agent --runtime <claude-code|codex> --print-env`.
   `--node <logicalId>` binds to an existing seat instead. Attach once, and keep the variables it prints
   (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put them in front of every
@@ -120,7 +121,7 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
   read it with `rig capture <seat>@<rig>` and answer with the key that screen shows (`rig send --help` says how to
   send a digit, a letter or Escape), or ask the person. Capture it again before sending anything more.
-- **Replies:** other agents can't type into this session. Read work sent to you with
+- **Replies:** in a plain shell, other agents can't type into this session. Read work sent to you with
   `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
   `rig capture <seat>@<rig>`.
 
