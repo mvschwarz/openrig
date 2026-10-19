@@ -175,6 +175,25 @@ describe("what a caller's cancellation does not change", () => {
     expect(f.writes).toEqual(["paste:a:WAKE", "keys:a:Enter"]);
   });
 
+  it("a caller that goes away while queued for the lease of a typing-guarded seat retains nothing", async () => {
+    const f = fixture();
+    await f.guard.set("a", { mode: "hold" }, "operator", "manual terminal");
+    let release!: () => void; let entered!: () => void;
+    const locked = new Promise<void>((r) => { entered = r; }); const gate = new Promise<void>((r) => { release = r; });
+    // A held seat routes an operation to its retention callback; hold the lease through either.
+    const hold = async () => { entered(); await gate; };
+    const holder = f.guard.operation("worker@test", hold, hold);
+    await locked;
+    const op = vi.spyOn(f.guard, "operation");
+    const caller = new AbortController();
+    const pending = f.post("/send", { session: "worker@test", text: "HELD", deliveryId: "held-queued" }, caller.signal);
+    await vi.waitFor(() => expect(op).toHaveBeenCalled());
+    caller.abort(); release(); await holder;
+    expect(await (await pending).json()).toMatchObject({ ok: false, sent: false, reason: "caller_cancelled", inputPhase: "not_reached" });
+    expect(f.outbox.getById("held-queued")).toBeFalsy();
+    expect(f.writes).toEqual([]);
+  });
+
   it("a delivery the typing guard retained stays retained after the caller goes away", async () => {
     const f = fixture();
     await f.guard.set("a", { mode: "hold" }, "operator", "manual terminal");

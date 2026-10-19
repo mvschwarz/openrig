@@ -2113,9 +2113,10 @@ export class SessionTransport {
    * With verification requested, compare rendered message counts, excluding
    * agent input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
-    if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) {
+      // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
+      if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       const result = await this.sendUnguarded(sessionName, text, opts);
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
@@ -2150,6 +2151,9 @@ export class SessionTransport {
           if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
         }
       }
+      // A recorded delivery has answered with its own outcome above; with nothing recorded, a caller already gone
+      // ends the send here.
+      if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       // #1084 — the idle wait must not occupy the seat's serial lease: a long
       // --wait-for-idle inside guard.operation holds up other sends and queue
       // creates to this seat for the whole wait. The lease-free wait, main's
@@ -2187,7 +2191,13 @@ export class SessionTransport {
       }
       const result = await guard.operation(sessionName, async () => {
         if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
-          // Draft-aware delivery commits its record before it writes; a caller going away doesn't cancel it.
+          // Up to its durable record a draft-aware send is still the caller's: one that went away while this send
+          // waited for the lease ends here, unless a record for this delivery already exists. DraftAwareDelivery.send
+          // commits that record synchronously before its first await, so no cancellation lands between this check
+          // and the commit; after the commit a caller going away doesn't cancel it.
+          if (callerSignal(sendOpts)?.aborted && !this.guardedDelivery.existing(sessionName, text, sendOpts ?? {}, ids)) {
+            return callerCancelled(sessionName);
+          }
           return this.guardedDelivery.send(sessionName, text, { ...sendOpts, signal: undefined }, ids);
         }
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
@@ -2196,6 +2206,8 @@ export class SessionTransport {
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
         if (prior) return prior;
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
+        // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
+        if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
