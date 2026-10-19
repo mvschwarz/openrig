@@ -1140,6 +1140,41 @@ describe("RestoreCheckService", () => {
     expect(hook?.remediation).toBe("");
   });
 
+  it("keeps projected activity-resource evidence when a selected core plugin is broken", () => {
+    const cwd = "/fixture-project";
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const pluginDir = "/custom-instance/plugins/openrig-core";
+    const events = ["SessionStart", "UserPromptSubmit"];
+    const settings = JSON.stringify({ hooks: Object.fromEntries(events.map(event => [event, [{ hooks: [
+      { type: "command", command: `node '${RELAY_PATH}'` },
+    ] }]])) });
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [
+        { absolutePath: "/source/activity-hooks", category: "runtime_resource", resourceType: "claude_activity_hooks" },
+        { absolutePath: pluginDir, category: "plugin" },
+      ] }),
+      getClaudeActivityHookEvents: () => events,
+      exists: () => true,
+      readFile: candidate => {
+        if (candidate === settingsPath) return settings;
+        if (candidate === path.join(pluginDir, ".claude-plugin", "plugin.json")) return "{";
+        return VALID_HOST_INFRA_DECLARATION;
+      },
+    }));
+
+    const result = service.check({});
+    const hook = result.checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook).toMatchObject({ status: "yellow", remediation: "" });
+    expect(hook?.evidence).toContain(`activity hooks are projected in ${settingsPath}`);
+    expect(hook?.evidence).toContain(`relay present at ${RELAY_PATH}`);
+    expect(hook?.evidence).toContain("hook execution is not verified");
+    expect(hook?.evidence).toContain("Saved openrig-core plugin channel is selected but its assets could not be trusted");
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.readiness.status).toBe("ready_with_caveats");
+    expect(result.repairPacket?.some(step => step.rationale === hook?.evidence) ?? false).toBe(false);
+  });
+
   it("Codex and infrastructure hook checks are green not-applicable without hook repair steps", () => {
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [
