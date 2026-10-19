@@ -222,6 +222,30 @@ function buildSystemMessage(restoreInstruction, customMessage) {
   return `${restoreInstruction}\n\n--- Operator-configured post-compaction restore instruction ---\n${customMessage}`;
 }
 
+// --- seat project boundary: keep this block identical in every script that has it ---
+// A Claude started from inside a seat (its shell, its Bash tool) inherits the seat's environment, so it loads this plugin
+// and its hooks would act as the seat. OpenRig tells the plugin the seat's launch project in OPENRIG_SEAT_PROJECT_DIR;
+// Claude's own CLAUDE_PROJECT_DIR is fixed for the life of a Claude and names the project it was started in (unlike the
+// hook payload's cwd, which follows a `cd`). The seat's effects run only when the two name the same folder. Spellings of
+// one folder (a symlink, a trailing slash, letter case on a case-insensitive disk) count as the same, and a missing
+// variable (an older or manual launch, a runtime without CLAUDE_PROJECT_DIR) leaves the hook doing what it always did.
+function runsForThisSeatsProject(env = process.env) {
+  const launch = env.OPENRIG_SEAT_PROJECT_DIR;
+  const project = env.CLAUDE_PROJECT_DIR;
+  if (!launch || !project) return true;
+  const canonical = (dir) => {
+    const absolute = path.resolve(dir);
+    // .native gives the case the disk has (plain realpathSync keeps the case the path was typed in), which is what Claude's
+    // CLAUDE_PROJECT_DIR carries on a case-insensitive filesystem such as macOS's default.
+    try { return fs.realpathSync.native(absolute); } catch { return absolute; }
+  };
+  return canonical(launch) === canonical(project);
+}
+// --- end seat project boundary ---
+
+// A Claude started elsewhere inside this seat is not the seat: no packet, no marker.
+if (!runsForThisSeatsProject()) process.exit(0);
+
 try {
   // Slice 51-01 RIDER (leak-visibility, review-r1 escalation): OPENRIG_TEST_CLOCK_NOW is
   // read by nowIso() to make createdAt deterministic in tests — but a LEAKED var in a

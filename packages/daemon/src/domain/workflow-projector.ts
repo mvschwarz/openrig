@@ -43,6 +43,7 @@ import {
   tryResolveRoleByCapability,
   type RoleResolutionContext,
 } from "./workflow-role-context.js";
+import { packetScopeTags } from "./workflow-scope.js";
 import { classifyFailureOccurrence, classifyGateTrip, workflowExceptionTags } from "./workflow-exception.js";
 import { newQitemId, QueueRepositoryError } from "./queue-repository.js";
 import { resolveExceptionRoute } from "./workflow-exception-router.js";
@@ -249,7 +250,7 @@ export class WorkflowProjector {
         { instanceId: instance.instanceId, currentPacketId: input.currentPacketId, frontier: instance.currentFrontier },
       );
     }
-    const specRow = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+    const specRow = this.specCache.getForInstance(instance);
     if (!specRow) {
       throw new WorkflowProjectorError(
         "spec_not_cached",
@@ -624,6 +625,7 @@ export class WorkflowProjector {
             `workflow:${spec.id}`,
             `instance:${instance.instanceId}`,
             ...(gateException ? workflowExceptionTags(gateException.identity).filter((t) => !t.startsWith("workflow:") && !t.startsWith("instance:")) : []),
+            ...packetScopeTags(instance, nextStep.id),
           ],
           summary: gateCompile?.summary ?? undefined,
           evidenceRef: gateCompile?.evidenceRef ?? undefined,
@@ -951,7 +953,7 @@ export class WorkflowProjector {
         body: itemBody,
         priority: "urgent",
         tier,
-        tags: workflowExceptionTags(exception.identity),
+        tags: [...workflowExceptionTags(exception.identity), ...packetScopeTags(instance, currentStep.id)],
         summary: exception.reason,
         evidenceRef,
         chainOfRecord: [input.currentPacketId],
@@ -1157,7 +1159,7 @@ export class WorkflowProjector {
           }),
           priority: "routine",
           tier: plan.gate?.tier ?? "mode2",
-          tags: ["workflow", plan.gate ? "gate" : "handoff", `workflow:${spec.id}`, `instance:${instance.instanceId}`, `step:${plan.step.id}`],
+          tags: ["workflow", plan.gate ? "gate" : "handoff", `workflow:${spec.id}`, `instance:${instance.instanceId}`, `step:${plan.step.id}`, ...packetScopeTags(instance, plan.step.id)],
           summary: plan.gate?.summary ?? undefined,
           evidenceRef: plan.gate?.evidenceRef ?? undefined,
           chainOfRecord: [input.currentPacketId],

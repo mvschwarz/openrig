@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -50,14 +51,19 @@ describe("stub CLI journeys", () => {
     }
   }, 60_000);
 
-  it("verified send renders in the addressed pane and not its sibling", async () => {
-    const marker = `verified-send-${randomUUID()}`;
+  it.each(["normal", "narrow soft-wrap"])("verified send renders in the addressed pane and not its sibling: %s", async (mode) => {
+    if (mode === "narrow soft-wrap") {
+      execFileSync("tmux", ["-S", scaffold!.tmuxSocketPath, "resize-window", "-t", `=${recipient}:`, "-x", "42", "-y", "40"], { env: scaffold!.env });
+    }
+    // A long token forces real mid-word terminal wrapping, not just modeled newlines.
+    const marker = `verified-send-${randomUUID()}` + (mode === "narrow soft-wrap" ? "-" + "x".repeat(100) + " tail" : "");
     const receipt = await cli(["send", recipient, marker, "--verify", "--json"]);
     expect(receipt.verified).toBe(true);
     const target = await cli(["capture", recipient, "--json"]);
     const sibling = await cli(["capture", sender, "--json"]);
-    expect(JSON.stringify(target)).toContain(marker);
-    expect(JSON.stringify(sibling)).not.toContain(marker);
+    if (mode === "narrow soft-wrap") expect(JSON.stringify(target)).not.toContain(marker);
+    expect(JSON.stringify(target).replace(/\\n/g, "")).toContain(marker);
+    expect(JSON.stringify(sibling).replace(/\\n/g, "")).not.toContain(marker);
     // Pane rendering is the contract here. The stub has no consuming input loop.
   }, 60_000);
 
@@ -73,6 +79,25 @@ describe("stub CLI journeys", () => {
     expect(current.entries.map((n: { canonicalSessionName: string }) => n.canonicalSessionName)).toEqual([sender]);
     expect(current.scope).toMatchObject({ rig: "rig-alpha", rigsOnHost: 2 });
     // Exact arrays, not subset matches: an extra sibling is a failure.
+  }, 60_000);
+
+  it("hold mode retains a CLI send outside its pane and exposes its original ID", async () => {
+    const marker = `typing-guard-${randomUUID()}`;
+    try {
+      const preference = await cli(["seat", "set-typing-guard", recipient, "--mode", "hold", "--reason", "fixture manual input", "--json"]);
+      expect(preference).toMatchObject({ effective: true, effectiveMode: "hold", pending: false });
+      const receipt = await cli(["send", recipient, marker, "--verify", "--json"]);
+      expect(receipt).toMatchObject({ outcome: "retained", sent: false, verified: false });
+      expect(receipt.outboxIds).toHaveLength(1);
+      const id = receipt.outboxIds[0];
+      const retained = await cli(["seat", "held-messages", recipient, "--id", id, "--json"]);
+      expect(retained.entry).toMatchObject({ outboxId: id, deliveryState: "retained", destinationSession: recipient });
+      expect(retained.entry.body).toContain(marker);
+      expect(JSON.stringify(await cli(["capture", recipient, "--json"]))).not.toContain(marker);
+      expect(await cli(["seat", "status", sender, "--json"])).toMatchObject({ typingGuard: { effective: false, effectiveMode: "off" } });
+    } finally {
+      await cli(["seat", "set-typing-guard", recipient, "--enabled", "false", "--reason", "fixture cleanup", "--json"]);
+    }
   }, 60_000);
 
   it("replays one exact stream item after restart and an idempotent emit retry", async () => {

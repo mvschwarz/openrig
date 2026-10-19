@@ -50,6 +50,7 @@ import { seatIdentityVerdictsSchema } from "../../src/db/migrations/046_seat_ide
 // this fixture must be production-migration-faithful for the D2 latency budget.
 import { eventsNodeTypeIndexSchema } from "../../src/db/migrations/047_events_node_type_index.js";      // idx_events_node_type_seq
 import { sessionsNodeIdIndexSchema } from "../../src/db/migrations/053_sessions_node_id_index.js";       // idx_sessions_node_created_id
+import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_stop_intent.js";
 
 // Vitest-free migrated in-memory DB — the same base migration list as
 // test-app.ts::createFullTestDb PLUS the shipped 047/053 hot-path indexes, and
@@ -59,7 +60,7 @@ import { sessionsNodeIdIndexSchema } from "../../src/db/migrations/053_sessions_
 // index-independent).
 export function createMigratedDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema, sessionStopIntentSchema]);
   return db;
 }
 

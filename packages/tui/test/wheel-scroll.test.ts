@@ -34,6 +34,22 @@ describe("wheel scroll — the pointer decides which pane moves", () => {
     });
   });
 
+  it("ignores horizontal wheel notches (66/67) instead of scrolling vertically", () => {
+    const snap = demoSnapshot();
+    const view = createViewState({ instanceId: "wheel", getSnapshot: () => snap });
+    const screen = renderScreen(view.get(), snap, { cols: 120, rows: 34 });
+    for (const button of [66, 67, 66 | 16, 67 | 4]) {
+      for (const x of [5, 90]) {
+        expect({ button, x, action: resolveMouseAction({ type: "mouse", button, x, y: 8 }, view.get(), screen, 20) })
+          .toEqual({ button, x, action: null });
+      }
+    }
+    // A modifier held during a vertical notch still scrolls.
+    expect(resolveMouseAction({ type: "mouse", button: 64 | 16, x: 90, y: 8 }, view.get(), screen, 20)).toEqual({
+      type: "content-scroll", delta: -3,
+    });
+  });
+
   it("a plain left click still decodes as a mouse event (regression guard)", () => {
     const evs = events(sgrClick(10, 5));
     expect(evs.some((e) => e.type === "mouse")).toBe(true);

@@ -54,7 +54,8 @@ Use for any substantive work that must not fall through chat — slice handoffs,
 guard verdicts, QA results, full-tip reviews, multi-item batches. Survives agent
 restarts. Tracked in the daemon SQLite schema. Surfaces in Project / queue views
 + in the destination seat's inbox. Tag with mission / slice / gate / checkpoint
-so future-you (and any peer) can find it.
+so future-you (and any peer) can find it. Give the row a `--summary` (its subject, wherever the row is listed)
+and the `project:`, `mission:` and `slice:` tags when it is project work.
 
 Body discipline: substantive bodies go through **`--body-file <path>`** (or `-` for stdin) — the
 purpose-built, corruption-safe surface (it kills the backtick-shell-corruption class for multi-line
@@ -66,7 +67,8 @@ Example:
 ```bash
 rig queue create \
   --destination dev-reviewer@example-project \
-  --tags "mission:data-import,slice:import-report" \
+  --summary "Review the import report: it changes how rows are deduplicated" \
+  --tags "project:example-project,mission:data-import,slice:import-report" \
   --body-file /tmp/import-report-handoff.md
 ```
 
@@ -83,7 +85,8 @@ Example:
 ```bash
 rig queue handoff <qitem-id> \
   --to dev-reviewer@example-project \
-  --tags "mission:data-import,slice:import-report" \
+  --summary "Review the import report: it changes how rows are deduplicated" \
+  --tags "project:example-project,mission:data-import,slice:import-report" \
   --body-file /tmp/import-report-handoff.md
 ```
 
@@ -355,11 +358,15 @@ restore) into one call.
 
 ```bash
 rig start                    # interactive: daemon + kernel + pick-and-restore
-rig start --last             # headless: restore all rigs that were last running
+rig start --last             # headless: restore rigs that were last running; a rig stopped on purpose stays down
 rig start --all              # headless: restore all rigs with restore-usable snapshots
 rig start --rigs <name> [<name>...]   # headless: restore only the named rigs
 rig start --json             # JSON output for agents
 ```
+
+`rig start --last` keeps down a rig that was stopped on purpose (`rig down` or `rig seat stop`).
+Bring it back with `rig start --rigs <rig>`. A rig whose seat statuses can't be read is still
+attempted, with a warning (`seat_status_unreadable`).
 
 Framing: `rig start` is the RECOVERY entry point, not the getting-started
 hero. The fresh-user boot hero remains `rig up <team>` (typically
@@ -500,11 +507,12 @@ rig ps --active             # opt-in active-state filter (does NOT change the al
 ```bash
 rig whoami                  # compact: identity + peers names + edges + transcript path
 rig whoami --json           # compact JSON
+rig whoami --json --all-peers  # compact JSON with every peer, when output.compact bounds the list
 rig whoami --full           # complete payload (v0.3.4 default shape)
 rig whoami --verbose        # alias of --full
 ```
 
-The first command every agent runs on boot AND every compaction-restore. The compact default keeps identity-recovery essentials (`identity`, `peers` names + sessionNames, `edges` directional `kind` + `to.sessionName`, `transcriptPath`). `--full` adds `contextUsage`, `commands`, `peersNote`, `runtimeContext`. The compact-default is an ALLOWLIST projection — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
+The first command every agent runs on boot AND every compaction-restore. The compact default keeps identity-recovery essentials (`identity`, `peers` names + sessionNames, `peersNote`, `edges` directional `kind` + `to.sessionName`, the transcript path). `--full` adds `contextUsage`, `commands`, `runtimeContext` and `workspace`. With `output.compact` on, compact JSON lists at most `output.whoami_peers` peers (default 8): edge peers first, then your pod, then roster order. `peersNote` and `peersOmitted` then say how many were left out, and `--all-peers` lists every one; `edges` stays complete. The compact-default is an ALLOWLIST projection — future payload fields default to `--full` and cannot silently re-bloat the every-boot path.
 
 ### `rig queue list` — active-frontier + docker/kubectl grammar
 
@@ -519,7 +527,7 @@ rig queue list --mine                # just the caller's items
 rig queue list --destination <s>     # destined to <s>
 rig queue list --source <s>          # sourced by <s>
 rig queue show <qitemId>             # bounded single-item body preview
-rig queue show <qitemId> --full      # complete body and chain fields
+rig queue show <qitemId> --full      # complete body and chain fields; a closed row adds closingTransition (the close's state, reason, target, actor, time and note)
 ```
 
 Four orthogonal axes (scope × history × field-breadth × encoding), all composable. **STOP using bare `rig queue list` as the cross-rig firehose.** Default is now active + compact + current-rig. Cross-rig history with full bodies is opt-in via `-A -a --full`; request only the breadth and fields needed for the question.
@@ -938,6 +946,88 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 
 **Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
 
+### Manage subscriptions across a fleet (when the person asks you to)
+
+**This applies only when both hold:**
+- the daemon's `provider.subscription_moves` setting is on. It's off by default; the person turns it on with
+  `rig config set provider.subscription_moves true`;
+- the person has asked you to manage their subscriptions.
+
+Otherwise, don't take this job on. Installing or upgrading OpenRig appoints no agent, launches no bundle and starts no
+rotation.
+
+When a person runs several Claude and Codex subscriptions across machines, the fleet studio bundle's one agent is meant
+to keep work running, through the Fleet app. Until that bundle is available, the agent the person asks to manage their
+subscriptions can use this section. If that's you, you decide which subscription or home moves, and when. You decide
+from:
+- the usage and assignment readings, and their freshness;
+- the move record;
+- the person's standing preferences.
+
+You say why, and you see the outcome through. OpenRig gives you the facts and the tools; it never decides for you,
+and there's no threshold to obey.
+
+**Who decides:**
+- **The person's operator agent** can ask you for a move, or look at the record. It doesn't make competing moves of
+  its own.
+- **One agent manages subscriptions:** the one the person asked, or the fleet studio's agent once that bundle is
+  available. There's no other fleet-manager role and no automatic manager. Use the commands below directly; no extra
+  hand-off is needed.
+- **The Observatory is optional:** it can show your moves and readings, but you don't need it to rotate.
+
+**The unit is a Codex home, with every seat on it.** Moving some seats on a shared home to a different account, and
+moving Claude seats, aren't supported moves yet: say so instead of improvising.
+
+1. **Know the subscriptions.**
+   - Each subscription is reached through a saved profile on a home (`rig auth list` and `rig auth save`) on each
+     machine. Which seats use which profile is `rig auth seats`, and that's metadata: not proof of a live account.
+   - Check you can read each subscription's usage, and name any you can't.
+2. **Read before deciding.**
+   - Use `rig provider status --all-hosts --json` (add `--refresh` for fresh native readings). Each allowance has
+     its windows, reset times and when it was observed.
+   - **One allowance seen on two machines is one allowance:** never add its headroom twice.
+   - **A stale reading** is usable only with its age recorded, or after a refresh.
+   - **An unknown or unavailable reading is never room.**
+   - **Equal reset times don't mean the same account.**
+   - **A seat's link to a subscription is observed, configured or unknown.** Only an observed link shows the seat
+     actually uses it; a configured one (a profile, a registry row) is a claim.
+3. **Decide, and leave seats alone for a reason.**
+   - `rig seat restart <seat> --keep-conversation --plan` shows what a restart keeps, and every peer on the same
+     home. Moving the home moves them all.
+   - Skip a seat that's mid-turn, running a service, or about to finish, and record why.
+   - The person's standing preferences ("never move the reviewers") are yours to follow and record.
+4. **Move the home.**
+   - On that machine, `CODEX_HOME=<that home> rig auth switch <profile> --runtime codex`. `rig auth` acts on
+     `CODEX_HOME`, or on the default home, and `rig auth status` prints which home it means: check it before
+     switching.
+   - Then restart each chosen seat: `rig seat restart <seat> --keep-conversation --reason "<why>"`.
+   - After it completes a real tool-using turn, check it: `rig seat restart <seat> --keep-conversation --verify
+     --expect-account <the target's Account line>`. `--verify` only checks; it never restarts. Only that check
+     reports `moved`, and anything less is unconfirmed.
+   - **A slow reply isn't a failure:** never restart a seat a second time. Follow up at your next look.
+5. **Record every move, partial or unconfirmed included,** with `rig provider moves record --file <move.json>`
+   (`--help` shows the shape):
+   - the home and machine;
+   - from and to, as labels;
+   - your reason;
+   - each reading you acted on, with its observation time;
+   - each seat's result (`moved`, `unconfirmed` or `unknown`) with its evidence or what's missing;
+   - the peers, for example "not restarted; account unverified".
+
+   A seat marked `moved` needs its `evidence`, and an `unconfirmed` or `unknown` one needs what's `missing`. A home
+   switched with every seat left as a peer is still a move to record, with `seats: []`. A follow-up that confirms an
+   earlier unconfirmed seat records a new move with `supersedes`. Asked "why did this
+   seat move?", answer from `rig provider moves --seat <seat>`. Never put credentials in a record.
+6. **When a sign-in is needed:**
+   - Ask the person once, durably: a queue item to their seat, naming the machine and the subscription.
+   - Move nothing onto that subscription until it's done.
+   - On later wakes, check that item instead of asking again. Carry on with everything else.
+7. **When nothing has room:** say so, with the reset times. Never fall back to an API key, buy anything, or create an
+   account.
+
+**What wakes you:** a watchdog, a usage-limit park on the queue, or the person asking. How often you look is your
+judgment within those.
+
 ## Context packs and paced delivery (0.5.0)
 
 **Compose context once, hand it to a seat cleanly.** A library primitive plus a set of delivery flags. The rule that keeps the grammar coherent — internalize this one: **the noun stores and composes; the verbs deliver.** `rig context` never sends anything; delivery is only ever `rig send` / `rig broadcast` / `rig walk` / `rig queue`.
@@ -984,7 +1074,8 @@ Walk a seat *through* a pack: each piece is sent into the pane, spaced by `--pac
 - **The orchestrator habit — assign work *with* its context attached:**
   ```bash
   rig context compose --out packs/qitem-brief --from <brief-file> <proof-file>
-  rig queue create --destination dev-driver@build --body-context packs/qitem-brief --summary "…"
+  rig queue create --destination dev-driver@build --body-context packs/qitem-brief \
+    --summary "…" --tags "project:<id>,mission:<id>,slice:<id>"
   ```
   Replace `<brief-file>` and `<proof-file>` with your existing local files. The curated context rides the durable handoff, survives compaction, and is auditable.
 
@@ -1280,8 +1371,8 @@ This lets ordinary agents ask the manager for OpenRig help instead of every agen
 ```bash
 rig grow <rig-id> <member...> [--pod <pod> | --new-pod <pod>] [--runtime <runtime>] [--cwd <path>] [--json]
 rig expand <rig-id> <pod-fragment-path> [--rig-root <path>] [--json]
-rig launch <rigId> <nodeRef> [--json]
-rig launch <rigId> --seats <a,b,c> [--hold-reason <text>] [--json]
+rig launch <rig> <nodeRef> [--json]
+rig launch <rig> --seats <a,b,c> [--hold-reason <text>] [--json]
 rig remove <rigId> <nodeRef> [--json]
 rig shrink <rigId> <podRef> [--json]
 rig unclaim <sessionRef> [--json]
@@ -1294,8 +1385,9 @@ or `rig add` (one member) when a seat needs an explicit model, a permission poli
 different agent spec or role profile, per-seat runtime or cwd, or startup files.
 
 Node-granular managed partial restore (v0.3.4+):
-- `rig launch <rigId> <nodeRef>` relaunches a single seat by logical id or node id through orchestration.
-- `rig launch <rigId> --seats <a,b,c>` relaunches a comma-separated subset of seats.
+- `rig launch <rig> <nodeRef>` relaunches a single seat by logical id or node id through orchestration. `<rig>` is the
+  rig's name or ID; a name shared by more than one active rig stops with the candidate IDs.
+- `rig launch <rig> --seats <a,b,c>` relaunches a comma-separated subset of seats.
 - `--hold-reason <text>` records a reason for holding non-target seats during the partial launch.
 - This is a SUPPORTED managed path. The prior `pod_aware_launch_unsupported` dead-end is retired; pod-aware narrow launch now goes through this surface rather than ad-hoc rebuilds.
 
@@ -1370,6 +1462,75 @@ Current shipped MCP tools:
 - `rig_capture`
 - `rig_chatroom_send`
 - `rig_chatroom_watch`
+- `rig_add`
+- `rig_queue_create`, `rig_queue_show`, `rig_queue_list`, `rig_queue_claim`, `rig_queue_update`
+
+The server acts as one seat: the `OPENRIG_SESSION_NAME` in its environment. Every request carries that identity, so
+no tool call names a sender. Without it, writes that need an actor are refused with `actor_required`.
+
+### Join a team from an agent with no terminal of its own (desktop apps)
+
+An agent in a desktop app can work with a team as a seat through this MCP server. If the app gives it a shell, it can
+use the `rig` CLI instead, the same way.
+
+1. **Attach once.** With its shell, or by asking the person to run it:
+   `rig attach --self --rig <rigId> --pod <namespace> --member <name> --runtime <runtime> --print-env`.
+   Note the `OPENRIG_SESSION_NAME` it prints.
+2. **Give the person the MCP entry to add.** Don't edit their app's settings yourself. The entry runs
+   `rig mcp serve`, with `OPENRIG_SESSION_NAME=<that seat>` in its environment. Most MCP clients take it as a
+   command, arguments and an `env` map.
+3. **Hand off work** with `rig_queue_create`, and keep the `qitemId` it returns.
+4. **Read the answer** with `rig_queue_show <qitemId>`. The item's state, closure and transition notes are where the
+   assignee records it. A call that times out has an unknown outcome: check `rig_queue_show` with the same id
+   before you retry, and retry only with that id.
+5. **Take work** with `rig_queue_list` (`owned: true`), `rig_queue_claim` and `rig_queue_update`. Close with the
+   answer in `note`.
+
+Limits today:
+- **OpenRig can't wake this agent itself.** `rig send` to an attached external node is refused, and a task's nudge to
+  it is unroutable. It sees new work when it checks `rig_queue_list`, or, if its app can run background shell
+  commands, with the opt-in wait below.
+- **Proven surfaces:** treat each app, and each mode inside one, as unproven until it has been run there.
+
+#### Wake on new work (opt-in; off unless the person turns it on)
+
+An agent whose app can run a shell command in the background, and starts a new turn when that command finishes, can
+wait for its own work. Claude Code, including Claude Desktop's Code tab, does this.
+
+- **Only if the person has said they want teammates to be able to wake this session.** Never turn it on yourself, and
+  never change their settings for it.
+- The shell needs this seat's identity: export the `OPENRIG_SESSION_NAME` that the one-time attach printed.
+- Start this as a background command, then end your turn. Don't poll it yourself.
+
+```sh
+# Waits until a task is assigned to this seat, prints it and exits; ends after MAX seconds.
+max=${MAX:-3300}; every=${EVERY:-5}; end=$(( $(date +%s) + max )); checked=0; failing_since=""
+while [ "$(date +%s)" -lt "$end" ]; do
+  if out=$(rig queue list --owned --state pending --json 2>/dev/null); then
+    checked=1; failing_since=""
+    case "$out" in *'"qitemId"'*) printf 'NEW WORK: %s\n' "$out"; exit 0 ;; esac
+  elif [ -z "$failing_since" ]; then
+    failing_since=$(date -u +%H:%M:%SZ)
+  fi
+  sleep "$every"
+done
+why="Run rig queue list --owned to see why (this seat's identity, the daemon) before starting the wait again."
+if [ "$checked" = 0 ]; then
+  echo "Couldn't check for work: every poll failed. $why"; exit 1
+elif [ -n "$failing_since" ]; then
+  echo "Checking stopped working at $failing_since: every poll since then failed. $why"; exit 1
+fi
+echo "No new work before the deadline. Start the wait again."
+```
+
+- **When it wakes you with `NEW WORK`:** `rig queue claim` each item, do it, and close it with the answer. Then start
+  the wait again and end your turn.
+- **Don't leave an item you've seen pending:** it wakes you again at once. Claim it, block it or hand it off.
+- **A failed poll doesn't end the wait;** only new work or the deadline does.
+- **If every poll failed, or every poll since some point did** (the daemon stopped mid-wait), it says so, with when,
+  and exits non-zero instead of reporting no work. A failure followed by a successful poll stays quiet. Find out why
+  with `rig queue list --owned` (usually this seat's identity, or the daemon) before starting the wait again.
+- **If your app stops the background command, or you start a new session,** start the wait again.
 
 ## Troubleshooting and Weird States
 

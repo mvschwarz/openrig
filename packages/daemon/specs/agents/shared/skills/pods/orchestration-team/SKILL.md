@@ -94,7 +94,7 @@ When you dispatch work, give the receiving agent enough structure to act without
 - what proof or verification you expect back
 - any independently held component explicitly selected, and the boundary that triggers it
 
-**(0.5.0) Assign work *with* its context attached.** Rather than make the assignee grep for the as-built, compose a context pack and ride it on the handoff: `rig context compose --out packs/<brief> --from <files>`, then `rig queue create --destination <seat> --body-context packs/<brief> --summary "…"`. The pack's resolved content is snapshotted into the qitem (plus its ref for provenance), so the context survives compaction and is auditable. See `openrig-user` → "Context packs and paced delivery." (`rig context` composes; the queue delivers — the noun never sends.)
+**(0.5.0) Assign work *with* its context attached.** Rather than make the assignee grep for the as-built, compose a context pack and ride it on the handoff: `rig context compose --out packs/<brief> --from <files>`, then `rig queue create --destination <seat> --body-context packs/<brief> --summary "…" --tags "project:<id>,mission:<id>,slice:<id>"`. The pack's resolved content is snapshotted into the qitem (plus its ref for provenance), so the context survives compaction and is auditable. See `openrig-user` → "Context packs and paced delivery." (`rig context` composes; the queue delivers — the noun never sends.)
 
 If design clarity is missing, route to design first.
 If QA gating is required, say so explicitly in the assignment.

@@ -309,7 +309,7 @@ const CONNECTION_FAILURE_PATTERNS = [
 ];
 
 function parseStats(stdout: string): { bytesTransferred?: number; filesTransferred?: number } {
-  const bytes = stdout.match(/Total transferred file size:\s*([\d,.]+)\s*bytes/i);
+  const bytes = stdout.match(/Total transferred file size:\s*([\d,.]+)\s*(?:bytes|B)\b/i);
   const files = stdout.match(/Number of (?:regular )?files transferred:\s*([\d,.]+)/i);
   const num = (m: RegExpMatchArray | null) => (m ? Number(m[1]!.replace(/[,.](?=\d{3})/g, "").replace(/,/g, "")) : undefined);
   return { bytesTransferred: num(bytes), filesTransferred: num(files) };

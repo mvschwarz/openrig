@@ -18,6 +18,9 @@ const VALID_APPLIES_ON = new Set(["fresh_start", "restore"]);
  * @returns array of error strings
  */
 export function validateStartupFile(raw: Record<string, unknown>, index: number, prefix: string): string[] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return [`${prefix}files[${index}]: must be an object`];
+  }
   const errors: string[] = [];
   // Slice-03 V3: startup artifacts are files only. Context packs are composed
   // by `rig context` and delivered only through dedicated delivery verbs.

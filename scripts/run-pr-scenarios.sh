@@ -9,7 +9,7 @@ CASES=(fixture library)
 MODES=(healthy lost-baton healthy)
 # Stub-script scenarios run once each, healthy only: their planted failures are
 # product-code mutations, kept as per-PR evidence outside CI.
-PASSING_CASES=(transcript capture)
+PASSING_CASES=(transcript capture daemon-restart)
 OUT="$REPO_ROOT/dist/pr-scenarios"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -17,8 +17,8 @@ while [ "$#" -gt 0 ]; do
     --case)
       case "${2:-}" in
         fixture|library) CASES=("$2"); PASSING_CASES=();;
-        transcript|capture) CASES=(); PASSING_CASES=("$2");;
-        *) echo 'Expected --case fixture|library|transcript|capture' >&2; exit 2;;
+        transcript|capture|daemon-restart) CASES=(); PASSING_CASES=("$2");;
+        *) echo 'Expected --case fixture|library|transcript|capture|daemon-restart' >&2; exit 2;;
       esac
       shift 2 ;;
     --mode)
@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
 done
 # The passing-only cases have no lost-baton form.
 if [ "${MODES[*]}" = lost-baton ]; then
-  test "${#CASES[@]}" -gt 0 || { echo 'transcript and capture run healthy only' >&2; exit 2; }
+  test "${#CASES[@]}" -gt 0 || { echo 'the passing-only cases run healthy only' >&2; exit 2; }
   PASSING_CASES=()
 fi
 if "$REMOTE"; then

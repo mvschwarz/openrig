@@ -154,13 +154,17 @@ describe("Bundle CLI", () => {
         // Capture query for assertion if needed; for now return a static fixture
         const url = new URL(req.url, "http://x");
         const rigFilter = url.searchParams.get("rig");
+        const since = url.searchParams.get("since");
         const allRecs = [
           { installedAt: "2026-05-18T10:00:00Z", bundlePath: "/tmp/a.rigbundle", targetRigName: "alpha", outcome: "success" },
           { installedAt: "2026-05-18T11:00:00Z", bundlePath: "/tmp/b.rigbundle", targetRigName: "beta", outcome: "failed" },
         ];
-        const recs = rigFilter ? allRecs.filter((r) => r.targetRigName === rigFilter) : allRecs;
+        // Like the daemon: since is compared as text, with an advisory for the values it doesn't read as a date or time.
+        const recs = allRecs.filter((r) => (!rigFilter || r.targetRigName === rigFilter) && (!since || r.installedAt >= since));
+        const advised = since === "garbage" || since === "2026-13-45";
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ records: recs, total: recs.length }));
+        res.end(JSON.stringify({ records: recs, total: recs.length,
+          ...(advised ? { advisories: [`since "${since}" was not recognised as a date or time; the existing text comparison against installedAt was used`] } : {}) }));
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -630,6 +634,42 @@ describe("Bundle CLI", () => {
     const parsed = JSON.parse(logs.join(""));
     expect(parsed.records).toHaveLength(1);
     expect(parsed.records[0].targetRigName).toBe("alpha");
+  });
+
+  it.each(["garbage", "2026-13-45"])("bundle history --since %s prints the advisory on stderr and keeps the empty result", async (since) => {
+    const { logs, stdout, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "history", "--since", since]);
+    });
+    const note = `Note: since "${since}" was not recognised as a date or time; the existing text comparison against installedAt was used`;
+    expect(logs).toContain(note);
+    expect(stdout).not.toContain(note);
+    expect(stdout).toEqual(["No bundle install audit records found."]);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("bundle history --since garbage --json stays one parseable payload carrying the advisory", async () => {
+    const { logs, stdout, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "history", "--since", "garbage", "--json"]);
+    });
+    expect(logs).toEqual(stdout);
+    expect(stdout).toHaveLength(1);
+    const parsed = JSON.parse(stdout[0]!);
+    expect(parsed.records).toEqual([]);
+    expect(parsed.advisories).toHaveLength(1);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it.each([
+    ["2026-05-18T11", 1],
+    ["2026-05-18", 2],
+    ["2026-05-18T11:00:00Z", 1],
+  ])("bundle history --since %s lists as before with no advisory", async (since, count) => {
+    const { logs, stdout, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "history", "--since", since]);
+    });
+    expect(logs).toEqual(stdout);
+    expect(stdout[0]).toBe(`Bundle install history (${count} record${count === 1 ? "" : "s"}):`);
+    expect(exitCode).toBeUndefined();
   });
 
   // Item 2 / slice-05: no flags → compatibility omitted (no empty object sent)

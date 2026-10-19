@@ -4,8 +4,10 @@
 // oversight detector). Option-A bar: no account identity in any response.
 import { Hono } from "hono";
 import type { Database } from "better-sqlite3";
-import { queryUsageSeries, computeTopBurn } from "../domain/usage-series.js";
+import { queryUsageSeries, computeTopBurn, computeCostView } from "../domain/usage-series.js";
 import { readTelemetryPage, TelemetryInputError, type TelemetrySource, type TelemetryStream } from "../domain/finite-telemetry.js";
+import { timeBoundAdvisory } from "../domain/time-bound-advisory.js";
+import { SQL_LIMIT_BOUND } from "./query-limit.js";
 
 export interface TelemetryRouteDeps {
   db: () => Database;
@@ -44,7 +46,7 @@ export function telemetryRoutes(deps: TelemetryRouteDeps): Hono {
     let limit: number | undefined;
     if (limitRaw !== undefined) {
       limit = Number(limitRaw);
-      if (!Number.isFinite(limit) || limit < 1) {
+      if (!Number.isFinite(limit) || limit < 1 || limit >= SQL_LIMIT_BOUND) {
         return c.json({ error: `invalid limit "${limitRaw}" — must be a positive number` }, 400);
       }
     }
@@ -55,7 +57,16 @@ export function telemetryRoutes(deps: TelemetryRouteDeps): Hono {
       untilIso,
       limit,
     });
-    return c.json({ rows });
+    // An unrecognised bound is compared as text against captured_at, as before; say so.
+    const advisories = [timeBoundAdvisory("since", sinceIso, "captured_at"), timeBoundAdvisory("until", untilIso, "captured_at")]
+      .filter((a): a is string => a !== undefined);
+    return c.json({ rows, ...(advisories.length > 0 ? { advisories } : {}) });
+  });
+
+  // OPR.0.7.0.2: what each seat's harness reports about cost, labelled; absent and stale stay visible.
+  app.get("/usage/cost", (c) => {
+    const seat = c.req.query("seat") || undefined;
+    return c.json(computeCostView(deps.db(), { nowIso: now(), seatSession: seat }));
   });
 
   app.get("/usage/top", (c) => {

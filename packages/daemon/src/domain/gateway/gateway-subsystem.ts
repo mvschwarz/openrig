@@ -32,6 +32,8 @@ export interface GatewayWire {
   stop(): void;
   startServices?(): void;
   status?(): Record<string, unknown>;
+  /** A shared Slack app's hub relayed this envelope here (slack/forwarding.ts). Absent: inbound isn't wired. */
+  acceptForwarded?(env: never): Promise<{ status: string; reason?: string }>;
 }
 
 export interface InProcessWireOpts {
@@ -160,6 +162,13 @@ export class GatewaySubsystem {
       return { ok: false, error: `dispatch refused: gateway subsystem is ${this.state}${this.reason ? ` (${this.reason})` : ""}` };
     }
     return this.wireHandle.dispatcher.dispatch(op, entityBindingRef, payload, opts);
+  }
+
+  /** An envelope the shared app's hub relayed to this machine. Null when nothing here can take it
+   *  (the subsystem isn't active or its connector has no inbound), so the hub keeps it for retry. */
+  async acceptForwarded(env: unknown): Promise<{ status: string; reason?: string } | null> {
+    if (this.state !== "active" || !this.wireHandle?.acceptForwarded) return null;
+    return this.wireHandle.acceptForwarded(env as never);
   }
 
   /** Snapshot only: no dispatch-buffer scan, network or recovery work. The connector's

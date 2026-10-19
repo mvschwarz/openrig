@@ -163,6 +163,34 @@ export interface RiggedConfig {
   terminal: {
     statusBar: boolean;
   };
+  // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
+  // defaults (default off: today's output). Read by the CLI only; the daemon
+  // settings-store twin keeps the two registries in lockstep.
+  output: {
+    compact: boolean;
+    /** With compact on, how many peers `rig whoami --json` lists (edge peers first). */
+    whoamiPeers: number;
+  };
+  // Slice 01 (OPR.0.7.0.1) — Codex and Claude usage windows in the provider view (default
+  // off). Read by the daemon; the CLI key is the lockstep twin.
+  provider: {
+    usageWindows: boolean;
+    // Slice 18 (OPR.0.7.0.18) — the subscription move record and its reads (default off). Read by the daemon;
+    // the CLI key is the lockstep twin.
+    subscriptionMoves: boolean;
+  };
+  bundle: { servicesEnabled: boolean };
+  // Slice 02 (OPR.0.7.0.2) — Pi seats report model-priced cost from persisted session entries
+  // (default off). Read by the daemon at Pi launch; the CLI key is the lockstep twin.
+  usage: {
+    piCostFacts: boolean;
+    piOpenRouterCharge: boolean;
+  };
+  // A verified Claude Code or Codex send reports on input-box evidence (default off). Read by the daemon at
+  // each such send; the CLI key is the lockstep twin.
+  transport: {
+    verifyInputBox: boolean;
+  };
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
   // settings-store): enabled + the four bounded numeric tunables.
   retention: {
@@ -312,6 +340,27 @@ const DEFAULTS = {
   terminal: {
     statusBar: false,
   },
+  // Slice 15 — compact command-output defaults OFF until the switch is on.
+  output: {
+    compact: false,
+    whoamiPeers: 8,
+  },
+  // Slice 01 — Codex usage windows OFF until the switch is on.
+  provider: {
+    usageWindows: false,
+    // Slice 18 — the subscription move record OFF until the switch is on.
+    subscriptionMoves: false,
+  },
+  bundle: { servicesEnabled: false },
+  // Slice 02 — Pi cost facts OFF until the switch is on.
+  usage: {
+    piCostFacts: false,
+    piOpenRouterCharge: false,
+  },
+  // Input-box evidence for verified sends OFF until the switch is on.
+  transport: {
+    verifyInputBox: false,
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -425,6 +474,18 @@ export const VALID_KEYS = [
   // boolean (default off), lockstep with the daemon settings-store twin
   // (the parity test pins both). Flip is future-launches-only (BR-1).
   "terminal.status_bar",
+  // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
+  "output.compact",
+  "output.whoami_peers",
+  // Slice 01 — Codex and Claude usage windows in the provider view; lockstep with the daemon twin.
+  "provider.usage_windows",
+  // Service-backed archives, including packing, preview and durable-target admission; default off.
+  "bundle.services_enabled",
+  // Slice 18 — the subscription move record and its reads; lockstep with the daemon twin.
+  "provider.subscription_moves",
+  "usage.pi_cost_facts",
+  "usage.pi_openrouter_charge",
+  "transport.verify_input_box",
   // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
   // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
   "retention.enabled",
@@ -521,6 +582,14 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
   // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
+  "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
+  "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
+  "bundle.services_enabled": { primary: "OPENRIG_BUNDLE_SERVICES_ENABLED" },
+  "provider.subscription_moves": { primary: "OPENRIG_PROVIDER_SUBSCRIPTION_MOVES" },
+  "usage.pi_cost_facts": { primary: "OPENRIG_USAGE_PI_COST_FACTS" },
+  "usage.pi_openrouter_charge": { primary: "OPENRIG_USAGE_PI_OPENROUTER_CHARGE" },
+  "transport.verify_input_box": { primary: "OPENRIG_TRANSPORT_VERIFY_INPUT_BOX" },
   // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
@@ -600,6 +669,14 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
   "terminal.status_bar": ["terminal", "statusBar"],
+  "output.compact": ["output", "compact"],
+  "output.whoami_peers": ["output", "whoamiPeers"],
+  "provider.usage_windows": ["provider", "usageWindows"],
+  "bundle.services_enabled": ["bundle", "servicesEnabled"],
+  "provider.subscription_moves": ["provider", "subscriptionMoves"],
+  "usage.pi_cost_facts": ["usage", "piCostFacts"],
+  "usage.pi_openrouter_charge": ["usage", "piOpenRouterCharge"],
+  "transport.verify_input_box": ["transport", "verifyInputBox"],
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
@@ -808,6 +885,27 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
     }
   },
+  // daemon.port had no KEY_CONSTRAINTS entry, so `rig config set daemon.port
+  // 99999` stored 99999 and the next daemon start died with a raw
+  // ERR_SOCKET_BAD_PORT from serve(). The check range-validates the value
+  // the runtime actually consumes — the same parseInt the boot path runs on
+  // OPENRIG_PORT (startServer) — rather than the raw input format, so
+  // everything that resolves today keeps resolving: 7433abc, 7433.5 and
+  // +7433 resolve to 7433, 1e4 to 1, 0x1D11 to 0, and a quoted in-range
+  // port in config.json ("7434") stays "7434". Only ports that cannot be
+  // bound are refused. 0 stays legal: checkPort treats port <= 0 as
+  // "always available" and the repo's own preflight tests write
+  // daemon.port = 0 on purpose. The ui.preview.* keys are deliberately
+  // unconstrained: their consumers floor/clamp out-of-range values today
+  // (refresh 0 disables polling on purpose; max_pins floors to 1; the
+  // daemon preview route falls back to 50 lines), so tightening them here
+  // would refuse input that works.
+  "daemon.port": (raw, coerced) => {
+    const port = parseInt(String(coerced), 10);
+    if (Number.isNaN(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid value for daemon.port: must be an integer in [0, 65535], got "${raw}"`);
+    }
+  },
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();
@@ -874,6 +972,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   // OPR.0.4.6.FS-1 W2 — retention numeric bounds. Lockstep with the daemon
   // settings-store KEY_CONSTRAINTS twin (same messages/bounds). retention.enabled
   // is a boolean (coerceValue enforces true/false) — no constraint entry.
+  // Slice 15 P5 — the whoami peer bound; lockstep with the daemon twin.
+  "output.whoami_peers": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for output.whoami_peers: must be an integer >= 1, got "${raw}"`);
+    }
+  },
   "retention.transitions_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.transitions_days: must be an integer >= 1, got "${raw}"`);
@@ -1107,6 +1211,22 @@ export class ConfigStore {
       },
       terminal: {
         statusBar: v("terminal.status_bar") as boolean,
+      },
+      output: {
+        compact: v("output.compact") as boolean,
+        whoamiPeers: v("output.whoami_peers") as number,
+      },
+      provider: {
+        usageWindows: v("provider.usage_windows") as boolean,
+        subscriptionMoves: v("provider.subscription_moves") as boolean,
+      },
+      bundle: { servicesEnabled: v("bundle.services_enabled") as boolean },
+      usage: {
+        piCostFacts: v("usage.pi_cost_facts") as boolean,
+        piOpenRouterCharge: v("usage.pi_openrouter_charge") as boolean,
+      },
+      transport: {
+        verifyInputBox: v("transport.verify_input_box") as boolean,
       },
       retention: {
         enabled: v("retention.enabled") as boolean,

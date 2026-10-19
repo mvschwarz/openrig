@@ -972,9 +972,14 @@ exit 7
       const seam = `  try {\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`;
       const source = fs.readFileSync(helperPath, "utf8");
       expect(source.split(seam), change).toHaveLength(2);
+      // Move the observed entry OUT of the library instead of deleting it: while its inode stays
+      // allocated the replacement cannot reuse that inode number. Filesystems that recycle freed
+      // inode numbers immediately (ext4) would otherwise hand an rm+recreate the SAME ino,
+      // and the "inode drift" case would silently exercise no drift at all.
+      const displaced = JSON.stringify(path.join(root, `displaced-${change}`));
       const replacement = change === "type"
-        ? `fs.rmSync(${JSON.stringify(linkPath)}); fs.writeFileSync(${JSON.stringify(linkPath)}, "changed type");`
-        : `fs.rmSync(${JSON.stringify(linkPath)}); fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
+        ? `fs.renameSync(${JSON.stringify(linkPath)}, ${displaced}); fs.writeFileSync(${JSON.stringify(linkPath)}, "changed type");`
+        : `fs.renameSync(${JSON.stringify(linkPath)}, ${displaced}); fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
       fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    ${replacement}\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
 
       const result = runJsonFileResult(interposedHelperPath, [
@@ -1027,7 +1032,9 @@ exit 7
 
       const movedLink = path.join(prepared.fixture.home, "context", "linked-pack");
       const original = fs.lstatSync(movedLink);
-      fs.rmSync(movedLink);
+      // Displace (not delete) so the replacement is guaranteed a different inode number even on
+      // filesystems that recycle freed inodes immediately (ext4).
+      fs.renameSync(movedLink, path.join(root, "displaced-link"));
       if (change === "type") fs.writeFileSync(movedLink, "changed type");
       else fs.symlinkSync(change === "payload" ? "changed-target" : linkTarget, movedLink, "dir");
       const settingsBefore = fs.readFileSync(prepared.fixture.settingsPath);

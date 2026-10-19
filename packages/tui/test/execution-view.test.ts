@@ -529,6 +529,76 @@ describe("execution drill — one page from source, esc back", () => {
     expect(live).toContain("assignment  dev-1@rig · working (self-report)");
   });
 
+  describe("a lane parked on an external gate is a waiting row, not the slice's assignment", () => {
+    const park = (lane: Record<string, unknown>) => {
+      lane["waiting"] = { on: "external:capacity-limit" };
+      lane["pickup"] = { state: "parked" };
+    };
+
+    it("shows the seat, the blocker and the row in the strip, and keeps assignment for in-progress lanes", () => {
+      const execution = executionFixture();
+      expect(text(executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active"))).toContain("assignment  dev-1@rig · working (self-report)");
+      park(execution.q1_lanes[0]!);
+      const strip = text(executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active"));
+      expect(strip).toContain("waiting     dev-1@rig · external:capacity-limit · qitem-1");
+      expect(strip).not.toContain("assignment");
+      expect(strip).not.toContain("working (self-report)");
+      const line = executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active").find(l => l.text.includes("waiting     "))!;
+      expect(line.action).toEqual({ type: "execution-open", key: "lane:qitem-1" });
+    });
+
+    it("gives the next line waiting wording instead of 'in progress on the lane above'", () => {
+      const execution = executionFixture();
+      expect(text(executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active"))).toContain("next        in progress on the lane above");
+      park(execution.q1_lanes[0]!);
+      const strip = text(executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active"));
+      expect(strip).toContain("next        waiting on external:capacity-limit, see the waiting row above");
+      expect(strip).not.toContain("in progress on the lane above");
+    });
+
+    it("shows a lane named by the slice directory as a waiting row too", () => {
+      const execution = executionFixture();
+      const lane = execution.q1_lanes[0]!;
+      lane["slice"] = "01-slice";
+      expect(text(executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active"))).toContain("assignment  dev-1@rig · working (self-report)");
+      park(lane);
+      expect(text(executionSliceStripLines(execution, "OPR.0.5.8.1", "01-slice", 120, "active"))).toContain("waiting     dev-1@rig · external:capacity-limit · qitem-1");
+    });
+
+    it("shows the waiting row on the slice card's activity field and the lane page, not as the seat's activity", () => {
+      const execution = executionFixture();
+      park(execution.q1_lanes[0]!);
+      const card = text(executionContentLines(execution, [], [], "slice:OPR.0.5.8.1", 120));
+      expect(card).toContain("activity:     waiting row · dev-1@rig · external:capacity-limit · qitem-1");
+      expect(card).toContain("seat:         none — no in-progress lane");
+      expect(card).not.toContain("self-report");
+      const lane = text(executionContentLines(execution, [], [], "lane:qitem-1", 120));
+      expect(lane).toContain("waiting row");
+      expect(lane).toContain("waiting on");
+      expect(lane).toContain("external:capacity-limit");
+      expect(lane).not.toContain("decided by");
+      const working = text(executionContentLines(executionFixture(), [], [], "lane:qitem-1", 120));
+      expect(working).toContain("decided by");
+      expect(working).not.toContain("waiting on");
+    });
+
+    it("leaves a waiting lane out of 'activity unconfirmed', and keeps a real unconfirmed one", () => {
+      const execution = executionFixture();
+      const unknown = { activity: "INDETERMINATE", basis: "no arbitrated state for this seat", source: "oracle" };
+      for (const lane of execution.q1_lanes) lane["activity"] = unknown;
+      const both = text(executionContentLines(execution, [], [], "evidence", 120));
+      expect(both).toContain("activity unconfirmed for 2 slices");
+      park(execution.q1_lanes[0]!);
+      const one = text(executionContentLines(execution, [], [], "evidence", 120));
+      expect(one).toContain("activity unconfirmed for 1 slice");
+      const activitySection = one.slice(one.indexOf("activity unconfirmed"));
+      expect(activitySection).toContain("OPR.0.5.8.2");
+      expect(activitySection).not.toContain("OPR.0.5.8.1");
+      park(execution.q1_lanes[1]!);
+      expect(text(executionContentLines(execution, [], [], "evidence", 120))).not.toContain("activity unconfirmed");
+    });
+  });
+
   it("renders through a SCOPES mission selection, opens rich slice detail, and preserves source drills", () => {
     const demo = demoSnapshot();
     const scopes = [...demo.scopes!, ...executionScopes()];

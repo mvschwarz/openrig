@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { readSeatEnvOverride } from "../domain/seat-env.js";
 import { Hono } from "hono";
 import { bootstrapFailureResponse } from "./bootstrap-failure-response.js";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
@@ -213,6 +214,9 @@ upRoutes.post("/", async (c) => {
     return c.json({ error: "sourceRef is required" }, 400);
   }
 
+  // `rig up --env KEY=VALUE`: environment for this launch only. It is not saved with the rig.
+  const envOverride = readSeatEnvOverride(body["envOverride"]);
+
   // Route source — classify raw sourceRef first, only resolve path for file-based kinds
   let sourceKind: string;
   let resolvedSourceRef = sourceRef;
@@ -378,6 +382,7 @@ upRoutes.post("/", async (c) => {
         autoApprove,
         nonInterruptive,
         cwdOverride,
+        envOverride,
         targetRoot,
         runId: run.id,
       });

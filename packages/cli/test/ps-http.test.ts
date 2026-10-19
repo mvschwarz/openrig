@@ -182,6 +182,33 @@ describe("rig ps --host HTTP", () => {
     expect(client._calls.length).toBe(0);
     expect(stderr.some((s) => s.includes("cannot be combined"))).toBe(true);
   });
+
+  it("warns once when a rig-tier context filter is ignored", async () => {
+    vi.stubEnv("HOST_B_TOKEN", "tok");
+    const client = mockClient({
+      "/api/ps": { status: 200, data: [{ rigId: "r1", name: "demo", status: "running" }] },
+    });
+    const deps: PsDeps = {
+      lifecycleDeps: {} as PsDeps["lifecycleDeps"],
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([
+        { id: "host-b", transport: "http", url: "http://x", bearer_env: "HOST_B_TOKEN" },
+      ]),
+    };
+    const { stdout, stderr } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "ps", "--host", "host-b", "--json", "--filter", "contextUsage.state=critical"]);
+    });
+    expect(JSON.parse(stdout.join(""))).toEqual({
+      entries: [expect.objectContaining({ rigId: "r1", name: "demo" })],
+      totalRigs: 1,
+      truncated: false,
+    });
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain("contextUsage.state");
+    expect(stderr[0]).toContain("was not applied");
+    expect(stderr[0]).toContain("--nodes");
+  });
+
   it("--nodes --json returns flattened node array (not rig wrappers)", async () => {
     vi.stubEnv("HOST_B_TOKEN", "tok");
     const client = mockClient({

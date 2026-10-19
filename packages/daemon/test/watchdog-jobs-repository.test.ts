@@ -48,6 +48,45 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     };
   }
 
+  it.each([["intervalSeconds", 0], ["scanIntervalSeconds", "invalid"]])("auto-registration refuses invalid %s without changing the saved schedule", (field, value) => {
+    const input = validInput({ registeredBySession: "daemon@kernel", scanIntervalSeconds: 30, activeWakeIntervalSeconds: 90 });
+    const original = repo.ensureAutoRegistration(input);
+    expect(() => repo.ensureAutoRegistration({ ...input, [field]: value })).toThrow(WatchdogJobsError);
+    expect(repo.getById(original.jobId)).toEqual(original);
+  });
+
+  it.each([
+    ["above signed range", 2n ** 63n],
+    ["below signed range", -(2n ** 63n) - 1n],
+    ["singleton above signed range", [2n ** 63n]],
+    ["singleton below signed range", [-(2n ** 63n) - 1n]],
+  ])("rejects %s scan with a named error and preserves auto-registration", (_name, value) => {
+    const input = validInput({ registeredBySession: "daemon@kernel", scanIntervalSeconds: 30 });
+    const original = repo.ensureAutoRegistration(input);
+    for (const register of [
+      () => repo.register({ ...input, scanIntervalSeconds: value as never }),
+      () => repo.ensureAutoRegistration({ ...input, scanIntervalSeconds: value as never }),
+    ]) {
+      let error: unknown;
+      try { register(); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(WatchdogJobsError);
+      expect(error).toMatchObject({ code: "interval_invalid", details: { field: "scan_interval_seconds" } });
+      expect(repo.listAll()).toEqual([original]);
+    }
+  });
+
+  it.each([
+    ["signed maximum", 2n ** 63n - 1n],
+    ["signed minimum", -(2n ** 63n)],
+    ["singleton signed maximum", [2n ** 63n - 1n]],
+    ["singleton signed minimum", [-(2n ** 63n)]],
+  ])("retains native SQLite binding for %s scan", (_name, value) => {
+    const bound = Array.isArray(value) ? value[0] : value;
+    const job = repo.register(validInput({ scanIntervalSeconds: value }));
+    expect(job.scanIntervalSeconds).toBe(Number(bound));
+    expect(repo.getById(job.jobId)?.scanIntervalSeconds).toBe(Number(bound));
+  });
+
   it("register stores every accepted policy + actionable defaults to false", () => {
     for (const p of PHASE_C_POLICIES) {
       const job = repo.register(validInput({
@@ -120,6 +159,23 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     const after = repo.getByIdOrThrow(job.jobId);
     expect(after.lastEvaluationAt).toBe("2026-05-03T07:00:00.000Z");
     expect(after.lastFireAt).toBe("2026-05-03T07:00:00.000Z");
+  });
+
+  it.each(["unchanged", "spec", "interval", "due"])("records a fire while preserving the %s schedule", (change) => {
+    const job = repo.register(validInput());
+    const nextSpec = change === "spec" ? `${job.specYaml}\n# revised wait` : job.specYaml;
+    const nextInterval = change === "interval" ? 300 : job.intervalSeconds;
+    const nextDue = change === "due" ? "1970-01-01T00:00:00.000Z" : job.lastEvaluationAt;
+    repo.updateSchedule(job.jobId, nextSpec, nextInterval, nextDue);
+    const firedAt = "2026-05-03T07:00:00.000Z";
+
+    repo.recordEvaluation(job.jobId, firedAt, true, job);
+
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({
+      specYaml: nextSpec, intervalSeconds: nextInterval,
+      lastEvaluationAt: change === "unchanged" ? firedAt : nextDue,
+      lastFireAt: firedAt,
+    });
   });
 
   it("recordEvaluation(fired=false) updates only last_evaluation_at", () => {

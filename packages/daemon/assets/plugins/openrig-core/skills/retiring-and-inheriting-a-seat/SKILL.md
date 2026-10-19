@@ -137,8 +137,11 @@ generation's session token → resume it for **one question**, then let it sleep
 - Claude: `claude -p --resume <session>`
 - Codex: `codex exec` (resume the rollout)
 
-Use `rig ask <rig> "<q>" --wake <seat[@gen]|token>` for an explicit bounded
-consultation (introduced in CLI 0.5.1). Check `rig ask --help` for `--runtime`
+Use `rig ask <rig> "<q>" --wake <target>` for an explicit bounded consultation
+(introduced in CLI 0.5.1). Wake seat targets must include the rig: `member@rig` or
+`member@rig@N` (1 = newest tenure). Values without `@` go unchanged to the runtime
+as a session ID or title; a bare member name is not resolved within `<rig>`.
+Check `rig ask --help` for `--runtime`
 and `--wake-timeout`. The wrapper uses a runtime resume; its presence is not
 proof that a particular retained history is available. For a Claude history,
 `claude -p --resume <full-uuid>` is the runtime-level fallback when supported.

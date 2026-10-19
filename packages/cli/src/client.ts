@@ -3,7 +3,6 @@ import path from "node:path";
 import { ConfigStore } from "./config-store.js";
 import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
-import { readLocalOrigin } from "./local-origin.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
   const token = resolveTerminalToken();
@@ -48,7 +47,7 @@ function resolveTerminalToken(): string | null {
   const env = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
   if (env) return env;
   try {
-    const homeDir = process.env.OPENRIG_HOME ?? path.join(process.env.HOME ?? "", ".openrig");
+    const homeDir = getOpenRigHome();
     const tokenPath = path.join(homeDir, "terminal-token");
     const token = fs.readFileSync(tokenPath, "utf-8").trim();
     return token || null;
@@ -168,7 +167,8 @@ export class DaemonClient {
     if (!session || session.split("@").length >= 3) return localHeaders;
     const directTarget = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
     if (!this.remoteTarget && !directTarget) return localHeaders;
-    const origin = this.originSelfHostId ?? readLocalOrigin();
+    // Imported here, not at the top: it loads better-sqlite3 and yaml, which only a seat on a direct endpoint needs.
+    const origin = this.originSelfHostId ?? (await import("./local-origin.js")).readLocalOrigin();
     if (!origin) {
       this.originUnknown = true;
       return { ...localHeaders, "X-OpenRig-Origin-Unknown": "true" };

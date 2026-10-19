@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { policyCommand } from "../src/commands/policy.js";
+import type { StatusDeps } from "../src/commands/status.js";
+import { STATE_FILE } from "../src/daemon-lifecycle.js";
 
 const PIN = "The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.";
 
@@ -224,5 +226,76 @@ body
     const current = await runCapture(["policy", "current", "--spec", spec, "--json"]);
     const out = JSON.parse(current.logs.join("")) as { sites: Array<{ applies?: string }> };
     expect(String(out.sites[0]!.applies)).toContain("origin=deliberate_none");
+  });
+});
+
+describe("rig policy apply --seat — an existing seat's stored policy", () => {
+  function seatDeps(response: { status: number; data: Record<string, unknown> }) {
+    const posts: unknown[][] = [];
+    const deps = {
+      lifecycleDeps: {
+        readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 7433, db: "inert.sqlite", startedAt: "2026-10-14T00:00:00Z" }) : null,
+        exists: (p: string) => p === STATE_FILE, isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+      },
+      clientFactory: () => ({ post: async (...a: unknown[]) => { posts.push(a); return response; } }),
+    };
+    // Stub daemon state and client: only post() is exercised, so the full DaemonClient shape is not built.
+    return { deps: deps as unknown as StatusDeps, posts };
+  }
+
+  async function run(deps: StatusDeps, argv: string[]) {
+    const logs: string[] = []; const errs: string[] = []; const saved = process.exitCode;
+    const log = vi.spyOn(console, "log").mockImplementation((...a) => { logs.push(a.join(" ")); });
+    const err = vi.spyOn(console, "error").mockImplementation((...a) => { errs.push(a.join(" ")); });
+    process.exitCode = undefined;
+    try {
+      await new Command().exitOverride().addCommand(policyCommand(deps)).parseAsync(["node", "rig", ...argv]);
+      return { logs, errs, exitCode: process.exitCode };
+    } finally { log.mockRestore(); err.mockRestore(); process.exitCode = saved; }
+  }
+
+  it("posts the builtin ref to the seat and reports the daemon's effect", async () => {
+    const effect = "Restore, resume and launches that read this seat's stored state use this policy, unless an explicit native selection (rig seat set-permissions) takes precedence.";
+    const { deps, posts } = seatDeps({ status: 200, data: {
+      ok: true, changed: true, from: null, to: "builtin:yolo", launchPosture: "full_bypass", effect,
+    } });
+    const out = await run(deps, ["policy", "apply", "yolo", "--seat", "dev-builder@spark", "--reason", "unattended", "--operator", "me@laptop"]);
+    expect(posts).toEqual([["/api/seat/set-policy/dev-builder%40spark", { ref: "builtin:yolo", reason: "unattended", operator: "me@laptop" }]]);
+    expect(out.logs).toEqual([
+      "Recorded permission_policy: builtin:yolo on seat dev-builder@spark (launch_posture=full_bypass).",
+      effect,
+    ]);
+    expect(out.exitCode).toBeUndefined();
+  });
+
+  it("reports none as an explicit floor for the seat, not inherited, through the nested verb too", async () => {
+    const { deps, posts } = seatDeps({ status: 200, data: { ok: true, changed: false, to: "none", launchPosture: "floor", effect: "e" } });
+    const out = await run(deps, ["policy", "permissions", "apply", "none", "--seat", "dev-builder@spark", "--reason", "r"]);
+    expect(posts[0]![1]).toEqual({ ref: "none", reason: "r" });
+    expect(out.logs[0]).toBe("Recorded permission_policy: none on seat dev-builder@spark: an explicit floor for this seat, not \"no policy\"; it does not inherit the rig's policy (launch_posture=floor) (unchanged).");
+  });
+
+  it("passes a daemon refusal through with its exit code", async () => {
+    const refusal = { ok: false, code: "missing_reason", message: "An audit reason is required (--reason)." };
+    const { deps } = seatDeps({ status: 400, data: refusal });
+    const json = await run(deps, ["policy", "apply", "yolo", "--seat", "dev-builder@spark", "--json"]);
+    expect(JSON.parse(json.logs.join(""))).toEqual(refusal);
+    expect(json.exitCode).toBe(1);
+    const human = await run(deps, ["policy", "apply", "yolo", "--seat", "dev-builder@spark"]);
+    expect(human.errs).toEqual(["An audit reason is required (--reason)."]);
+    expect(human.exitCode).toBe(1);
+  });
+
+  it("refuses an unknown choice, or anything but exactly one of --spec/--seat, without contacting the daemon", async () => {
+    const { deps, posts } = seatDeps({ status: 200, data: {} });
+    const unknown = await run(deps, ["policy", "apply", "builtin:yolo", "--seat", "s", "--reason", "r"]);
+    expect(unknown.errs.join(" ")).toContain("Unknown policy choice 'builtin:yolo'");
+    expect(unknown.exitCode).toBe(1);
+    for (const argv of [["policy", "apply", "yolo"], ["policy", "apply", "yolo", "--spec", "rig.yaml", "--seat", "s"]]) {
+      const out = await run(deps, argv);
+      expect(out.errs.join(" ")).toContain("exactly one of --spec");
+      expect(out.exitCode).toBe(1);
+    }
+    expect(posts).toEqual([]);
   });
 });

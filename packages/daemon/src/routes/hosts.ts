@@ -111,7 +111,8 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         port = 22;
       } else {
         const u = new URL(host.url);
-        target = u.hostname;
+        // WHATWG keeps the brackets on an IPv6 hostname; net.connect wants the bare address.
+        target = u.hostname.replace(/^\[(.*)\]$/, "$1");
         port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
       }
       return new Promise((resolve) => {

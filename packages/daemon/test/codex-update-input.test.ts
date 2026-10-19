@@ -74,7 +74,8 @@ function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; 
     writeFile: async (_path, content) => { paste = content; },
     unlink: async () => {}, tmpName: () => "/mock/input", bufferName: () => "input",
   });
-  vi.spyOn(tmux, "sendShellCommand").mockResolvedValue({ ok: true });
+  let launched = "";
+  vi.spyOn(tmux, "sendShellCommand").mockImplementation(async (_session: string, command: string) => { launched = command; return { ok: true }; });
   vi.spyOn(tmux, "getPaneCommand").mockImplementation(async () => options.command ?? "codex");
   vi.spyOn(tmux, "capturePaneScreen").mockImplementation(async () => screen());
   vi.spyOn(tmux, "capturePaneContent").mockResolvedValue(MENU); // stale scrollback
@@ -84,7 +85,10 @@ function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; 
     readFile: () => { throw new Error("absent"); }, writeFile: () => {},
     exists: () => false, mkdirp: () => {}, listFiles: () => [], homedir: "/mock/home",
   };
-  const listProcesses = vi.fn(() => options.processes ?? processRows(options.shape ?? "wrapper"));
+  // The process table reflects what was launched: a fork's Codex processes carry `fork <parent>`.
+  const forkArgs = () => / fork '?([^' ]+)'?$/.exec(launched)?.[1];
+  const listProcesses = vi.fn(() => (options.processes ?? processRows(options.shape ?? "wrapper")).map(row =>
+    forkArgs() && /codex/.test(row.command) && !/codex-code-mode/.test(row.command) ? { ...row, command: `${row.command} fork ${forkArgs()}` } : row));
   const adapter = new CodexRuntimeAdapter({
     tmux, fsOps, sleep: async () => { ticks++; },
     listProcesses,

@@ -14,6 +14,7 @@ interface ObservationRow {
   value: string | null;
   reason: string | null;
   approval_policy: "never" | null;
+  daemon_opt_out?: number | null;
   observed_at: string;
 }
 
@@ -30,9 +31,9 @@ export class AppliedLaunchObservationStore {
     try {
       const result = this.db.prepare(`
         INSERT INTO applied_launch_observations (
-          generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, observed_at
+          generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, daemon_opt_out, observed_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, ?, datetime('now')
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
          WHERE NOT EXISTS (
            SELECT 1
              FROM applied_launch_observation_invalidations
@@ -45,6 +46,7 @@ export class AppliedLaunchObservationStore {
           value = excluded.value,
           reason = excluded.reason,
           approval_policy = excluded.approval_policy,
+          daemon_opt_out = excluded.daemon_opt_out,
           observed_at = excluded.observed_at
       `).run(
         generationUuid,
@@ -54,6 +56,7 @@ export class AppliedLaunchObservationStore {
         observation.value,
         observation.reason ?? null,
         observation.approvalPolicy ?? null,
+        observation.daemonOptOut === undefined ? null : observation.daemonOptOut ? 1 : 0,
         generationUuid,
       );
       return result.changes > 0;
@@ -107,10 +110,33 @@ export class AppliedLaunchObservationStore {
         value: row.value,
         ...(row.reason ? { reason: row.reason } : {}),
         ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
+        ...(row.daemon_opt_out === 0 || row.daemon_opt_out === 1 ? { daemonOptOut: row.daemon_opt_out === 1 } : {}),
         observedAt: row.observed_at,
       };
     } catch {
       return null;
+    }
+  }
+
+  /** readCurrent's daemon choice for every node that has one recorded, in one read; unknown nodes are absent. */
+  readCurrentDaemonOptOuts(): Map<string, boolean> {
+    try {
+      const rows = this.db.prepare(`
+        SELECT t.node_id, o.daemon_opt_out
+          FROM occupant_tenures t
+          JOIN applied_launch_observations o
+            ON o.generation_uuid = t.generation_uuid
+          LEFT JOIN applied_launch_observation_invalidations invalidated
+            ON invalidated.generation_uuid = t.generation_uuid
+         WHERE invalidated.generation_uuid IS NULL
+           AND o.daemon_opt_out IN (0, 1)
+           AND t.generation_ordinal = (
+             SELECT MAX(latest.generation_ordinal) FROM occupant_tenures latest WHERE latest.node_id = t.node_id
+           )
+      `).all() as Array<{ node_id: string; daemon_opt_out: number }>;
+      return new Map(rows.map((row) => [row.node_id, row.daemon_opt_out === 1]));
+    } catch {
+      return new Map();
     }
   }
 }

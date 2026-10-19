@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { threadSeatMapSchema } from "../src/db/migrations/072_thread_seat_map.js";
+import { threadSeatMapChannelKeySchema } from "../src/db/migrations/115_thread_seat_map_channel_key.js";
 import { ThreadSeatMap } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
@@ -27,7 +28,7 @@ const clock = () => new Date("2026-08-27T05:00:00.000Z");
 
 function mapDb(): Database.Database {
   const db = new Database(":memory:");
-  migrate(db, [threadSeatMapSchema]);
+  migrate(db, [threadSeatMapSchema, threadSeatMapChannelKeySchema]);
   return db;
 }
 

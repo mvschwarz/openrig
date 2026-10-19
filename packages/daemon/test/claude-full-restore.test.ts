@@ -123,3 +123,113 @@ describe("managed Claude full down/up", () => {
     },
   );
 });
+
+// A pod-aware resume rolls a seat back as unresumable only on the runtime's own report that the
+// conversation doesn't exist. A Claude that returns to its shell for another reason stays failed,
+// with its pane and binding kept so its output can still be read.
+describe("pod-aware Claude resume failure outcomes", () => {
+  const dbs: ReturnType<typeof createFullTestDb>[] = [];
+  afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
+  const shellScreens: Record<string, string> = {
+    missing: `$ claude --resume ${token}\nNo conversation found with session ID: ${token}\nuser@host:~/project$ `,
+    "generic-exit": `$ claude --resume ${token}\nError: Claude exited before its interface opened\nuser@host:~/project$ `,
+  };
+
+  it.each(["generic-exit", "missing", "attention", "success"])("%s", async (mode) => {
+    const db = createFullTestDb(); dbs.push(db);
+    const rigRepo = new RigRepository(db);
+    const sessionRegistry = new SessionRegistry(db);
+    const eventBus = new EventBus(db);
+    const snapshotRepo = new SnapshotRepository(db);
+    const checkpointStore = new CheckpointStore(db);
+    const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
+    const rig = rigRepo.createRig("restore-test");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("restore-pod", rig.id, "Test");
+    const node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code", podId: "restore-pod" });
+    new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "auto" }, "fixture", "retained posture");
+    const name = "test-c@restore-test";
+    const old = sessionRegistry.registerSession(node.id, name);
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateResumeToken(old.id, "claude_id", token, "scrape");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%old" });
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const atShell = mode === "generic-exit" || mode === "missing";
+    let live = true;
+    const tmux = {
+      hasSession: vi.fn(async () => live),
+      probeSession: vi.fn(async () => ({ state: live ? "present" : "absent" })),
+      killSession: vi.fn(async () => { live = false; return { ok: true }; }),
+      createSession: vi.fn(async () => { live = true; return { ok: true }; }),
+      listSessions: vi.fn(async () => live ? [{ name }] : []),
+      listWindows: vi.fn(async () => []),
+      listPanes: vi.fn(async () => live ? [{ id: "%new", index: 0, cwd: "/", width: 80, height: 24, active: true }] : []),
+      getPanePid: vi.fn(async () => 100),
+      getPaneCommand: vi.fn(async () => atShell ? "bash" : "sh"),
+      // A killed session has no screen to read.
+      capturePaneContent: vi.fn(async () => !live ? null : atShell ? shellScreens[mode] : autoScreen),
+      sendText: vi.fn(async () => ({ ok: true })),
+      sendShellCommand: vi.fn(async () => ({ ok: true })),
+      sendKeys: vi.fn(async () => ({ ok: true })),
+    } as unknown as TmuxAdapter;
+    const startedAt = "Thu Oct  1 05:53:16 2026";
+    const shell = { pid: 100, ppid: 1, pgid: 100, tpgid: mode === "success" ? 101 : 100, executableName: "bash", command: "-bash", startedAt };
+    const listProcesses = async () => mode !== "success" ? [shell] : [
+      shell,
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt },
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${token} --name ${name}`, startedAt },
+    ];
+    const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
+    expect(down.errors).toEqual([]);
+    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
+      claudeManagedLaunch: {
+        prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", executable: "/opt/claude.exe" }),
+        configPaths: () => ({ configDir: "/fixture", statePath: "/fixture/.claude.json" }),
+        boundCwd: () => "/",
+      } as unknown as ClaudeManagedLaunch,
+      fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} } });
+    const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
+      checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume: new ClaudeResumeAdapter(tmux),
+      codexResume: new CodexResumeAdapter(tmux), listProcesses });
+    vi.mocked(tmux.killSession).mockClear();
+    const up = await restore.restore(down.snapshotId!, { adapters: { "claude-code": adapter } });
+    expect(up.ok).toBe(true);
+    if (!up.ok) throw new Error(up.message);
+    const outcome = up.result.nodes[0]!;
+    const latest = db.prepare("SELECT id, status, startup_status FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string; status: string; startup_status: string };
+    const binding = sessionRegistry.getBindingForNode(node.id);
+    // The earlier conversation's token is kept in every case.
+    expect(db.prepare("SELECT status, resume_type, resume_token FROM sessions WHERE id = ?").get(old.id))
+      .toEqual({ status: "exited", resume_type: "claude_id", resume_token: token });
+
+    if (mode === "generic-exit") {
+      expect(outcome.status).toBe("failed");
+      expect(outcome.error).toContain("pane returned to shell instead of entering Claude");
+      expect(outcome.error).not.toMatch(/unresumable/i);
+      expect(up.result.rigResult).toBe("failed");
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect(live).toBe(true);
+      expect(latest).toMatchObject({ status: "running", startup_status: "failed" });
+      expect(binding).toMatchObject({ tmuxSession: name, tmuxPane: "%new" });
+    } else if (mode === "missing") {
+      expect(outcome.status).toBe("awaiting-decision");
+      expect(outcome.error).toContain("Original session unresumable");
+      expect(outcome.error).toContain("no conversation found for the requested session");
+      expect(up.result.rigResult).toBe("partially_restored");
+      expect(tmux.killSession).toHaveBeenCalledExactlyOnceWith(name);
+      expect(live).toBe(false);
+      expect(latest).toMatchObject({ status: "superseded", startup_status: "failed" });
+      expect(binding).toBeNull();
+    } else if (mode === "attention") {
+      expect(outcome.status).toBe("attention_required");
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect(latest).toMatchObject({ status: "running", startup_status: "attention_required" });
+      expect(binding).toMatchObject({ tmuxSession: name, tmuxPane: "%new" });
+    } else {
+      expect(outcome.status).toBe("resumed");
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect(latest).toMatchObject({ status: "running", startup_status: "ready" });
+      expect(binding).toMatchObject({ tmuxSession: name, tmuxPane: "%new" });
+    }
+  });
+});

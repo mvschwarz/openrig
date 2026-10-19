@@ -66,7 +66,7 @@ These three are a division of labour, not a chain of gates. One agent may hold a
 ### PROGRESS.md
 - **WHO:** the orchestrator owns the current state; every agent logs its own outcomes.
 - **WHEN:** on material delivery-state changes and at acceptance.
-- **HOW:** keep current delivery state in `## Current state`; append material outcomes with links to proof under `## Outcomes`. Retain historical entries and existing checkboxes without treating them as current acceptance authority. For a selected proof policy, use `rig proof show <slice>` for current readiness; keep frontmatter `stage`/`verified` honest.
+- **HOW:** keep current delivery state in `## Current state`, naming who the next move waits on, and check that against the source (the PR on GitHub, the queue) before you rely on it; append material outcomes with links to proof under `## Outcomes`. Retain historical entries and existing checkboxes without treating them as current acceptance authority. For a selected proof policy, use `rig proof show <slice>` for current readiness; keep frontmatter `stage`/`verified` honest.
 
 ### PROOF.md + proof/
 - **WHO:** the impl/QA pair that worked the slice.
@@ -89,6 +89,15 @@ End every turn by passing the ball — a `rig queue handoff` to the next agent. 
 **A plain `rig queue create` row is informational** — a durable message. It is not a baton and does not carry this obligation. Use `handoff` when you are passing real work; use `create` when you are informing.
 
 Never go idle holding a baton.
+
+## Records
+
+The rules for recording a slice's state are in the conventions SSOT (`docs/reference/sdlc-conventions.md` in the OpenRig source repository, `$OPENRIG_HOME/reference/sdlc-conventions.md` when installed). Read them before you stamp, judge or report:
+
+- **Stamps, stages and proof:** A2 (`rig proof judge`, `rig scope slice stage` and `verified`) and B2–B3 (`rig scope slice approve --scope spec|delivery`, `rig proof add` and `--candidate-sha`).
+- **Built and merged:** the release-mission paragraphs of A1 (`candidate:<sha>`, `merged:<pr-number>`, `arrangement.source.integration_ref`).
+- **Dispatch data:** the DISPATCH DATA row of the component menu (the `worktree_path=` body line).
+- **Editing judged evidence resets the judgment.** An accepted `rig proof judge` records the sha256 of the evidence it cites; edit that evidence (the cited section, when it cites a heading), the contract item's text or the scope's proof policy, and the item reads `unknown` until you judge it again.
 
 ## Verify (deterministic backstop)
 

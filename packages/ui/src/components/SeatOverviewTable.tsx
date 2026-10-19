@@ -39,6 +39,7 @@ import {
 } from "../lib/token-format.js";
 import {
   getActivityLabel,
+  isCurrentUsageLimit,
   getActivityStateWithSource,
   getTimeInState,
   type ActivityState,
@@ -64,9 +65,9 @@ function placeholderOrValue(value: ReactNode | null | undefined): ReactNode {
   return value;
 }
 
-function activityLabelFromState(state: ActivityState): string {
+function activityLabelFromState(state: ActivityState, activity: NodeDetailData["agentActivity"]): string {
   if (state === "running") return "active";
-  return getActivityLabel(state);
+  return getActivityLabel(state, activity);
 }
 
 function activityLabelFromVisualState(state: TopologyActivityVisual["state"]): string {
@@ -75,12 +76,14 @@ function activityLabelFromVisualState(state: TopologyActivityVisual["state"]): s
   return state;
 }
 
-export function SeatOverviewTable({ data, activityVisual }: SeatOverviewTableProps) {
+export function SeatOverviewTable({ data, activityVisual: recentVisual }: SeatOverviewTableProps) {
+  const activityVisual = isCurrentUsageLimit(data.agentActivity)
+    && recentVisual?.state !== "needs_input" && recentVisual?.state !== "blocked" ? null : recentVisual;
   const { state: fallbackActivityState, source: fallbackActivitySource } = getActivityStateWithSource(data.agentActivity, data.terminalActive);
   const activityState = activityVisual?.state ?? fallbackActivityState;
   const activityLabel = activityVisual
     ? activityLabelFromVisualState(activityVisual.state)
-    : activityLabelFromState(fallbackActivityState);
+    : activityLabelFromState(fallbackActivityState, data.agentActivity);
   const activityIsActive = activityVisual
     ? activityVisual.state === "active"
     : fallbackActivityState === "running";

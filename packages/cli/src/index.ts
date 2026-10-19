@@ -70,6 +70,7 @@ import { contextCommand } from "./commands/context.js";
 import { pluginCommand } from "./commands/plugin.js";
 import { skillCommand } from "./commands/skill.js";
 import { agentImageCommand } from "./commands/agent-image.js";
+import { agentAppCommand } from "./commands/agent-app.js";
 import { forkCommand } from "./commands/fork.js";
 import { workspaceCommand, type WorkspaceDeps } from "./commands/workspace.js";
 import { whoamiCommand } from "./commands/whoami.js";
@@ -90,7 +91,7 @@ import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { policyCommand } from "./commands/policy.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
-import { CLI_VERSION } from "./version.js";
+import { configureRoot } from "./program-root.js";
 
 export interface ProgramDeps {
   daemonDeps?: LifecycleDeps;
@@ -138,6 +139,7 @@ export interface ProgramDeps {
   pluginDeps?: StatusDeps;
   skillDeps?: StatusDeps;
   agentImageDeps?: StatusDeps;
+  agentAppDeps?: StatusDeps;
   forkDeps?: StatusDeps;
   workspaceDeps?: WorkspaceDeps;
   whoamiDeps?: StatusDeps;
@@ -166,13 +168,7 @@ export interface ProgramDeps {
 }
 
 export function createProgram(depsOverride?: ProgramDeps): Command {
-  const program = new Command();
-
-  program
-    .name("rig")
-    .description("CLI for the OpenRig local control plane")
-    .version(CLI_VERSION)
-    .addHelpText("after", "\nThe OpenRig TUI and operator (after install, and whenever the person wants their agents):\n  rig terminal open saved:kernel --window\n  Opens a new desktop terminal itself: TUI | advisor | operator.\n  An installing agent can run this from its shell on the daemon's desktop.\n  Start a stopped daemon with rig daemon start.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n");
+  const program = configureRoot(new Command());
 
   program.addCommand(startCommand(depsOverride?.startDeps));
   program.addCommand(daemonCommand(depsOverride?.daemonDeps));
@@ -225,6 +221,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(pluginCommand(depsOverride?.pluginDeps));
   program.addCommand(skillCommand(depsOverride?.skillDeps));
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
+  program.addCommand(agentAppCommand(depsOverride?.agentAppDeps));
   program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(rigModeCommand(depsOverride?.rigModeDeps));

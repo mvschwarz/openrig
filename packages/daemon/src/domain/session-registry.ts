@@ -331,8 +331,16 @@ export class SessionRegistry {
 
   updateStatus(sessionId: string, status: string): void {
     this.db
-      .prepare("UPDATE sessions SET status = ?, last_seen_at = datetime('now') WHERE id = ?")
+      .prepare("UPDATE sessions SET status = ?, intentionally_stopped = 0, last_seen_at = datetime('now') WHERE id = ?")
       .run(status, sessionId);
+  }
+
+  /** A supported stop is distinct from an observed exit. Any later status write
+   * clears the intent, including a resume of this same session row. */
+  markIntentionallyStopped(sessionId: string): void {
+    this.db.prepare(
+      "UPDATE sessions SET status = 'exited', intentionally_stopped = 1, last_seen_at = datetime('now') WHERE id = ?",
+    ).run(sessionId);
   }
 
   updateStartupStatus(sessionId: string, status: "pending" | "ready" | "attention_required" | "failed", completedAt?: string): void {
@@ -362,6 +370,11 @@ export class SessionRegistry {
   // empty-token skip or a lower-rank no-op. Callers that only set-and-forget can
   // ignore it; the adoption-capture path uses it so its audit event never
   // falsely claims a captured write when the provenance guard refused it.
+  /** Record that this session was launched for a community agent app, selected through its preset. */
+  recordAgentAppSelection(sessionId: string, app: string): void {
+    this.db.prepare("UPDATE sessions SET agent_app = ? WHERE id = ?").run(app, sessionId);
+  }
+
   updateResumeToken(sessionId: string, type: string, token: string, provenance?: "hook" | "scrape" | "operator" | "adoption"): boolean {
     if (typeof token !== "string" || token.trim().length === 0) return false;
     if (provenance) {
@@ -454,6 +467,16 @@ export class SessionRegistry {
     return claudeResumeRotation(row)?.token === token.trim();
   }
 
+  /** A forked occupant (nodes.continuity_outcome = 'forked') whose own id is still pending must never
+   *  record an id another session row already holds: in a fork's process that is its parent's
+   *  (or a predecessor's) conversation, not its own. */
+  isForkClaimingHeldToken(sessionId: string, type: string, token: string): boolean {
+    return Boolean(this.db.prepare(
+      "SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.id = ? AND n.continuity_outcome = 'forked' " +
+        "AND EXISTS (SELECT 1 FROM sessions o WHERE o.id != s.id AND o.resume_type = ? AND o.resume_token = ?)",
+    ).get(sessionId, type, token));
+  }
+
   /** Test durable identity without returning the stored credential or changing
    *  its provenance. An equal protected token needs no lower-ranked write. */
   resumeTokenMatches(sessionId: string, type: string, token: string): boolean {
@@ -505,7 +528,9 @@ export class SessionRegistry {
 
   /** OPR.0.4.0.22 — resolve a canonical session name to the context needed to
    *  set its resume token: the latest session row + its node's runtime + the
-   *  current resume provenance. Returns null when no session matches. */
+   *  current resume provenance. Match inventory's ID ordering: the monotonic
+   *  factory preserves registration order through clock rollback in this daemon.
+   *  Returns null when no session matches. */
   findResumeContextByName(sessionName: string): {
     sessionId: string;
     nodeId: string;
@@ -518,7 +543,7 @@ export class SessionRegistry {
        FROM sessions s
        JOIN nodes n ON n.id = s.node_id
        WHERE s.session_name = ?
-       ORDER BY s.created_at DESC, s.id DESC LIMIT 1`
+       ORDER BY s.id DESC LIMIT 1`
     ).get(sessionName) as {
       session_id: string;
       node_id: string;
@@ -687,6 +712,8 @@ export class SessionRegistry {
       origin: (row.origin === "claimed" ? "claimed" : "launched"),
       startupStatus: (row.startup_status as Session["startupStatus"]) ?? "pending",
       startupCompletedAt: row.startup_completed_at ?? null,
+      // Present only on a session launched for a community agent app, so other sessions read as before.
+      ...(row.agent_app ? { agentApp: row.agent_app } : {}),
     };
   }
 
@@ -721,6 +748,7 @@ interface SessionRow {
   origin: string;
   startup_status: string | null;
   startup_completed_at: string | null;
+  agent_app?: string | null;
   // OPR.0.4.3.20 FR-3/FR-6 — resume ledger provenance + verification freshness.
   resume_provenance?: string | null;
   resume_last_verified?: string | null;
@@ -738,4 +766,18 @@ interface BindingRow {
   cmux_workspace: string | null;
   cmux_surface: string | null;
   updated_at: string;
+}
+
+const sessionsHaveAgentApp = new WeakMap<Database.Database, boolean>();
+
+/** The SQL that reads a session's recorded agent app: `<alias>.agent_app`, or NULL on a schema without that column
+ *  (as other optional columns are read), so a partial schema reads every seat as before. The schema check is made
+ *  once per database: the column only appears through a migration, which runs before these reads. */
+export function sessionAgentAppSelect(db: Database.Database, alias = "s"): string {
+  let has = sessionsHaveAgentApp.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_app");
+    sessionsHaveAgentApp.set(db, has);
+  }
+  return has ? `${alias}.agent_app` : "NULL";
 }

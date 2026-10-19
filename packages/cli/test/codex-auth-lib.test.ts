@@ -1,6 +1,8 @@
 // OPR.0.4.1.29 — rig auth secret-safe core (CLI-local, daemon-free). Foundational primitives:
 // fail-closed profile-name whitelist + CODEX_HOME path resolution (default $HOME/.codex, overridable).
 import { describe, it, expect } from "vitest";
+import { userInfo } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { validateProfileName, resolveCodexHome } from "../src/lib/codex-auth.js";
 
 describe("validateProfileName (OPR.0.4.1.29 — fail-closed whitelist)", () => {
@@ -32,5 +34,12 @@ describe("resolveCodexHome (OPR.0.4.1.29 — default $HOME/.codex, env-overridab
   it("defaults to $HOME/.codex when CODEX_HOME is unset/empty (no personal path baked in)", () => {
     expect(resolveCodexHome({ HOME: "/home/u" }).codexHome).toBe("/home/u/.codex");
     expect(resolveCodexHome({ HOME: "/home/u", CODEX_HOME: "" }).codexHome).toBe("/home/u/.codex");
+  });
+
+  it("falls back to the user's home when HOME is unset or empty (never a cwd-relative .codex)", () => {
+    expect(resolveCodexHome({}).codexHome).toBe(join(userInfo().homedir, ".codex"));
+    expect(resolveCodexHome({ HOME: "" }).codexHome).toBe(join(userInfo().homedir, ".codex"));
+    expect(resolveCodexHome({ HOME: "", CODEX_HOME: "" }).codexHome).toBe(join(userInfo().homedir, ".codex"));
+    expect(isAbsolute(resolveCodexHome({ HOME: "" }).codexHome)).toBe(true);
   });
 });

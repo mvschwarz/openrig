@@ -4,6 +4,7 @@
 // 40,000 truncation; top-level text is the screen-reader/notification fallback)
 // https://docs.slack.dev/reference/block-kit/blocks/section-block/ (3,000)
 // https://docs.slack.dev/reference/block-kit/blocks/ (50 blocks)
+import { createHash } from "node:crypto";
 import { MAX_OPTION_LABEL, type HumanQuestion } from "../../human-questions.js";
 
 export const SLACK_TEXT_CAP = 3900; // Our conservative complete-fallback budget, not Slack’s hard limit.
@@ -18,6 +19,26 @@ export interface QitemLike {
   destinationSession?: string | null;
   /** #193 — structured questions, rendered as one button row per question. */
   humanQuestions?: readonly HumanQuestion[] | null;
+  /** #1013 — row state + tags, so a workflow gate PARKED on a human seat can be
+   *  re-rendered for the person instead of posting the seat's agent packet. */
+  state?: string | null;
+  tags?: readonly string[] | null;
+  /** #1013 — the structured evidenceRef: for a parked gate it rides the evidence link/media
+   *  path when it is an https ref, else it renders as one Evidence line (never the packet). */
+  evidenceRef?: string | null;
+}
+
+/** #1013 — a workflow gate row parked on a human seat (the projector parks it
+ * `state=blocked, blocked_on=<human seat>` and tags it `gate`; every workflow gate also
+ * carries the `workflow` tag — the projector and the runtime both set it). Agents also
+ * put `gate` on rows they write by hand, so requiring both keeps a hand-tagged row's
+ * own body intact. A gate's body is the agent packet — instance/step/Continuation lines
+ * for the seat that resumes after sign-off — while the person needs only the headline
+ * (`gate.summary`, plain language per C6) and the evidence link. The row itself is
+ * untouched; this gates the OUTBOUND render only. */
+export function isHumanGatePacket(q: Pick<QitemLike, "state" | "tags">): boolean {
+  const tags = q.tags ?? [];
+  return q.state === "blocked" && tags.includes("gate") && tags.includes("workflow");
 }
 
 /** M1 A5b — an outbound image attachment. A media-bearing OutboundDecision carries these;
@@ -45,6 +66,9 @@ export interface OutboundMessageOpts {
    *  one sender context line in ONE honest bot identity. Authorship lives in OUR record;
    *  Slack's transport actor stays the app. NEVER a per-message username/icon override. */
   attribution?: SeatAttribution;
+  /** The machine this post comes from, shown after the sender ("from lead@my-rig on vps04") when
+   *  the sender's session doesn't already name a host. Absent: the sender line is unchanged. */
+  machine?: string;
   /** S10 interim loudness rule: an escalation MENTIONS its human (`<@Uxxx>`); everything else
    *  stays quiet-threaded. The value is the Slack USER ID (mention semantics require the id,
    *  never a display name). */
@@ -153,10 +177,12 @@ export function containsSecret(text: string): boolean {
   });
 }
 
+const REDACTED_SECRET = "[redacted-secret]";
+
 export function redactSecrets(text: string): string {
   let out = text;
   for (const p of SECRET_PATTERNS) {
-    out = out.replace(p, "[redacted-secret]");
+    out = out.replace(p, REDACTED_SECRET);
   }
   return out;
 }
@@ -268,14 +294,88 @@ function bounded(text: string, max: number, field: string): string {
   return text;
 }
 
+/** Longest tag value the gate context line shows, in characters, ellipsis included. */
+export const GATE_CONTEXT_VALUE_CAP = 80;
+
+/** Shorten a redacted tag value to GATE_CONTEXT_VALUE_CAP characters: its start and end around
+ * `…`, then the first 12 hex characters of the SHA-256 of the whole value. Labels that differ at
+ * the start or end stay visibly distinct; for labels that differ only in the cut middle, the
+ * digest makes a collision unlikely but doesn't rule it out. Counts code points, so no surrogate
+ * pair is split, and keeps a redaction marker whole or leaves it out, never cut. */
+function shortenGateValue(value: string): string {
+  const tokens: string[] = [];
+  value.split(REDACTED_SECRET).forEach((part, index) => {
+    if (index > 0) tokens.push(REDACTED_SECRET);
+    tokens.push(...Array.from(part));
+  });
+  const width = (token: string) => (token === REDACTED_SECRET ? REDACTED_SECRET.length : 1);
+  if (tokens.reduce((sum, token) => sum + width(token), 0) <= GATE_CONTEXT_VALUE_CAP) return value;
+  const hash = ` #${createHash("sha256").update(value).digest("hex").slice(0, 12)}`;
+  const room = GATE_CONTEXT_VALUE_CAP - hash.length - 1;
+  const take = (from: string[], budget: number): string[] => {
+    const kept: string[] = [];
+    let used = 0;
+    for (const token of from) {
+      if (used + width(token) > budget) break;
+      kept.push(token);
+      used += width(token);
+    }
+    return kept;
+  };
+  const head = take(tokens, Math.floor(room / 2));
+  const tail = take([...tokens.slice(head.length)].reverse(), room - Math.floor(room / 2)).reverse();
+  return `${head.join("")}…${tail.join("")}${hash}`;
+}
+
+/** PR #1143 review — the one-line workflow/instance context for a rendered human gate,
+ * built from the row's own `workflow:` / `instance:` / `step:` tags. The step rides along
+ * only when tagged. Missing tags render as `?` so the line never names the wrong workflow.
+ * A hand-made row can carry a tag of any length, so each value is redacted, then shortened
+ * (shortenGateValue), and only then is the line escaped, so no escape is split.
+ * `instanceOnly` gives the shorter line that still tells two instances apart. */
+export function buildGateContextLine(tags: readonly string[], instanceOnly = false): string {
+  const tagValue = (prefix: string): string => {
+    const raw = tags.find((t) => t.startsWith(`${prefix}:`))?.slice(prefix.length + 1);
+    return raw ? shortenGateValue(redactSecrets(raw)) : "?";
+  };
+  if (instanceOnly) return escapeSlackText(`instance ${tagValue("instance")}`);
+  const parts = [`Workflow ${tagValue("workflow")}`, `instance ${tagValue("instance")}`];
+  const step = tagValue("step");
+  if (step !== "?") parts.push(`step ${step}`);
+  return escapeSlackText(parts.join(" · "));
+}
+
 /** Pure, deterministic rendering. Queue metadata stays in the durable request;
  * the human sees one subject, complete body and one sender attribution. */
 export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): SlackMessagePayload {
   const summary = inert(String(q.summary || "(no summary)"));
-  const body = bounded(inert(String(q.body || "")), SLACK_SECTION_CAP, "body");
+  // #1013 — a gate parked on a human renders from the structured fields: the headline IS
+  // the ask (gate.summary) and the evidenceRef rides the evidence link/media path. When
+  // that path won't carry it (a local path, not an https ref), the body falls to a single
+  // Evidence line — the raw agent packet (instance/step/Continuation lines for the seat
+  // that resumes after sign-off) never does. Without a plain-language summary there is
+  // nothing to show the person instead, so the packet stays as the fallback.
+  const humanGate = isHumanGatePacket(q) && String(q.summary ?? "").trim() !== "";
+  // PR #1143 review — two instances of the same workflow parked at the same gate otherwise
+  // render byte-identical messages. One short line from the row's own tags tells the person
+  // which workflow instance is asking (never the agent packet).
+  const gateContext = humanGate ? buildGateContextLine(q.tags ?? []) : null;
+  const gateEvidence = String(q.evidenceRef ?? "").trim();
+  // The Evidence path drops out only when the render already carries that same reference —
+  // an https ref riding as the evidence link, or a media attachment whose URL IS the ref.
+  // An image of a DIFFERENT artifact (the common screenshot case) keeps the Evidence line:
+  // without it the human cannot find the referenced document.
+  const gateEvidenceCarried = Boolean(opts.evidenceLink)
+    || (opts.mediaRefs ?? []).some((m) => m.imageUrl === gateEvidence);
+  const body = humanGate
+    ? (!gateEvidence || gateEvidenceCarried
+      ? ""
+      : bounded(`Evidence: ${inert(gateEvidence)}`, SLACK_SECTION_CAP, "body"))
+    : bounded(inert(String(q.body || "")), SLACK_SECTION_CAP, "body");
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
-  const attr = bounded(`from ${inert(opts.attribution?.session || opts.sourceLabel)}`, 2000, "sender");
+  const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
+  const attr = bounded(`from ${inert(opts.attribution?.session || opts.sourceLabel)}${machine}`, 2000, "sender");
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);
@@ -283,8 +383,18 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }
-  const text = bounded([headline, body, questionParts?.text, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n"), SLACK_TEXT_CAP, "complete fallback");
+  const fallback = (context: string | null) => [headline, context, body, questionParts?.text, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n");
+  // The gate context line is supplementary: when it alone would push the complete fallback over
+  // budget, the instance part alone is tried, and the line is left out only when even that
+  // doesn't fit, rather than refusing the gate.
+  let shownContext = gateContext;
+  if (gateContext && fallback(gateContext).length > SLACK_TEXT_CAP && fallback(null).length <= SLACK_TEXT_CAP) {
+    const instanceLine = buildGateContextLine(q.tags ?? [], true);
+    shownContext = fallback(instanceLine).length <= SLACK_TEXT_CAP ? instanceLine : null;
+  }
+  const text = bounded(fallback(shownContext), SLACK_TEXT_CAP, "complete fallback");
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: headline } }];
+  if (shownContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownContext }] });
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
   if (questionParts) blocks.push(...questionParts.blocks);
   blocks.push(...imageBlocks);

@@ -599,6 +599,15 @@ describe("NodeLauncher", () => {
       expect(result.warnings).toContain('tmux "mouse" option not set for r01-dev1-impl: boom');
     });
 
+    it("folds the session's own non-fatal warnings (the #771 identity cleanup) into the launch result", async () => {
+      const { rig } = seedRigWithNode();
+      const createSession = vi.fn(async () => ({ ok: true as const, warnings: ["identity cleanup skipped: boom"] }));
+      const result = await createLauncher(mockTmuxAdapter({ createSession })).launchNode(rig.id, "dev1-impl");
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.warnings).toContain("identity cleanup skipped: boom");
+    });
+
     it("without an applier injected, launch succeeds and applies nothing (existing-behavior safety)", async () => {
       const { rig } = seedRigWithNode();
       const result = await createLauncher().launchNode(rig.id, "dev1-impl");

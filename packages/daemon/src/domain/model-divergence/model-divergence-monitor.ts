@@ -56,7 +56,11 @@ export interface ModelDivergenceProclamation {
 
 /** D-a — the effective read carries a NAMED reason on every no-answer outcome, and may be async
  *  (the current-generation join reads the live process table). */
-export type EffectiveModelRead = { ok: true; model: string } | { ok: false; reason: string };
+export type EffectiveModelRead =
+  /** `pinReadings`: the pin's readings the record may match (default: the pin itself). The Pi
+   *  reader supplies Pi's own (`piSeatPinReadings`). */
+  | { ok: true; model: string; pinReadings?: string[] }
+  | { ok: false; reason: string };
 
 export interface ModelDivergenceMonitorDeps {
   /** Every running canonical seat carrying a model pin (the detector's whole population). */
@@ -191,7 +195,8 @@ export class ModelDivergenceMonitor {
     }
     this.pendingPolls.delete(key);
     this.pendingReasons.delete(key);
-    if (modelsMatch(seat.pinnedModel, read.model)) {
+    const pins = read.pinReadings ?? [seat.pinnedModel];
+    if (pins.some((pin) => modelsMatch(pin, read.model, seat.runtime))) {
       this.settled.add(key);
       return;
     }
@@ -271,11 +276,16 @@ export class ModelDivergenceMonitor {
  *  same data before comparing. Never add a second map here, and never token containment: an
  *  unknown alias or a fallback model canonicalizes to itself and still diverges. Raw
  *  pinned/effective strings travel untouched in any proclamation. */
-export function modelsMatch(pinned: string, effective: string): boolean {
+export function modelsMatch(pinned: string, effective: string, runtime?: string | null): boolean {
+  // Claude's [1m] selects the context window, not a different model. Other runtimes keep it literal.
+  const modelId = (model: string) => runtime === "claude-code" ? model.trim().replace(/\[1m\]$/i, "") : model;
+  return canonicalModelPin(modelId(pinned)) === modelId(effective).trim().toLowerCase();
+}
+
+/** The pin as modelsMatch compares it: trimmed, lower-cased, through CANONICAL_MODEL_PINS. */
+export function canonicalModelPin(pinned: string): string {
   const pin = pinned.trim().toLowerCase();
-  const eff = effective.trim().toLowerCase();
-  const canonicalPin = (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
-  return canonicalPin === eff;
+  return (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
 }
 // (The self-expiring CLAUDE_ALIAS_MIGRATION_BRIDGE and its SPEC_VALIDATION_CAPABILITIES sentinel
 // gate completed their arc and are DELETED per the bridge's own deletion contract: the 5.3

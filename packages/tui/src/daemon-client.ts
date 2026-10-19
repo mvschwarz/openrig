@@ -5,6 +5,10 @@ import type { ProjectSelection } from "./types.js";
 // one-file read (every route below is an EXISTING, web-consumed daemon read).
 // Daemon-direct, never via the Studio serve-shell (FR-9). Phase 1 ships the
 // wrappers; Phase 2 binds the three sections to them.
+
+/** Usage across hosts: the daemon answers by its 15 s view deadline; 15 s + 5 s for its own read and the transfer. */
+export const USAGE_HOSTS_VIEW_WAIT_MS = 20_000;
+
 export interface DaemonClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -182,6 +186,68 @@ export class DaemonClient {
     return this.get("/healthz");
   }
 
+  /** Slice 01 — the provider read model, as `rig provider status --json` prints it. GET only: the daemon answers it
+   *  from memory and never starts a native read for it; this client never calls the refresh route. A failed or
+   *  absent route resolves to its status (404: a daemon without provider routes) instead of throwing. */
+  async providerStatus(): Promise<import("./usage/usage-model.js").UsageRead["status"]> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/provider/status`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) return { status: res.status, error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}` };
+    if (!data || typeof data !== "object" || Array.isArray(data)) return { status: res.status, error: "the response was not a provider read model" };
+    return { model: data };
+  }
+
+  /** Slice 01 — usage windows across registered hosts, as `rig provider status --all-hosts --json` prints them. GET
+   *  only: the daemon and every host answer from memory, and this client has no method for the refresh route. A
+   *  failed or absent route resolves to its status, with the daemon's own message (409: usage windows off here). */
+  async usageAcrossHosts(): Promise<import("./usage/usage-hosts-model.js").UsageHostsRead["status"]> {
+    let res: Response;
+    try {
+      // 20 s, not the usual 5 s: the daemon answers this view within its own 15 s deadline whatever the registry's
+      // size (hosts it hasn't heard from by then are listed as such), plus 5 s for its own read and the transfer. The
+      // page reader is per page, so a slow read here holds up neither other sections nor the live refresh of other pages.
+      res = await this.fetchImpl(`${this.baseUrl}/api/provider/usage/hosts`, { headers: this.headers, signal: AbortSignal.timeout(USAGE_HOSTS_VIEW_WAIT_MS) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) {
+      return {
+        status: res.status,
+        error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}`,
+        ...(typeof data?.["message"] === "string" ? { message: data["message"] } : {}),
+      };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) return { status: res.status, error: "the response was not a usage-across-hosts view" };
+    return { view: data };
+  }
+
+  /** Slice 02 — the cost view, as `rig usage cost --json` prints it. GET only, computed from what the daemon already
+   *  stores: no provider lookup, native read or charge lookup. A failed or absent route resolves to its status. */
+  async usageCost(): Promise<import("./cost/cost-read.js").CostRead["status"]> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}/api/telemetry/usage/cost`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
+    } catch (error) {
+      return { status: null, error: error instanceof Error ? error.message : "Read failed; the cause was not identified." };
+    }
+    const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+    if (!res.ok) return { status: res.status, error: typeof data?.["error"] === "string" ? data["error"] : `HTTP ${res.status}` };
+    // Every seat must be an object naming its seat and status, or the whole body isn't a cost view: a malformed
+    // member reads as unavailable, never as a partial view or a render failure.
+    const isSeat = (s: unknown) => !!s && typeof s === "object" && !Array.isArray(s)
+      && typeof (s as Record<string, unknown>)["seatSession"] === "string" && typeof (s as Record<string, unknown>)["status"] === "string";
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray(data["seats"]) || !data["seats"].every(isSeat)) {
+      return { status: res.status, error: "the response was not a cost view" };
+    }
+    return { body: { seats: data["seats"] as import("./cost/cost-read.js").CostBody["seats"], note: typeof data["note"] === "string" ? data["note"] : "" } };
+  }
+
   /** Bounded canonical findings; the TUI filters this one record set by scope. */
   healthFindings(limit = 200) {
     return this.get(`/api/health?limit=${limit}`);
@@ -340,7 +406,10 @@ export class DaemonClient {
    *  Herdr's layout and falls back to plain tmux without Herdr, so preview the same composition: its planId is the
    *  window opener's expected plan. A provider-less preview may pick cmux, whose plan the window opener never matches. */
   async previewTerminal(view: string): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
-    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr`) as import("./terminals/terminal-model.js").TerminalPreview;
+    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow.
+    const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
+    const viewport = Number.isSafeInteger(columns) && columns! > 0 ? `&viewportColumns=${columns}` : "";
+    return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr${viewport}`) as import("./terminals/terminal-model.js").TerminalPreview;
   }
   async openTerminal(view: string, expectedPlan?: string): Promise<TerminalOpenResult> {
     const result = (await this.post(`/api/terminal/open`, { view, ...(expectedPlan !== undefined ? { expectedPlan } : {}) })) as TerminalOpenResult;

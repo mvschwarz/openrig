@@ -62,9 +62,11 @@ describe("prepareHermeticEnv scaffold", () => {
     expect(s.env.HOME).toBe(s.home);
     expect(s.env.OPENRIG_HOME).toBe(s.openrigHome);
     expect(s.env.OPENRIG_NO_KERNEL).toBe("1");
-    // The private tmux wrapper wins command resolution; the caller's PATH is
-    // preserved after it so every non-tmux executable resolves as before.
-    expect(s.env.PATH).toBe(`${join(s.root, "bin")}${delimiter}/usr/bin`);
+    // The private tmux wrapper wins command resolution, then the runtime stubs (codex and claude); the
+    // caller's PATH is preserved after them so every other executable resolves as before.
+    expect(s.env.PATH).toBe(
+      `${join(s.root, "bin")}${delimiter}${join(s.root, ".openrig-test-runtime-stubs")}${delimiter}/usr/bin`,
+    );
   });
 
   it("does NOT mutate the caller's env object nor process.env", () => {

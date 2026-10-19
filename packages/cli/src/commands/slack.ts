@@ -250,6 +250,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .addHelpText("after", [
       "",
       "Creates nothing: open the --url link yourself in a browser signed in to your Slack workspace.",
+      "If Slack shows an empty manifest or parsing error with --url, paste the plain YAML output of",
+      "`rig slack manifest` into the YAML tab in Slack's \"Create an app from an app manifest\" dialog.",
       "The app is private to that workspace (Socket Mode; OpenRig hosts nothing and publishes nothing).",
       "--json lists every requested scope and why. `rig slack verify` checks only the baseline scopes,",
       "so a READY there does not prove attachments or mentions have their grants.",
@@ -341,8 +343,10 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       "",
       "A match is a rig name (my-rig) or a seat (lead@my-rig). The most specific match wins (seat, then",
       "rig); anything unmapped, and aggregate digests, use the default channel (`rig slack setup --channel`).",
-      "Replies in a thread reach that thread's seat in every channel; other messages the human starts go to",
-      "the inbound destination (`rig slack setup --inbound-destination`), whichever channel they are in.",
+      "Replies in a thread reach that thread's seat in every channel. A message a person starts in a rig's",
+      "channel goes to that rig's representative (its delegation root), or to the seat --inbound names;",
+      "every other message the human starts goes to the inbound destination (`rig slack setup",
+      "--inbound-destination`). A seat entry alone doesn't make its channel that seat's inbox.",
     ].join("\n"));
 
   // A config the connector cannot load (a hand-edited, invalid map) must fail loudly here too; on a
@@ -402,12 +406,13 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       }
       log(`default -> ${cfg.channel ?? "(unset: rig slack setup --channel)"}`);
       if (entries.length === 0) log("no channel map entries: every item uses the default channel");
-      for (const e of entries) log(`${e.match} -> ${e.channel}`);
+      for (const e of entries) log(`${e.match} -> ${e.channel}${e.inbound ? ` (new messages there go to ${e.inbound})` : ""}`);
     });
 
   channelMap
     .command("set <match> <channel>")
     .description("Map a rig (my-rig) or seat (lead@my-rig) to a Slack channel id; replaces an existing entry")
+    .option("--inbound <seat>", "the seat a person's new message in this channel goes to (default: a rig's representative)")
     .option("--reason <reason>", "Reason recorded with the configuration change", "configure the slack channel map")
     .option("--actor <actor>", "Named operator when outside a managed seat")
     .action(async (match: string, channel: string, opts) => {
@@ -416,7 +421,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       if (!cur) return;
       if (refuseUnsupported(surface, cur)) return;
       try {
-        await writeChannelMap(cur, surface.setChannelMapEntry(cur.channelMap, { match, channel }), opts);
+        await writeChannelMap(cur, surface.setChannelMapEntry(cur.channelMap, { match, channel, ...(opts.inbound ? { inbound: opts.inbound } : {}) }), opts);
       } catch (e) {
         log(`✗ channel map not changed: ${(e as Error).message}`);
         process.exitCode = 1;

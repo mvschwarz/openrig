@@ -8,6 +8,9 @@ import {
   WorkflowProjectorError,
   type WorkflowRuntime,
 } from "../domain/workflow-runtime.js";
+import { normalizeWorkflowScope, WorkflowScopeError, type WorkflowScope } from "../domain/workflow-scope.js";
+import { ProjectReadError } from "../domain/workspace/project-catalog.js";
+import { declaredProject } from "../domain/workspace/project-read.js";
 import { WorkflowSpecError } from "../domain/workflow-spec-cache.js";
 import { WorkflowHumanDestinationError } from "../domain/workflow-human-destination.js";
 
@@ -42,6 +45,9 @@ export function workflowRoutes(): Hono {
     c: { json: (body: unknown, status?: number) => Response },
     err: unknown,
   ): Response {
+    if (err instanceof WorkflowScopeError) {
+      return c.json({ error: err.code, message: err.message }, 400);
+    }
     if (err instanceof WorkflowHumanDestinationError) {
       return c.json({ error: err.code, message: err.message, ...err.details }, 409);
     }
@@ -202,20 +208,62 @@ export function workflowRoutes(): Hono {
         entryOwnerSession?: string;
         /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
         targetRig?: string;
-      }>()
+        /** Scope stamped on every packet the instance creates (migration 110). One that cannot be applied is
+         *  ignored with an advisory; bare project/mission/slice/tags fields keep their old meaning: ignored. */
+        scope?: { project?: unknown; mission?: unknown; slice?: unknown; tags?: unknown };
+      } & Record<string, unknown>>()
       .catch(() => ({} as never));
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
     if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
     if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
     try {
+      // A request can carry scope the route cannot apply: main accepted every such request, ignoring the key and
+      // creating one unscoped instance, so this route does too. The instance is created unscoped, nothing the scope
+      // named is recorded, and the response advisories say plainly that it was not applied. A scope that can be
+      // applied (validated here, project in the workspace catalog) is stamped on every packet.
+      let scope: WorkflowScope | null = null;
+      let scopeFailure: string | null = null;
+      if (body.scope !== undefined) {
+        try {
+          if (body.scope === null || typeof body.scope !== "object" || Array.isArray(body.scope)) {
+            throw new WorkflowScopeError("scope_invalid", "scope must be an object: { project?, mission?, slice?, tags? }");
+          }
+          scope = normalizeWorkflowScope({ project: body.scope.project, mission: body.scope.mission, slice: body.scope.slice, tags: body.scope.tags });
+          // The packets must show up under a project the workspace catalog declares (same lookup as the project reads).
+          if (scope?.project) declaredProject(c, scope.project);
+        } catch (err) {
+          if (err instanceof WorkflowScopeError || err instanceof ProjectReadError) {
+            scope = null;
+            scopeFailure = `${err.code}: ${err.message}`;
+          } else {
+            throw err;
+          }
+        }
+      }
+      const ignoredFields = ["project", "mission", "slice", "tags"].filter((field) => body[field] !== undefined);
       const result = await getRuntime(c).instantiate({
         specPath: body.specPath,
         rootObjective: body.rootObjective,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
         targetRig: body.targetRig,
+        ...(scope ? { scope } : {}),
       });
-      return c.json(result, 201);
+      const notes: string[] = [];
+      if (ignoredFields.length > 0) {
+        notes.push(`Ignored request body fields: ${ignoredFields.join(", ")}. Send scope as an object ({ project, mission, slice, tags }) to apply it. `
+          + (scope ? "The instance carries the scope object's scope." : "The instance was created unscoped."));
+      }
+      if (scopeFailure) {
+        notes.push(`Scope not applied (${scopeFailure}). Instance ${result.instance.instanceId} was created unscoped: its packets carry no project, mission, slice or tag scope. `
+          + "Correct the scope and instantiate again for a scoped instance; that creates a second instance.");
+      }
+      if (notes.length === 0) return c.json(result, 201);
+      return c.json({
+        ...result,
+        advisories: [...(result.advisories ?? []), ...notes],
+        scopeIgnored: { fields: [...ignoredFields, ...(scopeFailure ? ["scope"] : [])], message: notes.join(" ") },
+      }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

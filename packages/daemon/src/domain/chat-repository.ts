@@ -163,8 +163,9 @@ export class ChatRepository {
     const keywords = pattern.split("|").map((k) => k.trim()).filter(Boolean);
     if (keywords.length === 0) return [];
 
-    const conditions = keywords.map(() => "body LIKE ?").join(" OR ");
-    const params = [rigId, ...keywords.map((k) => `%${k}%`)];
+    // Keywords are literal text: escape LIKE's own wildcards and the escape character.
+    const conditions = keywords.map(() => "body LIKE ? ESCAPE '\\'").join(" OR ");
+    const params = [rigId, ...keywords.map((k) => `%${k.replace(/[\\%_]/g, "\\$&")}%`)];
 
     const rows = this.db
       .prepare(
