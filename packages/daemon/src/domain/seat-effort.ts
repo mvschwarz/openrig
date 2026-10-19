@@ -127,7 +127,7 @@ export function unknownLevelWarning(runtime: EffortRuntime, level: string | null
   if (level === null || KNOWN_EFFORT_LEVELS[runtime].includes(level)) return undefined;
   const name = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : "Claude Code";
   const consequence = runtime === "pi"
-    ? "Pi doesn't reject the turn: it ignores a level it doesn't know (printing a warning) and runs at its own default"
+    ? "Pi doesn't reject the turn: it ignores a level it doesn't know (printing a warning) and keeps the level it would use without the flag (a model suffix, the resumed session's level, or its default)"
     : "the runtime may reject every turn until it is changed";
   return `"${level}" isn't a level ${name} is known to accept (${KNOWN_EFFORT_LEVELS[runtime].join(", ")}); the next managed continuation sends it anyway, and ${consequence}.`;
 }

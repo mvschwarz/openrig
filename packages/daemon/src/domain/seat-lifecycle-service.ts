@@ -1956,7 +1956,7 @@ function effortSummary(saved: EffortResolution, emitted: EffortReport["emitted"]
   const launchNote = emitted.matchesSaved ? "" : " This differs from the saved value: it applies at the seat's next managed continuation.";
   if (observed.state !== "observed") return `Saved: ${savedText}. Launch sent: ${launch}.${launchNote} Native effort: NOT VERIFIED (${observed.detail})`;
   const sent = observed.matchesEmitted !== false ? observed.value
-    : runtime === "pi" ? `${observed.value}, not the ${launch} sent at launch (Pi caps a level the model doesn't offer and ignores one it doesn't know)`
+    : runtime === "pi" ? `${observed.value}, not the ${launch} sent at launch (Pi caps a level the model doesn't offer, ignores one it doesn't know, and the level can change inside the session)`
     : `${observed.value}, not the ${launch} the launch sent (changed or overridden inside the session)`;
   const verdict = observed.outcome === "accepted" ? "accepted by the service for that turn"
     : observed.outcome === "rejected" ? `REJECTED (${observed.detail})`

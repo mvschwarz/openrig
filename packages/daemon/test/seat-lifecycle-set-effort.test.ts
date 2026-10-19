@@ -284,7 +284,7 @@ describe("SeatLifecycleService.setEffort and effortReport on a Pi seat", () => {
     const report = await service.effortReport(sessionName);
     expect(report).toMatchObject({ emitted: { value: "xhigh", matchesSaved: true }, observed: { state: "observed", value: "high", matchesEmitted: false } });
     const summary = (report as { summary: string }).summary;
-    expect(summary).toContain("high, not the xhigh sent at launch (Pi caps a level the model doesn't offer and ignores one it doesn't know)");
+    expect(summary).toContain("high, not the xhigh sent at launch (Pi caps a level the model doesn't offer, ignores one it doesn't know, and the level can change inside the session)");
     expect(summary).not.toContain("changed or overridden inside the session");
   });
 
