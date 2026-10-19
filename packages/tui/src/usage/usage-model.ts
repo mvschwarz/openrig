@@ -53,11 +53,24 @@ export function signInText(r: Row): string | null {
   return `sign-in: ${state} (${str(s["evidence"])}${s["at"] ? `; as of ${str(s["at"])}` : ""})`;
 }
 
+/** The row's retained history: last observed exhaustion, the account link, and an inactive account's profile. */
+function historyLines(r: Row): ContentLine[] {
+  const lines: ContentLine[] = [];
+  const ex = r["lastObservedExhausted"] as Row | null | undefined;
+  if (ex) lines.push({ text: `    last observed exhausted at ${str(ex["at"])} (${ex["window"] ? str(ex["window"]) : "account-level"}: ${str(ex["evidence"])})` });
+  if (r["accountHistory"] === "unknown") lines.push({ text: "    account history unknown" });
+  if (r["savedProfile"] === "not linked") lines.push({ text: "    saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)" });
+  return lines;
+}
+
 export function allowanceLines(r: Row): ContentLine[] {
   const lines: ContentLine[] = [];
   const id = r["identity"] as Row | null | undefined;
   if (!id) {
     lines.push({ text: `  ${str(r["provider"])}  unavailable: ${str(r["unavailableReason"], "no reading")}` });
+    // A row with no identity yet can still carry history (Claude's before its first identity refresh): before sign-in,
+    // as on an identified row.
+    lines.push(...historyLines(r));
     const last = r["lastRefresh"] as Row | null | undefined;
     if (last?.["outcome"] === "failed") lines.push({ text: `    refresh failed at ${str(last["at"])}: ${failureText(last)}` });
     const signIn = signInText(r);
@@ -93,10 +106,7 @@ export function allowanceLines(r: Row): ContentLine[] {
     const expect = w["expectation"] as Row | undefined;
     if (expect) lines.push({ text: `      expected full since ${str(expect["expectedFullSince"])}, not yet observed (${str(expect["note"])})` });
   }
-  const ex = r["lastObservedExhausted"] as Row | null | undefined;
-  if (ex) lines.push({ text: `    last observed exhausted at ${str(ex["at"])} (${ex["window"] ? str(ex["window"]) : "account-level"}: ${str(ex["evidence"])})` });
-  if (r["accountHistory"] === "unknown") lines.push({ text: "    account history unknown" });
-  if (r["savedProfile"] === "not linked") lines.push({ text: "    saved profile: not linked (OpenRig doesn't record which saved profile was active at this read)" });
+  lines.push(...historyLines(r));
   // Whenever availability is unknown, say why (with windows too).
   if ((((r["windows"] as unknown[] | undefined) ?? []).length === 0 || r["currentAvailability"] === "unknown") && r["unavailableReason"]) lines.push({ text: `    ${r["unavailableReason"]}` });
   if (r["limitEvidence"]) lines.push({ text: `    limit evidence: ${r["limitEvidence"]}` });

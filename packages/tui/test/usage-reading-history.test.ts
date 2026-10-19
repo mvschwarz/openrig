@@ -35,4 +35,10 @@ describe("TUI account row: reading history", () => {
     const lines = text({ ...older, windows: [{ ...ROW.windows[0], expectation: undefined }] }).join("\n");
     expect(lines).not.toMatch(/expected full|last observed exhausted|account history|saved profile|before the daemon restarted\]/);
   });
+  it("a row with no identity yet still draws its history lines, before its sign-in line", () => {
+    const lines = text({ provider: "claude", identity: null, windows: [], unavailableReason: "identity not read yet", accountHistory: "unknown",
+      signIn: { state: "unknown", evidence: "no refresh since the daemon started at S", at: null } });
+    expect(lines[1]).toBe("    account history unknown");
+    expect(lines[2]).toMatch(/^    sign-in: unknown/);
+  });
 });

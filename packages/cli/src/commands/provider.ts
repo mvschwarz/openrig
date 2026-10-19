@@ -200,6 +200,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
       console.log(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+      // A row with no identity yet can still carry history (Claude's before its first identity refresh): before sign-in,
+      // as on an identified row.
+      for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
       const signIn = signInLine(r);
       if (signIn) console.log(`${pad}  ${signIn}`);
       return;

@@ -151,6 +151,15 @@ describe("rig provider status — usage windows", () => {
     expect(out).toContain("    no sample-time link between these seats' readings and this login");
   });
 
+  it("a row with no identity yet still prints its history lines, before its sign-in line", async () => {
+    model = { ...MODEL, usage: [
+      { provider: "claude", identity: null, windows: [], unavailableReason: "identity not read yet", accountHistory: "unknown",
+        signIn: { state: "unknown", evidence: "no refresh since the daemon started at S", at: null } },
+    ] };
+    const { out } = await run(["status"], port);
+    expect(out).toContain("  claude  unavailable: identity not read yet\n    account history unknown\n    sign-in: unknown (no refresh since the daemon started at S)");
+  });
+
   it("an unavailable row and a last-seen row say so", async () => {
     model = { ...MODEL, usage: [
       { provider: "codex", identity: null, windows: [], unavailableReason: "no reading since the daemon started at T; refresh with rig provider status --refresh" },
