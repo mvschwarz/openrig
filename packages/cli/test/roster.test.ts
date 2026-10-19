@@ -78,9 +78,14 @@ it("reports the occupant's observed model separately from its configured model, 
   expect(sample.sources[0]?.status).toBe("partial");
 });
 
-it("does not choose between conflicting model observations from duplicate host routes", () => {
+it.each(["model", "time", "unknown", "generation"])("r2: preserves registry fields when duplicate routes disagree only on observation %s", kind => {
   const observation = { status: "observed", model: "model-a", source: "codex-turn-context", observedAt: "2026-10-18T23:00:00.000Z", generation: "current", reason: null };
-  const sample: RosterInventory = { readAt: "2026-10-18T23:01:00Z", nodes: [{ ...node, modelObservation: observation }, { ...node, modelObservation: { ...observation, model: "model-b" } }], sources: [] };
+  const other = kind === "model" ? { ...observation, model: "model-b" }
+    : kind === "time" ? { ...observation, observedAt: "2026-10-18T23:00:01.000Z" }
+    : kind === "generation" ? { ...observation, generation: "replacement" }
+    : { status: "unknown", model: null, source: null, observedAt: null, generation: "current", reason: "model-record-unavailable" };
+  const sample: RosterInventory = { readAt: "2026-10-18T23:01:00Z", nodes: [{ ...node, modelObservation: observation }, { ...node, modelObservation: other }], sources: [] };
+  expect(enrichRosterMember(member, sample).live).toMatchObject({ status: "reported", configuredModel: "configured-a", runtime: "claude-code", sessionStatus: "running", agentActivity: node.agentActivity });
   expect(enrichRosterMember(member, sample).live.observedModel).toBeNull();
   expect(enrichRosterMember(member, sample).live).toMatchObject({ modelObservation: { status: "unknown", reason: "conflicting-observations" } });
 });

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -9,10 +9,11 @@ import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import { CurrentModelReader } from "../src/domain/model-divergence/current-model-reader.js";
 import { parseSqliteUtcMs } from "../src/domain/sqlite-time.js";
+import * as recordReaders from "../src/domain/model-divergence/effective-model-readers.js";
 import { readClaudeModelObservation, readCodexModelObservation } from "../src/domain/model-divergence/effective-model-readers.js";
 
 const cleanup: Array<() => void> = [];
-afterEach(() => { for (const fn of cleanup.splice(0).reverse()) fn(); });
+afterEach(() => { vi.restoreAllMocks(); for (const fn of cleanup.splice(0).reverse()) fn(); });
 function fixture(runtime = "claude-code") {
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const dir = mkdtempSync(join(tmpdir(), "observed-model-")); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -38,13 +39,14 @@ function fixture(runtime = "claude-code") {
   const census = new ProcessCensus({ list, now: () => boot + 5_000 });
   const getPanePid = vi.fn(async () => 10);
   const thread = vi.fn(async () => id);
+  const readAllPaneProcesses = vi.fn(async () => new Map([["%1", { pid: 10, command: "claude" }]]));
   const reader = new CurrentModelReader({ sessions, identities,
     context: { readSidecar: () => ({ ok: true, data: { session_id: id, session_name: "editor@studio", transcript_path: path, sampled_at: stamp, occupant_generation: tenure.generationUuid } }) } as never,
     codexRollout: () => path, piRunner: () => ({ state: { ready: true, launchId: "launch", sessionFile: path }, sessionsDir: dir, entryPath: `${dir}/pi-runner.mjs`, stateRoot: dir }),
-    census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
+    readAllPaneProcesses, census, now: () => boot + 60_000, native: { getPanePid, listProcesses: () => census.list(), readThreadIdByPid: thread },
   });
   const input = { nodeId: node.id, canonicalSessionName: "editor@studio", runtime, sessionStatus: "running" };
-  return { db, dir, rigs, rig, node, sessions, identities, session, tenure, boot, stamp, path, claudeRecord, reader, input, list, getPanePid, thread, processRows };
+  return { db, dir, rigs, rig, node, sessions, identities, session, tenure, boot, stamp, path, claudeRecord, reader, input, list, getPanePid, thread, processRows, readAllPaneProcesses };
 }
 
 it("reports assistant-response evidence separately from the pin, with native time and no record contents", async () => {
@@ -121,4 +123,72 @@ it("serves the same observation through the actual inventory route with configur
 it("reports Pi response evidence without consulting its pin or models comparator", async () => {
   const f = fixture("pi");
   expect(await f.reader.observe(f.input)).toMatchObject({ status: "observed", model: "example/response-model", source: "pi-assistant-response", observedAt: f.stamp });
+});
+
+
+it.each(["generation", "binding", "name-generation"])("r2: rejects %s turnover on the final PID await even with the same PID", async (kind) => {
+  const f = fixture();
+  f.getPanePid.mockImplementation(async () => {
+    if (f.getPanePid.mock.calls.length === 3) {
+      if (kind === "generation") f.sessions.mintOccupantTenure(f.node.id, "replacement");
+      else if (kind === "binding") f.sessions.updateBinding(f.node.id, { tmuxSession: "editor@studio", tmuxPane: "%2" });
+      else vi.spyOn(f.sessions, "currentOccupantGenerationForSession").mockReturnValue("replacement");
+    }
+    return 10;
+  });
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "occupant-changed-during-read" });
+});
+
+it.each(["claude-code", "codex", "pi"])("r2: caches an unchanged %s native fact and invalidates append and replacement", async runtime => {
+  const f = fixture(runtime);
+  if (runtime === "codex") writeFileSync(f.path, JSON.stringify({ timestamp: f.stamp, type: "turn_context", payload: { model: "first-model" } }) + "\n");
+  const read = vi.spyOn(recordReaders, runtime === "codex" ? "readCodexModelObservation" : runtime === "pi" ? "readPiModelObservation" : "readClaudeModelObservation");
+  expect((await f.reader.observe(f.input)).status).toBe("observed");
+  expect((await f.reader.observe(f.input)).status).toBe("observed");
+  expect(read).toHaveBeenCalledTimes(1);
+  appendFileSync(f.path, "\n");
+  await f.reader.observe(f.input); expect(read).toHaveBeenCalledTimes(2);
+  const copy = f.path + ".replacement";
+  writeFileSync(copy, (await import("node:fs")).readFileSync(f.path)); renameSync(copy, f.path);
+  await f.reader.observe(f.input); expect(read).toHaveBeenCalledTimes(3);
+});
+
+it("r2: checks the final-await occupant even on a cached record", async () => {
+  const f = fixture(); await f.reader.observe(f.input); f.getPanePid.mockClear();
+  f.getPanePid.mockImplementation(async () => {
+    if (f.getPanePid.mock.calls.length === 3) f.sessions.mintOccupantTenure(f.node.id, "replacement");
+    return 10;
+  });
+  expect(await f.reader.observe(f.input)).toMatchObject({ status: "unknown", reason: "occupant-changed-during-read" });
+});
+
+it("r2: batches inventory pane reads and shares one census without per-seat tmux calls", async () => {
+  const f = fixture();
+  const result = await f.reader.observeInventory([f.input, f.input, f.input]);
+  expect(result.map(r => r.status)).toEqual(["observed", "observed", "observed"]);
+  expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(2);
+  expect(f.getPanePid).not.toHaveBeenCalled(); expect(f.list).toHaveBeenCalledTimes(1);
+  await f.reader.observeInventory([{ ...f.input, sessionStatus: "stopped" }, { ...f.input, runtime: "stub" }]);
+  expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(2);
+});
+
+it("r2: uses the bulk path on repeated actual inventory requests and skips unchanged transcript reads", async () => {
+  const f = fixture(); const read = vi.spyOn(recordReaders, "readClaudeModelObservation");
+  const { app } = createTestApp(f.db, { appDeps: { currentModelReader: f.reader } });
+  for (let n = 0; n < 2; n++) {
+    const response = await app.request(`/api/rigs/${f.rig.id}/nodes`);
+    expect(response.status).toBe(200); expect((await response.json())[0].modelObservation.status).toBe("observed");
+  }
+  expect(read).toHaveBeenCalledTimes(1); expect(f.getPanePid).not.toHaveBeenCalled();
+  expect(f.readAllPaneProcesses).toHaveBeenCalledTimes(4);
+});
+
+it("r2: finishes the entire inventory selection before the final bulk PID and ledger check", async () => {
+  const f = fixture();
+  f.readAllPaneProcesses.mockImplementation(async () => {
+    if (f.readAllPaneProcesses.mock.calls.length === 2) f.sessions.mintOccupantTenure(f.node.id, "replacement");
+    return new Map([["%1", { pid: 10, command: "claude" }]]);
+  });
+  const results = await f.reader.observeInventory([f.input, f.input]);
+  expect(results.every(r => r.reason === "occupant-changed-during-read")).toBe(true);
 });
