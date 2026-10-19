@@ -1663,7 +1663,8 @@ export interface CaptureResult {
   lines?: number;
   error?: string;
   reason?: string;
-  /** Claude Code and Codex seats: what the live input box holds, and which part is likely a harness suggestion. */
+  /** Claude Code and Codex seats, when the caller asked: what the live input box holds, and which part is likely a
+   *  harness suggestion. */
   inputBox?: InputBoxAnnotation;
 }
 
@@ -3380,7 +3381,9 @@ export class SessionTransport {
     }
   }
 
-  async capture(sessionName: string, opts?: { lines?: number }): Promise<CaptureResult> {
+  /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads, bounded). Only
+   *  callers that use it ask: the capture route, which the CLI and MCP read. */
+  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean }): Promise<CaptureResult> {
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -3437,18 +3440,33 @@ export class SessionTransport {
     await this.reconcileStartupReadiness(sessionName).catch(() => {});
 
     const runtime = sessionMeta.runtime;
-    const inputBox = runtime === "claude-code" || runtime === "codex" ? await this.captureInputBox(sessionName, runtime) : undefined;
+    const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex") ? await this.captureInputBox(sessionName, runtime) : undefined;
     return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
   }
 
-  /** The input box as one styled read of the visible screen sees it, with the cursor read before and after that read:
-   *  a cursor that moved in between is reported as unavailable. Never fails the capture. */
+  /** The input box, or unknown when its reads don't finish within INPUT_BOX_READ_DEADLINE_MS: the pane text is already
+   *  in hand, so a slow read never holds the capture. A read still pending then settles on its own, unused. */
   private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<InputBoxAnnotation>((resolve) => {
+      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), INPUT_BOX_READ_DEADLINE_MS);
+    });
+    try {
+      return await Promise.race([this.readInputBoxAnnotation(sessionName, runtime), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** One styled read of the visible screen with the cursor read before and after it: a cursor that moved, or a pane
+   *  that resized, in between is reported as moved. Never throws. */
+  private async readInputBoxAnnotation(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
     try {
       const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
       const screen = await this.tmuxAdapter.capturePaneContent(sessionName, 0, { escapeSequences: true });
       const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
-      const steady = before && after && before.x === after.x && before.y === after.y ? after : null;
+      const steady = before && after && before.x === after.x && before.y === after.y
+        && before.width === after.width && before.height === after.height ? after : null;
       return annotateInputBox(screen, steady, runtime, { cursorMoved: before !== null && after !== null && steady === null });
     } catch {
       return annotateInputBox(null, null, runtime);
@@ -3696,21 +3714,15 @@ export interface InputBoxAnnotation {
 }
 
 const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's later rows by two cells
-const PLAIN_RULE = /^[─━═-]{10,}$/;
+// How long a capture waits for the input box's three reads before reporting it unknown.
+const INPUT_BOX_READ_DEADLINE_MS = 1_000;
+// Claude Code's input frame rule, as findClaudeComposer and the composer-boundary reader match it (a label may sit in it).
+const CLAUDE_FRAME_RULE = /^─{3,}(?: .+ ─+)?$/;
 
-/** Approximate terminal cells for one character: ASCII one, combining marks none, East Asian wide and emoji two. */
-function inputCellWidth(ch: string): number {
-  const c = ch.codePointAt(0) ?? 0;
-  if (c < 0x300) return 1;
-  if (c <= 0x36f || (c >= 0x200b && c <= 0x200f) || (c >= 0xfe00 && c <= 0xfe0f)) return 0;
-  if ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff)
-    || (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff)) return 2;
-  return 1;
-}
-
-/** The input box's rows on the screen: from the prompt row to the row before Claude Code's closing rule, or Codex's
- *  box as codexInputBox reads it. Null when no input box is recognized (a selector, a menu instead of a box, busy
- *  output with no box, another layout). */
+/** The input box's rows on the screen: Claude Code's prompt row inside its frame (the opening rule directly above it,
+ *  through the row before the closing rule), or Codex's box as codexInputBox reads it. A committed prompt row in the
+ *  transcript, or a prompt-looking line in output, has no opening rule above it. Null when no input box is recognized
+ *  (a selector, a menu instead of a box, busy output with no box, another layout). */
 function inputBoxRows(lines: string[], runtime: "claude-code" | "codex"): { first: number; last: number; empty?: boolean } | null {
   if (runtime === "codex") {
     const box = codexInputBox(lines.join("\n"));
@@ -3719,9 +3731,13 @@ function inputBoxRows(lines: string[], runtime: "claude-code" | "codex"): { firs
   }
   const promptClass = composerPromptClassForRuntime("claude-code");
   const first = findComposerInputLineIndex(lines, promptClass);
-  if (first < 0 || composerNumberedChoicePattern(promptClass).test(lines[first]!.trimStart())) return null;
+  if (first < 1 || composerNumberedChoicePattern(promptClass).test(lines[first]!.trimStart())) return null;
+  // A rule at the prompt's own indent: an input's later rows are indented, so a rule typed inside it never closes it.
+  const indent = /^[ \t]*/.exec(lines[first]!)![0];
+  const frame = (line: string) => line.startsWith(indent) && CLAUDE_FRAME_RULE.test(line.slice(indent.length).trimEnd());
+  if (!frame(lines[first - 1]!)) return null;
   let close = first + 1;
-  while (close < lines.length && !PLAIN_RULE.test(lines[close]!.trim())) close++;
+  while (close < lines.length && !frame(lines[close]!)) close++;
   return close < lines.length ? { first, last: close - 1 } : null;
 }
 
@@ -3729,12 +3745,16 @@ export function annotateInputBox(
   styledScreen: string | null,
   cursor: { x: number; y: number; width: number; height: number } | null,
   runtime: "claude-code" | "codex",
-  opts: { cursorMoved?: boolean } = {},
+  opts: { cursorMoved?: boolean; timedOut?: boolean } = {},
 ): InputBoxAnnotation {
   const harness = runtime === "codex" ? "Codex" : "Claude Code";
   const result = (status: InputBoxAnnotation["status"], confidence: InputBoxAnnotation["confidence"], hint: string,
     input: InputBoxSpan | null = null, suggestion: InputBoxSpan | null = null, evidence: string[] = []): InputBoxAnnotation =>
     ({ status, confidence, cursor, input, suggestion, evidence, hint });
+  if (opts.timedOut) {
+    return result("unknown", "unknown", `The input box's reads didn't finish within ${INPUT_BOX_READ_DEADLINE_MS / 1000} s, so it wasn't checked.`,
+      null, null, ["input box reads timed out"]);
+  }
   if (!styledScreen?.trim()) return result("unknown", "unknown", "The screen couldn't be read, so the input box wasn't checked.");
   const cells = styledLines(styledScreen);
   const lines = cells.map((row) => row.map((cell) => cell.ch).join(""));
@@ -3746,7 +3766,7 @@ export function annotateInputBox(
   const rows: Array<{ row: number; cells: Array<{ ch: string; faint: boolean; col: number }> }> = [];
   for (let row = box.first; row <= box.last; row++) {
     let col = 0;
-    const placed = (cells[row] ?? []).map((cell) => { const at = col; col += inputCellWidth(cell.ch); return { ...cell, col: at }; });
+    const placed = (cells[row] ?? []).map((cell) => { const at = col; col += stringWidth(cell.ch); return { ...cell, col: at }; });
     const glyphAt = row === box.first ? placed.findIndex((cell) => cell.ch === "❯" || cell.ch === "›") : -1;
     const startCol = row === box.first ? (glyphAt >= 0 ? placed[glyphAt]!.col + 2 : INPUT_CONTINUATION_COLUMN) : INPUT_CONTINUATION_COLUMN;
     let text = placed.filter((cell) => cell.col >= startCol);
@@ -3766,7 +3786,7 @@ export function annotateInputBox(
   }
   const lastRow = textRows[textRows.length - 1]!;
   const lastCell = lastRow.cells[lastRow.cells.length - 1]!;
-  const end = { row: lastRow.row, col: lastCell.col + inputCellWidth(lastCell.ch) };
+  const end = { row: lastRow.row, col: lastCell.col + stringWidth(lastCell.ch) };
   const input = spanOf({ row: box.first, col: startCol }, end);
   const quote = (text: string) => {
     const flat = text.replace(/\s*\n\s*/g, " ").trim();
@@ -3777,9 +3797,11 @@ export function annotateInputBox(
   const textCells = rows.flatMap((r) => r.cells.filter((cell) => cell.ch.trim()).map((cell) => ({ ...cell, row: r.row })));
   const allFaint = styled && textCells.every((cell) => cell.faint);
   const noneFaint = styled && textCells.every((cell) => !cell.faint);
-  const trySuggestion = runtime === "claude-code" && CLAUDE_TRY_SUGGESTION.test(input.text.replace(/\s+/g, ""));
+  // Claude Code's `Try "…"` suggestion counts unless the styling says otherwise: a person can type those words.
+  const tryShape = runtime === "claude-code" && CLAUDE_TRY_SUGGESTION.test(input.text.replace(/\s+/g, ""));
+  const trySuggestion = tryShape && !noneFaint;
   const evidence: string[] = [];
-  if (trySuggestion) evidence.push("Claude Code's Try \"...\" suggestion");
+  if (tryShape) evidence.push(trySuggestion ? "Claude Code's Try \"...\" suggestion" : "Try \"...\" words drawn unfaint");
   evidence.push(!styled ? "no styling in the capture" : allFaint ? "text drawn faint" : noneFaint ? "text not faint" : "part of the text drawn faint");
 
   const inBox = cursor !== null && cursor.y >= box.first && cursor.y <= box.last;
@@ -3789,24 +3811,27 @@ export function annotateInputBox(
   else evidence.unshift(!inBox ? "cursor outside the input box" : atStart ? "cursor at the input's start" : atEnd ? "cursor after the text" : "cursor inside the text");
   const why = evidence.join("; ");
 
-  const likelySuggestion = (confidence: InputBoxAnnotation["confidence"]) => result("likely-suggestion", confidence,
-    `The input box shows ${quote(input.text)}, likely a ${harness} suggestion (${why}), not something the person typed: it isn't their intent, a draft or a staged command.`,
+  const likelySuggestion = (confidence: "high" | "medium") => result("likely-suggestion", confidence, confidence === "high"
+    ? `The input box shows ${quote(input.text)}, likely a ${harness} suggestion (${why}), not something the person typed: it isn't their intent, a draft or a staged command.`
+    : `The input box shows ${quote(input.text)}, possibly a ${harness} suggestion (${why}; medium confidence): don't take it as the person's intent, and don't assume it isn't their draft.`,
     input, input, evidence);
   const typed = (confidence: InputBoxAnnotation["confidence"]) => result("typed", confidence,
     `The input box holds ${quote(input.text)}, likely typed by the person and not yet sent (${why}).`, input, null, evidence);
   const unknown = () => result("unknown", "unknown",
     `The input box shows ${quote(input.text)}; whether the person typed it or it's a ${harness} suggestion is unknown (${why}).`, input, null, evidence);
 
+  // A moved cursor or one outside the box contradicts any reading; only an unavailable cursor leaves the styling or the
+  // Try words to go on, at medium confidence.
   if (cursor === null || !inBox) {
-    if (trySuggestion || (cursor === null && allFaint)) return likelySuggestion("medium");
+    if (cursor === null && !opts.cursorMoved && (allFaint || trySuggestion)) return likelySuggestion("medium");
     return unknown();
   }
   if (atStart) {
     if (allFaint || trySuggestion) return likelySuggestion("high");
     if (!styled) return likelySuggestion("medium");
-    // Claude Code draws its suggestion faint; unfaint text with the cursor at its start may be a draft the person moved
-    // the cursor back through. Codex's suggestion styling isn't established, so the cursor alone stays medium there.
-    return runtime === "codex" && noneFaint ? likelySuggestion("medium") : unknown();
+    // Claude Code draws its suggestion faint (Codex draws its placeholder faint too); unfaint text with the cursor at its
+    // start may be a draft the person moved the cursor back through, in either harness.
+    return unknown();
   }
   if (atEnd) {
     if (noneFaint) return typed("high");

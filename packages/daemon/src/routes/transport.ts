@@ -208,7 +208,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
       const results = [];
       for (const session of resolved.sessions) {
-        const result = await transport.capture(session.sessionName, { lines: body.lines });
+        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox: true });
         results.push(result);
       }
       return c.json({ results });
@@ -219,7 +219,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Provide session, rig, or pod to capture" }, 400);
     }
 
-    const result = await transport.capture(body.session, { lines: body.lines });
+    // The CLI and MCP read this route, so it also asks for an agent seat's input box (bounded; the preview and
+    // attention paths don't ask).
+    const result = await transport.capture(body.session, { lines: body.lines, inputBox: true });
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         session_missing: 404,
