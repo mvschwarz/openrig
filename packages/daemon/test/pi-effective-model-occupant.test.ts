@@ -398,6 +398,12 @@ describe("Pi runner arguments and pane process must be unambiguous", () => {
     }
   });
 
+  it("a runner command carrying --thinking still matches the managed shape", async () => {
+    const command = `${runnerCommand(managed, "L2").replace(`--model ${PIN}`, `--model ${PIN} --thinking high`)}`;
+    expect(command).toContain("--thinking high");
+    expect((await pass(monitorFor(withRunner(command)))).fired).toHaveLength(1);
+  });
+
   it("a pane whose own process is not a shell stays pending, with the exact runner under it", async () => {
     expect(await pendingReason(withRunner(runnerCommand(managed, "L2"), { paneRoot: "vim notes.md" }))).toMatch(/is not a shell/);
   });

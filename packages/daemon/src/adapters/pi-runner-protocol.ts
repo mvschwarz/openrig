@@ -254,6 +254,8 @@ export interface PiRunnerLaunchOpts {
   model?: string;
   /** Explicit posture; OMP maps it to --approval-mode, Pi to resource trust. */
   trust: "approve" | "no-approve";
+  /** Pi only: the seat's resolved effort, sent as Pi's own `--thinking <level>` (wins over a model `:level` suffix). */
+  thinking?: string;
   /** Exact session file to resume (FR-6). Mutually exclusive with forkRef. */
   sessionFile?: string;
   /** OPR.0.7.0.2: Pi only — the runner reports usage facts from persisted entries (usage.pi_cost_facts). */
@@ -283,6 +285,9 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
+  if (opts.thinking?.trim() && opts.runtime !== "omp") {
+    parts.push("--thinking", shellQuote(opts.thinking.trim()));
+  }
   if (opts.sessionFile) {
     parts.push("--session", shellQuote(opts.sessionFile));
   }
@@ -303,6 +308,8 @@ export function buildPiChildArgs(opts: {
   sessionsDir: string;
   sessionName: string;
   model?: string;
+  /** Pi only: forwarded as `--thinking`; Pi warns on a level it does not know. */
+  thinking?: string;
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
@@ -317,6 +324,9 @@ export function buildPiChildArgs(opts: {
   ];
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());
+  }
+  if (opts.thinking?.trim() && opts.runtime !== "omp") {
+    args.push("--thinking", opts.thinking.trim());
   }
   if (opts.sessionFile) {
     // Exact file resume — NEVER --resume (interactive picker; forbidden in

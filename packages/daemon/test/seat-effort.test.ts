@@ -14,7 +14,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import {
-  LATEST_WINS_EFFORT_PRECEDENCE, UNDECIDED_EFFORT_PRECEDENCE, effortPrecedence, emittedEffortFromArgv, readNativeEffort, readSeatEffort, resolveSeatEffort,
+  LATEST_WINS_EFFORT_PRECEDENCE, UNDECIDED_EFFORT_PRECEDENCE, effortPrecedence, emittedEffortFromArgv, KNOWN_EFFORT_LEVELS, unknownLevelWarning, readNativeEffort, readSeatEffort, resolveSeatEffort,
 } from "../src/domain/seat-effort.js";
 
 const LSTART = "Tue Oct 13 05:49:17 2026";
@@ -63,6 +63,29 @@ describe("emittedEffortFromArgv: what the launch command line sent", () => {
     expect(emittedEffortFromArgv("codex", ["codex", "-m", "gpt-5.5", "-c", 'model_reasoning_effort="high"', "resume", "t"])).toEqual({ flag: "present", value: "high" });
     expect(emittedEffortFromArgv("codex", ["codex", "--config=model_reasoning_effort=minimal"])).toEqual({ flag: "present", value: "minimal" });
     expect(emittedEffortFromArgv("codex", ["codex", "-c", "sandbox_workspace_write.network_access=true", "resume", "t"])).toEqual({ flag: "none" });
+  });
+});
+
+describe("Pi effort: levels, warning, and launch argv", () => {
+  it("knows Pi's own thinking levels, with no Codex none", () => {
+    expect(KNOWN_EFFORT_LEVELS.pi).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("warns on an unknown Pi level in Pi's terms, and keeps Claude/Codex wording", () => {
+    const pi = unknownLevelWarning("pi", "none")!;
+    expect(pi).toContain('"none" isn\'t a level Pi is known to accept');
+    expect(pi).toContain("ignores a level it doesn't know");
+    expect(pi).not.toContain("reject every turn");
+    expect(unknownLevelWarning("pi", "high")).toBeUndefined();
+    expect(unknownLevelWarning("claude-code", "bogus")).toBe(`"bogus" isn't a level Claude Code is known to accept (low, medium, high, xhigh, max); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`);
+    expect(unknownLevelWarning("codex", "bogus")).toBe(`"bogus" isn't a level Codex is known to accept (none, minimal, low, medium, high, xhigh, max); the next managed continuation sends it anyway, and the runtime may reject every turn until it is changed.`);
+  });
+
+  it("reads --thinking from the runner argv, last one wins", () => {
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--session-name", "s", "--thinking", "high"])).toEqual({ flag: "present", value: "high" });
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--thinking=low"])).toEqual({ flag: "present", value: "low" });
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--thinking", "low", "--thinking=max"])).toEqual({ flag: "present", value: "max" });
+    expect(emittedEffortFromArgv("pi", ["node", "/r/pi-runner.js", "--session-name", "s"])).toEqual({ flag: "none" });
   });
 });
 

@@ -838,6 +838,7 @@ interface RunnerArgs {
   cwd: string;
   launchId: string;
   model?: string;
+  thinking?: string;
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
@@ -867,6 +868,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--cwd": args.cwd = next(); break;
       case "--launch-id": args.launchId = next(); break;
       case "--model": args.model = next(); break;
+      case "--thinking": args.thinking = next(); break;
       case "--session": args.sessionFile = next(); break;
       case "--fork": args.forkRef = next(); break;
       case "--usage-facts": args.usageFacts = true; break;
@@ -1061,6 +1063,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     sessionsDir: paths.sessionsDir,
     sessionName: args.sessionName,
     model: args.model,
+    thinking: args.thinking,
     trust: args.trust,
     sessionFile: args.sessionFile,
     forkRef: args.forkRef,

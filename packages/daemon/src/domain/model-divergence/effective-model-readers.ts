@@ -21,6 +21,7 @@
 import { openSync, readSync, closeSync, fstatSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parsePiModelsJson } from "../../adapters/pi-readiness.js";
+import { KNOWN_EFFORT_LEVELS } from "../seat-effort.js";
 import { parsePiSessionHeader, piAssistantFields, piEntryOrigin, type PiSessionBoundary } from "../pi-usage-facts.js";
 
 const TAIL_BYTES = 512 * 1024;
@@ -197,7 +198,7 @@ export interface PiOccupantScope {
 
 /** Pi's thinking levels for `--thinking` and the `--model` suffix (`pi --help`; the same at the
  *  tested 0.87.1 baseline and 1.3.0). */
-const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const PI_THINKING_LEVELS = new Set(KNOWN_EFFORT_LEVELS.pi);
 
 /** The model ids a Pi pin can resolve to, in Pi's own order (`parseModelPattern`): the whole pin
  *  first, then with each trailing `:<thinking level>` removed in turn. Pi records the model without
