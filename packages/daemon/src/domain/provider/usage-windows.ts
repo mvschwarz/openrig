@@ -202,8 +202,13 @@ export class UsageWindows<I extends { source: string }, R> {
 
   /** The sign-in fact for a row, from the last refresh only (never from its windows). Only the latest read's row is the
    *  login the refresh read. */
-  private signIn(latest: boolean, unresolved = false, observedAt: string | null = null): SignInFact {
+  private signIn(latest: boolean, unresolved = false, observedAt: string | null = null, retained = false): SignInFact {
     const last = this.lastRefresh;
+    // A row kept from before the restart: there may have been no refresh since, so it was superseded by nothing.
+    if (retained) {
+      return { state: "unknown", at: null,
+        evidence: `kept from before the daemon restarted at ${this.startedAt}; this login's sign-in hasn't been read since` };
+    }
     if (!latest) {
       // An unresolved earlier read can't be matched, so it may be this same login: never call it another one.
       return { state: "unknown", at: null, evidence: unresolved
@@ -304,7 +309,7 @@ export class UsageWindows<I extends { source: string }, R> {
         accountHistory: key !== null ? "linked" as const : "unknown" as const,
         ...(this.spec.store && key !== null ? { lastObservedExhausted: this.exhaustion.get(key) ?? null } : {}),
         ...(!reading.latest && key !== null ? { savedProfile: "not linked" as const } : {}),
-        signIn: this.signIn(reading.latest, reading.identity.source === "unresolved", reading.observedAt),
+        signIn: this.signIn(reading.latest, reading.identity.source === "unresolved", reading.observedAt, reading.retained === true),
         ...(reading.identity.source === "unresolved" ? {
           unresolved: {
             note: reading.latest ? UNRESOLVED_NOTE : UNRESOLVED_EARLIER_NOTE,

@@ -264,3 +264,21 @@ describe("projection cost and restart guidance", () => {
     for (const w of row!.windows) expect(w.freshnessReason).toContain("refresh with rig provider status --refresh");
   });
 });
+
+describe("sign-in on rows kept from before a restart", () => {
+  it("a restored row's sign-in says it was kept from before the restart, unlike a row a later live read superseded", async () => {
+    const d = db();
+    await windows(d, [read(T0, { primaryUsed: 40 })]).w.refresh();
+    const restored = windows(d, [], at(10)).w.project(at(10)).find((r) => r.retained === "before_restart")!;
+    expect(restored.signIn).toMatchObject({ state: "unknown", at: null });
+    expect(restored.signIn!.evidence).toContain("kept from before the daemon restarted");
+    expect(restored.signIn!.evidence).not.toContain("not the latest read");
+
+    // The live contrast: one daemon reads account A, then account B; A's row is superseded, not restored.
+    const live = windows(db(), [read(T0, { primaryUsed: 40 }), read(at(5), { primaryUsed: 10, accountId: "acct-2" })]);
+    await live.w.refresh(); live.setNow(at(5)); await live.w.refresh();
+    const superseded = live.w.project(at(5)).find((r) => !r.latestFromSource && r.identity !== null)!;
+    expect(superseded.retained).toBeUndefined();
+    expect(superseded.signIn!.evidence).toContain("not the latest read");
+  });
+});
