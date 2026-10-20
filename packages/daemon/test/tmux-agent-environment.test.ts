@@ -25,7 +25,7 @@ describe.skipIf(process.platform !== "linux")("#1178 initial-shell environment p
       const cli=path.join(home,"rig-fixture"), rc=path.join(home,"private.bashrc");
       writeFileSync(cli,"#!/bin/sh\nexit 0\n",{mode:0o755});
       // This deliberately custom default-command must still run; its function and override are intended setup.
-      writeFileSync(rc, `printf '%s|%s|%s|%s' "\${Q1178_SERVER-absent}" "\${Q1178_DAEMON-absent}" "\${Q1178_AUTH-absent}" "\${TMUX_PANE-absent}" > ${shellQuote(initial)}\nexport Q1178_STARTUP=startup Q1178_AUTH=startup\nclaude() { printf '%s|%s|%s|%s' "\${Q1178_SERVER-absent}" "\${Q1178_DAEMON-absent}" "$Q1178_AUTH" "$Q1178_STARTUP" > ${shellQuote(final)}; }\n`);
+      writeFileSync(rc, `unset HISTFILE\nprintf '%s|%s|%s|%s' "\${Q1178_SERVER-absent}" "\${Q1178_DAEMON-absent}" "\${Q1178_AUTH-absent}" "\${TMUX_PANE-absent}" > ${shellQuote(initial)}\nexport Q1178_STARTUP=startup Q1178_AUTH=startup\nclaude() { printf '%s|%s|%s|%s' "\${Q1178_SERVER-absent}" "\${Q1178_DAEMON-absent}" "$Q1178_AUTH" "$Q1178_STARTUP" > ${shellQuote(final)}; }\n`);
       const custom=`exec /bin/bash --noprofile --rcfile ${shellQuote(rc)} -i`;
       const selected={HOME:home,PATH:process.env.PATH!,OPENRIG_HOME:home,OPENRIG_NODE_ID:"node",OPENRIG_SESSION_NAME:"seat",Q1178_AUTH:"daemon"};
       const baseline={...selected,Q1178_DAEMON:"daemon"};

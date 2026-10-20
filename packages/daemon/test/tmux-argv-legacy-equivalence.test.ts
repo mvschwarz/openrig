@@ -42,6 +42,7 @@ function respond(cmd: string, failing: string[], composer = false): string {
   // #1072's composer snapshot reads a cursor and a screen before its mode check; other calls keep their replies.
   if (composer && sub === "display-message" && cmd.includes("cursor_x")) return "2|0|80|24\n";
   if (composer && sub === "capture-pane") return "❯ \n";
+  if (sub === "show-options" && cmd.includes("default-shell")) return "/bin/sh\n";
   switch (sub) {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";
@@ -152,6 +153,10 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await recordingAdapter(calls, { failing: ["paste-buffer"] }).sendText(SESSION, "hello");
   await recordingAdapter(calls, { guard: true }).killSession(SESSION);
   await recordingAdapter(calls, { composer: true }).captureComposerSnapshot("%1");
+  const scoped = recordingAdapter(calls);
+  scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });
+  await scoped.createSession(SESSION, "/w x", { Q: "it's" });
+  await scoped.respawnPane("%1", "printf '$HOME'", { env: { A: "b c" } });
   return calls;
 }
 
