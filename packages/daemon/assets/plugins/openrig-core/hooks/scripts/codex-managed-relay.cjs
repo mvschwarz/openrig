@@ -118,9 +118,9 @@ function managedRelayWouldRun(event, env, deps) {
   const block = content.slice(begin, end);
   const stanza = managedStanza(block, event);
   if (!stanza) return { runs: false, reason: "no managed stanza for this event in the daemon's form" };
-  // Any other mention of the event outside the block could be a hook group that shifts the managed one's position.
-  const outside = content.slice(0, begin) + content.slice(end);
-  if (new RegExp(`\\b${escapeRegExp(event)}\\b`).test(outside)) return { runs: false, reason: "another hook group may precede it" };
+  // A hook group for the event before the block would shift the managed one's position (its trust key's group index); one
+  // after it doesn't. Any mention of the event before the block counts.
+  if (new RegExp(`\\b${escapeRegExp(event)}\\b`).test(content.slice(0, begin))) return { runs: false, reason: "another hook group may precede it" };
   if (!deps.isThisScript(stanza.relay)) return { runs: false, reason: "the managed relay is a different script" };
   let keySource = configPath;
   try { keySource = fs.realpathSync.native(configPath); } catch { /* the plain path, as the daemon falls back to */ }

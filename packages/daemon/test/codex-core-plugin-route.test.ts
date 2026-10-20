@@ -322,6 +322,16 @@ describe("the plugin relay on Codex: quiet only when Codex would run the managed
     expect(quiet("Stop", env(home, empty))).toBe(false);
   });
 
+  it("a hook group for the same event after the managed block doesn't move it; one before it does", () => {
+    const later = provisioned();
+    edit(later, (s) => `${s}\n[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\ncommand = "echo mine"\n`);
+    expect(quiet("UserPromptSubmit", env(later))).toBe(true);
+    rmSync(root, { recursive: true, force: true }); mkdirSync(root);
+    const earlier = provisioned();
+    edit(earlier, (s) => `[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\ncommand = "echo mine"\n\n${s}`);
+    expect(quiet("UserPromptSubmit", env(earlier))).toBe(false);
+  });
+
   it("an untrusted managed relay leaves the plugin reporting, which is twice only where Codex is told to bypass hook trust", () => {
     // Codex runs an untrusted handler only when hook trust is bypassed for the session, which this check can't see; that
     // case reports twice. It is the stated limit, never a lost report.
