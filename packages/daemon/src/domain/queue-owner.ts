@@ -1,3 +1,4 @@
+import { resolveCurrentSessionAddress } from "./session-registry.js";
 import type Database from "better-sqlite3";
 
 /** The durable session→node binding (the session-registry precedent: latest sessions row
@@ -8,7 +9,7 @@ export function resolveSessionNodeId(db: Database.Database, session: string): st
   const row = db
     .prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
     .get(session) as { node_id: string } | undefined;
-  return row?.node_id ?? null;
+  return row?.node_id ?? resolveCurrentSessionAddress(db, session)?.nodeId ?? null;
 }
 
 /** Default orchestrator derivation: the destination's BOUND node → the source of its

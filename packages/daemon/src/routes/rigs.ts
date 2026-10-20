@@ -624,6 +624,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
       return c.json(result, 404);
     case "runtime_required":
       return c.json(result, 400);
+    case "address_conflict":
     case "already_bound":
     case "duplicate_logical_id":
     case "invalid_member_name":

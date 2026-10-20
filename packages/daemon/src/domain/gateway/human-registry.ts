@@ -413,6 +413,9 @@ export interface HumanSummary {
   deliveryClass: HumanPrefs["deliveryClass"];
   /** EFFECTIVE availability preset (default false when unauthored). */
   away: boolean;
+  /** The availability delivery acts on: the authored value, else legacy `away`, else available (the engine's
+   *  resolveAvailability rule). */
+  availability: NonNullable<HumanPrefs["availability"]>;
   bindings: HumanBindingsSummary;
   fragmentPath: string;
 }
@@ -509,6 +512,7 @@ export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
       address: e.address,
       deliveryClass: e.prefs.deliveryClass,
       away: e.prefs.away === true,
+      availability: e.prefs.availability ?? (e.prefs.away === true ? "away" : "available"),
       bindings: {
         count: e.connectorBindings.length,
         primary: { kind: primary.kind, connectorRef: primary.connectorRef },

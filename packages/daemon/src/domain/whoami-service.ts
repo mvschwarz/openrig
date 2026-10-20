@@ -1,3 +1,4 @@
+import { resolveCurrentSessionAddress } from "./session-registry.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -18,6 +19,7 @@ export interface WhoamiResult {
     memberId: string;
     memberLabel: string | null;
     sessionName: string | null;
+    senderAddress: string | null;
     runtime: string;
     cwd: string | null;
     agentRef: string | null;
@@ -154,6 +156,12 @@ export class WhoamiService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
   }
 
+  private senderAddress(sessionName: string, nodeId: string): string {
+    const current = resolveCurrentSessionAddress(this.db, sessionName);
+    return current && resolveCurrentSessionAddress(this.db, current.senderAddress)?.nodeId === nodeId
+      ? current.senderAddress : sessionName;
+  }
+
   resolve(query: { nodeId?: string; sessionName?: string; targetRepoOverride?: string; compact?: boolean }): WhoamiResult | null {
     let nodeRow: NodeRow | undefined;
     let resolvedBy: "node_id" | "session_name";
@@ -166,9 +174,10 @@ export class WhoamiService {
       currentSessionName = this.getCurrentSessionName(nodeRow.id, nodeRow.rig_id);
     } else if (query.sessionName) {
       // Find sessions matching this name — check for ambiguity across rigs
-      const sessionRows = this.db
-        .prepare("SELECT * FROM sessions WHERE session_name = ? ORDER BY id DESC")
-        .all(query.sessionName) as SessionRow[];
+      const current = resolveCurrentSessionAddress(this.db, query.sessionName);
+      const sessionRows = current && current.sessionName !== query.sessionName
+        ? this.db.prepare("SELECT * FROM sessions WHERE id=?").all(current.sessionId) as SessionRow[]
+        : this.db.prepare("SELECT * FROM sessions WHERE session_name = ? ORDER BY id DESC").all(query.sessionName) as SessionRow[];
 
       if (sessionRows.length === 0) return null;
 
@@ -242,6 +251,7 @@ export class WhoamiService {
       memberId,
       memberLabel: nodeRow.label,
       sessionName: currentSessionName,
+      senderAddress: currentSessionName ? this.senderAddress(currentSessionName, nodeRow.id) : null,
       runtime: nodeRow.runtime ?? "unknown",
       cwd: nodeRow.cwd,
       agentRef: nodeRow.agent_ref,

@@ -483,7 +483,7 @@ export class TmuxAdapter {
           throw error;
         }
         const pane = fresh ? created.pane : bound.pane;
-        if (!pane || panes.length !== 1 || panes[0]!.id !== pane) throw new Error("Managed pane identity unavailable or changed; no input written.");
+        if (!pane || panes.length !== 1 || panes[0]!.id !== pane) throw new Error("Managed pane identity unavailable or changed; no input written. If the seat's pane was never recorded, rig reconcile-session <seat> --repair-missing-pane --no-launch fills it (with typing protection off).");
         if (inputKind === "control" && guard.needsInputCheck(identity)) await guard.beforeInput(identity);
         if (inputKind === "respawn" && guard.needsInputCheck(identity)) {
           if (!guard.ownsLifecycle(bound.nodeId) || !await this.isPaneDead(pane)) {

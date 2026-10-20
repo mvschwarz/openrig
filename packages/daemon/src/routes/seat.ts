@@ -220,7 +220,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   if (result.code === "tmux_probe_failed") {
     return c.json(result, 502);
   }
-  if (result.code === "current_occupant_required" ||
+  if (result.code === "address_conflict" || result.code === "current_occupant_required" ||
     result.code === "discovered_not_active" ||
     result.code === "successor_tmux_absent" ||
     result.code === "successor_already_managed" ||

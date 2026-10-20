@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
+import { createDb } from "../src/db/connection.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { annotateInputBox } from "../src/domain/session-transport.js";
 import { transportRoutes } from "../src/routes/transport.js";
@@ -211,7 +212,11 @@ describe("annotateInputBox: Codex", () => {
 });
 
 describe("rig capture reports the input box for agent seats only, leaving the pane text as it was", () => {
-  afterEach(() => { vi.useRealTimers(); });
+  const readModels: Array<ReturnType<typeof createDb>> = [];
+  afterEach(() => { vi.useRealTimers(); for (const db of readModels.splice(0)) db.close(); });
+  // A canonical-only read model has no alias bindings; use real sqlite_master
+  // rather than leaving the transport's required database dependency absent.
+  const readModel = () => { const db = createDb(); readModels.push(db); return db; };
 
   async function makeTransport(getPaneCursorPosition: (promptRow: number) => Promise<unknown>, screenOverride?: string) {
     const { SessionTransport } = await import("../src/domain/session-transport.js");
@@ -224,7 +229,7 @@ describe("rig capture reports the input box for agent seats only, leaving the pa
     const make = (runtime: string) => {
       const transport = Object.create(SessionTransport.prototype) as InstanceType<typeof SessionTransport>;
       Object.assign(transport, {
-        tmuxAdapter: tmux,
+        db: readModel(), tmuxAdapter: tmux,
         getSessionMeta: () => ({ runtime, attachmentType: "tmux", nodeId: "n1", pane: "%1", occupant: null, resumeToken: null }),
         absenceProbeTarget: () => null,
         now: () => new Date(),
@@ -323,7 +328,7 @@ describe("rig capture reports the input box for agent seats only, leaving the pa
     const seats = ["s1@r", "s2@r", "s3@r", "s4@r", "s5@r"];
     const transport = Object.create(SessionTransport.prototype) as InstanceType<typeof SessionTransport>;
     Object.assign(transport, {
-      tmuxAdapter: tmux,
+      db: readModel(), tmuxAdapter: tmux,
       getSessionMeta: () => ({ runtime: "claude-code", attachmentType: "tmux", nodeId: "n1", pane: "%1", occupant: null, resumeToken: null }),
       absenceProbeTarget: () => null,
       now: () => new Date(),

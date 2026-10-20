@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./domain/session-registry.js";
 import { makeWatchdogDeliver, occurrenceAttempted, priorDigestAttempt } from "./domain/watchdog-delivery.js";
 import { fileURLToPath } from "node:url";
 import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
@@ -452,6 +453,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (h): resolve the source seat's atom-B generation for the handoff-nudge Sent: line
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
+    resolveSessionAddresses: (sessionName) => sessionRegistry.sessionAddresses(sessionName),
   });
   // W1 (transactional closure): ONE OutboxHandler shared between the deps slot
   // (sender-side audit surface) and the queue repo's durable wake-intent
@@ -1407,6 +1409,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // status == 'running'.
       classifierLeaseManagerInstance.attachIsAlive((classifierSession: string): boolean => {
         try {
+          classifierSession = physicalSessionName(db, classifierSession);
           const row = db
             .prepare(
               `SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1`,
@@ -2102,6 +2105,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const sessionTransport = deps.sessionTransport;
   if (sessionTransport) {
     queueRepoInstance.attachActivityReader((session) => {
+      session = physicalSessionName(db, session);
       const node = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(session) as { node_id: string } | undefined;
       return node ? seatActivityService.getSeatState(node.node_id) : null;
     });

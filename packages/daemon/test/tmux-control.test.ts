@@ -299,7 +299,8 @@ describe("tmuxControlExec", () => {
   it("spawns load-buffer, alone or in a chain: the server would open the file itself", async () => {
     const client = fakeClient();
     const { spawned, fallback } = fakeSpawned();
-    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, replyTimeoutMs: 50 });
+    // Dispatch semantics, not a 50ms reply race against waitFor's 50ms poll.
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0 });
 
     const read = exec(["tmux", "display-message", "-p", "-t", "=seat@rig:", "x"]);
     await vi.waitFor(() => expect(client.written).toHaveLength(1));

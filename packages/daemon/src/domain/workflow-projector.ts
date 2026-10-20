@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 // PL-004 Phase D: workflow projector — transactional-scribe contract.
 //
@@ -133,6 +134,7 @@ export function workflowWaitWakeMessage(input: {
  * facade (instantiate-time static pin checks).
  */
 export function nodeRuntimeOf(db: Database.Database, session: string): string | null {
+  session = physicalSessionName(db, session);
   const row = db
     .prepare(
       `SELECT n.runtime FROM nodes n

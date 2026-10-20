@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js";
 import { exceptionConfigurationSource, inspectExceptionReadiness, type ExceptionReadiness } from "./workflow-exception-readiness.js";
 import { inspectGraph, recoverGraphOperation, reviseGraph } from "./workflow-reconciliation.js";
@@ -345,6 +346,7 @@ export class WorkflowRuntime {
     // EITHER way — report alive so no warning fires, and never let an advisory
     // path fail validate/instantiate.
     try {
+      sessionRef = physicalSessionName(this.db, sessionRef);
       const row = this.db
         .prepare(
           `SELECT s.status AS status FROM sessions s WHERE s.session_name = ? ORDER BY s.created_at DESC LIMIT 1`,

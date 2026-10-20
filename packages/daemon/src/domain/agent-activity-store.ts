@@ -1,3 +1,4 @@
+import { physicalSessionName } from "./session-registry.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
@@ -129,6 +130,7 @@ export class AgentActivityStore {
     sessionName?: string | null;
     now?: Date;
   }): AgentActivity | null {
+    if (input.sessionName) input = { ...input, sessionName: physicalSessionName(this.db, input.sessionName) };
     const nodeId = input.nodeId ?? (input.sessionName ? this._resolveSession({ sessionName: input.sessionName })?.node_id : null);
     if (!nodeId) return null;
 
@@ -310,6 +312,7 @@ export class AgentActivityStore {
     }
 
     if (!input.sessionName) return null;
+    const sessionName = physicalSessionName(this.db, input.sessionName);
     const row = this.db.prepare(`
       SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime
       FROM sessions s
@@ -317,7 +320,7 @@ export class AgentActivityStore {
       WHERE s.session_name = ?
       ORDER BY s.id DESC
       LIMIT 1
-    `).get(input.sessionName) as SessionLookupRow | undefined;
+    `).get(sessionName) as SessionLookupRow | undefined;
     return row ?? null;
   }
 }

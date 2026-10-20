@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -143,6 +143,12 @@ export class NodeLauncher {
         code: "invalid_session_name",
         message: `Derived session name "${sessionName}" does not match OpenRig naming pattern`,
       };
+    }
+
+    try { this.sessionRegistry.assertAddressAvailable(node.id, sessionName); }
+    catch (error) {
+      if (!(error instanceof SessionAddressConflict)) throw error;
+      return { ok: false, code: "address_conflict", message: error.message };
     }
 
     // 3. Reserve the source-bound occupant generation before the process starts. Reservation is

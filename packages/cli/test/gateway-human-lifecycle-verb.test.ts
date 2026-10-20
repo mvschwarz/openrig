@@ -131,6 +131,12 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     let body: unknown;
     let requests = 0;
     const server = createServer((req, res) => {
+      // `list` also reads the person's quiet hours; that route isn't under test here.
+      if (req.url === "/api/gateway/human/mike/quiet") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, window: null, state: { active: false, nextBoundary: null } }));
+        return;
+      }
       expect(req.url).toBe("/api/gateway/human/mike/readiness");
       requests++;
       res.writeHead(status, { "content-type": "application/json" });

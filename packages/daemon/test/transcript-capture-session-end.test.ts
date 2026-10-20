@@ -160,7 +160,9 @@ describe("transcript capture stops when a single session ends", () => {
     const owner = seedSeat("dev.impl");
     const stale = setup.rigRepo.createRig("stale-rig");
     const staleNode = setup.rigRepo.addNode(stale.id, "dev.impl", { runtime: "claude-code" });
-    setup.sessionRegistry.registerSession(staleNode.id, owner.sessionName);
+    // Retained pre-admission duplicate, not a new shared join (which now refuses).
+    db.prepare("INSERT INTO sessions(id,node_id,session_name) VALUES (?,?,?)").run(staleNode.id, staleNode.id, owner.sessionName);
+    setup.sessionRegistry.mintOccupantTenure(staleNode.id, "initial");
     rotate(owner.sessionName);
 
     const res = await setup.app.request(`/api/rigs/${stale.id}/nodes/dev.impl`, { method: "DELETE" });

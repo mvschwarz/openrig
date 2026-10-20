@@ -1,3 +1,4 @@
+import type { SessionRegistry } from "../domain/session-registry.js";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
@@ -1286,7 +1287,8 @@ export function queueRoutes(): Hono {
     if (!senderSession) return c.json({ error: "senderSession is required" }, 400);
     const parsed = queryLimit(c);
     if (!parsed.ok) return parsed.response;
-    return c.json(getOutbox(c).listForSender(senderSession, parsed.limit));
+    const sessions = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+    return c.json(getOutbox(c).listForSender(senderSession, parsed.limit, sessions?.sessionAddresses(senderSession)));
   });
 
   return app;
