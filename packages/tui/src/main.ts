@@ -142,7 +142,7 @@ async function run(): Promise<void> {
   function enableLive(): boolean {
     if (!live || !client || startup?.state.connection !== "up") return false;
     liveEnabled = true;
-    activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); void live.invalidate(); }, onStatus: (status) => live.connectionStatus(status) });
+    activityEvents ??= subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: (event) => { if (event.type.startsWith("proof.")) reviewCache.clear(); live.pushed(); }, onStatus: (status) => live.connectionStatus(status) });
     return true;
   }
   function commandContext() {
