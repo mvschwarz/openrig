@@ -10,6 +10,8 @@ import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 import { resolveContextRef } from "../context-resolve.js";
 import { shellQuote } from "../cross-host-executor.js";
+import { loadHostRegistry, resolveHost } from "../host-registry.js";
+import { loadHostBindings } from "../host-bindings.js";
 import { omittedReadField, readView } from "../read-view.js";
 import { buildWriteReceipt, compactOutputEnabled, type ReceiptContext } from "../queue-receipt.js";
 import { TRANSITIONS_SHOWN, compactShow, compactTransitions, showEmptyNotice, transitionsNotice } from "../queue-read-compact.js";
@@ -340,6 +342,50 @@ function printResult(json: boolean, body: unknown, status: number): void {
     console.log(JSON.stringify(body, null, 2));
   }
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
+}
+
+/** #1642: why a create provably wrote nothing, for the refusals that come before any write: the
+ *  selected daemon refused the forward before contacting another host (its registry was unreadable,
+ *  the host unknown or SSH-declared), or refused a local create to a rig it doesn't have. Any other
+ *  failure, including a timeout or a remote's error, may follow a commit, so it returns null. */
+function provenCreateRefusal(status: number, body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const { error, failureClass, hostId } = body as { error?: unknown; failureClass?: unknown; hostId?: unknown };
+  if (status === 502 && error === "remote_queue_write_failed"
+    && (failureClass === "unknown-host" || failureClass === "unsupported-transport" || failureClass === "registry")) {
+    return `the daemon refused to forward it to host '${String(hostId)}' (${failureClass}) before contacting that host.`;
+  }
+  if (status === 400 && error === "unknown_destination_rig") {
+    return "the daemon refused it because the destination's rig doesn't exist on that daemon.";
+  }
+  return null;
+}
+
+/** #1642: after the daemon refuses a host token it doesn't know, the substitution this CLI's own
+ *  registry suggests, when it resolves the token (through an entry's declared hostId or a learned
+ *  binding, as `rig send` does) to another entry id. Only a hint: the registry of the daemon this
+ *  command reached may give that id to another host. Nothing is sent again. */
+function hostSubstitutionHint(
+  status: number,
+  body: unknown,
+  rawDestination: string,
+  explicitHost: string | undefined,
+  resolved: { destination: string; hostId?: string },
+  keep = "",
+): string | null {
+  const token = resolved.hostId;
+  const data = body as { error?: unknown; failureClass?: unknown; hostId?: unknown } | null;
+  if (token === undefined || token === "local" || status !== 502 || data?.error !== "remote_queue_write_failed"
+    || data.failureClass !== "unknown-host" || data.hostId !== token) return null;
+  const registry = loadHostRegistry();
+  const match = registry.ok ? resolveHost(registry.registry, token, loadHostBindings().bindings) : undefined;
+  const entryId = match?.ok ? match.host.id : undefined;
+  if (entryId === undefined || entryId === token) return null;
+  const forms = [
+    ...(rawDestination !== resolved.destination ? [`the destination ${shellQuote(`${resolved.destination}@${entryId}`)}`] : []),
+    ...(explicitHost !== undefined ? [`--host ${shellQuote(entryId)}`] : []),
+  ];
+  return `Host '${token}' resolves to '${entryId}' in this CLI's host registry. That doesn't prove '${entryId}' names the same host in the registry of the daemon this command reached, which OPENRIG_URL can select. If it does, send the write again to the same daemon with ${forms.join(" and ")}${keep}.`;
 }
 
 interface WorkChoiceCandidate {
@@ -906,6 +952,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
           return;
         }
+        const refusal = res.status >= 400 ? provenCreateRefusal(res.status, res.data) : null;
+        if (refusal) console.error(`No row was created: ${refusal}`);
+        const hint = hostSubstitutionHint(res.status, res.data, opts.destination, opts.host, hostResolved, `, keeping --id ${shellQuote(qitemId)}`);
+        if (hint) console.error(hint);
         const createWarning = res.data?.createWarning as { code?: unknown; message?: unknown } | undefined;
         if (res.status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
           console.error(`Warning: ${createWarning.message}`);
@@ -1225,6 +1275,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
+        const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
+        if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
@@ -1322,6 +1374,8 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
+        const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
+        if (hint) console.error(hint);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
