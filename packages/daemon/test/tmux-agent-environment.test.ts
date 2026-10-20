@@ -103,7 +103,9 @@ describe.skipIf(process.platform === "win32")("#1178 initial-shell environment p
       await tmux(["set-environment","-g","SSH_ASKPASS","stale-server"]);
       await tmux(["set-option","-g","update-environment","SSH_AUTH_SOCK SSH_ASKPASS Q1178_CUSTOM_UPDATED"]);
       await tmux(["set-option","-g","default-shell","/bin/bash"]);
-      await tmux(["set-option","-g","default-command",`printf '%s|%s|%s' "$SSH_AUTH_SOCK" "\${SSH_ASKPASS-absent}" "$Q1178_CUSTOM_UPDATED" > ${shellQuote(observed)}; exec /bin/bash --noprofile --norc`]);
+      const script=path.join(home,"observe.sh");
+      writeFileSync(script,`printf '%s|%s|%s' "$SSH_AUTH_SOCK" "\${SSH_ASKPASS-absent}" "$Q1178_CUSTOM_UPDATED" > ${shellQuote(observed)}\nexec /bin/bash --noprofile --norc\n`);
+      await tmux(["set-option","-g","default-command",`exec /bin/bash ${shellQuote(script)}`]);
       expect((await adapter.createSession("seat",home,{OPENRIG_NODE_ID:"owned-node"})).ok).toBe(true);
       expect(await waitFile(observed)).toEqual(["/synthetic/daemon-agent.sock","absent","daemon-custom"]);
       expect(await tmux(["show-environment","-g","SSH_AUTH_SOCK"])).toBe("SSH_AUTH_SOCK=/stale/server-agent.sock");
