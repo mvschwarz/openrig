@@ -86,7 +86,9 @@ continuity remain unverified; ordinary sends still apply their existing checks.`
         body,
         { headers: terminalAuthHeaders() },
       );
-      const data = res.data;
+      const data: ReconcileResponse = opts.repairMissingPane && res.status === 404
+        ? { ok: false, code: "repair_missing_pane_unsupported", message: "This daemon does not support --repair-missing-pane; nothing was changed. Do not use plain reconcile-session for this repair: it adopts the session." }
+        : res.data;
 
       if (opts.json) {
         console.log(JSON.stringify(data, null, 2));
