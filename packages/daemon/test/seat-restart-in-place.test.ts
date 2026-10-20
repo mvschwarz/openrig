@@ -14,7 +14,7 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
-import { accountLineNames, linesAfterAnchor, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { accountLineNames, accountTextMark, linesAfterAnchor, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 
@@ -252,7 +252,9 @@ function world(options: WorldOptions = {}) {
     setRows: (next: NativeProcessRow[]) => { rows = next; },
     print: (text: string) => { paneLines.push(...text.split("\n").filter(Boolean)); },
     /** tmux dropping the oldest history lines once the history is full. */
-    trim: (count: number) => { paneLines.splice(0, count); } };
+    trim: (count: number) => { paneLines.splice(0, count); },
+    /** A redraw clearing the screen's last rows. */
+    erase: (count: number) => { paneLines.splice(paneLines.length - count, count); } };
 }
 
 function state(activity: string, needs = 0): ArbitratedSeatState {
@@ -1024,12 +1026,32 @@ describe("--verify compares only text after the restart, however much history tm
     expect(await verify(inAnchor)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
   });
 
+  it("a copy of the anchor on the screen at the restart doesn't move where counting starts", async () => {
+    // History ends with the anchor (a to h) and one more line; the screen shows an old /status, then the anchor again.
+    const anchor = "abcdefgh".split("").map((letter) => `step ${letter}`);
+    const w = world({ screenBefore: [...anchor, "tail", OLD, ...anchor].join("\n"), screenRows: 9, rollout });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "x" })).toMatchObject({ outcome: "restarted_account_unverified" });
+    w.erase(8);
+    expect(await verify(w)).toMatchObject({ outcome: "restarted_account_unverified", accountEvidence: { state: "not_observed" } });
+  });
+
   it("a restart recorded with the earlier whole-pane counts is still compared as before", async () => {
     const w = await restartedAfterOldStatus();
     w.db.prepare("UPDATE events SET payload = json_remove(json_set(payload, '$.accountLinesAtRestart', json(?)), '$.accountTextAtRestart') WHERE type = 'seat.restart_in_place_finished'")
       .run(JSON.stringify({ [createHash("sha256").update(OLD.trim()).digest("hex").slice(0, 16)]: 2 }));
     w.print(OLD);
     expect(await verify(w)).toMatchObject({ outcome: "moved" });
+  });
+});
+
+describe("accountTextMark", () => {
+  const key = (line: string) => createHash("sha256").update(line).digest("hex").slice(0, 16);
+  it("counts from where the anchor ends in history, not from a later copy on the screen", () => {
+    expect(accountTextMark({ history: "a\nb\ntail", all: "a\nb\ntail\nAccount: x\na\nb" }))
+      .toEqual({ anchor: [key("a"), key("b")], counts: { [key("Account: x")]: 1 } });
+  });
+  it("records nothing when the pane moved between the two captures", () => {
+    expect(accountTextMark({ history: "a\nb\ntail", all: "b\ntail\nAccount: x" })).toBeNull();
   });
 });
 

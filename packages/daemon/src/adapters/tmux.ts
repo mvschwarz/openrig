@@ -1024,8 +1024,8 @@ export class TmuxAdapter {
   }
 
   /** The pane's history rows alone and its whole text (history and visible screen), both with wrapped lines joined,
-   *  from one chained tmux call so they describe the same moment. `history` is empty when the pane has no history.
-   *  Null when unreadable. */
+   *  from one chained tmux call. Through tmux control mode the commands run one at a time, so the pane can change
+   *  between the two captures. `history` is empty when the pane has no history. Null when unreadable. */
   async capturePaneHistoryParts(paneTarget: string): Promise<{ history: string; all: string } | null> {
     const exact = exactTarget(paneTarget, "pane");
     const nonce = randomUUID().replace(/-/g, "");

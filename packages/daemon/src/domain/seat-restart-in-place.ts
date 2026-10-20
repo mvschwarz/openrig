@@ -784,10 +784,10 @@ export class CodexInPlaceRestart {
    * that (a TUI rewrites rows above and below the cursor), so this compares occurrences after an anchor: the
    * last history lines when the restart finished, which no redraw changes once they've scrolled up. Only text
    * after the anchor's last occurrence is compared, and a line is new only when the same text occurs there more
-   * often than it did after the anchor then. tmux trims the oldest history first, so trimming can't remove
-   * the restart-time lines after the anchor while keeping the anchor, and older copies of a line no longer
-   * hide a new one. Text that moved, stayed or was redrawn never counts more than once; anything that can't
-   * be compared is not observed.
+   * often than it did after the anchor's own position then. tmux trims the oldest history first, so trimming
+   * can't remove the restart-time lines after the anchor while keeping the anchor, and older copies of a line no
+   * longer hide a new one. Text that moved, stayed or was redrawn never counts more than once; anything that
+   * can't be compared is not observed.
    */
   private async readAccountLine(pane: string, atRestart: { anchor: string[] | null; counts: Record<string, number> } | null, expectAccount: string | null): Promise<{ state: "matched" | "not_matched" | "not_requested" | "not_observed"; detail: string }> {
     if (!expectAccount?.trim()) return { state: "not_requested", detail: "No --expect-account given, so no account-specific evidence was checked." };
@@ -1066,15 +1066,20 @@ export function linesAfterAnchor(lines: string[], anchor: string[]): string[] {
   return lines;
 }
 
-/** The anchor and post-anchor Account counts from one capture; null when the pane couldn't be read. The last history
+/** The anchor and the Account counts after it from one capture; null when the pane couldn't be read. The last history
  *  line isn't part of the anchor: it can be the start of a line that wraps onto the screen, and joins its continuation
- *  once it scrolls up. */
+ *  once it scrolls up. The counts start where the anchor actually ends, not after its last match: a copy of the anchor
+ *  on the screen can be redrawn away, and verify would then compare lines that were never counted. */
 export function accountTextMark(capture: { history: string; all: string } | null): AccountTextMark | null {
   if (capture === null) return null;
   const history = paneLines(capture.history);
-  const anchor = history.slice(Math.max(0, history.length - 1 - ANCHOR_LINES), Math.max(0, history.length - 1)).map(lineDigest);
+  const all = paneLines(capture.all);
+  const end = Math.max(0, history.length - 1);
+  const anchor = history.slice(Math.max(0, end - ANCHOR_LINES), end).map(lineDigest);
+  // The two captures can be separate tmux commands; if the pane moved between them, the anchor isn't where history ended.
+  if (!anchor.every((key, i) => lineDigest(all[end - anchor.length + i] ?? "") === key)) return null;
   const counts: Record<string, number> = {};
-  for (const line of accountLines(linesAfterAnchor(paneLines(capture.all), anchor).join("\n"))) {
+  for (const line of accountLines(all.slice(end).join("\n"))) {
     counts[lineDigest(line)] = (counts[lineDigest(line)] ?? 0) + 1;
   }
   return { anchor, counts };
