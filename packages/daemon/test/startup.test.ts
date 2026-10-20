@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeRuntimeStubs } from "../../../test/stub-runtimes.js";
 import { collectAllowlistedProviderAuthEnv, createDaemon } from "../src/startup.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -428,7 +429,9 @@ describe("createDaemon startup composition", () => {
   });
 
   it("passes daemon CLI reachability env and PATH into launched tmux sessions", async () => {
-    vi.stubEnv("PATH", "/proof/openrig/bin:/usr/bin:/bin");
+    const stubDir = writeRuntimeStubs(process.env["HOME"] ?? os.tmpdir());
+    const proofPath = `${stubDir}:/proof/openrig/bin:/usr/bin:/bin`;
+    vi.stubEnv("PATH", proofPath);
     vi.stubEnv("OPENRIG_PORT", "17433");
     vi.stubEnv("OPENRIG_HOST", "127.0.0.1");
     const cmuxFactory: CmuxTransportFactory = async () => {
@@ -448,7 +451,7 @@ describe("createDaemon startup composition", () => {
         .map((call) => call[0])
         .find((cmd) => cmd.includes("tmux new-session"));
       expect(newSessionCmd).toBeDefined();
-      expect(newSessionCmd).toContain("-e 'PATH=/proof/openrig/bin:/usr/bin:/bin'");
+      expect(newSessionCmd).toContain(`-e 'PATH=${proofPath}'`);
       expect(newSessionCmd).toContain("-e 'OPENRIG_PORT=17433'");
       expect(newSessionCmd).toContain("-e 'OPENRIG_HOST=127.0.0.1'");
 
@@ -462,10 +465,12 @@ describe("createDaemon startup composition", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-gap7-default-"));
     const daemonHome = path.join(root, "daemon-home");
     fs.mkdirSync(daemonHome, { recursive: true });
+    const stubDir = writeRuntimeStubs(daemonHome);
+    const proofPath = `${stubDir}:/proof/openrig/bin:/usr/bin:/bin`;
     const saved = saveEnv("HOME", "CODEX_HOME", "PATH", "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", "OPENAI_API_KEY");
     process.env.HOME = daemonHome;
     delete process.env.CODEX_HOME;
-    process.env.PATH = "/proof/openrig/bin:/usr/bin:/bin";
+    process.env.PATH = proofPath;
     process.env.OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST = "OPENAI_API_KEY";
     process.env.OPENAI_API_KEY = "gap7-openai-key";
     const tmuxExec = vi.fn<ExecFn>(async () => "");
@@ -479,7 +484,7 @@ describe("createDaemon startup composition", () => {
       expect(result.deps.sessionEnv).toMatchObject({
         HOME: daemonHome,
         CODEX_HOME: path.join(daemonHome, ".codex"),
-        PATH: "/proof/openrig/bin:/usr/bin:/bin",
+        PATH: proofPath,
         OPENAI_API_KEY: "gap7-openai-key",
       });
 
@@ -489,7 +494,7 @@ describe("createDaemon startup composition", () => {
       const command = tmuxExec.mock.calls.map((call) => call[0]).find((line) => line.includes("tmux new-session"));
       expect(command).toContain(`-e 'HOME=${daemonHome}'`);
       expect(command).toContain(`-e 'CODEX_HOME=${path.join(daemonHome, ".codex")}'`);
-      expect(command).toContain("-e 'PATH=/proof/openrig/bin:/usr/bin:/bin'");
+      expect(command).toContain(`-e 'PATH=${proofPath}'`);
       expect(command).toContain("-e 'OPENAI_API_KEY=gap7-openai-key'");
     } finally {
       result?.db.close();

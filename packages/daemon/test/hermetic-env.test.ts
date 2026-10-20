@@ -68,3 +68,17 @@ describe("hermetic-env setup: compaction packet folder", () => {
     expect(outRoot.startsWith("/tmp/claude-compaction-restore")).toBe(false);
   });
 });
+
+describe("hermetic-env setup: host isolation", () => {
+  it("scrubs CLAUDE_CONFIG_DIR from process.env", () => {
+    expect(process.env["CLAUDE_CONFIG_DIR"]).toBeUndefined();
+  });
+
+  it("retains fixture-scoped HOME and runtime stubs on PATH for non-E2E tests", () => {
+    const home = process.env["HOME"]!;
+    const openrigHome = process.env["OPENRIG_HOME"]!;
+    expect(home.startsWith(openrigHome)).toBe(true);
+    const firstPath = (process.env["PATH"] ?? "").split(path.delimiter)[0];
+    expect(firstPath.endsWith(".openrig-test-runtime-stubs")).toBe(true);
+  });
+});

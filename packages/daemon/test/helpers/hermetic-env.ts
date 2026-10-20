@@ -361,6 +361,7 @@ process.exit(result.status ?? 1);
   // Scrub any injected-clock var (defense in depth behind the fail-closed guard) so
   // only an explicit injectClockNow can set it below — never an inherited value.
   for (const name of TEST_CLOCK_ENV_VARS) delete env[name];
+  delete env.CLAUDE_CONFIG_DIR;
   env.HOME = home;
   env.XDG_CONFIG_HOME = join(home, ".config");
   env.XDG_STATE_HOME = join(home, ".local", "state");

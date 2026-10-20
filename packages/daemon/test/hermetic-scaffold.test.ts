@@ -51,6 +51,7 @@ describe("prepareHermeticEnv scaffold", () => {
       PATH: "/usr/bin",
       OPENRIG_URL: undefined, // absent -> fine
       OPENRIG_AUTH_BEARER_TOKEN: "secret",
+      CLAUDE_CONFIG_DIR: "/ambient/claude",
     };
     const s = make(base);
     for (const v of DAEMON_TARGET_ENV_VARS) {
@@ -58,6 +59,7 @@ describe("prepareHermeticEnv scaffold", () => {
     }
     // credential also scrubbed
     expect(s.env.OPENRIG_AUTH_BEARER_TOKEN).toBeUndefined();
+    expect(s.env.CLAUDE_CONFIG_DIR).toBeUndefined();
     // scratch paths point INTO the scaffold
     expect(s.env.HOME).toBe(s.home);
     expect(s.env.OPENRIG_HOME).toBe(s.openrigHome);
