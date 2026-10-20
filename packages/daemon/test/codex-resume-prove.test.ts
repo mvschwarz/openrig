@@ -9,6 +9,8 @@ import { describe, expect, it, vi } from "vitest";
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps, type CodexResumeEvidence } from "../src/adapters/codex-runtime-adapter.js";
 import { verifyCodexPaneProcess } from "../src/domain/native-process-lineage.js";
+import { lstartToMinTs } from "../src/domain/codex-thread-id.js";
+import Database from "better-sqlite3";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -174,6 +176,34 @@ describe("#1524 (b): a Codex resume is resumed only when the launched process's 
       const r = await resume(a);
       expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
       expect(r.ok === false && r.error).toMatch(/no_log_row|sqlite_unreadable/);
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  // The production reader (no injected evidence) on Codex's own log and state databases, the same shapes the
+  // resolver's own start-second controls use: a just-launched resume may log only inside its start second.
+  it.each([
+    ["a lone start-second row from a process instance with no earlier rows", "lone", true],
+    ["a start-second row from an instance that logged before the second", "earlier", false],
+    ["a start-second row when another log database can't be read", "unreadable", false],
+  ])("the default reader, by-process: %s", async (_label, kind, resumed) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-resume-records-"));
+    try {
+      const identity = "Tue Oct 20 05:00:01 2026";
+      const start = lstartToMinTs(identity)!;
+      const logs = new Database(path.join(home, "logs_2.sqlite"));
+      logs.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY, ts INTEGER, ts_nanos INTEGER, process_uuid TEXT, thread_id TEXT)");
+      const state = new Database(path.join(home, "state_5.sqlite"));
+      state.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT, rollout_path TEXT)");
+      state.prepare("INSERT INTO threads VALUES (?,?,?)").run(token, "cli", `${home}/${token}.jsonl`);
+      const log = (ts: number) => logs.prepare("INSERT INTO logs (ts,ts_nanos,process_uuid,thread_id) VALUES (?,0,?,?)").run(ts, "pid:901:native-process", token);
+      if (kind === "earlier") log(start - 5);
+      log(start);
+      logs.close(); state.close();
+      if (kind === "unreadable") fs.writeFileSync(path.join(home, "logs_1.sqlite"), "not a database");
+      const { a } = adapter({ codexHome: home, listProcesses: () => rows(identity) });
+      const r = await resume(a);
+      if (resumed) expect(r).toMatchObject({ ok: true, resumeToken: token });
+      else expect(r).toMatchObject({ ok: false, recovery: "attention_required" });
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   });
 
