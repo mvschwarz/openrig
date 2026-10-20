@@ -250,7 +250,8 @@ describe("tmuxControlExec", () => {
   it("fails a chain's write whose client ended after an earlier command, without writing the rest to it", async () => {
     const client = fakeClient();
     const { spawned, fallback } = fakeSpawned();
-    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, replyTimeoutMs: 50 });
+    // Client-exit ordering, not a reply deadline racing waitFor's 50ms poll.
+    const exec = tmuxControlExec(fallback, { spawnClient: () => client.child, now: () => 0 });
 
     const chain = exec(["tmux", "paste-buffer", "-b", "b1", "-t", "=seat@rig:", ";", "delete-buffer", "-b", "b1"]);
     await vi.waitFor(() => expect(client.written).toHaveLength(1));
