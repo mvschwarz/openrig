@@ -117,9 +117,9 @@ read only the pieces a task needs.
 
 The session-name format `{pod}-{member}@{rig}` is your address. When you
 run `rig whoami --json`, you get back your full topology context: rig name,
-pod, member, peers, edges, transcript path. On a large rig the peer list can be
-a bounded, edge-first selection: `peersNote` then says how many are not shown,
-and `rig whoami --json --all-peers` lists them all.
+pod, member, peers, edges, transcript path. With `output.compact` enabled,
+a large rig's peer list can be a bounded, edge-first selection: `peersNote`
+then says how many are not shown; `rig whoami --json --all-peers` lists them all.
 
 ---
 

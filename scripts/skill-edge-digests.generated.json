@@ -65,7 +65,7 @@
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
       "delegating-work/SKILL.md": "f40346ec08f0ba22d8dccab0dca8442a8d3783173275d36a4e913185e0e29fbd",
-      "forming-an-openrig-mental-model/SKILL.md": "5dce5a8c2cbe4928a0c2bff7f7701f7b54fd0ecc4d9650dd1287e8ec1960df60",
+      "forming-an-openrig-mental-model/SKILL.md": "a1c14e7e61bbb2b56739ff56ff8d6dd8e9e9d37969db9f1e7b278cf0f650b43f",
       "loading-addressable-markdown/SKILL.md": "104dc6a02ae6e2d0eff519387c6839cb09803945b9ee35ec3498af8feaaa8d1e",
       "loading-addressable-markdown/scripts/resolve-markdown.mjs": "61a6d52c6c94fb1878361d19bdfaeb4524062fc4c483f557ab2f140e516d15f9",
       "messaging-the-human/SKILL.md": "4804d32fe66db050722caf2b43f8b868ca65b3dfcf2f2830f8f4859726f6f1b0",
