@@ -617,6 +617,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // applies to the NEXT launch without a daemon restart; a resolution failure
   // falls back to off (bar hidden).
   const tmuxOptionSettings = new ContextPackSettingsStore();
+  tmuxAdapter.launchEnvironment = () => ({
+    inheritTmuxEnvironment: tmuxOptionSettings.resolveOne("terminal.inherit_tmux_environment").value === true,
+    env: { ...process.env, ...launchSessionEnv },
+  });
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
     platform: opts?.tmuxOptionPlatform,

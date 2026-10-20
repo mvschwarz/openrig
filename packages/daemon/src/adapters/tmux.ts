@@ -5,7 +5,7 @@ import { join as pathJoin } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
-import { parentSessionEnvKeys } from "../domain/parent-session-env.js";
+import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -343,6 +343,37 @@ function parseLines<T>(output: string, parser: (line: string) => T | null): T[] 
 }
 
 export class TmuxAdapter {
+  /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
+  launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>> };
+
+  /** Reset before the selected user shell runs, without changing the server or other sessions.
+   * Multiple tmux command arguments execute directly; only this fixed non-interactive sh runs
+   * before env -i. Generated pane metadata must come from this spawn, never daemon TMUX values.
+   * Keep the configured default-command and default-shell lookup, including rc functions.
+   */
+  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string): Promise<string[] | null> {
+    if (!this.launchEnvironment) return null;
+    try {
+      const policy = this.launchEnvironment();
+      if (policy.inheritTmuxEnvironment) return null;
+      if (process.platform === "win32") throw new Error("POSIX launch boundary unavailable");
+      const shell = await this.getDefaultShell();
+      if (!shell) throw new Error("Default shell unavailable");
+      if (command === undefined) command = await this.run(["tmux", "show-options", "-gv", "default-command"]);
+      const baseline = { ...policy.env };
+      removeParentSessionEnv(baseline);
+      const values = Object.entries({ ...baseline, ...seatEnv })
+        .filter((entry): entry is [string,string] => entry[1] !== undefined)
+        .map(([key,value]) => shellQuote(`${key}=${value}`));
+      const reset = `exec /usr/bin/env -i ${values.join(" ")} TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" TERM="$TERM" SHELL="$SHELL" "$@"`;
+      return ["/bin/sh", "-c", reset, "sh", shell, ...(command ? ["-c", command] : ["-l"])];
+    } catch {
+      // Keep the working launch, with a diagnostic; this option is not a new admission gate.
+      console.warn("[seat launch] Scoped tmux environment unavailable; retaining the previous environment for this launch.");
+      return null;
+    }
+  }
+
   private inputGuard?: SeatDeliveryGuard;
   get deliveryGuard(): SeatDeliveryGuard | undefined { return this.inputGuard; }
   set deliveryGuard(guard: SeatDeliveryGuard | undefined) {
@@ -638,6 +669,8 @@ export class TmuxAdapter {
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     legacyParts.push("-P", "-F", shellQuote("#{pane_id}"));
+    const scopedCommand = await this.scopedLaunchCommand(seatEnv);
+    if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(shellQuote)); }
     let created: string;
     try {
       created = (await this.run(argv, legacyParts.join(" "))).trim();
@@ -649,7 +682,7 @@ export class TmuxAdapter {
     // and restart the fresh pane so its shell starts without it. The session
     // exists either way, so a failure here is a warning, never a failed launch.
     try {
-      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv))) {
+      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv)) && !scopedCommand) {
         if (!/^%\d+$/.test(created)) throw new Error(`new-session reported no pane id ("${created}"), so no pane was restarted`);
         const respawn = ["tmux", "respawn-pane", "-k", "-t", created];
         if (cwd != null) respawn.push("-c", cwd);
@@ -944,12 +977,15 @@ export class TmuxAdapter {
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
-    // The respawn command is ONE argv unit: tmux runs it via the shell.
-    if (command != null && command.length > 0) argv.push(command);
+    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command);
+    // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
+    if (scopedCommand) argv.push(...scopedCommand);
+    else if (command != null && command.length > 0) argv.push(command);
     const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
-    if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
+    if (scopedCommand) legacyRespawn.push(...scopedCommand.map(shellQuote));
+    else if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
