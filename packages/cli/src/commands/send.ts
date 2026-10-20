@@ -1102,14 +1102,19 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; managedCompaction?: { notice?: unknown } }>) ?? [];
+  // Context beside a recipient's own result: it was in a managed compaction or restore when the send ran.
+  const printNotice = (r: (typeof results)[number]) => {
+    if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
+  };
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
   // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —
   // the false delivery claim is suppressed entirely, not qualified.
   for (const r of results) {
-    if (r.outcome === "retained") { console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`); continue; }
+    if (r.outcome === "retained") { console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`); printNotice(r); continue; }
     if (!r.ok) {
       console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
+      printNotice(r);
       continue;
     }
     const ec = effectBySeat.get(r.sessionName);
@@ -1124,6 +1129,7 @@ async function runFanOutSend(params: {
     } else {
       console.log(`${r.sessionName}: sent`);
     }
+    printNotice(r);
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);

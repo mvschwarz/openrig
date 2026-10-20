@@ -98,6 +98,18 @@ describe("Send CLI", () => {
           lastBroadcastBody = parsed;
           const sessions: string[] = (parsed.sessions as string[] | undefined)
             ?? ["seat-a@my-rig", "seat-b@my-rig"]; // pod/rig/global resolve to a fixed pair
+          if (parsed.text === "compaction-notice") {
+            const notice = (who: string) => ({ stage: "restoring", observed: "before_send", notice: `${who} was mid-restore (as recorded). This doesn't mean the restore has finished.` });
+            const results = [
+              { ok: true, sessionName: "a@r", managedCompaction: notice("a@r") },
+              { ok: true, sessionName: "b@r" },
+              { ok: false, sessionName: "c@r", error: "paste failed", managedCompaction: notice("c@r") },
+              { ok: true, sessionName: "d@r", outcome: "retained", sent: false, managedCompaction: notice("d@r") },
+            ];
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ total: 4, sent: 2, failed: 1, retained: 1, results }));
+            return;
+          }
           if (parsed.text === "partial") {
             const results = [
               { ok: true, sessionName: sessions[0] },
@@ -959,6 +971,18 @@ describe("Send CLI", () => {
       expect(output).toMatch(/unverifiable|not .{0,20}this send|does not match this send/i);
       expect(output).toContain("Verified: yes"); // the transport verdict stands, honestly qualified
     });
+  });
+
+  it("fan-out prints each recipient's compaction notice under that recipient's line; exit code unchanged", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "a@r,b@r,c@r,d@r", "compaction-notice"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("a@r: sent\nNotice: a@r was mid-restore (as recorded). This doesn't mean the restore has finished.\nb@r: sent\n");
+    expect(output).toContain("c@r: FAILED — paste failed\nNotice: c@r was mid-restore");
+    expect(output).toContain("d@r: retained, not delivered; inspect with rig seat held-messages\nNotice: d@r was mid-restore");
+    expect(output.match(/^Notice: /gm)).toHaveLength(3); // none for b@r
+    expect(exitCode).toBe(1); // a failed recipient, as before
   });
 
   // S2 (OPR.0.5.4.3): the fan-out renderer must SURFACE an additive warning —
